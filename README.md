@@ -53,5 +53,17 @@ TBD
 
 **CIRP CMS data set:**
 ```bibtex
-TBD
+@dataset{blankemeyer_2024_14132641,
+  author       = {Blankemeyer, Sebastian and
+                  Wendorff, David and
+                  Raatz, Annika},
+  title        = {Robotic Evaluation Framework for 6D Object Pose
+                   Estimation Accuracy
+                  },
+  month        = nov,
+  year         = 2024,
+  publisher    = {Zenodo},
+  doi          = {10.5281/zenodo.14132641},
+  url          = {https://doi.org/10.5281/zenodo.14132641},
+}
 ```
