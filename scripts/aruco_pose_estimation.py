@@ -103,9 +103,8 @@ def read_camera_parameters(input_folder: str) -> Tuple[bool, np.ndarray, np.ndar
     return True, cam_matrix, dist_coefficients
 
 
-def process_sensor_data(
-    input_folder: str,
-    sensor: str,
+def process_sensor_folder(
+    sensor_folder: str,
     aruco_dict: cv.aruco.Dictionary,
     board: cv.aruco.GridBoard,
     save_images: bool,
@@ -116,23 +115,20 @@ def process_sensor_data(
     Processes the data for a single sensor, performing ArUco pose estimation and saving the results.
 
     Args:
-        input_folder (str): The path to the input folder containing sensor data.
-        sensor (str): The name of the sensor.
+        sensor_folder (str): The path to the folder containing sensor data.
         aruco_dict (cv.aruco.Dictionary): The ArUco dictionary to use.
         board (cv.aruco.GridBoard): The ArUco board to use.
         save_images (bool): Whether to save the images with detected markers.
         quiet (bool): Whether to suppress image display.
         wait_time (int): The time to wait between displaying images.
     """
-    frame_folder = os.path.join(input_folder, sensor, "rgb")
-    _, cam_matrix, dist_coefficients = read_camera_parameters(
-        os.path.join(input_folder, sensor)
-    )
+    frame_folder = os.path.join(sensor_folder, "rgb")
+    _, cam_matrix, dist_coefficients = read_camera_parameters(sensor_folder)
 
     detector_parameters = cv.aruco.DetectorParameters()
     detector = cv.aruco.ArucoDetector(aruco_dict, detector_parameters)
 
-    json_file = os.path.join(input_folder, sensor, "match_robot_ee_poses.json")
+    json_file = os.path.join(sensor_folder, "match_robot_ee_poses.json")
     if not os.path.isfile(json_file):
         raise FileNotFoundError(f"Error: file {json_file} not found")
 
@@ -206,7 +202,7 @@ def process_sensor_data(
                 cv.imshow("out", image_copy)
 
             if save_images:
-                output_folder = os.path.join(input_folder, sensor, "aruco")
+                output_folder = os.path.join(sensor_folder, "aruco")
                 os.makedirs(output_folder, exist_ok=True)
                 output_path = os.path.join(output_folder, image_name)
                 cv.imwrite(output_path, image_copy)
@@ -229,7 +225,7 @@ def process_sensor_data(
                 }
             )
 
-    output_json_file = os.path.join(input_folder, sensor, "aruco_pose_estimation.json")
+    output_json_file = os.path.join(sensor_folder, "aruco_pose_estimation.json")
     with open(output_json_file, "w") as f:
         json.dump(data, f, indent=4, default=str)
 
@@ -239,7 +235,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "input_folder",
         type=str,
-        help="Path to the folder containing the sensor folders with images, camera parameters.",
+        help="Path to the folder containing sensor images and camera parameters.",
     )
     parser.add_argument(
         "--save_images",
@@ -264,16 +260,9 @@ if __name__ == "__main__":
     quiet = args.quiet
     wait_time = args.wait_time
 
-    sensors = [
-        folder
-        for folder in os.listdir(input_folder)
-        if os.path.isdir(os.path.join(input_folder, folder))
-    ]
-
     aruco_dict = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_5X5_50)
     board = cv.aruco.GridBoard((4, 3), 50, 65, aruco_dict)
 
-    for sensor in sensors:
-        process_sensor_data(
-            input_folder, sensor, aruco_dict, board, save_images, quiet, wait_time
-        )
+    process_sensor_folder(
+        input_folder, aruco_dict, board, save_images, quiet, wait_time
+    )
