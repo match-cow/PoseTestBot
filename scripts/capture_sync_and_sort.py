@@ -9,44 +9,31 @@ from tqdm import tqdm
 
 def test_input_folder(input_folder: str) -> dict:
     """
-    Validates the input folder and its structure, ensuring it contains subfolders
-    for each sensor with 'rgb' and 'depth' directories.
-
+    Validates the input folder (a sensor folder), ensuring it contains
+    'rgb' and 'depth' directories.
     Args:
         input_folder: Path to the input folder.
-
     Returns:
-        A dictionary where keys are sensor subfolder names and values are dictionaries
-        containing paths to 'rgb' and 'depth' directories, if they exist.
-        Returns an empty dictionary if the input folder is invalid or empty.
+        A dictionary containing paths to 'rgb' and 'depth' directories, if they exist.
+        Returns None if checks fail.
     """
-    sensor_subfolders = {}
-
     if not os.path.isdir(input_folder):
         print("Error: input_folder is not a valid folder.")
-        return sensor_subfolders
+        return None
 
-    subfolders = [
-        f
-        for f in os.listdir(input_folder)
-        if os.path.isdir(os.path.join(input_folder, f))
-    ]
+    sensor_paths = {}
+    rgb_path = os.path.join(input_folder, "rgb")
+    depth_path = os.path.join(input_folder, "depth")
 
-    if not subfolders:
-        print("Error: input_folder does not contain any subfolders.")
-        return sensor_subfolders
+    if os.path.isdir(rgb_path):
+        sensor_paths["rgb"] = rgb_path
+    if os.path.isdir(depth_path):
+        sensor_paths["depth"] = depth_path
 
-    for subfolder in subfolders:
-        rgb_path = os.path.join(input_folder, subfolder, "rgb")
-        depth_path = os.path.join(input_folder, subfolder, "depth")
-        sensor_subfolders[subfolder] = {}
+    if "rgb" not in sensor_paths or "depth" not in sensor_paths:
+        return None
 
-        if os.path.isdir(rgb_path):
-            sensor_subfolders[subfolder]["rgb"] = rgb_path
-        if os.path.isdir(depth_path):
-            sensor_subfolders[subfolder]["depth"] = depth_path
-
-    return sensor_subfolders
+    return sensor_paths
 
 
 def find_motion_keyframes(poses_df: pd.DataFrame) -> dict:
@@ -73,12 +60,11 @@ def find_motion_keyframes(poses_df: pd.DataFrame) -> dict:
 
 
 def process_sensor_data(
-    sensor: str,
+    sensor_folder: str,
     sensor_subfolders: dict,
     data: pd.DataFrame,
     keyframes: dict,
-    sync_delta: dict,
-    input_folder: str,
+    sync_delta: int,
     dry_run: bool,
 ):
     """
@@ -86,15 +72,14 @@ def process_sensor_data(
     renaming images, and creating a JSON file containing the synchronized data.
 
     Args:
-        sensor: The name of the sensor.
+        sensor_folder: The path to the sensor folder.
         sensor_subfolders: Paths to the sensor's 'rgb' and 'depth' directories.
         data: DataFrame containing robot poses.
         keyframes: Dictionary of motion keyframes.
-        sync_delta: Dictionary containing synchronization deltas for each sensor.
-        input_folder: Path to the input folder.
+        sync_delta: Synchronization delta for the sensor.
         dry_run: If True, performs a dry run without modifying files.
     """
-    print(f"Sensor: {sensor}, sensor_subfolders: {sensor_subfolders}")
+    print(f"Sensor folder: {sensor_folder}")
 
     sensor_output_dict = {}
     sensor_frame_counter = 0
@@ -107,7 +92,7 @@ def process_sensor_data(
     for image in tqdm(rgb_files):
         image_frame = int(os.path.splitext(image)[0])
         image_extension = os.path.splitext(image)[1]
-        delayed_frame = image_frame - sync_delta[sensor]
+        delayed_frame = image_frame - sync_delta
 
         image_motion = None
         for key, value in keyframes.items():
@@ -157,7 +142,7 @@ def process_sensor_data(
             sensor_frame_counter += 1
 
     if not dry_run:
-        output_file = os.path.join(input_folder, sensor, "match_robot_ee_poses.json")
+        output_file = os.path.join(sensor_folder, "match_robot_ee_poses.json")
         with open(output_file, "w") as f:
             json.dump(sensor_output_dict, f, indent=4, default=str)
 
@@ -216,32 +201,43 @@ def main():
     sync_delta_path = args.sync_delta
     dry_run = args.dry_run
 
+    sync_delta = {}
     if sync_delta_path is None:
-        print("Error: No Sync Delta file provided, using 100ms as default value.")
+        print("Warning: No Sync Delta file provided, using 100ms as default value.")
         sync_delta = {"realsense": 100, "luxonis": 100}
     else:
         with open(sync_delta_path, "r") as file:
             sync_delta = json.load(file)
 
+    sensor_paths = test_input_folder(input_folder)
+    if sensor_paths is None:
+        print("Error: Input folder is not a valid sensor data folder.")
+        return
+
+    sensor_name = os.path.basename(input_folder)
+    sensor_type = sensor_name.split("_")[0]
+
+    sensor_sync_delta = sync_delta.get(sensor_type)
+    if sensor_sync_delta is None:
+        print(f"Warning: No sync delta for {sensor_type}, using 100ms.")
+        sensor_sync_delta = 100
+
     poses_file = os.path.join(input_folder, "raw_robot_ee_poses.json")
     data = pd.read_json(poses_file, orient="index")
 
-    subfolders = test_input_folder(input_folder)
     keyframes = find_motion_keyframes(data)
 
-    for sensor, sensor_subfolders in subfolders.items():
-        process_sensor_data(
-            sensor,
-            sensor_subfolders,
-            data,
-            keyframes,
-            sync_delta,
-            input_folder,
-            dry_run,
-        )
+    process_sensor_data(
+        input_folder,
+        sensor_paths,
+        data,
+        keyframes,
+        sensor_sync_delta,
+        dry_run,
+    )
 
     if not dry_run:
-        copy_default_data(input_folder)
+        copy_default_data(os.path.dirname(input_folder))
 
 
 if __name__ == "__main__":
