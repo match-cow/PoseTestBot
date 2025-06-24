@@ -132,7 +132,7 @@ def main():
         # Print the number of received frames
         print(f"Received poses: {received_frames}", end="\r")
 
-    with open(os.path.join(output_path, f"raw_robot_ee_poses.json"), "w") as f:
+    with open(os.path.join(output_path, "raw_robot_ee_poses.json"), "w") as f:
         json.dump(poses, f, indent=4)
 
     return

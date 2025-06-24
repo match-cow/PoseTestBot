@@ -3,7 +3,7 @@ import json
 import os
 import shutil
 import subprocess
-from typing import Any, Dict, List
+from typing import List
 
 import trimesh
 
@@ -104,7 +104,7 @@ def run_foundationpose_on_motion(
         f"--test_scene_dir={temp_folder}",
         f"--est_refine_iter={est_refine_iter}",
         f"--track_refine_iter={track_refine_iter}",
-        f"--debug=1",
+        "--debug=1",
         f"--debug_dir={temp_output_folder}",
     ]
     try:
@@ -269,9 +269,9 @@ def main(
                 motions_frames[motion].append(key)
 
         for motion, frames in motions_frames.items():
-            temp_rgb_folder = os.path.join(temp_folder, f"rgb")
-            temp_depth_folder = os.path.join(temp_folder, f"depth")
-            temp_masks_folder = os.path.join(temp_folder, f"masks")
+            temp_rgb_folder = os.path.join(temp_folder, "rgb")
+            temp_depth_folder = os.path.join(temp_folder, "depth")
+            temp_masks_folder = os.path.join(temp_folder, "masks")
 
             os.makedirs(temp_rgb_folder, exist_ok=True)
             os.makedirs(temp_depth_folder, exist_ok=True)
@@ -311,7 +311,7 @@ def main(
                         f"--test_scene_dir={temp_folder}",
                         f"--est_refine_iter={est_refine_iter}",
                         f"--track_refine_iter={track_refine_iter}",
-                        f"--debug=1",
+                        "--debug=1",
                         f"--debug_dir={temp_output_folder}",
                     ],
                     cwd=foundationpose_folder,

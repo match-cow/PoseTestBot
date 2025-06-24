@@ -3,7 +3,6 @@ import json
 import os
 from typing import Dict, List, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
 from pytransform3d import rotations as pr
 from pytransform3d import transformations as pt

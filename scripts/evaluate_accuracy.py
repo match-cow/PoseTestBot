@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from typing import Dict, List, Union
+from typing import Dict
 
 import numpy as np
 from pytransform3d import rotations as pr

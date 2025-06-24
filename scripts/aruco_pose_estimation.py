@@ -2,11 +2,10 @@ import argparse
 import concurrent.futures
 import json
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import cv2 as cv
 import numpy as np
-import pandas as pd
 from tqdm import tqdm
 
 """ 

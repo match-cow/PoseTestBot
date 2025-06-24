@@ -95,7 +95,7 @@ class RealSenseCamera:
             
             return color_image, depth_image
             
-        except RuntimeError as e:
+        except RuntimeError:
             print(f"Timeout getting frames from camera {self.serial_number}")
             return None, None
 
