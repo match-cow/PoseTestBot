@@ -23,9 +23,9 @@ def main():
     )
     parser.add_argument(
         "--capture_vel",
-        type=int,
-        default=50,
-        help="Capture velocity, default is 50",
+        type=float,
+        default=0.2,
+        help="Capture velocity, default is 0.2",
     )
     parser.add_argument(
         "--ip_robot",
