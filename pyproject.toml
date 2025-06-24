@@ -9,6 +9,7 @@ dependencies = [
     "pyrealsense2>=2.55.1.6486",
     "requests>=2.32.4",
     "flask>=2.0.0",
+    "depthai>=2.30.0.0",
 ]
 
 [tool.setuptools.packages.find]

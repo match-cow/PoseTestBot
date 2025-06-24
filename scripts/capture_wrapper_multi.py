@@ -5,6 +5,37 @@ import time
 from typing import List
 
 
+def get_realsense_serials() -> List[str]:
+    """Gets serial numbers of connected RealSense devices."""
+    serials = []
+    try:
+        import pyrealsense2 as rs
+
+        context = rs.context()
+        for dev in context.query_devices():
+            serials.append(dev.get_info(rs.camera_info.serial_number))
+    except ImportError:
+        print("pyrealsense2 is not installed. Skipping RealSense devices.")
+    except Exception as e:
+        print(f"Error getting RealSense serial numbers: {e}")
+    return serials
+
+
+def get_luxonis_serials() -> List[str]:
+    """Gets serial numbers of connected Luxonis devices."""
+    serials = []
+    try:
+        import depthai as dai
+
+        for device in dai.Device.getAllAvailableDevices():
+            serials.append(device.getMxId())
+    except ImportError:
+        print("depthai is not installed. Skipping Luxonis devices.")
+    except Exception as e:
+        print(f"Error getting Luxonis serial numbers: {e}")
+    return serials
+
+
 def get_user_input(prompt: str, default: str) -> str:
     """Gets user input with a default value."""
     return input(f"{prompt} ([{default}]): ") or default
@@ -27,41 +58,72 @@ def capture_run(
     resolution: str,
 ) -> None:
     """Captures data for a single run."""
-    output_folder = os.path.join(output_path, run_name)
+    run_output_folder = os.path.join(output_path, run_name)
 
-    if os.path.exists(output_folder):
-        print(f"Output folder {output_folder} already exists.")
+    if os.path.exists(run_output_folder):
+        print(f"Output folder {run_output_folder} already exists.")
         capture_continue = get_user_input(
             "Do you want to overwrite the existing folder? (Y/n)", "Y"
         )
         if capture_continue.lower() != "y":
             return
 
-        shutil.rmtree(output_folder)
+        shutil.rmtree(run_output_folder)
 
-    os.makedirs(output_folder)
+    os.makedirs(run_output_folder)
 
-    pose_receiver = os.path.join(script_dir, "pose_receiver_udp_json.py")
-    luxonis_capture = os.path.join(script_dir, f"capture_luxonis_{resolution}.py")
-    realsense_capture = os.path.join(script_dir, f"capture_realsense_{resolution}.py")
-
-    # Start luxonis_capture with output_folder as argument
+    capture_processes = []
     if capture_luxonis:
-        luxonis_capture_process = subprocess.Popen(
-            ["python", luxonis_capture, output_folder, f"--fps={capture_fps}"]
-        )
+        luxonis_serials = get_luxonis_serials()
+        if luxonis_serials:
+            luxonis_capture = os.path.join(
+                script_dir, f"capture_luxonis_{resolution}.py"
+            )
+            for serial in luxonis_serials:
+                output_folder = os.path.join(run_output_folder, f"luxonis_{serial}")
+                os.makedirs(output_folder)
+                p = subprocess.Popen(
+                    [
+                        "python",
+                        luxonis_capture,
+                        output_folder,
+                        f"--fps={capture_fps}",
+                        f"--device={serial}",
+                    ]
+                )
+                capture_processes.append(p)
 
-    # Start realsense_capture with output_folder as argument
     if capture_realsense:
-        realsense_capture_process = subprocess.Popen(
-            ["python", realsense_capture, output_folder, f"--fps={capture_fps}"]
-        )
+        realsense_serials = get_realsense_serials()
+        if realsense_serials:
+            realsense_capture = os.path.join(
+                script_dir, f"capture_realsense_{resolution}.py"
+            )
+            for serial in realsense_serials:
+                output_folder = os.path.join(run_output_folder, f"realsense_{serial}")
+                os.makedirs(output_folder)
+                p = subprocess.Popen(
+                    [
+                        "python",
+                        realsense_capture,
+                        output_folder,
+                        f"--fps={capture_fps}",
+                        f"--device={serial}",
+                    ]
+                )
+                capture_processes.append(p)
 
     time.sleep(2)
 
     # Start pose_receiver with output_folder as argument
+    pose_receiver = os.path.join(script_dir, "pose_receiver_udp_json.py")
     pose_receiver_process = subprocess.Popen(
-        ["python", pose_receiver, output_folder, f"--capture_vel={capture_vel}"]
+        [
+            "python",
+            pose_receiver,
+            run_output_folder,
+            f"--capture_vel={capture_vel}",
+        ]
     )
 
     # Wait for pose_receiver to finish
@@ -70,10 +132,15 @@ def capture_run(
     time.sleep(2)
 
     # Terminate luxonis_capture and realsense_capture subprocesses
-    if capture_luxonis:
-        luxonis_capture_process.terminate()
-    if capture_realsense:
-        realsense_capture_process.terminate()
+    for p in capture_processes:
+        p.terminate()
+
+    # Move pose data to each sensor folder for synchronization
+    pose_data_path = os.path.join(run_output_folder, "pose_data.json")
+    if os.path.exists(pose_data_path):
+        for f in os.scandir(run_output_folder):
+            if f.is_dir():
+                shutil.copy(pose_data_path, f.path)
 
     print(f"Finished capturing {run_name}.")
 
@@ -191,22 +258,35 @@ def main():
             save_aruco_images = save_aruco_images_tmp.lower() == "y"
 
     for io in output_folders:
-        print(f"Output folder: {io}")
+        print(f"Processing run folder: {io}")
 
-        run_subprocess(
-            ["python", capture_sync_and_sort, io, f"--sync_delta={sync_data}"]
-        )
+        # Data for each sensor is in a separate subfolder.
+        # Run sync and aruco estimation on each subfolder.
+        sensor_folders = [f.path for f in os.scandir(io) if f.is_dir()]
+        # If no sensors were used, no subfolders will be created.
+        # In that case, run on the main folder.
+        if not sensor_folders:
+            sensor_folders.append(io)
 
-        if capture_autostart:
+        for folder in sensor_folders:
+            print(f"Processing sensor folder: {folder}")
             run_subprocess(
-                ["python", aruco_pose_estimation, io, "--save_images", "--quiet"]
+                ["python", capture_sync_and_sort, folder, f"--sync_delta={sync_data}"]
             )
-        elif run_aruco:
-            if save_aruco_images:
-                run_subprocess(["python", aruco_pose_estimation, io, "--save_images"])
-            else:
-                run_subprocess(["python", aruco_pose_estimation, io, "--quiet"])
 
+            if capture_autostart:
+                run_subprocess(
+                    ["python", aruco_pose_estimation, folder, "--save_images", "--quiet"]
+                )
+            elif run_aruco:
+                if save_aruco_images:
+                    run_subprocess(
+                        ["python", aruco_pose_estimation, folder, "--save_images"]
+                    )
+                else:
+                    run_subprocess(["python", aruco_pose_estimation, folder, "--quiet"])
+
+        # These steps likely need data from all sensors, so run them on the main folder.
         if not capture_autostart:
             perform_blenderproc_prepare = get_user_input(
                 "Do you want to perform the blenderproc_prepare step? (Y/n)", "Y"
