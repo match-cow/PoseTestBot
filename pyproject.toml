@@ -12,6 +12,7 @@ dependencies = [
     "depthai>=2.30.0.0",
     "tqdm>=4.67.1",
     "pytransform3d>=3.14.1",
+    "pandas>=2.3.0",
 ]
 
 [tool.setuptools.packages.find]
