@@ -53,7 +53,7 @@ def capture_run(
     script_dir: str,
     capture_luxonis: bool,
     capture_realsense: bool,
-    capture_vel: int,
+    capture_vel: float,
     capture_fps: int,
     resolution: str,
 ) -> None:
@@ -160,12 +160,12 @@ def main():
     if capture_autostart:
         capture_realsense = True
         capture_luxonis = True
-        capture_vel = 100
+        capture_vel = 0.2
         capture_fps = 6
         resolution = "720p"
     else:
         resolution = get_user_input("Enter resolution ([720p]/360p)", "720p")
-        capture_vel = int(get_user_input("Enter capture velocity in % ([100])", "100"))
+        capture_vel = float(get_user_input("Enter capture velocity ([0.2])", "0.2"))
         capture_fps = int(get_user_input("Enter capture fps ([6]/15/30)", "6"))
         capture_realsense_input = get_user_input(
             "Do you want to capture realsense? (Y/n)", "Y"

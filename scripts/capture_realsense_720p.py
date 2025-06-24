@@ -90,9 +90,15 @@ def main():
         default=0,
         help="Specify the maximum number of frames to capture (0 for unlimited).",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="The serial number of the device to use.",
+    )
     args = parser.parse_args()
 
-    output_path = os.path.join(args.output_path, "realsense")
+    output_path = args.output_path
     fps = args.fps
     max_frames = args.max_frames
 
@@ -103,17 +109,15 @@ def main():
     CameraParametersSaved = False  # Flag to check if camera parameters are saved
     captured_frames = 0
 
-    # Temporary fix for issue where camera only works every second time or so...
-    # restart the usb service for the device "Intel(R) RealSense(TM) Depth Camera 435i"
-    os.system("usbreset 'Intel(R) RealSense(TM) Depth Camera 435i'")
-    time.sleep(0.5)
-
     # Create a pipeline
     pipeline = rs.pipeline()
 
     # Create a config and configure the pipeline to stream
     # different resolutions of color and depth streams
     config = rs.config()
+
+    if args.device:
+        config.enable_device(args.device)
 
     # Get device product line for setting a supporting resolution
     try:
