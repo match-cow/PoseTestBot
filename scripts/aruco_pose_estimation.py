@@ -188,8 +188,7 @@ def process_sensor_folder(
                 )
 
                 if (
-                    _
-                    and len(ids) >= 4
+                    len(ids) >= 4
                     and (not quiet or save_images)
                     and rvec is not None
                     and tvec is not None
