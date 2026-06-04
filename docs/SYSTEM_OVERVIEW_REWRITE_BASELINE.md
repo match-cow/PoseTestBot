@@ -1359,6 +1359,51 @@ Responsibilities:
 The UI should not directly call scripts. It should call backend API endpoints
 that create jobs.
 
+#### Recommended Web GUI Framework
+
+Strong recommendation: use a Python FastAPI backend with a React/TypeScript
+single-page app built with Vite.
+
+This project is not a marketing website or public content platform. It is a
+local robotics operations tool with hardware status, long-running jobs, logs,
+artifact browsing, calibration workflows, BOP export, and estimator/evaluation
+control. The most important architectural requirement is not server-side
+rendering or SEO. It is a reliable typed backend that can orchestrate Python
+hardware/process code and a responsive frontend that can monitor state in real
+time.
+
+Recommended stack:
+
+| Layer | Recommendation | Reason |
+| --- | --- | --- |
+| Backend API | FastAPI | Python-native, async-friendly, OpenAPI-generating, good fit for hardware adapters, job APIs, status endpoints, and WebSocket/SSE log streaming. |
+| Frontend | React + TypeScript + Vite | Good fit for dense operational UI, device tables, job timelines, calibration views, dataset/artifact browsing, and reusable components. Vite gives a simple SPA setup and fast development loop. |
+| Routing | React Router | Enough for a local operations app; avoids forcing the frontend into a server-rendered framework. |
+| Data fetching | TanStack Query or a small typed API client | Keeps polling, refetching, cache invalidation, and job-status updates manageable. |
+| Realtime updates | WebSockets or Server-Sent Events from FastAPI | Needed for job logs, capture progress, calibration progress, and estimator/evaluation status. |
+| UI components | A pragmatic component library such as shadcn/ui or MUI | Avoid spending rewrite time inventing tables, dialogs, tabs, forms, and status components. |
+| Job execution | Python job runner owned by backend | Hardware and estimator orchestration should stay close to the Python modules, not in a Node/Next.js server. |
+
+Avoid making Next.js the primary app framework for v1. Next.js is strong for
+full-stack React and server-rendered applications, but this project's server is
+already naturally Python due to camera SDKs, robot adapters, calibration, BOP
+export, and estimator orchestration. Adding a Node server layer would mostly add
+deployment and ownership complexity. A Vite SPA served by FastAPI, or built as
+static assets and served separately, is simpler and fits the lab-control use
+case better.
+
+Also avoid Streamlit, Gradio, or notebook-style apps for the main rewrite. They
+are excellent for demos and small research tools, but they are the wrong center
+of gravity for safe long-running robotics jobs, multi-stage pipelines, artifact
+registries, BOP export, and eventual maintainability.
+
+Useful references:
+
+- FastAPI docs: <https://fastapi.tiangolo.com/>
+- FastAPI WebSocket docs: <https://fastapi.tiangolo.com/advanced/websockets/>
+- Vite guide: <https://vite.dev/guide/>
+- React framework guidance: <https://react.dev/learn/creating-a-react-app>
+
 #### Backend API
 
 Responsibilities:
@@ -1630,30 +1675,196 @@ This document records the required current contracts:
   - Canonical BOP scenewise dataset output.
   - BOP Toolkit evaluation after estimator result conversion.
 
-## Open Questions For The Rewrite
+## Resolved Rewrite Defaults
 
-These questions should be answered before a complete rewrite starts:
+These defaults should be treated as the starting specification for the rewrite.
+They can still be changed during detailed design, but implementation should not
+re-open them casually.
 
-- Should the robot controller be changed to accept floating-point capture
-  velocities, or should Python always send integer velocity values?
-- What is the intended stop behavior during an active robot motion?
-- Should raw timestamped frames be preserved separately from synchronized
-  sequential frames?
-- Should sensor calibration be keyed by sensor type, physical serial,
-  calibration profile, mounting mode, or a user-defined rig position?
-- Which calibration target should be standardized for robust hand-eye and static
-  calibration: Charuco, ArUco grid, checkerboard, or multiple supported target
-  types?
-- What clock synchronization method should be authoritative for each sensor:
-  device timestamps, hardware trigger, host monotonic receive time, PTP/NTP, or
-  a calibrated offset model?
-- How should BOP `[_CAMTYPE]` and `[_SPLITTYPE]` suffixes encode sensor type,
-  mounting mode, serial number, and calibration profile?
-- Should BlenderProc remain the ground-truth generator, or should a lighter
-  renderer/data model be introduced for some workflows?
-- Which estimator methods are first-class targets: FoundationPose only, or also
-  MegaPose and SAM6D?
-- What should the canonical unit convention be across all modules: millimeters
-  internally, meters internally, or explicit units per field?
-- Should the future webapp be local-only for lab use, or designed for multi-user
-  experiment management?
+### Robot Command Protocol
+
+Use structured JSON robot commands with explicit units instead of the current
+ambiguous `{"start": 0.2}` shape.
+
+Recommended command:
+
+```json
+{
+  "schema_version": "robot_command.v1",
+  "command": "start_capture",
+  "cartesian_velocity_m_s": 0.2,
+  "run_id": "optional_run_identifier"
+}
+```
+
+The robot-side application should accept floating-point velocities and validate
+the allowed range. Python should not be forced to send integer velocities just
+to satisfy the current Java `Long` cast.
+
+### Stop Behavior
+
+Do not treat a normal web button as a safety-rated emergency stop. Define
+separate control intents:
+
+- `pause_capture`: stop recording while leaving robot safety to the robot
+  controller/operator.
+- `stop_after_current_motion`: default webapp stop behavior; finish the current
+  motion segment, stop streaming/capture, and return to an idle state if
+  configured.
+- `emergency_stop`: only for a real safety-rated integration, not a casual UDP
+  command.
+
+### Raw And Synchronized Data
+
+Always preserve raw captures separately from synchronized/processed outputs.
+Synchronization must create derived artifacts and BOP scenes, not destructively
+rename or delete the only copy of the images.
+
+Recommended layout concept:
+
+```text
+run/
+  raw/
+    robot_poses/
+    sensors/
+  processed/
+    synchronized/
+    calibration/
+  bop/
+    DATASET_NAME/
+```
+
+### Calibration Identity
+
+Key calibration by a calibration profile, not by sensor type alone. A profile
+should include:
+
+- Sensor type, such as `realsense_d435`, `oak_d_pro`, or `zed_2i`.
+- Physical serial or device ID.
+- Mounting mode, such as `eye_in_hand` or `static`.
+- Rig position, such as `wrist`, `front_left`, or `cell_top`.
+- Calibration profile ID/version.
+
+Example profile IDs:
+
+```text
+realsense_d435_123456_eye_in_hand_wrist_v2026_01
+oak_d_pro_ABC123_static_front_left_v2026_01
+zed_2i_SN0001_static_cell_top_v2026_01
+```
+
+### Calibration Target
+
+Use ChArUco as the primary calibration target for robust hand-eye and static
+camera calibration. It combines ArUco marker robustness with chessboard-corner
+precision and is a better default for partial views than a plain checkerboard.
+
+Keep ArUco grid support as a legacy/secondary path because the current code
+already uses an ArUco grid board. Checkerboards can be supported as an optional
+target type, but should not be the default for this system.
+
+### Clock Synchronization
+
+Use sensor/device timestamps as the primary image timestamp source. Also record
+host monotonic receive timestamps for every sensor frame and robot pose.
+
+The sync module should estimate and store a clock-offset model per sensor:
+
+- Sensor timestamp to host monotonic time.
+- Robot pose receive timestamp to host monotonic time.
+- Nearest-pose delta for every synchronized frame.
+- Dropped-frame and timestamp-gap statistics.
+
+Hardware trigger, PTP, or NTP can be added later where supported, but the v1
+rewrite should not depend on hardware triggering being available for every
+camera.
+
+### BOP Suffix Naming
+
+Use short, readable BOP `[_CAMTYPE]` and `[_SPLITTYPE]` suffixes. Do not encode
+serial numbers or full calibration IDs into folder names.
+
+Recommended examples:
+
+```text
+test_realsense_d435_eih
+test_oak_d_pro_static_front
+test_zed_2i_static_left
+```
+
+Store detailed sensor serials, calibration profile IDs, mounting metadata, and
+timestamp-sync metadata in `dataset_manifest.json` or equivalent project
+metadata.
+
+### Ground-Truth Rendering
+
+Keep BlenderProc as the primary ground-truth generator for v1. The current
+pipeline already uses it and it can produce BOP-style scene ground truth, masks,
+depth, and color artifacts.
+
+A lighter renderer can be introduced later as another rendering backend, but it
+should not block the first rewrite.
+
+### First-Class Estimators
+
+Make the estimator interface first-class, not every estimator implementation on
+day one.
+
+FoundationPose should be the first fully supported implementation. MegaPose and
+SAM6D should be supported by the interface design and added as later adapters.
+
+Canonical estimator contract:
+
+```text
+BOP dataset in -> estimator run -> BOP result CSV out
+```
+
+### Unit Convention
+
+Use explicit units in internal field names and convert to BOP millimeter units
+at the export boundary.
+
+Recommended internal naming examples:
+
+```text
+translation_mm
+depth_scale_to_mm
+cartesian_velocity_m_s
+timestamp_ns
+rotation_quaternion_wxyz
+```
+
+BOP export should follow BOP conventions: object models and translation vectors
+in millimeters, depth scale declared in camera files.
+
+### Webapp Scope
+
+Build a local lab webapp first, designed so future multi-user support remains
+possible.
+
+For v1:
+
+- Local network/lab deployment.
+- One active robot capture job at a time.
+- Multiple non-hardware jobs can run if they do not fight for GPU/container
+  resources.
+- Basic authentication can be added if the app is reachable outside the lab
+  machine.
+- Job history, logs, artifacts, and configuration snapshots are mandatory.
+
+Do not start with a multi-user experiment-management platform. The first
+rewrite target is reliable orchestration and maintainability.
+
+## Remaining Design Questions
+
+These still need concrete implementation choices:
+
+- Exact robot-side stop implementation inside the KUKA Sunrise app.
+- ChArUco board dimensions, marker dictionary, square size, and manufacturing
+  procedure.
+- Whether any camera can or should use hardware trigger in addition to sensor
+  timestamps.
+- Exact BOP scene/split naming once real calibration profiles and experiment
+  naming conventions are finalized.
+- Whether to serve the Vite app from FastAPI in production or run frontend and
+  backend as separate local services during development only.
