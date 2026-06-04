@@ -1361,36 +1361,50 @@ that create jobs.
 
 #### Recommended Web GUI Framework
 
-Strong recommendation: use a Python FastAPI backend with a React/TypeScript
-single-page app built with Vite.
+Strong recommendation: use a Python FastAPI backend. For the first webapp
+version, prefer server-rendered Jinja2 templates with HTMX and small amounts of
+plain JavaScript. Add a React/TypeScript Vite frontend only when the UI grows
+past what HTMX can keep pleasant.
 
 This project is not a marketing website or public content platform. It is a
 local robotics operations tool with hardware status, long-running jobs, logs,
 artifact browsing, calibration workflows, BOP export, and estimator/evaluation
-control. The most important architectural requirement is not server-side
-rendering or SEO. It is a reliable typed backend that can orchestrate Python
-hardware/process code and a responsive frontend that can monitor state in real
-time.
+control. The most important architectural requirement is a reliable typed
+backend that can orchestrate Python hardware/process code. The frontend should
+start as light as possible and become richer only where the workflows demand it.
 
-Recommended stack:
+Recommended v1 stack:
 
 | Layer | Recommendation | Reason |
 | --- | --- | --- |
 | Backend API | FastAPI | Python-native, async-friendly, OpenAPI-generating, good fit for hardware adapters, job APIs, status endpoints, and WebSocket/SSE log streaming. |
-| Frontend | React + TypeScript + Vite | Good fit for dense operational UI, device tables, job timelines, calibration views, dataset/artifact browsing, and reusable components. Vite gives a simple SPA setup and fast development loop. |
-| Routing | React Router | Enough for a local operations app; avoids forcing the frontend into a server-rendered framework. |
-| Data fetching | TanStack Query or a small typed API client | Keeps polling, refetching, cache invalidation, and job-status updates manageable. |
-| Realtime updates | WebSockets or Server-Sent Events from FastAPI | Needed for job logs, capture progress, calibration progress, and estimator/evaluation status. |
-| UI components | A pragmatic component library such as shadcn/ui or MUI | Avoid spending rewrite time inventing tables, dialogs, tabs, forms, and status components. |
+| Initial frontend | Jinja2 templates + HTMX + small vanilla JS | Lowest code footprint for forms, status panels, job controls, logs, and artifact links. Keeps most behavior in Python while still allowing partial page updates. |
+| Realtime updates | Server-Sent Events or WebSockets from FastAPI | Needed for job logs, capture progress, calibration progress, and estimator/evaluation status. SSE is enough for many one-way status streams. |
+| Styling/components | Minimal CSS or a small pragmatic component layer | Avoid investing early rewrite time in a large frontend design system. |
 | Job execution | Python job runner owned by backend | Hardware and estimator orchestration should stay close to the Python modules, not in a Node/Next.js server. |
+
+Escalate to a React/TypeScript Vite frontend when the UI genuinely needs richer
+client-side behavior, such as dense dataset browsing, complex calibration
+visualization, multi-panel dashboards, interactive plots, or reusable stateful
+components. Vite itself is not the heavy part; it is a lightweight development
+and build tool. The real cost comes from adding a full SPA architecture, routing,
+client-side state management, and a component system. Keep that cost optional
+until the benefit is clear.
+
+If a richer frontend becomes necessary, use:
+
+| Layer | Recommendation | Reason |
+| --- | --- | --- |
+| Frontend build | Vite | Small, fast SPA build/dev tool; avoids a server-rendered Node framework. |
+| UI framework | React + TypeScript | Good fit for dense operational UI, device tables, job timelines, calibration views, dataset/artifact browsing, and reusable components. |
+| Routing | React Router | Enough for a local operations app. |
+| Data fetching | TanStack Query or a small typed API client | Keeps polling, refetching, cache invalidation, and job-status updates manageable. |
 
 Avoid making Next.js the primary app framework for v1. Next.js is strong for
 full-stack React and server-rendered applications, but this project's server is
 already naturally Python due to camera SDKs, robot adapters, calibration, BOP
 export, and estimator orchestration. Adding a Node server layer would mostly add
-deployment and ownership complexity. A Vite SPA served by FastAPI, or built as
-static assets and served separately, is simpler and fits the lab-control use
-case better.
+deployment and ownership complexity.
 
 Also avoid Streamlit, Gradio, or notebook-style apps for the main rewrite. They
 are excellent for demos and small research tools, but they are the wrong center
@@ -1401,6 +1415,7 @@ Useful references:
 
 - FastAPI docs: <https://fastapi.tiangolo.com/>
 - FastAPI WebSocket docs: <https://fastapi.tiangolo.com/advanced/websockets/>
+- HTMX docs: <https://htmx.org/docs/>
 - Vite guide: <https://vite.dev/guide/>
 - React framework guidance: <https://react.dev/learn/creating-a-react-app>
 
@@ -1845,6 +1860,8 @@ possible.
 For v1:
 
 - Local network/lab deployment.
+- FastAPI backend with Jinja2 templates, HTMX, SSE/WebSockets where needed, and
+  small vanilla JavaScript.
 - One active robot capture job at a time.
 - Multiple non-hardware jobs can run if they do not fight for GPU/container
   resources.
@@ -1866,5 +1883,5 @@ These still need concrete implementation choices:
   timestamps.
 - Exact BOP scene/split naming once real calibration profiles and experiment
   naming conventions are finalized.
-- Whether to serve the Vite app from FastAPI in production or run frontend and
-  backend as separate local services during development only.
+- Whether and when specific screens justify introducing a Vite/React frontend
+  alongside or instead of the HTMX/Jinja2 interface.
