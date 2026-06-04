@@ -48,7 +48,17 @@ series = {HRI '25}
 
 **CIRP CMS paper:**
 ```bibtex
-TBD
+@article{BLANKEMEYER20251113,
+  title = {Robotic Evaluation Framework for {{6D}} Object Pose Estimation Accuracy},
+  author = {Blankemeyer, Sebastian and Wendorff, David and Raatz, Annika},
+  year = 2025,
+  journal = {Procedia CIRP},
+  volume = {134},
+  pages = {1113--1118},
+  issn = {2212-8271},
+  doi = {10.1016/j.procir.2025.02.251},
+  keywords = {Automation,Pose Estimation,Robotics}
+}
 ```
 
 **CIRP CMS data set:**
