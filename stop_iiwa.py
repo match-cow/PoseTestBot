@@ -1,48 +1,71 @@
 #!/usr/bin/env python3
 
 import argparse
-import json
-import socket
 import sys
 
-def send_stop_message(ip_robot, port_robot):
-    """Send stop message to robot via UDP"""
-    
-    # Stop message
-    stop_message = {"stop": True}
-    print(f"Sending stop message: {stop_message}")
-    
-    # Convert the stop_message to JSON
-    stop_message_json = json.dumps(stop_message)
-    
+from posetestbot.config import robot_profile
+from posetestbot.robot.udp import send_stop
+
+
+def send_stop_message(
+    *,
+    robot_mode: str,
+    ip_robot: str | None,
+    port_robot: int | None,
+    protocol: str,
+    intent: str,
+) -> bool:
+    """Send a stop-like control message to the configured iiwa controller."""
+
+    profile = robot_profile(robot_mode).with_overrides(
+        robot_ip=ip_robot,
+        command_port=port_robot,
+    )
+
     try:
-        # Send the stop_message JSON to the robot via UDP
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.sendto(stop_message_json.encode(), (ip_robot, port_robot))
-            print(f"Sent stop message to {ip_robot}:{port_robot}")
-            return True
-            
-    except socket.error as e:
-        print(f"Socket error: {e}")
+        stop_message = send_stop(profile, protocol=protocol, intent=intent)
+        print(f"Sent stop message to {profile.robot_ip}:{profile.command_port}")
+        print(f"Message: {stop_message}")
+        return True
+    except OSError as exc:
+        print(f"Socket error: {exc}")
         return False
-    except Exception as e:
-        print(f"Error sending stop message: {e}")
+    except Exception as exc:
+        print(f"Error sending stop message: {exc}")
         return False
 
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Send stop message to robot via UDP")
     parser.add_argument(
+        "--robot_mode",
+        choices=("fake", "real"),
+        default=None,
+        help="Robot target profile. Defaults to POSETESTBOT_ROBOT_MODE or fake.",
+    )
+    parser.add_argument(
         "--ip_robot",
         type=str,
-        default="172.31.1.147",
-        help="IP address of the robot (default: 172.31.1.147)",
+        default=None,
+        help="Override robot IP address from the selected profile.",
     )
     parser.add_argument(
         "--port_robot",
         type=int,
-        default=30300,
-        help="Port of the robot (default: 30300)",
+        default=None,
+        help="Override robot UDP command port from the selected profile.",
+    )
+    parser.add_argument(
+        "--protocol",
+        choices=("legacy", "v1"),
+        default="legacy",
+        help="Robot command protocol. Use legacy for the current Sunrise app.",
+    )
+    parser.add_argument(
+        "--intent",
+        choices=("pause_capture", "stop_after_current_motion", "emergency_stop"),
+        default="stop_after_current_motion",
+        help="Structured v1 stop intent. Legacy protocol still sends {'stop': true}.",
     )
     parser.add_argument(
         "--verbose",
@@ -51,18 +74,31 @@ def main():
     )
 
     args = parser.parse_args()
+    selected_profile = robot_profile(args.robot_mode).with_overrides(
+        robot_ip=args.ip_robot,
+        command_port=args.port_robot,
+    )
 
     if args.verbose:
-        print(f"Target robot: {args.ip_robot}:{args.port_robot}")
+        print(
+            "Target robot: "
+            f"{selected_profile.mode} "
+            f"{selected_profile.robot_ip}:{selected_profile.command_port}"
+        )
 
-    # Send stop message
-    success = send_stop_message(args.ip_robot, args.port_robot)
-    
+    success = send_stop_message(
+        robot_mode=selected_profile.mode,
+        ip_robot=selected_profile.robot_ip,
+        port_robot=selected_profile.command_port,
+        protocol=args.protocol,
+        intent=args.intent,
+    )
+
     if success:
-        print("✅ Stop message sent successfully!")
+        print("Stop message sent successfully.")
         sys.exit(0)
     else:
-        print("❌ Failed to send stop message!")
+        print("Failed to send stop message.")
         sys.exit(1)
 
 if __name__ == "__main__":

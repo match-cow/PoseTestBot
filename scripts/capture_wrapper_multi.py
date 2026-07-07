@@ -1,8 +1,26 @@
+import argparse
 import os
 import shutil
 import subprocess
 import time
 from typing import List
+
+from posetestbot.io.artifacts import RAW_ROBOT_EE_POSES
+from posetestbot.config import robot_profile
+from posetestbot.io.manifest import (
+    create_run_manifest,
+    make_sensor_record,
+    record_raw_robot_pose_artifact,
+    set_manifest_sensors,
+    upsert_stage,
+    write_run_manifest,
+)
+from posetestbot.sensors.contracts import SensorType
+
+
+def uv_python_command(script_path: str, *args: str) -> List[str]:
+    """Build a uv-managed Python script command."""
+    return ["uv", "run", "python", script_path, *args]
 
 
 def get_realsense_serials() -> List[str]:
@@ -36,6 +54,23 @@ def get_luxonis_serials() -> List[str]:
     return serials
 
 
+def get_zed_serials() -> List[str]:
+    """Gets serial numbers of connected Stereolabs ZED devices."""
+    serials = []
+    try:
+        import pyzed.sl as sl
+
+        for device in sl.Camera.get_device_list():
+            serial_number = getattr(device, "serial_number", None)
+            if serial_number is not None:
+                serials.append(str(serial_number))
+    except ImportError:
+        print("ZED SDK Python API is not installed. Skipping ZED devices.")
+    except Exception as e:
+        print(f"Error getting ZED serial numbers: {e}")
+    return serials
+
+
 def get_user_input(prompt: str, default: str) -> str:
     """Gets user input with a default value."""
     return input(f"{prompt} ([{default}]): ") or default
@@ -53,6 +88,7 @@ def capture_run(
     script_dir: str,
     capture_luxonis: bool,
     capture_realsense: bool,
+    capture_zed: bool,
     capture_vel: float,
     capture_fps: int,
     resolution: str,
@@ -73,6 +109,23 @@ def capture_run(
     os.makedirs(run_output_folder)
 
     capture_processes = []
+    profile = robot_profile()
+    sensor_records = []
+    manifest = create_run_manifest(
+        run_output_folder,
+        run_name=run_name,
+        robot_profile=profile,
+        capture_config={
+            "capture_luxonis": capture_luxonis,
+            "capture_realsense": capture_realsense,
+            "capture_zed": capture_zed,
+            "cartesian_velocity_m_s": capture_vel,
+            "fps": capture_fps,
+            "resolution": resolution,
+        },
+    )
+    write_run_manifest(manifest, run_output_folder)
+
     if capture_luxonis:
         luxonis_serials = get_luxonis_serials()
         if luxonis_serials:
@@ -82,14 +135,23 @@ def capture_run(
             for serial in luxonis_serials:
                 output_folder = os.path.join(run_output_folder, f"luxonis_{serial}")
                 os.makedirs(output_folder)
+                sensor_records.append(
+                    make_sensor_record(
+                        sensor_type=SensorType.OAK_D_PRO,
+                        device_id=serial,
+                        folder=output_folder,
+                        run_root=run_output_folder,
+                        display_name=f"luxonis_{serial}",
+                        status="recording",
+                    )
+                )
                 p = subprocess.Popen(
-                    [
-                        "python",
+                    uv_python_command(
                         luxonis_capture,
                         output_folder,
                         f"--fps={capture_fps}",
                         f"--device={serial}",
-                    ]
+                    )
                 )
                 capture_processes.append(p)
 
@@ -102,28 +164,73 @@ def capture_run(
             for serial in realsense_serials:
                 output_folder = os.path.join(run_output_folder, f"realsense_{serial}")
                 os.makedirs(output_folder)
+                sensor_records.append(
+                    make_sensor_record(
+                        sensor_type=SensorType.REALSENSE_D435,
+                        device_id=serial,
+                        folder=output_folder,
+                        run_root=run_output_folder,
+                        display_name=f"realsense_{serial}",
+                        status="recording",
+                    )
+                )
                 p = subprocess.Popen(
-                    [
-                        "python",
+                    uv_python_command(
                         realsense_capture,
                         output_folder,
                         f"--fps={capture_fps}",
                         f"--device={serial}",
-                    ]
+                    )
                 )
                 capture_processes.append(p)
+
+    if capture_zed:
+        zed_serials = get_zed_serials()
+        if zed_serials:
+            zed_capture = os.path.join(script_dir, "capture_zed_2i.py")
+            for serial in zed_serials:
+                output_folder = os.path.join(run_output_folder, f"zed_2i_{serial}")
+                os.makedirs(output_folder)
+                sensor_records.append(
+                    make_sensor_record(
+                        sensor_type=SensorType.ZED_2I,
+                        device_id=serial,
+                        folder=output_folder,
+                        run_root=run_output_folder,
+                        display_name=f"zed_2i_{serial}",
+                        status="recording",
+                    )
+                )
+                p = subprocess.Popen(
+                    uv_python_command(
+                        zed_capture,
+                        output_folder,
+                        f"--fps={capture_fps}",
+                        f"--device={serial}",
+                        f"--resolution={resolution}",
+                    )
+                )
+                capture_processes.append(p)
+
+    set_manifest_sensors(manifest, sensor_records)
+    upsert_stage(
+        manifest,
+        name="capture",
+        status="running",
+        message=f"Started {len(capture_processes)} sensor capture process(es).",
+    )
+    write_run_manifest(manifest, run_output_folder)
 
     time.sleep(2)
 
     # Start pose_receiver with output_folder as argument
     pose_receiver = os.path.join(script_dir, "pose_receiver_udp_json.py")
     pose_receiver_process = subprocess.Popen(
-        [
-            "python",
+        uv_python_command(
             pose_receiver,
             run_output_folder,
             f"--capture_vel={capture_vel}",
-        ]
+        )
     )
 
     # Wait for pose_receiver to finish
@@ -134,19 +241,44 @@ def capture_run(
     # Terminate luxonis_capture and realsense_capture subprocesses
     for p in capture_processes:
         p.terminate()
+    for p in capture_processes:
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
 
     # Move pose data to each sensor folder for synchronization
-    pose_data_path = os.path.join(run_output_folder, "pose_data.json")
+    pose_data_path = os.path.join(run_output_folder, RAW_ROBOT_EE_POSES)
     if os.path.exists(pose_data_path):
         for f in os.scandir(run_output_folder):
             if f.is_dir():
                 shutil.copy(pose_data_path, f.path)
+        record_raw_robot_pose_artifact(manifest, run_output_folder)
+
+    finished_sensor_records = []
+    for sensor in sensor_records:
+        updated = dict(sensor)
+        updated["status"] = "captured"
+        finished_sensor_records.append(updated)
+    set_manifest_sensors(manifest, finished_sensor_records)
+    upsert_stage(
+        manifest,
+        name="capture",
+        status="succeeded" if pose_receiver_process.returncode == 0 else "failed",
+        message=f"Pose receiver exited with code {pose_receiver_process.returncode}.",
+    )
+    write_run_manifest(manifest, run_output_folder)
 
     print(f"Finished capturing {run_name}.")
 
 
 def main():
     """Main function to handle capture process."""
+    parser = argparse.ArgumentParser(
+        description="Interactive multi-sensor PoseTestBot capture wrapper."
+    )
+    parser.parse_args()
+
     script_dir = os.path.dirname(os.path.realpath(__file__))
     output_path = get_user_input(
         "Enter output path", os.path.join(script_dir, "../working_data")
@@ -160,6 +292,7 @@ def main():
     if capture_autostart:
         capture_realsense = True
         capture_luxonis = True
+        capture_zed = True
         capture_vel = 0.2
         capture_fps = 6
         resolution = "720p"
@@ -173,8 +306,12 @@ def main():
         capture_luxonis_input = get_user_input(
             "Do you want to capture luxonis? (Y/n)", "Y"
         )
+        capture_zed_input = get_user_input(
+            "Do you want to capture ZED 2i? (Y/n)", "Y"
+        )
         capture_realsense = capture_realsense_input.lower() == "y"
         capture_luxonis = capture_luxonis_input.lower() == "y"
+        capture_zed = capture_zed_input.lower() == "y"
 
     now = time.localtime()
     output_path = os.path.join(
@@ -203,6 +340,7 @@ def main():
                 script_dir,
                 capture_luxonis,
                 capture_realsense,
+                capture_zed,
                 capture_vel,
                 capture_fps,
                 resolution,
@@ -271,20 +409,28 @@ def main():
         for folder in sensor_folders:
             print(f"Processing sensor folder: {folder}")
             run_subprocess(
-                ["python", capture_sync_and_sort, folder, f"--sync_delta={sync_data}"]
+                uv_python_command(
+                    capture_sync_and_sort, folder, f"--sync_delta={sync_data}"
+                )
             )
 
             if capture_autostart:
                 run_subprocess(
-                    ["python", aruco_pose_estimation, folder, "--save_images", "--quiet"]
+                    uv_python_command(
+                        aruco_pose_estimation, folder, "--save_images", "--quiet"
+                    )
                 )
             elif run_aruco:
                 if save_aruco_images:
                     run_subprocess(
-                        ["python", aruco_pose_estimation, folder, "--save_images"]
+                        uv_python_command(
+                            aruco_pose_estimation, folder, "--save_images"
+                        )
                     )
                 else:
-                    run_subprocess(["python", aruco_pose_estimation, folder, "--quiet"])
+                    run_subprocess(
+                        uv_python_command(aruco_pose_estimation, folder, "--quiet")
+                    )
 
         # These steps likely need data from all sensors, so run them on the main folder.
         if not capture_autostart:
@@ -294,20 +440,19 @@ def main():
             if perform_blenderproc_prepare.lower() == "y":
                 print("Starting blenderproc_prepare.")
                 run_subprocess(
-                    [
-                        "python",
+                    uv_python_command(
                         blencerproc_prepare,
                         io,
                         object_models,
                         camera_ee_transform,
-                    ]
+                    )
                 )
 
         if not capture_autostart:
             start_render = get_user_input("Do you want to start rendering? (Y/n)", "Y")
             if start_render.lower() == "y":
                 run_subprocess(
-                    ["python", blenderproc_wrapper, io, blenderproc_render],
+                    uv_python_command(blenderproc_wrapper, io, blenderproc_render),
                 )
 
 

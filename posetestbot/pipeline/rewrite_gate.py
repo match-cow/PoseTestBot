@@ -1,0 +1,1795 @@
+"""Milestone gates that keep the rewrite focused on proved workflows."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Mapping
+
+from posetestbot.io.artifacts import (
+    BOP_DIR,
+    BOP_EVALUATION_REPORT,
+    BOP_EXPORT_MANIFEST,
+    BOP_RESULT_EXPORT_MANIFEST,
+    CALIBRATION_PROFILES,
+    CALIBRATION_VALIDATION_REPORT,
+    CAPTURE_EXECUTION_PLAN,
+    CAPTURE_EXECUTION_REPORT,
+    CAPTURE_PLAN,
+    CAPTURE_PLAN_PREFLIGHT_REPORT,
+    DEPTH_DIR,
+    FRAME_METADATA_JSONL,
+    FOUNDATIONPOSE_PLAN,
+    HARDWARE_STATUS_REPORT,
+    METRIC_REPORT_JSON,
+    METRICS_DIR,
+    PIPELINE_SEQUENCE_PLAN,
+    RESULTS_DIR,
+    REWRITE_GATE_REPORT,
+    REWRITE_STATUS_REPORT,
+    RGB_DIR,
+    RUN_CONFIG,
+    RUN_PREFLIGHT_REPORT,
+    SYNTHETIC_RGBD_REPORT,
+    SYNC_QUALITY_REPORT,
+)
+
+
+SCHEMA_VERSION = "rewrite_gate_report.v1"
+STATUS_SCHEMA_VERSION = "rewrite_status_report.v1"
+FAKE_E2E_GATE_ID = "rewrite_fake_end_to_end.v1"
+FULL_CAPTURE_GATE_ID = "rewrite_full_capture.v1"
+FOUNDATIONPOSE_RUNTIME_GATE_ID = "rewrite_foundationpose_runtime.v1"
+CALIBRATION_VALIDATION_GATE_ID = "rewrite_calibration_validation.v1"
+GATE_IDS = (
+    FAKE_E2E_GATE_ID,
+    FULL_CAPTURE_GATE_ID,
+    FOUNDATIONPOSE_RUNTIME_GATE_ID,
+    CALIBRATION_VALIDATION_GATE_ID,
+)
+
+
+def default_full_capture_run_root(run_root: str | Path) -> Path:
+    """Return the default sibling root for real full-capture evidence."""
+
+    root = Path(run_root)
+    return root.parent / f"{root.name}_real_full_capture"
+
+
+def _load_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    if not path.is_file():
+        return None, "missing"
+    try:
+        loaded = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        return None, f"invalid_json: {exc.msg}"
+    if not isinstance(loaded, dict):
+        return None, "json_root_not_object"
+    return loaded, None
+
+
+def _check(
+    *,
+    name: str,
+    path: Path,
+    ok: bool,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "status": "ready" if ok else "blocked",
+        "artifact": path.as_posix(),
+        "message": message,
+        "details": details or {},
+    }
+
+
+def _json_file_check(name: str, path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    data, error = _load_json_object(path)
+    if error:
+        return (
+            _check(
+                name=name,
+                path=path,
+                ok=False,
+                message=f"{path.name} is {error}.",
+            ),
+            None,
+        )
+    return (
+        _check(
+            name=name,
+            path=path,
+            ok=True,
+            message=f"{path.name} exists and is valid JSON.",
+        ),
+        data,
+    )
+
+
+def _status_value(data: dict[str, Any]) -> str | None:
+    value = data.get("overall_status", data.get("status"))
+    return str(value) if value is not None else None
+
+
+def _report_problem_checks(
+    data: Mapping[str, Any],
+    *,
+    blocking_statuses: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    blocking_statuses = blocking_statuses or {"error", "blocked", "failed"}
+    checks = data.get("checks")
+    if not isinstance(checks, list):
+        checks = data.get("gates")
+    if not isinstance(checks, list):
+        return []
+    problem_checks: list[dict[str, Any]] = []
+    for check in checks:
+        if not isinstance(check, Mapping):
+            continue
+        status = str(check.get("status") or "")
+        if status not in blocking_statuses:
+            continue
+        problem_checks.append(
+            {
+                "name": check.get("name"),
+                "status": status,
+                "message": check.get("message"),
+                "details": (
+                    dict(check.get("details"))
+                    if isinstance(check.get("details"), Mapping)
+                    else {}
+                ),
+            }
+        )
+    return problem_checks
+
+
+def _sensor_diagnostics_from_status(
+    data: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(data, Mapping):
+        return []
+    families = data.get("families")
+    if not isinstance(families, list):
+        return []
+    diagnostics: list[dict[str, Any]] = []
+    for family in families:
+        if not isinstance(family, Mapping):
+            continue
+        family_diagnostics = family.get("diagnostics")
+        if not isinstance(family_diagnostics, list):
+            continue
+        for diagnostic in family_diagnostics:
+            if not isinstance(diagnostic, Mapping):
+                continue
+            diagnostics.append(
+                {
+                    "sensor_type": family.get("sensor_type"),
+                    "display_name": family.get("display_name"),
+                    **dict(diagnostic),
+                }
+            )
+    return diagnostics
+
+
+def _sensor_diagnostics_from_report(data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    sensor_status = data.get("sensor_status")
+    return _sensor_diagnostics_from_status(
+        sensor_status if isinstance(sensor_status, Mapping) else None
+    )
+
+
+def _sensor_blockers_from_diagnostics(
+    diagnostics: list[dict[str, Any]],
+) -> list[str]:
+    blockers: list[str] = []
+    for diagnostic in diagnostics:
+        severity = str(diagnostic.get("severity") or "")
+        sensor_type = diagnostic.get("sensor_type")
+        if severity not in {"error", "warning"} or not sensor_type:
+            continue
+        blocker = f"sensor:{sensor_type}"
+        if blocker not in blockers:
+            blockers.append(blocker)
+    return blockers
+
+
+def format_blocker_detail_lines(
+    blocker: Mapping[str, Any],
+    *,
+    indent: str = "  ",
+    max_checks: int = 3,
+    max_diagnostics: int = 3,
+    max_hints: int = 2,
+) -> list[str]:
+    """Return compact human-readable detail lines for a gate blocker."""
+
+    details = blocker.get("details")
+    if not isinstance(details, Mapping):
+        return []
+
+    lines: list[str] = []
+    error_checks = details.get("error_checks")
+    if isinstance(error_checks, list):
+        shown_checks = 0
+        for check in error_checks:
+            if not isinstance(check, Mapping):
+                continue
+            name = check.get("name")
+            message = check.get("message")
+            if name or message:
+                text = f"blocked check: {name}" if name else "blocked check"
+                if message:
+                    text = f"{text} - {message}"
+                lines.append(f"{indent}{text}")
+                shown_checks += 1
+            if shown_checks >= max_checks:
+                break
+
+    sensor_diagnostics = details.get("sensor_diagnostics")
+    if isinstance(sensor_diagnostics, list):
+        shown_diagnostics = 0
+        for diagnostic in sensor_diagnostics:
+            if not isinstance(diagnostic, Mapping):
+                continue
+            message = diagnostic.get("message")
+            if message:
+                lines.append(f"{indent}diagnostic: {message}")
+                shown_diagnostics += 1
+            hints = diagnostic.get("hints")
+            if isinstance(hints, list):
+                for hint in hints[:max_hints]:
+                    lines.append(f"{indent}  hint: {hint}")
+            if shown_diagnostics >= max_diagnostics:
+                break
+
+    return lines
+
+
+def _gate_report(
+    *,
+    gate_id: str,
+    run_root: Path,
+    checks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    blockers = [check for check in checks if check["status"] != "ready"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "gate_id": gate_id,
+        "run_root": run_root.as_posix(),
+        "overall_status": "ready" if not blockers else "blocked",
+        "summary": {
+            "ready_count": len(checks) - len(blockers),
+            "blocked_count": len(blockers),
+            "check_count": len(checks),
+        },
+        "checks": checks,
+        "next_blockers": [
+            {
+                "name": check["name"],
+                "artifact": check["artifact"],
+                "message": check["message"],
+                "details": check.get("details", {}),
+            }
+            for check in blockers
+        ],
+    }
+
+
+def _capture_selected_roles(capture: dict[str, Any]) -> list[str]:
+    selected_roles = capture.get("selected_roles")
+    if isinstance(selected_roles, list):
+        return [str(role) for role in selected_roles]
+
+    plan = capture.get("capture_execution_plan")
+    if isinstance(plan, dict) and isinstance(plan.get("selected_roles"), list):
+        return [str(role) for role in plan["selected_roles"]]
+
+    processes = capture.get("processes")
+    if isinstance(processes, list):
+        return [
+            str(process["role"])
+            for process in processes
+            if isinstance(process, dict) and process.get("role")
+        ]
+    return []
+
+
+def _enabled_run_config_sensors(run_config: dict[str, Any]) -> list[dict[str, Any]]:
+    capture = run_config.get("capture")
+    if not isinstance(capture, dict):
+        return []
+    sensors = capture.get("sensors")
+    if not isinstance(sensors, list):
+        return []
+    return [
+        sensor
+        for sensor in sensors
+        if isinstance(sensor, dict) and sensor.get("enabled", True)
+    ]
+
+
+def _sensor_folder_name(sensor: dict[str, Any]) -> str:
+    sensor_type = str(sensor.get("sensor_type") or "sensor")
+    device_id = str(sensor.get("device_id") or "auto")
+    if sensor_type in {"realsense", "realsense_d435"}:
+        return f"realsense_{device_id}"
+    if sensor_type in {"luxonis", "oak", "oak_d_pro"}:
+        return f"luxonis_{device_id}"
+    if sensor_type == "zed_2i":
+        return f"zed_2i_{device_id}"
+    return f"{sensor_type}_{device_id}"
+
+
+def _png_count(path: Path) -> int:
+    if not path.is_dir():
+        return 0
+    return len(list(path.glob("*.png")))
+
+
+def _numeric_pose_file_count(path: Path) -> int:
+    if not path.is_dir():
+        return 0
+    count = 0
+    for child in path.iterdir():
+        if not child.is_file():
+            continue
+        try:
+            int(child.stem)
+        except ValueError:
+            continue
+        count += 1
+    return count
+
+
+def _artifact_path(root: Path, value: object) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else root / path
+
+
+def build_fake_end_to_end_gate_report(run_root: str | Path) -> dict[str, Any]:
+    """Report whether the first rewrite proof path is actually satisfied.
+
+    This gate is intentionally stricter than sequence planning. A dry-run plan
+    is useful, but the gate only passes when the run folder contains evidence
+    from capture, sync, BOP export/result/evaluation, and metric reporting.
+    """
+
+    root = Path(run_root)
+    checks: list[dict[str, Any]] = []
+
+    check, run_config = _json_file_check("run_config", root / RUN_CONFIG)
+    checks.append(check)
+    if run_config is not None:
+        checks[-1]["details"] = {
+            "robot_mode": run_config.get("robot", {}).get("mode"),
+            "sequence_id": run_config.get("pipeline", {}).get("sequence_id"),
+        }
+
+    check, preflight = _json_file_check("run_preflight", root / RUN_PREFLIGHT_REPORT)
+    if preflight is not None:
+        status = _status_value(preflight)
+        ok = status in {"ok", "warning", "ready", "succeeded"}
+        check = _check(
+            name="run_preflight",
+            path=root / RUN_PREFLIGHT_REPORT,
+            ok=ok,
+            message=(
+                "run_preflight_report.json has acceptable status."
+                if ok
+                else "run_preflight_report.json is missing an acceptable status."
+            ),
+            details={"status": status},
+        )
+    checks.append(check)
+
+    check, capture = _json_file_check(
+        "capture_execution",
+        root / CAPTURE_EXECUTION_REPORT,
+    )
+    if capture is not None:
+        status = capture.get("status")
+        raw_pose_count = int(capture.get("raw_pose_count") or 0)
+        selected_roles = _capture_selected_roles(capture)
+        ok = (
+            status == "succeeded"
+            and raw_pose_count > 0
+            and "robot_pose_receiver" in selected_roles
+        )
+        check = _check(
+            name="capture_execution",
+            path=root / CAPTURE_EXECUTION_REPORT,
+            ok=ok,
+            message=(
+                "capture_execution_report.json proves a fake pose capture."
+                if ok
+                else (
+                    "capture_execution_report.json must be succeeded, include "
+                    "robot_pose_receiver, and record at least one raw pose."
+                )
+            ),
+            details={
+                "status": status,
+                "raw_pose_count": raw_pose_count,
+                "selected_roles": selected_roles,
+            },
+        )
+    checks.append(check)
+
+    check, synthetic_rgbd = _json_file_check(
+        "synthetic_rgbd_fixture",
+        root / SYNTHETIC_RGBD_REPORT,
+    )
+    if synthetic_rgbd is not None:
+        status = synthetic_rgbd.get("status")
+        frame_count = int(synthetic_rgbd.get("frame_count") or 0)
+        ok = status == "succeeded" and frame_count > 0
+        check = _check(
+            name="synthetic_rgbd_fixture",
+            path=root / SYNTHETIC_RGBD_REPORT,
+            ok=ok,
+            message=(
+                "synthetic_rgbd_report.json proves RGB-D fixture frames exist."
+                if ok
+                else (
+                    "synthetic_rgbd_report.json must be succeeded and record "
+                    "at least one synthetic RGB-D frame."
+                )
+            ),
+            details={"status": status, "frame_count": frame_count},
+        )
+    checks.append(check)
+
+    check, sync_quality = _json_file_check("sync_quality", root / SYNC_QUALITY_REPORT)
+    if sync_quality is not None:
+        status = _status_value(sync_quality)
+        ok = status in {"ok", "warning", "succeeded"}
+        check = _check(
+            name="sync_quality",
+            path=root / SYNC_QUALITY_REPORT,
+            ok=ok,
+            message=(
+                "sync_quality_report.json has acceptable status."
+                if ok
+                else "sync_quality_report.json must be ok or warning."
+            ),
+            details={"status": status},
+        )
+    checks.append(check)
+
+    bop_manifest_path = root / BOP_DIR / BOP_EXPORT_MANIFEST
+    check, bop_export = _json_file_check("bop_export", bop_manifest_path)
+    if bop_export is not None:
+        exports = bop_export.get("exports")
+        ok = isinstance(exports, list) and len(exports) > 0
+        check = _check(
+            name="bop_export",
+            path=bop_manifest_path,
+            ok=ok,
+            message=(
+                "bop_export_manifest.json contains exported scene entries."
+                if ok
+                else "bop_export_manifest.json must contain at least one export."
+            ),
+            details={"export_count": len(exports) if isinstance(exports, list) else 0},
+        )
+    checks.append(check)
+
+    check, result_export = _json_file_check(
+        "bop_result_export",
+        root / BOP_RESULT_EXPORT_MANIFEST,
+    )
+    if result_export is not None:
+        results = result_export.get("results")
+        row_count = 0
+        if isinstance(results, list):
+            row_count = sum(int(result.get("row_count") or 0) for result in results if isinstance(result, dict))
+        ok = isinstance(results, list) and row_count > 0
+        check = _check(
+            name="bop_result_export",
+            path=root / BOP_RESULT_EXPORT_MANIFEST,
+            ok=ok,
+            message=(
+                "bop_result_export_manifest.json records exported result rows."
+                if ok
+                else "bop_result_export_manifest.json must record at least one result row."
+            ),
+            details={
+                "result_count": len(results) if isinstance(results, list) else 0,
+                "row_count": row_count,
+            },
+        )
+    checks.append(check)
+
+    check, bop_eval = _json_file_check(
+        "bop_evaluation",
+        root / BOP_EVALUATION_REPORT,
+    )
+    if bop_eval is not None:
+        status = bop_eval.get("status")
+        result = bop_eval.get("result")
+        ok = status in {"planned", "succeeded"} and isinstance(result, dict)
+        check = _check(
+            name="bop_evaluation",
+            path=root / BOP_EVALUATION_REPORT,
+            ok=ok,
+            message=(
+                "bop_evaluation_report.json records a planned or completed evaluation."
+                if ok
+                else "bop_evaluation_report.json must be planned or succeeded with result metadata."
+            ),
+            details={"status": status, "dry_run": bop_eval.get("dry_run")},
+        )
+    checks.append(check)
+
+    metric_report_path = root / RESULTS_DIR / METRICS_DIR / METRIC_REPORT_JSON
+    check, metric_report = _json_file_check("metric_report", metric_report_path)
+    if metric_report is not None:
+        rows = metric_report.get("rows")
+        row_count = metric_report.get("row_count")
+        if row_count is None and isinstance(rows, list):
+            row_count = len(rows)
+        dashboard = metric_report.get("dashboard")
+        ok = isinstance(dashboard, dict) and int(row_count or 0) > 0
+        check = _check(
+            name="metric_report",
+            path=metric_report_path,
+            ok=ok,
+            message=(
+                "metric_report.json records exported metric rows."
+                if ok
+                else "metric_report.json must include dashboard data and at least one row."
+            ),
+            details={"row_count": row_count},
+        )
+    checks.append(check)
+
+    return _gate_report(gate_id=FAKE_E2E_GATE_ID, run_root=root, checks=checks)
+
+
+def build_full_capture_gate_report(run_root: str | Path) -> dict[str, Any]:
+    """Report whether real/full camera capture has actually been validated."""
+
+    root = Path(run_root)
+    checks: list[dict[str, Any]] = []
+
+    check, run_config = _json_file_check("run_config", root / RUN_CONFIG)
+    if run_config is not None:
+        robot_mode = run_config.get("robot_profile", {}).get("mode")
+        sensors = _enabled_run_config_sensors(run_config)
+        ok = robot_mode == "real" and len(sensors) > 0
+        check = _check(
+            name="run_config",
+            path=root / RUN_CONFIG,
+            ok=ok,
+            message=(
+                "run_config.json targets real capture with enabled sensors."
+                if ok
+                else (
+                    "run_config.json must target robot_profile.mode=real and "
+                    "include at least one enabled sensor."
+                )
+            ),
+            details={
+                "robot_mode": robot_mode,
+                "enabled_sensor_count": len(sensors),
+            },
+        )
+    else:
+        sensors = []
+    checks.append(check)
+
+    check, preflight = _json_file_check("run_preflight", root / RUN_PREFLIGHT_REPORT)
+    if preflight is not None:
+        status = _status_value(preflight)
+        ok = status in {"ok", "warning", "ready", "succeeded"}
+        check = _check(
+            name="run_preflight",
+            path=root / RUN_PREFLIGHT_REPORT,
+            ok=ok,
+            message=(
+                "run_preflight_report.json has acceptable status."
+                if ok
+                else "run_preflight_report.json is missing an acceptable status."
+            ),
+            details={"status": status},
+        )
+    checks.append(check)
+
+    check, hardware = _json_file_check(
+        "hardware_status",
+        root / HARDWARE_STATUS_REPORT,
+    )
+    if hardware is not None:
+        status = _status_value(hardware)
+        robot_status = hardware.get("robot_status")
+        selected_profile = (
+            robot_status.get("selected_profile")
+            if isinstance(robot_status, dict)
+            else None
+        )
+        selected_robot_mode = (
+            selected_profile.get("mode")
+            if isinstance(selected_profile, dict)
+            else None
+        )
+        status_ok = status in {"ok", "warning", "ready", "succeeded"}
+        robot_mode_ok = selected_robot_mode == "real"
+        ok = status_ok and robot_mode_ok
+        if ok:
+            message = (
+                "hardware_status_report.json has acceptable status and real robot mode."
+            )
+        elif not robot_mode_ok:
+            message = (
+                "hardware_status_report.json must select the real robot profile."
+            )
+        else:
+            message = "hardware_status_report.json must be ok or warning."
+        check = _check(
+            name="hardware_status",
+            path=root / HARDWARE_STATUS_REPORT,
+            ok=ok,
+            message=message,
+            details={
+                "status": status,
+                "selected_robot_mode": selected_robot_mode,
+                "status_ok": status_ok,
+                "robot_mode_ok": robot_mode_ok,
+                "error_checks": _report_problem_checks(hardware),
+                "sensor_diagnostics": _sensor_diagnostics_from_report(hardware),
+            },
+        )
+    checks.append(check)
+
+    check, capture_plan = _json_file_check("capture_plan", root / CAPTURE_PLAN)
+    if capture_plan is not None:
+        commands = capture_plan.get("commands")
+        command_count = len(commands) if isinstance(commands, list) else 0
+        ok = command_count > 0
+        check = _check(
+            name="capture_plan",
+            path=root / CAPTURE_PLAN,
+            ok=ok,
+            message=(
+                "capture_plan.json records planned capture commands."
+                if ok
+                else "capture_plan.json must record planned capture commands."
+            ),
+            details={"command_count": command_count},
+        )
+    checks.append(check)
+
+    check, capture_plan_preflight = _json_file_check(
+        "capture_plan_preflight",
+        root / CAPTURE_PLAN_PREFLIGHT_REPORT,
+    )
+    if capture_plan_preflight is not None:
+        status = _status_value(capture_plan_preflight)
+        ok = status in {"ok", "warning", "ready", "succeeded"}
+        check = _check(
+            name="capture_plan_preflight",
+            path=root / CAPTURE_PLAN_PREFLIGHT_REPORT,
+            ok=ok,
+            message=(
+                "capture_plan_preflight_report.json has acceptable status."
+                if ok
+                else "capture_plan_preflight_report.json must be ok or warning."
+            ),
+            details={
+                "status": status,
+                "error_checks": _report_problem_checks(capture_plan_preflight),
+                "sensor_diagnostics": _sensor_diagnostics_from_report(
+                    capture_plan_preflight
+                ),
+            },
+        )
+    checks.append(check)
+
+    check, execution_plan = _json_file_check(
+        "capture_execution_plan",
+        root / CAPTURE_EXECUTION_PLAN,
+    )
+    if execution_plan is not None:
+        status = str(execution_plan.get("status") or "")
+        ready_to_execute = bool(execution_plan.get("ready_to_execute"))
+        problem_checks = _report_problem_checks(execution_plan)
+        selected_roles = [
+            str(role)
+            for role in execution_plan.get("selected_roles", [])
+            if isinstance(role, str)
+        ]
+        ok = (
+            status == "ok"
+            and ready_to_execute
+            and "sensor_capture" in selected_roles
+            and "robot_pose_receiver" in selected_roles
+        )
+        check = _check(
+            name="capture_execution_plan",
+            path=root / CAPTURE_EXECUTION_PLAN,
+            ok=ok,
+            message=(
+                "capture_execution_plan.json is ready for full capture."
+                if ok
+                else (
+                    f"capture_execution_plan.json is blocked by "
+                    f"{problem_checks[0]['name']}: {problem_checks[0]['message']}"
+                    if problem_checks
+                    and problem_checks[0].get("name")
+                    and problem_checks[0].get("message")
+                    else (
+                        "capture_execution_plan.json must be ready_to_execute "
+                        "with sensor_capture and robot_pose_receiver selected."
+                    )
+                )
+            ),
+            details={
+                "status": status,
+                "ready_to_execute": ready_to_execute,
+                "selected_roles": selected_roles,
+                "error_checks": problem_checks,
+            },
+        )
+    checks.append(check)
+
+    check, capture = _json_file_check(
+        "capture_execution",
+        root / CAPTURE_EXECUTION_REPORT,
+    )
+    if capture is not None:
+        status = capture.get("status")
+        mode = capture.get("mode")
+        allow_cameras = bool(capture.get("allow_cameras"))
+        raw_pose_count = int(capture.get("raw_pose_count") or 0)
+        selected_roles = _capture_selected_roles(capture)
+        processes = capture.get("processes")
+        sensor_processes = [
+            process
+            for process in processes
+            if isinstance(process, dict) and process.get("role") == "sensor_capture"
+        ] if isinstance(processes, list) else []
+        sensor_process_ready = bool(sensor_processes) and all(
+            process.get("status") in {"succeeded", "stopped"}
+            and process.get("started_at")
+            and process.get("ended_at")
+            for process in sensor_processes
+        )
+        ok = (
+            status == "succeeded"
+            and mode == "full"
+            and allow_cameras
+            and raw_pose_count > 0
+            and "sensor_capture" in selected_roles
+            and "robot_pose_receiver" in selected_roles
+            and sensor_process_ready
+        )
+        check = _check(
+            name="capture_execution",
+            path=root / CAPTURE_EXECUTION_REPORT,
+            ok=ok,
+            message=(
+                "capture_execution_report.json proves supervised full capture."
+                if ok
+                else (
+                    "capture_execution_report.json must be succeeded full mode "
+                    "with camera commands, robot poses, and completed sensor processes."
+                )
+            ),
+            details={
+                "status": status,
+                "mode": mode,
+                "allow_cameras": allow_cameras,
+                "raw_pose_count": raw_pose_count,
+                "selected_roles": selected_roles,
+                "sensor_process_count": len(sensor_processes),
+            },
+        )
+    checks.append(check)
+
+    for sensor in sensors:
+        folder_name = _sensor_folder_name(sensor)
+        sensor_path = root / folder_name
+        rgb_count = _png_count(sensor_path / RGB_DIR)
+        depth_count = _png_count(sensor_path / DEPTH_DIR)
+        metadata_path = sensor_path / FRAME_METADATA_JSONL
+        ok = (
+            rgb_count > 0
+            and depth_count > 0
+            and rgb_count == depth_count
+            and metadata_path.is_file()
+        )
+        checks.append(
+            _check(
+                name=f"sensor_frames:{folder_name}",
+                path=sensor_path,
+                ok=ok,
+                message=(
+                    f"{folder_name} contains raw RGB-D frames and metadata."
+                    if ok
+                    else (
+                        f"{folder_name} must contain matching rgb/*.png and "
+                        f"depth/*.png frame counts plus {FRAME_METADATA_JSONL}."
+                    )
+                ),
+                details={
+                    "rgb_count": rgb_count,
+                    "depth_count": depth_count,
+                    "frame_count_match": rgb_count == depth_count,
+                    "has_frame_metadata": metadata_path.is_file(),
+                },
+            )
+        )
+
+    return _gate_report(gate_id=FULL_CAPTURE_GATE_ID, run_root=root, checks=checks)
+
+
+def build_foundationpose_runtime_gate_report(run_root: str | Path) -> dict[str, Any]:
+    """Report whether real FoundationPose plus BOP scoring has been validated."""
+
+    root = Path(run_root)
+    checks: list[dict[str, Any]] = []
+
+    check, plan = _json_file_check("foundationpose_runtime", root / FOUNDATIONPOSE_PLAN)
+    if plan is not None:
+        dry_run = bool(plan.get("dry_run", True))
+        jobs = plan.get("jobs")
+        job_summaries = []
+        output_pose_file_count = 0
+        if isinstance(jobs, list):
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                output_folder = _artifact_path(root, job.get("expected_output_folder"))
+                pose_count = (
+                    _numeric_pose_file_count(output_folder / "ob_in_cam")
+                    if output_folder is not None
+                    else 0
+                )
+                output_pose_file_count += pose_count
+                job_summaries.append(
+                    {
+                        "sensor_name": job.get("sensor_name"),
+                        "expected_output_folder": (
+                            output_folder.as_posix()
+                            if output_folder is not None
+                            else None
+                        ),
+                        "pose_file_count": pose_count,
+                    }
+                )
+        jobs_ready = bool(job_summaries) and all(
+            int(job["pose_file_count"]) > 0 for job in job_summaries
+        )
+        ok = dry_run is False and jobs_ready
+        check = _check(
+            name="foundationpose_runtime",
+            path=root / FOUNDATIONPOSE_PLAN,
+            ok=ok,
+            message=(
+                "foundationpose_plan.json records non-dry-run outputs."
+                if ok
+                else (
+                    "foundationpose_plan.json must be non-dry-run and each "
+                    "planned job must have ob_in_cam pose files."
+                )
+            ),
+            details={
+                "dry_run": dry_run,
+                "job_count": len(job_summaries),
+                "output_pose_file_count": output_pose_file_count,
+                "jobs": job_summaries,
+            },
+        )
+    checks.append(check)
+
+    check, result_export = _json_file_check(
+        "foundationpose_bop_results",
+        root / BOP_RESULT_EXPORT_MANIFEST,
+    )
+    if result_export is not None:
+        source_type = result_export.get("source_type")
+        results = result_export.get("results")
+        result_summaries = []
+        row_count = 0
+        if isinstance(results, list):
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                result_rows = int(result.get("row_count") or 0)
+                row_count += result_rows
+                result_path = _artifact_path(root, result.get("path"))
+                result_summaries.append(
+                    {
+                        "filename": result.get("filename"),
+                        "row_count": result_rows,
+                        "path": (
+                            result_path.as_posix()
+                            if result_path is not None
+                            else None
+                        ),
+                        "exists": bool(result_path and result_path.is_file()),
+                    }
+                )
+        results_ready = bool(result_summaries) and all(
+            result["row_count"] > 0 and result["exists"]
+            for result in result_summaries
+        )
+        ok = source_type == "foundationpose" and results_ready
+        check = _check(
+            name="foundationpose_bop_results",
+            path=root / BOP_RESULT_EXPORT_MANIFEST,
+            ok=ok,
+            message=(
+                "bop_result_export_manifest.json records FoundationPose result rows."
+                if ok
+                else (
+                    "bop_result_export_manifest.json must be source_type="
+                    "foundationpose and reference existing result CSVs with rows."
+                )
+            ),
+            details={
+                "source_type": source_type,
+                "result_count": len(result_summaries),
+                "row_count": row_count,
+                "results": result_summaries,
+            },
+        )
+    checks.append(check)
+
+    check, bop_eval = _json_file_check(
+        "foundationpose_bop_evaluation",
+        root / BOP_EVALUATION_REPORT,
+    )
+    if bop_eval is not None:
+        status = bop_eval.get("status")
+        dry_run = bool(bop_eval.get("dry_run", True))
+        result = bop_eval.get("result")
+        method = result.get("method") if isinstance(result, dict) else None
+        score_summary = bop_eval.get("score_summary")
+        score_metrics = (
+            score_summary.get("metrics", {})
+            if isinstance(score_summary, dict)
+            else {}
+        )
+        score_metric_count = len(score_metrics) if isinstance(score_metrics, dict) else 0
+        ok = (
+            status == "succeeded"
+            and dry_run is False
+            and method == "foundationpose"
+            and score_metric_count > 0
+        )
+        check = _check(
+            name="foundationpose_bop_evaluation",
+            path=root / BOP_EVALUATION_REPORT,
+            ok=ok,
+            message=(
+                "bop_evaluation_report.json records completed FoundationPose scoring."
+                if ok
+                else (
+                    "bop_evaluation_report.json must be a succeeded non-dry-run "
+                    "FoundationPose evaluation with score metrics."
+                )
+            ),
+            details={
+                "status": status,
+                "dry_run": dry_run,
+                "method": method,
+                "score_metric_count": score_metric_count,
+            },
+        )
+    checks.append(check)
+
+    return _gate_report(
+        gate_id=FOUNDATIONPOSE_RUNTIME_GATE_ID,
+        run_root=root,
+        checks=checks,
+    )
+
+
+def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, Any]:
+    """Report whether production calibration profiles were validated and promoted."""
+
+    root = Path(run_root)
+    checks: list[dict[str, Any]] = []
+
+    check, validation = _json_file_check(
+        "calibration_validation",
+        root / CALIBRATION_VALIDATION_REPORT,
+    )
+    promoted_profile_count = 0
+    if validation is not None:
+        overall_status = validation.get("overall_status")
+        promotion = validation.get("promotion")
+        profile_count = int(validation.get("profile_count") or 0)
+        promotable_profile_count = int(
+            validation.get("promotable_profile_count") or 0
+        )
+        promotion_requested = (
+            bool(promotion.get("requested"))
+            if isinstance(promotion, dict)
+            else False
+        )
+        promotion_promoted = (
+            bool(promotion.get("promoted"))
+            if isinstance(promotion, dict)
+            else False
+        )
+        promoted_profile_count = (
+            int(promotion.get("profile_count") or 0)
+            if isinstance(promotion, dict)
+            else 0
+        )
+        promotion_path = (
+            str(promotion.get("path"))
+            if isinstance(promotion, dict) and promotion.get("path")
+            else None
+        )
+        ok = (
+            overall_status == "ok"
+            and promotion_requested
+            and promotion_promoted
+            and profile_count > 0
+            and promotable_profile_count == profile_count
+            and promoted_profile_count == profile_count
+            and promotion_path is not None
+        )
+        check = _check(
+            name="calibration_validation",
+            path=root / CALIBRATION_VALIDATION_REPORT,
+            ok=ok,
+            message=(
+                "calibration_validation_report.json records promoted valid profiles."
+                if ok
+                else (
+                    "calibration_validation_report.json must be ok, explicitly "
+                    "promoted, and promote every validated profile."
+                )
+            ),
+            details={
+                "overall_status": overall_status,
+                "profile_count": profile_count,
+                "promotable_profile_count": promotable_profile_count,
+                "promotion_requested": promotion_requested,
+                "promotion_promoted": promotion_promoted,
+                "promoted_profile_count": promoted_profile_count,
+                "promotion_path": promotion_path,
+            },
+        )
+    checks.append(check)
+
+    check, profile_collection = _json_file_check(
+        "calibration_profiles",
+        root / CALIBRATION_PROFILES,
+    )
+    if profile_collection is not None:
+        profiles = profile_collection.get("profiles")
+        profile_summaries = []
+        if isinstance(profiles, list):
+            for profile in profiles:
+                if not isinstance(profile, dict):
+                    continue
+                quality = profile.get("quality")
+                quality = quality if isinstance(quality, dict) else {}
+                profile_summaries.append(
+                    {
+                        "profile_id": profile.get("profile_id"),
+                        "sensor_id": profile.get("sensor_id"),
+                        "sensor_type": profile.get("sensor_type"),
+                        "status": profile.get("status"),
+                        "num_inliers": quality.get("num_inliers"),
+                        "residual_translation_mm": quality.get(
+                            "residual_translation_mm"
+                        ),
+                        "residual_rotation_deg": quality.get(
+                            "residual_rotation_deg"
+                        ),
+                    }
+                )
+        all_profiles_valid = bool(profile_summaries) and all(
+            profile["status"] == "valid"
+            and isinstance(profile["num_inliers"], int)
+            and profile["num_inliers"] > 0
+            and profile["residual_translation_mm"] is not None
+            and profile["residual_rotation_deg"] is not None
+            for profile in profile_summaries
+        )
+        count_matches_validation = (
+            promoted_profile_count == 0
+            or len(profile_summaries) == promoted_profile_count
+        )
+        ok = all_profiles_valid and count_matches_validation
+        check = _check(
+            name="calibration_profiles",
+            path=root / CALIBRATION_PROFILES,
+            ok=ok,
+            message=(
+                "calibration_profiles.json contains promoted valid profiles."
+                if ok
+                else (
+                    "calibration_profiles.json must contain valid profiles "
+                    "with inlier counts and residual quality fields."
+                )
+            ),
+            details={
+                "profile_count": len(profile_summaries),
+                "promoted_profile_count": promoted_profile_count,
+                "count_matches_validation": count_matches_validation,
+                "profiles": profile_summaries,
+            },
+        )
+    checks.append(check)
+
+    return _gate_report(
+        gate_id=CALIBRATION_VALIDATION_GATE_ID,
+        run_root=root,
+        checks=checks,
+    )
+
+
+def build_gate_report(run_root: str | Path, *, gate_id: str) -> dict[str, Any]:
+    if gate_id == FAKE_E2E_GATE_ID:
+        return build_fake_end_to_end_gate_report(run_root)
+    if gate_id == FULL_CAPTURE_GATE_ID:
+        return build_full_capture_gate_report(run_root)
+    if gate_id == FOUNDATIONPOSE_RUNTIME_GATE_ID:
+        return build_foundationpose_runtime_gate_report(run_root)
+    if gate_id == CALIBRATION_VALIDATION_GATE_ID:
+        return build_calibration_validation_gate_report(run_root)
+    raise ValueError(f"Unknown rewrite gate: {gate_id}")
+
+
+def write_gate_report(run_root: str | Path, *, gate_id: str) -> tuple[Path, dict[str, Any]]:
+    root = Path(run_root)
+    report = build_gate_report(root, gate_id=gate_id)
+    path = root / REWRITE_GATE_REPORT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(report, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return path, report
+
+
+def write_fake_end_to_end_gate_report(run_root: str | Path) -> tuple[Path, dict[str, Any]]:
+    return write_gate_report(run_root, gate_id=FAKE_E2E_GATE_ID)
+
+
+def _action(
+    *,
+    gate_id: str,
+    label: str,
+    command: list[str],
+    reason: str,
+    blocks_on: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "gate_id": gate_id,
+        "label": label,
+        "command": command,
+        "reason": reason,
+        "blocks_on": blocks_on or [],
+    }
+
+
+def _existing_hardware_status_blockers(gate_run_root: Path) -> list[str]:
+    data, error = _load_json_object(gate_run_root / HARDWARE_STATUS_REPORT)
+    if error or data is None:
+        return []
+    checks = data.get("checks")
+    if not isinstance(checks, list):
+        return []
+    blockers: list[str] = []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        if check.get("status") == "error" and check.get("name"):
+            blockers.append(str(check["name"]))
+    for blocker in _sensor_blockers_from_diagnostics(
+        _sensor_diagnostics_from_report(data)
+    ):
+        if blocker not in blockers:
+            blockers.append(blocker)
+    return blockers
+
+
+def _existing_hardware_selected_robot_mode(gate_run_root: Path) -> str | None:
+    data, error = _load_json_object(gate_run_root / HARDWARE_STATUS_REPORT)
+    if error or data is None:
+        return None
+    robot_status = data.get("robot_status")
+    if not isinstance(robot_status, dict):
+        return None
+    selected_profile = robot_status.get("selected_profile")
+    if not isinstance(selected_profile, dict):
+        return None
+    mode = selected_profile.get("mode")
+    return str(mode) if mode is not None else None
+
+
+def _rewrite_status_next_actions(
+    root: Path,
+    blocked_gates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not blocked_gates:
+        return []
+
+    gate = blocked_gates[0]
+    gate_id = str(gate["gate_id"])
+    gate_run_root = Path(str(gate.get("run_root") or root.as_posix()))
+    blocker_names = [
+        str(blocker["name"])
+        for blocker in gate.get("next_blockers", [])
+        if isinstance(blocker, dict) and blocker.get("name")
+    ]
+    run_root = gate_run_root.as_posix()
+    actions: list[dict[str, Any]] = []
+
+    if gate_id == FULL_CAPTURE_GATE_ID:
+        has_sequence_plan = (gate_run_root / PIPELINE_SEQUENCE_PLAN).is_file()
+        if "run_config" in blocker_names:
+            actions.append(
+                _action(
+                    gate_id=gate_id,
+                    label="Create real lab run config",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/create_run_config.py",
+                        run_root,
+                        "--robot-mode",
+                        "real",
+                        "--sequence",
+                        "real_full_capture_validation",
+                        "--print-sequence-plan",
+                    ],
+                    reason=(
+                        "The full-capture gate requires an intentional real "
+                        "robot profile with enabled lab sensors and the saved "
+                        "real full-capture validation sequence."
+                    ),
+                    blocks_on=["run_config"],
+                )
+            )
+            if not has_sequence_plan:
+                actions.append(
+                    _action(
+                        gate_id=gate_id,
+                        label="Plan real full-capture validation sequence",
+                        command=[
+                            "uv",
+                            "run",
+                            "python",
+                            "scripts/run_pipeline_sequence.py",
+                            run_root,
+                            "--sequence",
+                            "real_full_capture_validation",
+                            "--plan-only",
+                        ],
+                        reason=(
+                            "Preview the real robot plus camera validation workflow "
+                            "without starting hardware."
+                        ),
+                        blocks_on=["run_config"],
+                    )
+                )
+            return actions
+        if not has_sequence_plan:
+            actions.append(
+                _action(
+                    gate_id=gate_id,
+                    label="Plan real full-capture validation sequence",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_pipeline_sequence.py",
+                        run_root,
+                        "--sequence",
+                        "real_full_capture_validation",
+                        "--plan-only",
+                    ],
+                    reason=(
+                        "Preview the real robot plus camera validation workflow "
+                        "without starting hardware."
+                    ),
+                    blocks_on=blocker_names,
+                )
+            )
+            return actions
+        if "run_preflight" in blocker_names:
+            return [
+                _action(
+                    gate_id=gate_id,
+                    label="Write real run preflight",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_preflight.py",
+                        run_root,
+                        "--check",
+                        "--write",
+                    ],
+                    reason=(
+                        "Confirm the real run config, sequence, robot, sensor, "
+                        "and runtime readiness before planning capture execution."
+                    ),
+                    blocks_on=["run_preflight"],
+                )
+            ]
+        if "hardware_status" in blocker_names:
+            selected_robot_mode = _existing_hardware_selected_robot_mode(
+                gate_run_root
+            )
+            if selected_robot_mode is not None and selected_robot_mode != "real":
+                return [
+                    _action(
+                        gate_id=gate_id,
+                        label="Refresh hardware status from run config",
+                        command=[
+                            "uv",
+                            "run",
+                            "python",
+                            "scripts/run_hardware_status_stage.py",
+                            run_root,
+                        ],
+                        reason=(
+                            "The latest hardware snapshot selected the fake "
+                            "robot profile; refresh it so the run-scoped "
+                            "snapshot uses the real profile saved in "
+                            "run_config.json before validating real full capture."
+                        ),
+                        blocks_on=["hardware_status"],
+                    )
+                ]
+            hardware_blockers = _existing_hardware_status_blockers(gate_run_root)
+            if any(name.startswith("sensor:") for name in hardware_blockers):
+                return [
+                    _action(
+                        gate_id=gate_id,
+                        label="Inspect sensor status",
+                        command=[
+                            "uv",
+                            "run",
+                            "python",
+                            "scripts/sensor_status.py",
+                            "--json",
+                            "--check-expected",
+                        ],
+                        reason=(
+                            "The latest hardware snapshot has sensor discovery "
+                            "errors; inspect camera SDK/device visibility before "
+                            "refreshing the full-capture gate."
+                        ),
+                        blocks_on=hardware_blockers,
+                    ),
+                    _action(
+                        gate_id=gate_id,
+                        label="Refresh hardware status after sensor fix",
+                        command=[
+                            "uv",
+                            "run",
+                            "python",
+                            "scripts/run_hardware_status_stage.py",
+                            run_root,
+                        ],
+                        reason=(
+                            "After the lab host can see the expected cameras and "
+                            "camera SDKs, refresh the run-scoped hardware snapshot "
+                            "so the full-capture gate can advance to capture-plan "
+                            "preflight."
+                        ),
+                        blocks_on=hardware_blockers,
+                    ),
+                ]
+            return [
+                _action(
+                    gate_id=gate_id,
+                    label="Write hardware status snapshot",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_hardware_status_stage.py",
+                        run_root,
+                    ],
+                    reason=(
+                        "Record read-only robot, sensor, and runtime readiness; "
+                        "resolve any error status before starting full capture."
+                    ),
+                    blocks_on=["hardware_status"],
+                )
+            ]
+        if "capture_plan" in blocker_names:
+            return [
+                _action(
+                    gate_id=gate_id,
+                    label="Write capture plan",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_capture_plan_stage.py",
+                        run_root,
+                    ],
+                    reason=(
+                        "Full capture execution starts from the saved "
+                        "run_config.json command plan."
+                    ),
+                    blocks_on=["capture_plan"],
+                )
+            ]
+        if "capture_plan_preflight" in blocker_names:
+            return [
+                _action(
+                    gate_id=gate_id,
+                    label="Preflight real capture plan",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_capture_plan_preflight.py",
+                        run_root,
+                        "--allow-real-robot",
+                    ],
+                    reason=(
+                        "Check command shape, real-robot safety, scripts, and "
+                        "sensor readiness before selecting commands for execution."
+                    ),
+                    blocks_on=["capture_plan_preflight"],
+                )
+            ]
+        if "capture_execution_plan" in blocker_names:
+            return [
+                _action(
+                    gate_id=gate_id,
+                    label="Write full capture execution plan",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_capture_execution_plan.py",
+                        run_root,
+                        "--mode",
+                        "full",
+                        "--allow-cameras",
+                        "--allow-real-robot",
+                        "--include-sensors",
+                    ],
+                    reason=(
+                        "Select real robot and camera commands explicitly "
+                        "before process supervision."
+                    ),
+                    blocks_on=["capture_execution_plan"],
+                )
+            ]
+        actions.append(
+            _action(
+                gate_id=gate_id,
+                label="Run real full-capture validation sequence",
+                command=[
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/run_pipeline_sequence.py",
+                    run_root,
+                    "--sequence",
+                    "real_full_capture_validation",
+                ],
+                reason=(
+                    "Execute capture planning, real preflight, full supervised "
+                    "capture, and the rewrite_full_capture.v1 audit in order."
+                ),
+                blocks_on=blocker_names,
+            )
+        )
+        if "capture_execution" in blocker_names or any(
+            name.startswith("sensor_frames:") for name in blocker_names
+        ):
+            actions.extend(
+                [
+                    _action(
+                        gate_id=gate_id,
+                        label="Run full supervised capture",
+                        command=[
+                            "uv",
+                            "run",
+                            "python",
+                            "scripts/run_capture_execution_stage.py",
+                            run_root,
+                            "--mode",
+                            "full",
+                            "--allow-cameras",
+                            "--allow-real-robot",
+                            "--include-sensors",
+                        ],
+                        reason=(
+                            "Produce the capture_execution_report.json, raw "
+                            "robot poses, and raw RGB-D sensor folders required "
+                            "by the full-capture gate."
+                        ),
+                        blocks_on=["capture_execution"],
+                    ),
+                ]
+            )
+        actions.append(
+            _action(
+                gate_id=gate_id,
+                label="Audit full capture gate",
+                command=[
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/run_rewrite_gate.py",
+                    run_root,
+                    "--gate",
+                    FULL_CAPTURE_GATE_ID,
+                    "--write",
+                ],
+                reason="Confirm the real capture evidence satisfies the rewrite gate.",
+            )
+        )
+        return actions
+
+    if gate_id == FOUNDATIONPOSE_RUNTIME_GATE_ID:
+        if "foundationpose_runtime" in blocker_names:
+            actions.append(
+                _action(
+                    gate_id=gate_id,
+                    label="Run FoundationPose runtime",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_foundationpose_stage.py",
+                        run_root,
+                    ],
+                    reason=(
+                        "The runtime gate requires a non-dry-run "
+                        "foundationpose_plan.json and ob_in_cam pose outputs."
+                    ),
+                    blocks_on=["foundationpose_runtime"],
+                )
+            )
+        if "foundationpose_bop_results" in blocker_names:
+            actions.append(
+                _action(
+                    gate_id=gate_id,
+                    label="Export FoundationPose BOP results",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_bop_result_export_stage.py",
+                        run_root,
+                        "--source",
+                        "foundationpose",
+                    ],
+                    reason=(
+                        "Convert FoundationPose ob_in_cam outputs into BOP19 "
+                        "result CSV rows."
+                    ),
+                    blocks_on=["foundationpose_bop_results"],
+                )
+            )
+        if "foundationpose_bop_evaluation" in blocker_names:
+            actions.append(
+                _action(
+                    gate_id=gate_id,
+                    label="Run BOP Toolkit evaluation",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_bop_evaluation_stage.py",
+                        run_root,
+                        "--result-file",
+                        (
+                            gate_run_root
+                            / RESULTS_DIR
+                            / BOP_DIR
+                            / "foundationpose_bop-test.csv"
+                        ).as_posix(),
+                    ],
+                    reason=(
+                        "The runtime gate needs a succeeded non-dry-run BOP "
+                        "Toolkit report with score metrics."
+                    ),
+                    blocks_on=["foundationpose_bop_evaluation"],
+                )
+            )
+        actions.append(
+            _action(
+                gate_id=gate_id,
+                label="Audit FoundationPose runtime gate",
+                command=[
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/run_rewrite_gate.py",
+                    run_root,
+                    "--gate",
+                    FOUNDATIONPOSE_RUNTIME_GATE_ID,
+                    "--write",
+                ],
+                reason="Confirm the real runtime and scoring evidence satisfies the gate.",
+            )
+        )
+        return actions
+
+    if gate_id == CALIBRATION_VALIDATION_GATE_ID:
+        if "calibration_validation" in blocker_names or "calibration_profiles" in blocker_names:
+            actions.append(
+                _action(
+                    gate_id=gate_id,
+                    label="Validate and promote calibration profiles",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_calibration_validation.py",
+                        run_root,
+                        "--promote",
+                    ],
+                    reason=(
+                        "The calibration gate requires an ok validation report "
+                        "and promoted valid calibration_profiles.json entries."
+                    ),
+                    blocks_on=blocker_names,
+                )
+            )
+        actions.append(
+            _action(
+                gate_id=gate_id,
+                label="Audit calibration validation gate",
+                command=[
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/run_rewrite_gate.py",
+                    run_root,
+                    "--gate",
+                    CALIBRATION_VALIDATION_GATE_ID,
+                    "--write",
+                ],
+                reason="Confirm promoted calibration profile evidence satisfies the gate.",
+            )
+        )
+        return actions
+
+    return [
+        _action(
+            gate_id=gate_id,
+            label="Audit rewrite gate",
+            command=[
+                "uv",
+                "run",
+                "python",
+                "scripts/run_rewrite_gate.py",
+                run_root,
+                "--gate",
+                gate_id,
+                "--write",
+            ],
+            reason="Write the gate report and inspect its blockers.",
+            blocks_on=blocker_names,
+        )
+    ]
+
+
+def build_rewrite_status_report(
+    run_root: str | Path,
+    *,
+    gate_ids: tuple[str, ...] = GATE_IDS,
+    gate_run_roots: Mapping[str, str | Path] | None = None,
+) -> dict[str, Any]:
+    root = Path(run_root)
+    explicit_gate_roots = {
+        gate_id: Path(gate_run_roots[gate_id])
+        for gate_id in gate_ids
+        if gate_run_roots is not None and gate_id in gate_run_roots
+    }
+    gate_roots: dict[str, Path] = {}
+    gate_reports: list[dict[str, Any]] = []
+    ready_gate_ids: set[str] = set()
+    for gate_id in gate_ids:
+        gate_root = explicit_gate_roots.get(gate_id, root)
+        if (
+            gate_id == FULL_CAPTURE_GATE_ID
+            and gate_id not in explicit_gate_roots
+            and FAKE_E2E_GATE_ID in ready_gate_ids
+        ):
+            gate_root = default_full_capture_run_root(root)
+        gate_roots[gate_id] = gate_root
+        report = build_gate_report(gate_root, gate_id=gate_id)
+        gate_reports.append(report)
+        if report["overall_status"] == "ready":
+            ready_gate_ids.add(gate_id)
+    ready_gates = [
+        report for report in gate_reports if report["overall_status"] == "ready"
+    ]
+    blocked_gates = [
+        report for report in gate_reports if report["overall_status"] != "ready"
+    ]
+    total_check_count = sum(
+        int(report["summary"]["check_count"]) for report in gate_reports
+    )
+    total_ready_check_count = sum(
+        int(report["summary"]["ready_count"]) for report in gate_reports
+    )
+    total_blocked_check_count = sum(
+        int(report["summary"]["blocked_count"]) for report in gate_reports
+    )
+    next_gate = blocked_gates[0] if blocked_gates else None
+    return {
+        "schema_version": STATUS_SCHEMA_VERSION,
+        "run_root": root.as_posix(),
+        "gate_run_roots": {
+            gate_id: gate_roots.get(gate_id, root).as_posix()
+            for gate_id in gate_ids
+        },
+        "overall_status": "ready" if not blocked_gates else "blocked",
+        "summary": {
+            "gate_count": len(gate_reports),
+            "ready_gate_count": len(ready_gates),
+            "blocked_gate_count": len(blocked_gates),
+            "check_count": total_check_count,
+            "ready_check_count": total_ready_check_count,
+            "blocked_check_count": total_blocked_check_count,
+        },
+        "gates": [
+            {
+                "gate_id": report["gate_id"],
+                "run_root": report["run_root"],
+                "overall_status": report["overall_status"],
+                "summary": report["summary"],
+                "next_blockers": report["next_blockers"],
+            }
+            for report in gate_reports
+        ],
+        "next_gate": {
+            "gate_id": next_gate["gate_id"],
+            "run_root": next_gate["run_root"],
+            "overall_status": next_gate["overall_status"],
+            "summary": next_gate["summary"],
+        }
+        if next_gate is not None
+        else None,
+        "next_blockers": [
+            {
+                "gate_id": report["gate_id"],
+                "name": blocker["name"],
+                "artifact": blocker["artifact"],
+                "message": blocker["message"],
+                "details": blocker.get("details", {}),
+            }
+            for report in blocked_gates
+            for blocker in report["next_blockers"][:3]
+        ],
+        "next_actions": _rewrite_status_next_actions(root, blocked_gates),
+    }
+
+
+def write_rewrite_status_report(
+    run_root: str | Path,
+    *,
+    gate_ids: tuple[str, ...] = GATE_IDS,
+    gate_run_roots: Mapping[str, str | Path] | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    root = Path(run_root)
+    report = build_rewrite_status_report(
+        root,
+        gate_ids=gate_ids,
+        gate_run_roots=gate_run_roots,
+    )
+    path = root / REWRITE_STATUS_REPORT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(report, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return path, report

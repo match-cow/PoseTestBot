@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from posetestbot.io.artifacts import (
+    CAMERA_DATA_JSON,
+    CAMERA_JSON,
+    CAM_K,
+    DATASET_MANIFEST,
+    DEPTH_DIR,
+    DEPTH_SCALE,
+    FRAME_METADATA_JSONL,
+    MATCH_ROBOT_EE_POSES,
+    RAW_ROBOT_EE_POSES,
+    RGB_DIR,
+    SYNC_REPORT,
+)
+from posetestbot.sync.non_destructive import synchronize_sensor_folder
+
+
+def write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(value, f, indent=2)
+
+
+def write_jsonl(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+
+
+def create_sync_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    run_root = tmp_path / "run-1"
+    sensor_folder = run_root / "realsense_123"
+    rgb_folder = sensor_folder / RGB_DIR
+    depth_folder = sensor_folder / DEPTH_DIR
+    rgb_folder.mkdir(parents=True)
+    depth_folder.mkdir()
+
+    for frame_id in ["1000.png", "1050.png", "1500.png"]:
+        (rgb_folder / frame_id).write_bytes(f"rgb:{frame_id}".encode())
+        (depth_folder / frame_id).write_bytes(f"depth:{frame_id}".encode())
+
+    (sensor_folder / CAM_K).write_text("1 0 2\n0 3 4\n0 0 1\n")
+    (sensor_folder / DEPTH_SCALE).write_text("1.0\n")
+    write_json(sensor_folder / CAMERA_JSON, {"cam_K": [1, 0, 2, 0, 3, 4, 0, 0, 1]})
+    write_json(sensor_folder / CAMERA_DATA_JSON, {"K": [[1, 0, 2], [0, 3, 4], [0, 0, 1]]})
+
+    write_jsonl(
+        sensor_folder / FRAME_METADATA_JSONL,
+        [
+            {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": "realsense_d435",
+                "sensor_id": "123",
+                "frame_index": 0,
+                "frame_id": "1000.png",
+                "rgb_path": "rgb/1000.png",
+                "depth_path": "depth/1000.png",
+                "sensor_timestamp_ns": 10,
+                "host_received_timestamp_ns": 1_000_000_000,
+                "host_wall_timestamp_ns": 10_000_000_000,
+            },
+            {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": "realsense_d435",
+                "sensor_id": "123",
+                "frame_index": 1,
+                "frame_id": "1050.png",
+                "rgb_path": "rgb/1050.png",
+                "depth_path": "depth/1050.png",
+                "sensor_timestamp_ns": 20,
+                "host_received_timestamp_ns": 1_050_000_000,
+                "host_wall_timestamp_ns": 10_050_000_000,
+            },
+            {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": "realsense_d435",
+                "sensor_id": "123",
+                "frame_index": 2,
+                "frame_id": "1500.png",
+                "rgb_path": "rgb/1500.png",
+                "depth_path": "depth/1500.png",
+                "sensor_timestamp_ns": 30,
+                "host_received_timestamp_ns": 1_500_000_000,
+                "host_wall_timestamp_ns": 10_500_000_000,
+            },
+        ],
+    )
+
+    write_json(
+        run_root / RAW_ROBOT_EE_POSES,
+        {
+            "0": {
+                "framename": 1000,
+                "host_received_timestamp_ns": 1_000_000_000,
+                "motion": "circ_far",
+                "pose": {"X": 1, "Y": 2, "Z": 3, "A": 4, "B": 5, "C": 6},
+            },
+            "1": {
+                "framename": 1100,
+                "host_received_timestamp_ns": 1_100_000_000,
+                "motion": "circ_far",
+                "pose": {"X": 7, "Y": 8, "Z": 9, "A": 10, "B": 11, "C": 12},
+            },
+            "2": {
+                "framename": 2000,
+                "host_received_timestamp_ns": 2_000_000_000,
+                "motion": "zoom",
+                "pose": {"X": 13, "Y": 14, "Z": 15, "A": 16, "B": 17, "C": 18},
+            },
+        },
+    )
+    return run_root, sensor_folder
+
+
+def test_synchronize_sensor_folder_preserves_raw_frames(tmp_path: Path) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+
+    result = synchronize_sensor_folder(
+        sensor_folder,
+        run_root=run_root,
+        sync_delta=0,
+        timestamp_source="host_received",
+    )
+
+    assert result.total_frames == 3
+    assert result.matched_frames == 2
+    assert result.dropped_frames == 1
+    assert (sensor_folder / RGB_DIR / "1000.png").exists()
+    assert (sensor_folder / DEPTH_DIR / "1050.png").exists()
+
+    output_folder = Path(result.output_folder)
+    assert (output_folder / RGB_DIR / "000000.png").read_bytes() == b"rgb:1000.png"
+    assert (output_folder / DEPTH_DIR / "000001.png").read_bytes() == b"depth:1050.png"
+    assert (output_folder / CAM_K).read_text() == "1 0 2\n0 3 4\n0 0 1\n"
+    assert (output_folder / DEPTH_SCALE).read_text() == "1.0\n"
+    assert (output_folder / CAMERA_JSON).exists()
+    assert (output_folder / CAMERA_DATA_JSON).exists()
+    assert (output_folder / FRAME_METADATA_JSONL).exists()
+
+    matched = json.loads((output_folder / MATCH_ROBOT_EE_POSES).read_text())
+    assert list(matched) == ["000000.png", "000001.png"]
+    assert matched["000000.png"]["motion"] == "circ_far"
+    assert matched["000000.png"]["source_rgb"] == "rgb/1000.png"
+    assert matched["000000.png"]["synchronized_rgb"].endswith(
+        "processed/synchronized/realsense_123/rgb/000000.png"
+    )
+    assert abs(matched["000001.png"]["nearest_robot_delta_ns"]) == 50_000_000
+
+    report = json.loads((output_folder / SYNC_REPORT).read_text())
+    assert report["matched_frames"] == 2
+    assert report["dropped"][0]["frame_id"] == "1500.png"
+    assert CAM_K in report["copied_metadata_artifacts"]
+
+
+def test_sync_cli_updates_manifest(tmp_path: Path) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "sync_non_destructive.py"),
+            str(sensor_folder),
+            "--run-root",
+            str(run_root),
+            "--sync-delta",
+            "0",
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "Matched 2/3 frames" in result.stdout
+
+    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
+    stage = next(stage for stage in manifest["stages"] if stage["name"] == "sync:realsense_123")
+    assert stage["status"] == "succeeded"
+    assert stage["artifacts"][MATCH_ROBOT_EE_POSES].endswith(
+        "processed/synchronized/realsense_123/match_robot_ee_poses.json"
+    )
+    assert stage["artifacts"][SYNC_REPORT].endswith(
+        "processed/synchronized/realsense_123/sync_report.json"
+    )
+
+
+def test_sync_run_cli_processes_all_discovered_sensors(tmp_path: Path) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+    shutil.copytree(sensor_folder, run_root / "luxonis_abc")
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "sync_run_non_destructive.py"),
+            str(run_root),
+            "--sync-delta",
+            "0",
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "Synchronized 2 sensor(s)" in result.stdout
+
+    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
+    stages = {stage["name"]: stage for stage in manifest["stages"]}
+
+    assert stages["sync_run"]["status"] == "succeeded"
+    assert stages["sync:realsense_123"]["status"] == "succeeded"
+    assert stages["sync:luxonis_abc"]["status"] == "succeeded"
+    assert (
+        run_root
+        / "processed"
+        / "synchronized"
+        / "luxonis_abc"
+        / MATCH_ROBOT_EE_POSES
+    ).exists()

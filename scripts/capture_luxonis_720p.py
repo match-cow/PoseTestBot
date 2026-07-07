@@ -1,11 +1,41 @@
 import argparse
-import json
-import os
 import time
 
 import cv2
 import depthai as dai
 import numpy as np
+
+from posetestbot.sensors.contracts import CameraIntrinsics, SensorType
+from posetestbot.sensors.frame_writer import (
+    ensure_legacy_rgbd_folders,
+    write_legacy_camera_sidecars,
+    write_legacy_rgbd_frame,
+)
+
+
+def dai_timestamp_ns(packet, *, device_clock: bool) -> int | None:
+    if packet is None:
+        return None
+
+    timestamp = packet.getTimestampDevice() if device_clock else packet.getTimestamp()
+    if timestamp is None:
+        return None
+    return int(timestamp.total_seconds() * 1_000_000_000)
+
+
+def camera_intrinsics_from_matrix(
+    matrix: np.ndarray,
+    *,
+    width: int,
+    height: int,
+    depth_scale_to_mm: float = 1.0,
+) -> CameraIntrinsics:
+    return CameraIntrinsics(
+        cam_k=tuple(float(value) for value in matrix.reshape(-1)),
+        width=width,
+        height=height,
+        depth_scale_to_mm=depth_scale_to_mm,
+    )
 
 
 def main():
@@ -40,9 +70,15 @@ def main():
         default=0,
         help="Specify the maximum number of frames to capture (0 for unlimited).",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="The MX ID of the Luxonis device to use.",
+    )
     args = parser.parse_args()
 
-    output_path = os.path.join(args.output_path, "luxonis")
+    output_path = args.output_path
     downscaleColor = args.downscaleColor
     fps = args.fps
     max_frames = args.max_frames
@@ -55,17 +91,13 @@ def main():
     else:
         RecordStream = True
 
-    # get output dir from argpase and create folder if necessary
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-
     if RecordStream:
-        # os.makedirs(os.path.join(output_path), exist_ok=True)
-        os.makedirs(os.path.join(output_path, "rgb"), exist_ok=True)
-        os.makedirs(os.path.join(output_path, "depth"), exist_ok=True)
+        ensure_legacy_rgbd_folders(output_path)
 
     # Create pipeline
     pipeline = dai.Pipeline()
-    device = dai.Device()
+    device_info = dai.DeviceInfo(args.device) if args.device else None
+    device = dai.Device(device_info) if device_info else dai.Device()
 
     # Define sources and outputs
     camRgb = pipeline.create(dai.node.ColorCamera)
@@ -91,6 +123,7 @@ def main():
     # need to test this further
     camRgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     # camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
+    camRgb.setFps(fps)
 
     try:
         calibData = device.readCalibration2()
@@ -128,6 +161,8 @@ def main():
 
         frameRgb = None
         depthFrameRaw = None
+        frameRgbPacket = None
+        depthFramePacket = None
 
         # Configure windows; trackbar adjusts blending ratio of rgb/depth
         rgbWindowName = "Luxonis Capture RGB aligned"
@@ -168,50 +203,10 @@ def main():
 
             # distortion_str = " ".join(map(str, distortion))
 
-            with open(os.path.join(output_path, "cam_K.txt"), "w") as f:
-                f.write(f"{M_rgb[0][0]} {M_rgb[0][1]} {M_rgb[0][2]}\n")
-                f.write(f"{M_rgb[1][0]} {M_rgb[1][1]} {M_rgb[1][2]}\n")
-                f.write(f"{M_rgb[2][0]} {M_rgb[2][1]} {M_rgb[2][2]}\n")
-                # f.write(f"{distortion_str}\n")
-
-            # FoundationPose format
-            with open(os.path.join(output_path, "cam_K.txt"), "w") as f:
-                f.write(f"{M_rgb[0][0]} {M_rgb[0][1]} {M_rgb[0][2]}\n")
-                f.write(f"{M_rgb[1][0]} {M_rgb[1][1]} {M_rgb[1][2]}\n")
-                f.write(f"{M_rgb[2][0]} {M_rgb[2][1]} {M_rgb[2][2]}\n")
-
-            with open(os.path.join(output_path, "depthscale.txt"), "w") as f:
-                f.write(f"{1.0}\n")
-
-            # SAM6D camera.json format
-            with open(os.path.join(output_path, "camera.json"), "w") as f:
-                camera_dict = {
-                    "cam_K": [
-                        M_rgb[0][0],
-                        0.0,
-                        M_rgb[0][2],
-                        0.0,
-                        M_rgb[1][1],
-                        M_rgb[1][2],
-                        0.0,
-                        0.0,
-                        1.0,
-                    ],
-                    "depth_scale": 1.0,
-                }
-                json.dump(camera_dict, f, indent=4)
-
-            # MegaPose camera_data.json format
-            with open(os.path.join(output_path, "camera_data.json"), "w") as f:
-                camera_data_dict = {
-                    "K": [
-                        [M_rgb[0][0], M_rgb[0][1], M_rgb[0][2]],
-                        [M_rgb[1][0], M_rgb[1][1], M_rgb[1][2]],
-                        [M_rgb[2][0], M_rgb[2][1], M_rgb[2][2]],
-                    ],
-                    "resolution": [720, 1280],
-                }
-                json.dump(camera_data_dict, f)
+            write_legacy_camera_sidecars(
+                output_path,
+                camera_intrinsics_from_matrix(M_rgb, width=1280, height=720),
+            )
 
         while True:
             latestPacket = {}
@@ -226,6 +221,7 @@ def main():
                     latestPacket[queueName] = packets[-1]
 
             if latestPacket["rgb"] is not None:
+                frameRgbPacket = latestPacket["rgb"]
                 frameRgb = latestPacket["rgb"].getCvFrame()
                 frameRgb = cv2.resize(
                     frameRgb, (1280, 720), interpolation=cv2.INTER_NEAREST
@@ -233,6 +229,7 @@ def main():
                 cv2.imshow(rgbWindowName, frameRgb)
 
             if latestPacket["depth"] is not None:
+                depthFramePacket = latestPacket["depth"]
                 depthFrameRaw = latestPacket["depth"].getFrame()
                 depthFrame = cv2.normalize(
                     depthFrameRaw, None, 255, 0, cv2.NORM_INF, cv2.CV_8UC1
@@ -247,16 +244,39 @@ def main():
             if frameRgb is not None and depthFrameRaw is not None:
                 # Need to have both frames in BGR format before blending
                 if RecordStream:
-                    framename = int(round(time.time() * 1000))
-
-                    # Define the path to the image file within the subfolder
-                    image_path_depth = os.path.join(
-                        output_path, f"depth/{framename}.png"
+                    host_wall_timestamp_ns = time.time_ns()
+                    host_received_timestamp_ns = time.monotonic_ns()
+                    write_legacy_rgbd_frame(
+                        output_path,
+                        rgb_image=frameRgb,
+                        depth_image=depthFrameRaw,
+                        sensor_type=SensorType.OAK_D_PRO,
+                        sensor_id=args.device or "default",
+                        frame_index=captured_frames,
+                        sensor_timestamp_ns=dai_timestamp_ns(
+                            frameRgbPacket, device_clock=True
+                        ),
+                        depth_sensor_timestamp_ns=dai_timestamp_ns(
+                            depthFramePacket, device_clock=True
+                        ),
+                        host_received_timestamp_ns=host_received_timestamp_ns,
+                        host_wall_timestamp_ns=host_wall_timestamp_ns,
+                        extra_metadata={
+                            "host_timestamp_ns": dai_timestamp_ns(
+                                frameRgbPacket, device_clock=False
+                            ),
+                            "rgb_sequence_num": (
+                                frameRgbPacket.getSequenceNum()
+                                if frameRgbPacket is not None
+                                else None
+                            ),
+                            "depth_sequence_num": (
+                                depthFramePacket.getSequenceNum()
+                                if depthFramePacket is not None
+                                else None
+                            ),
+                        },
                     )
-                    image_path_rgb = os.path.join(output_path, f"rgb/{framename}.png")
-
-                    cv2.imwrite(image_path_depth, depthFrameRaw)
-                    cv2.imwrite(image_path_rgb, frameRgb)
 
                     captured_frames += 1
                     # print(f"Received frames: {captured_frames}", end="\r")
@@ -267,6 +287,8 @@ def main():
 
                 frameRgb = None
                 depthFrameRaw = None
+                frameRgbPacket = None
+                depthFramePacket = None
 
             key = cv2.waitKey(1)
 

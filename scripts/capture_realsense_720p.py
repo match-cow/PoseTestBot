@@ -6,61 +6,46 @@
 #####################################################
 
 import argparse
-import json
-import os
 import time
 
 import cv2
 import numpy as np
 import pyrealsense2 as rs
 
+from posetestbot.sensors.contracts import CameraIntrinsics, SensorType
+from posetestbot.sensors.frame_writer import (
+    ensure_legacy_rgbd_folders,
+    write_legacy_camera_sidecars,
+    write_legacy_rgbd_frame,
+)
+
+
+def camera_intrinsics_from_realsense(intrinsics, depth_scale: float) -> CameraIntrinsics:
+    return CameraIntrinsics(
+        cam_k=(
+            float(intrinsics.fx),
+            0.0,
+            float(intrinsics.ppx),
+            0.0,
+            float(intrinsics.fy),
+            float(intrinsics.ppy),
+            0.0,
+            0.0,
+            1.0,
+        ),
+        width=int(getattr(intrinsics, "width", 1280)),
+        height=int(getattr(intrinsics, "height", 720)),
+        depth_scale_to_mm=float(depth_scale),
+    )
+
 
 def save_camera_parameters(output_path, intrinsics, depth_scale):
-    """Saves camera parameters to multiple formats.
+    """Saves camera parameters to the shared legacy sidecar formats."""
 
-    Args:
-        output_path (str): The directory to save the camera parameters.
-        intrinsics: The camera intrinsics from the RealSense sensor.
-        depth_scale (float): The depth scale value from the RealSense sensor.
-    """
-    # FoundationPose format
-    with open(os.path.join(output_path, "cam_K.txt"), "w") as f:
-        f.write(f"{intrinsics.fx} {0.0} {intrinsics.ppx}\n")
-        f.write(f"{0.0} {intrinsics.fy} {intrinsics.ppy}\n")
-        f.write(f"{0.0} {0.0} {1.0}\n")
-
-    with open(os.path.join(output_path, "depthscale.txt"), "w") as f:
-        f.write(f"{depth_scale}\n")
-
-    # SAM6D camera.json format
-    with open(os.path.join(output_path, "camera.json"), "w") as f:
-        camera_dict = {
-            "cam_K": [
-                intrinsics.fx,
-                0.0,
-                intrinsics.ppx,
-                0.0,
-                intrinsics.fy,
-                intrinsics.ppy,
-                0.0,
-                0.0,
-                1.0,
-            ],
-            "depth_scale": depth_scale,
-        }
-        json.dump(camera_dict, f, indent=4)
-
-    # MegaPose camera_data.json format
-    with open(os.path.join(output_path, "camera_data.json"), "w") as f:
-        camera_data_dict = {
-            "K": [
-                [intrinsics.fx, 0.0, intrinsics.ppx],
-                [0.0, intrinsics.fy, intrinsics.ppy],
-                [0.0, 0.0, 1.0],
-            ],
-            "resolution": [720, 1280],
-        }
-        json.dump(camera_data_dict, f)
+    write_legacy_camera_sidecars(
+        output_path,
+        camera_intrinsics_from_realsense(intrinsics, depth_scale),
+    )
 
 
 def main():
@@ -162,9 +147,7 @@ def main():
     align = rs.align(align_to)
 
     if RecordStream:
-        # os.makedirs(os.path.join(output_path), exist_ok=True)
-        os.makedirs(os.path.join(output_path, "rgb"), exist_ok=True)
-        os.makedirs(os.path.join(output_path, "depth"), exist_ok=True)
+        ensure_legacy_rgbd_folders(output_path)
 
     # Streaming loop
     try:
@@ -206,14 +189,26 @@ def main():
             key = cv2.waitKey(1)
 
             if RecordStream:
-                framename = int(round(time.time() * 1000))
-
-                # Define the path to the image file within the subfolder
-                image_path_depth = os.path.join(output_path, f"depth/{framename}.png")
-                image_path_rgb = os.path.join(output_path, f"rgb/{framename}.png")
-
-                cv2.imwrite(image_path_depth, depth_image)
-                cv2.imwrite(image_path_rgb, color_image)
+                host_wall_timestamp_ns = time.time_ns()
+                host_received_timestamp_ns = time.monotonic_ns()
+                write_legacy_rgbd_frame(
+                    output_path,
+                    rgb_image=color_image,
+                    depth_image=depth_image,
+                    sensor_type=SensorType.REALSENSE_D435,
+                    sensor_id=args.device or "default",
+                    frame_index=captured_frames,
+                    sensor_timestamp_ns=int(color_frame.get_timestamp() * 1_000_000),
+                    depth_sensor_timestamp_ns=int(
+                        aligned_depth_frame.get_timestamp() * 1_000_000
+                    ),
+                    host_received_timestamp_ns=host_received_timestamp_ns,
+                    host_wall_timestamp_ns=host_wall_timestamp_ns,
+                    extra_metadata={
+                        "color_frame_number": color_frame.get_frame_number(),
+                        "depth_frame_number": aligned_depth_frame.get_frame_number(),
+                    },
+                )
 
             captured_frames += 1
             # print(f"Received frames: {captured_frames}", end="\r")

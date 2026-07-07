@@ -177,22 +177,43 @@ def receive_command(sock: socket.socket, timeout: float | None) -> dict | None:
     return command
 
 
+def start_value_from_command(command: dict) -> float | None:
+    if "start" in command:
+        return float(command["start"])
+
+    if command.get("command") == "start_capture":
+        return float(command.get("cartesian_velocity_m_s", 0.2))
+
+    return None
+
+
+def is_stop_command(command: dict) -> bool:
+    if command.get("stop") is True:
+        return True
+
+    return command.get("command") in {
+        "pause_capture",
+        "stop_after_current_motion",
+        "emergency_stop",
+    }
+
+
 def wait_for_start(sock: socket.socket) -> float:
     while True:
         command = receive_command(sock, None)
         if command is None:
             continue
 
-        if "start" in command:
-            start_value = command["start"]
+        start_value = start_value_from_command(command)
+        if start_value is not None:
             print(f"Received start command: {start_value!r}")
-            return float(start_value)
+            return start_value
 
-        if command.get("stop") is True:
+        if is_stop_command(command):
             print("Received stop command while idle; nothing is running.")
             continue
 
-        print(f"Ignoring command without start/stop key: {command!r}")
+        print(f"Ignoring command without a known robot command key: {command!r}")
 
 
 def iter_motion_samples(duration: float, sample_interval: float) -> Iterable[tuple[str, float]]:
@@ -223,12 +244,12 @@ def run_motion(
 
     for motion, t in iter_motion_samples(duration, sample_interval):
         command = receive_command(sock, max(0.0, next_send - time.monotonic()))
-        if command and command.get("stop") is True:
+        if command and is_stop_command(command):
             print("Received stop command; ending mock motion early.")
             send_packet(sock, receiver, "end", last_pose)
             return False
 
-        if command and "start" in command:
+        if command and start_value_from_command(command) is not None:
             print("Ignoring start command because a mock motion is already running.")
 
         pose = mock_pose(motion, t)

@@ -9,7 +9,11 @@ from typing import List
 logger = logging.getLogger(__name__)
 
 
-def run_cmd(args: str) -> bool:
+def uv_python_command(script_path: str, *args: str) -> List[str]:
+    return ["uv", "run", "python", script_path, *args]
+
+
+def run_cmd(args: List[str]) -> bool:
     """Runs a command in the shell.
 
     Args:
@@ -18,10 +22,7 @@ def run_cmd(args: str) -> bool:
     Returns:
         True if the command ran successfully, False otherwise.
     """
-    logger.info(f"Running command: {args}")
-
-    # Split args to list
-    args = args.split(" ")
+    logger.info(f"Running command: {' '.join(args)}")
 
     try:
         subprocess.run(
@@ -62,10 +63,17 @@ def run_foundations(input_folder: str, script_dir: str, object_id: int) -> bool:
             # Iterate over tracking_refiner
             for tracking_refiner in tracking_refiner_list:
                 # Parse command
-                cmd = f"python {wrapper_path} {input_folder} --no_tracking={tracking} --est_refine_iter={est_refiner} --track_refine_iter={tracking_refiner} --object_id={object_id}"
-                logger.info(f"Running command: {cmd} at {time.ctime()}")
+                cmd = uv_python_command(
+                    wrapper_path,
+                    input_folder,
+                    f"--no_tracking={tracking}",
+                    f"--est_refine_iter={est_refiner}",
+                    f"--track_refine_iter={tracking_refiner}",
+                    f"--object_id={object_id}",
+                )
+                logger.info(f"Running command: {' '.join(cmd)} at {time.ctime()}")
                 if not run_cmd(cmd):
-                    logger.error(f"Command failed: {cmd}")
+                    logger.error(f"Command failed: {' '.join(cmd)}")
                     return False
 
     return True
@@ -93,10 +101,12 @@ def run_megapose(input_folder: str, script_dir: str, roi_scale: float) -> bool:
     wrapper_path = os.path.join(script_dir, wrapper)
 
     for model in models:
-        cmd = f"conda run -n megapose python {wrapper_path} {input_folder} --model={model} --ROI_scale={roi_scale}"
-        logger.info(f"Running command: {cmd} at {time.ctime()}")
+        cmd = uv_python_command(
+            wrapper_path, input_folder, f"--model={model}", f"--ROI_scale={roi_scale}"
+        )
+        logger.info(f"Running command: {' '.join(cmd)} at {time.ctime()}")
         if not run_cmd(cmd):
-            logger.error(f"Command failed: {cmd}")
+            logger.error(f"Command failed: {' '.join(cmd)}")
             return False
 
     return True
@@ -118,10 +128,12 @@ def run_sam6d(input_folder: str, script_dir: str) -> bool:
     ism_models = ["sam"]
 
     for ism_model in ism_models:
-        cmd = f"conda run -n sam6d python {wrapper_path} {input_folder} --segmentor_model={ism_model}"
-        logger.info(f"Running command: {cmd} at {time.ctime()}")
+        cmd = uv_python_command(
+            wrapper_path, input_folder, f"--segmentor_model={ism_model}"
+        )
+        logger.info(f"Running command: {' '.join(cmd)} at {time.ctime()}")
         if not run_cmd(cmd):
-            logger.error(f"Command failed: {cmd}")
+            logger.error(f"Command failed: {' '.join(cmd)}")
             return False
 
     return True

@@ -13,7 +13,12 @@ dependencies = [
     "tqdm>=4.67.1",
     "pytransform3d>=3.14.1",
     "pandas>=2.3.0",
+    "trimesh>=4.12.2",
 ]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 exclude = [
@@ -22,4 +27,9 @@ exclude = [
     "object_models*",
     "output*",
     "scripts*",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
 ]

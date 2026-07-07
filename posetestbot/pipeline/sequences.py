@@ -1,0 +1,1150 @@
+"""Dependency-aware pipeline sequence planning for PoseTestBot runs."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Mapping
+
+from posetestbot.io.artifacts import PIPELINE_SEQUENCE_PLAN
+from posetestbot.pipeline.stages import (
+    PIPELINE_STAGES,
+    PipelineJobSpec,
+    PipelineStageSpec,
+    build_pipeline_job,
+)
+
+
+SCHEMA_VERSION = "pipeline_sequence_plan.v1"
+
+
+@dataclass(frozen=True)
+class PipelineSequenceStepSpec:
+    """A stage invocation inside a named pipeline sequence."""
+
+    id: str
+    stage_id: str
+    depends_on: tuple[str, ...] = ()
+    options: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["depends_on"] = list(self.depends_on)
+        data["options"] = dict(self.options)
+        return data
+
+
+@dataclass(frozen=True)
+class PipelineSequenceSpec:
+    """A reusable, dependency-aware workflow made of typed stage presets."""
+
+    id: str
+    label: str
+    description: str
+    steps: tuple[PipelineSequenceStepSpec, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "description": self.description,
+            "steps": [step.to_dict() for step in self.steps],
+        }
+
+
+@dataclass(frozen=True)
+class PipelineSequenceStepPlan:
+    id: str
+    stage_id: str
+    stage_label: str
+    depends_on: list[str]
+    command: list[str]
+    resources: list[str]
+    options: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PipelineSequencePlan:
+    schema_version: str
+    sequence_id: str
+    sequence_label: str
+    run_root: str
+    plan_only: bool
+    steps: list[PipelineSequenceStepPlan]
+    resources: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "sequence_id": self.sequence_id,
+            "sequence_label": self.sequence_label,
+            "run_root": self.run_root,
+            "plan_only": self.plan_only,
+            "steps": [step.to_dict() for step in self.steps],
+            "resources": list(self.resources),
+        }
+
+
+@dataclass(frozen=True)
+class PipelineSequenceJobSpec:
+    sequence_id: str
+    sequence_label: str
+    run_root: str
+    command: list[str]
+    resources: list[str]
+    parameters: dict[str, Any]
+    plan: PipelineSequencePlan
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["plan"] = self.plan.to_dict()
+        return data
+
+
+def _stringify_path(value: str | Path) -> str:
+    return value.as_posix() if isinstance(value, Path) else str(value)
+
+
+def _sequence_specs(
+    registry: Mapping[str, PipelineSequenceSpec] | None,
+) -> Mapping[str, PipelineSequenceSpec]:
+    return PIPELINE_SEQUENCES if registry is None else registry
+
+
+def list_pipeline_sequences(
+    registry: Mapping[str, PipelineSequenceSpec] | None = None,
+) -> list[dict[str, Any]]:
+    specs = _sequence_specs(registry)
+    return [sequence.to_dict() for sequence in sorted(specs.values(), key=lambda item: item.id)]
+
+
+def get_pipeline_sequence(
+    sequence_id: str,
+    registry: Mapping[str, PipelineSequenceSpec] | None = None,
+) -> PipelineSequenceSpec:
+    specs = _sequence_specs(registry)
+    try:
+        return specs[sequence_id]
+    except KeyError as exc:
+        raise ValueError(f"Unknown pipeline sequence: {sequence_id}") from exc
+
+
+def _validate_sequence_spec(
+    sequence: PipelineSequenceSpec,
+    *,
+    stage_registry: Mapping[str, PipelineStageSpec],
+) -> None:
+    if not sequence.steps:
+        raise ValueError(f"Pipeline sequence {sequence.id} has no steps")
+
+    step_ids = [step.id for step in sequence.steps]
+    duplicate_step_ids = sorted(
+        step_id for step_id in set(step_ids) if step_ids.count(step_id) > 1
+    )
+    if duplicate_step_ids:
+        raise ValueError(
+            f"Pipeline sequence {sequence.id} has duplicate step IDs: "
+            f"{', '.join(duplicate_step_ids)}"
+        )
+
+    known_step_ids = set(step_ids)
+    for step in sequence.steps:
+        if step.stage_id not in stage_registry:
+            raise ValueError(
+                f"Pipeline sequence {sequence.id} references unknown stage: "
+                f"{step.stage_id}"
+            )
+        unknown_dependencies = sorted(set(step.depends_on) - known_step_ids)
+        if unknown_dependencies:
+            raise ValueError(
+                f"Pipeline sequence step {step.id} depends on unknown step(s): "
+                f"{', '.join(unknown_dependencies)}"
+            )
+
+
+def _topological_steps(
+    sequence: PipelineSequenceSpec,
+    *,
+    stage_registry: Mapping[str, PipelineStageSpec],
+) -> list[PipelineSequenceStepSpec]:
+    _validate_sequence_spec(sequence, stage_registry=stage_registry)
+
+    remaining = {step.id: step for step in sequence.steps}
+    ordered: list[PipelineSequenceStepSpec] = []
+    completed: set[str] = set()
+
+    while remaining:
+        progressed = False
+        for step in sequence.steps:
+            if step.id not in remaining:
+                continue
+            if all(dependency in completed for dependency in step.depends_on):
+                ordered.append(step)
+                completed.add(step.id)
+                del remaining[step.id]
+                progressed = True
+        if not progressed:
+            cycle = ", ".join(sorted(remaining))
+            raise ValueError(
+                f"Pipeline sequence {sequence.id} has cyclic dependencies: {cycle}"
+            )
+
+    return ordered
+
+
+def _normalize_sequence_option_groups(
+    sequence: PipelineSequenceSpec,
+    options: Mapping[str, Any] | None,
+) -> dict[str, Mapping[str, Any]]:
+    provided = dict(options or {})
+    valid_groups = {step.id for step in sequence.steps}
+    valid_groups.update(step.stage_id for step in sequence.steps)
+    unknown_groups = sorted(set(provided) - valid_groups)
+    if unknown_groups:
+        raise ValueError(
+            "Unknown pipeline sequence option group(s) for "
+            f"{sequence.id}: {', '.join(unknown_groups)}"
+        )
+
+    normalized: dict[str, Mapping[str, Any]] = {}
+    for key, value in provided.items():
+        if not isinstance(value, Mapping):
+            raise ValueError(
+                f"Pipeline sequence options for {key!r} must be a JSON object"
+            )
+        normalized[key] = value
+    return normalized
+
+
+def _resolve_option_placeholders(value: Any, *, run_root: str) -> Any:
+    if isinstance(value, str):
+        return value.replace("{run_root}", run_root)
+    if isinstance(value, list):
+        return [
+            _resolve_option_placeholders(item, run_root=run_root)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _resolve_option_placeholders(item, run_root=run_root)
+            for item in value
+        )
+    if isinstance(value, Mapping):
+        return {
+            key: _resolve_option_placeholders(item, run_root=run_root)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _step_options(
+    step: PipelineSequenceStepSpec,
+    sequence_options: Mapping[str, Mapping[str, Any]],
+    *,
+    run_root: str,
+) -> dict[str, Any]:
+    options = dict(step.options)
+    if step.stage_id in sequence_options:
+        options.update(dict(sequence_options[step.stage_id]))
+    if step.id in sequence_options:
+        options.update(dict(sequence_options[step.id]))
+    return _resolve_option_placeholders(options, run_root=run_root)
+
+
+def build_sequence_plan(
+    *,
+    sequence_id: str,
+    run_root: str | Path,
+    options: Mapping[str, Any] | None = None,
+    plan_only: bool = False,
+    sequence_registry: Mapping[str, PipelineSequenceSpec] | None = None,
+    stage_registry: Mapping[str, PipelineStageSpec] | None = None,
+) -> PipelineSequencePlan:
+    stage_specs = PIPELINE_STAGES if stage_registry is None else stage_registry
+    sequence = get_pipeline_sequence(sequence_id, registry=sequence_registry)
+    run_root_value = _stringify_path(run_root)
+    if not run_root_value:
+        raise ValueError("Pipeline sequence run_root must not be empty")
+
+    ordered_steps = _topological_steps(sequence, stage_registry=stage_specs)
+    sequence_options = _normalize_sequence_option_groups(sequence, options)
+    step_plans: list[PipelineSequenceStepPlan] = []
+    resource_set: set[str] = set()
+
+    for step in ordered_steps:
+        job = build_pipeline_job(
+            stage_id=step.stage_id,
+            run_root=run_root_value,
+            options=_step_options(step, sequence_options, run_root=run_root_value),
+            registry=stage_specs,
+        )
+        resource_set.update(job.resources)
+        step_plans.append(
+            PipelineSequenceStepPlan(
+                id=step.id,
+                stage_id=job.stage_id,
+                stage_label=job.stage_label,
+                depends_on=list(step.depends_on),
+                command=job.command,
+                resources=job.resources,
+                options=dict(job.parameters["options"]),
+            )
+        )
+
+    return PipelineSequencePlan(
+        schema_version=SCHEMA_VERSION,
+        sequence_id=sequence.id,
+        sequence_label=sequence.label,
+        run_root=run_root_value,
+        plan_only=plan_only,
+        steps=step_plans,
+        resources=sorted(resource_set),
+    )
+
+
+def write_sequence_plan(
+    run_root: str | Path,
+    plan: PipelineSequencePlan,
+    *,
+    filename: str = PIPELINE_SEQUENCE_PLAN,
+) -> Path:
+    path = Path(run_root) / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(plan.to_dict(), f, indent=2, sort_keys=True)
+        f.write("\n")
+    return path
+
+
+def execute_sequence_plan(
+    plan: PipelineSequencePlan,
+    *,
+    cwd: str | Path | None = None,
+) -> list[subprocess.CompletedProcess]:
+    completed = set()
+    results: list[subprocess.CompletedProcess] = []
+    for step in plan.steps:
+        missing_dependencies = sorted(set(step.depends_on) - completed)
+        if missing_dependencies:
+            raise RuntimeError(
+                f"Pipeline sequence step {step.id} cannot run before: "
+                f"{', '.join(missing_dependencies)}"
+            )
+        result = subprocess.run(step.command, cwd=cwd, check=True)
+        results.append(result)
+        completed.add(step.id)
+    return results
+
+
+def build_sequence_job(
+    *,
+    sequence_id: str,
+    run_root: str | Path,
+    options: Mapping[str, Any] | None = None,
+    plan_only: bool = False,
+    sequence_registry: Mapping[str, PipelineSequenceSpec] | None = None,
+    stage_registry: Mapping[str, PipelineStageSpec] | None = None,
+) -> PipelineSequenceJobSpec:
+    plan = build_sequence_plan(
+        sequence_id=sequence_id,
+        run_root=run_root,
+        options=options,
+        plan_only=plan_only,
+        sequence_registry=sequence_registry,
+        stage_registry=stage_registry,
+    )
+    options_json = json.dumps(dict(options or {}), sort_keys=True)
+    command = [
+        "uv",
+        "run",
+        "python",
+        "scripts/run_pipeline_sequence.py",
+        plan.run_root,
+        "--sequence",
+        plan.sequence_id,
+        "--options-json",
+        options_json,
+    ]
+    if plan_only:
+        command.append("--plan-only")
+    job_resources = ["disk_io"] if plan_only else list(plan.resources)
+    parameters = {
+        "pipeline_sequence": plan.sequence_id,
+        "sequence_label": plan.sequence_label,
+        "run_root": plan.run_root,
+        "plan_only": plan_only,
+        "locked_resources": list(job_resources),
+        "planned_resources": list(plan.resources),
+        "options": dict(options or {}),
+        "steps": [step.to_dict() for step in plan.steps],
+    }
+    return PipelineSequenceJobSpec(
+        sequence_id=plan.sequence_id,
+        sequence_label=plan.sequence_label,
+        run_root=plan.run_root,
+        command=command,
+        resources=job_resources,
+        parameters=parameters,
+        plan=plan,
+    )
+
+
+PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
+    "fake_capture_rehearsal": PipelineSequenceSpec(
+        id="fake_capture_rehearsal",
+        label="Fake Capture Rehearsal",
+        description=(
+            "Write and preflight the capture command plan, select the safe "
+            "pose-only fake execution commands, then run a fake iiwa rehearsal "
+            "without starting camera hardware."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="capture_plan", stage_id="capture_plan"),
+            PipelineSequenceStepSpec(
+                id="capture_plan_preflight",
+                stage_id="capture_plan_preflight",
+                depends_on=("capture_plan",),
+                options={"no_sensors": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_execution_plan",
+                stage_id="capture_execution_plan",
+                depends_on=("capture_plan_preflight",),
+                options={"mode": "pose_only_fake"},
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_rehearsal",
+                stage_id="capture_rehearsal",
+                depends_on=("capture_execution_plan",),
+            ),
+        ),
+    ),
+    "fake_capture_execution": PipelineSequenceSpec(
+        id="fake_capture_execution",
+        label="Supervised Fake Capture Execution",
+        description=(
+            "Write and preflight the capture command plan, write the safe "
+            "pose-only fake execution plan, then run the supervised capture "
+            "execution stage without starting camera hardware."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="capture_plan", stage_id="capture_plan"),
+            PipelineSequenceStepSpec(
+                id="capture_plan_preflight",
+                stage_id="capture_plan_preflight",
+                depends_on=("capture_plan",),
+                options={"no_sensors": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_execution_plan",
+                stage_id="capture_execution_plan",
+                depends_on=("capture_plan_preflight",),
+                options={"mode": "pose_only_fake"},
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_execution",
+                stage_id="capture_execution",
+                depends_on=("capture_execution_plan",),
+                options={"mode": "pose_only_fake"},
+            ),
+        ),
+    ),
+    "real_full_capture_validation": PipelineSequenceSpec(
+        id="real_full_capture_validation",
+        label="Real Full Capture Validation",
+        description=(
+            "Write run preflight and hardware snapshots, write and preflight "
+            "the capture command plan, explicitly select real robot plus camera "
+            "commands, run supervised full capture, then audit "
+            "rewrite_full_capture.v1. This sequence is intended for an "
+            "operator-controlled lab run, not the default fake development path."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(
+                id="run_preflight",
+                stage_id="run_preflight",
+                options={"write": True, "check": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="hardware_status",
+                stage_id="hardware_status",
+                depends_on=("run_preflight",),
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_plan",
+                stage_id="capture_plan",
+                depends_on=("hardware_status",),
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_plan_preflight",
+                stage_id="capture_plan_preflight",
+                depends_on=("capture_plan",),
+                options={"allow_real_robot": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_execution_plan",
+                stage_id="capture_execution_plan",
+                depends_on=("capture_plan_preflight",),
+                options={
+                    "mode": "full",
+                    "allow_cameras": True,
+                    "allow_real_robot": True,
+                    "include_sensors": True,
+                },
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_execution",
+                stage_id="capture_execution",
+                depends_on=("capture_execution_plan",),
+                options={
+                    "mode": "full",
+                    "allow_cameras": True,
+                    "allow_real_robot": True,
+                    "include_sensors": True,
+                },
+            ),
+            PipelineSequenceStepSpec(
+                id="rewrite_full_capture_gate",
+                stage_id="rewrite_gate",
+                depends_on=("capture_execution",),
+                options={"gate": "rewrite_full_capture.v1", "write": True},
+            ),
+        ),
+    ),
+    "sync_aruco": PipelineSequenceSpec(
+        id="sync_aruco",
+        label="Synchronize And Run ArUco",
+        description=(
+            "Run non-destructive synchronization, then run ArUco pose estimation "
+            "on the synchronized sensor folders."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="aruco",
+                stage_id="aruco",
+                depends_on=("sync_quality",),
+            ),
+        ),
+    ),
+    "sync_aruco_calibration_observations": PipelineSequenceSpec(
+        id="sync_aruco_calibration_observations",
+        label="Synchronize ArUco Calibration Observations",
+        description=(
+            "Run non-destructive synchronization, sync quality checks, ArUco "
+            "pose estimation, then extract solver-ready calibration "
+            "observations."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="aruco",
+                stage_id="aruco",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_observations",
+                stage_id="calibration_observations",
+                depends_on=("aruco",),
+            ),
+        ),
+    ),
+    "sync_aruco_calibration_candidates": PipelineSequenceSpec(
+        id="sync_aruco_calibration_candidates",
+        label="Synchronize ArUco Calibration Candidates",
+        description=(
+            "Run synchronization, sync quality checks, ArUco pose estimation, "
+            "calibration observation extraction, then generate validation-gated "
+            "calibration profile candidates."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="aruco",
+                stage_id="aruco",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_observations",
+                stage_id="calibration_observations",
+                depends_on=("aruco",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_candidates",
+                stage_id="calibration_candidates",
+                depends_on=("calibration_observations",),
+            ),
+        ),
+    ),
+    "sync_aruco_calibration_solver": PipelineSequenceSpec(
+        id="sync_aruco_calibration_solver",
+        label="Synchronize ArUco Calibration Solver",
+        description=(
+            "Run synchronization, sync quality checks, ArUco pose estimation, "
+            "calibration observation extraction, then solve needs-validation "
+            "calibration profiles."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="aruco",
+                stage_id="aruco",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_observations",
+                stage_id="calibration_observations",
+                depends_on=("aruco",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_solver",
+                stage_id="calibration_solver",
+                depends_on=("calibration_observations",),
+            ),
+        ),
+    ),
+    "sync_aruco_calibration_validation": PipelineSequenceSpec(
+        id="sync_aruco_calibration_validation",
+        label="Synchronize ArUco Calibration Validation",
+        description=(
+            "Run synchronization, sync quality, ArUco pose estimation, "
+            "observation extraction, candidate generation, then validate "
+            "candidate profiles without promoting them."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="aruco",
+                stage_id="aruco",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_observations",
+                stage_id="calibration_observations",
+                depends_on=("aruco",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_candidates",
+                stage_id="calibration_candidates",
+                depends_on=("calibration_observations",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_validation",
+                stage_id="calibration_validation",
+                depends_on=("calibration_candidates",),
+            ),
+        ),
+    ),
+    "sync_to_bop_dry_run": PipelineSequenceSpec(
+        id="sync_to_bop_dry_run",
+        label="Synchronize To BOP Dry-Run",
+        description=(
+            "Run non-destructive synchronization, prepare BlenderProc inputs, "
+            "write a BlenderProc render plan, then export the BOP dataset shape."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_prepare",
+                stage_id="blenderproc_prepare",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_render",
+                stage_id="blenderproc_render",
+                depends_on=("blenderproc_prepare",),
+                options={"dry_run": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_export",
+                stage_id="bop_export",
+                depends_on=("blenderproc_render",),
+            ),
+        ),
+    ),
+    "sync_to_bop_calibrated_dry_run": PipelineSequenceSpec(
+        id="sync_to_bop_calibrated_dry_run",
+        label="Synchronize To Calibrated BOP Dry-Run",
+        description=(
+            "Run non-destructive synchronization, sync quality checks, "
+            "calibration profile preflight, prepare BlenderProc inputs from "
+            "calibration_profiles.json, write a BlenderProc render plan, then "
+            "export the calibrated BOP dataset shape."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_preflight",
+                stage_id="calibration_preflight",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_prepare",
+                stage_id="blenderproc_prepare",
+                depends_on=("sync_quality", "calibration_preflight"),
+                options={
+                    "calibration_profiles": (
+                        "{run_root}/calibration_profiles.json"
+                    ),
+                },
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_render",
+                stage_id="blenderproc_render",
+                depends_on=("blenderproc_prepare",),
+                options={"dry_run": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_export",
+                stage_id="bop_export",
+                depends_on=("blenderproc_render",),
+                options={
+                    "calibration_profiles": (
+                        "{run_root}/calibration_profiles.json"
+                    ),
+                },
+            ),
+        ),
+    ),
+    "capture_to_bop_foundationpose_dry_run": PipelineSequenceSpec(
+        id="capture_to_bop_foundationpose_dry_run",
+        label="Captured Run To BOP And FoundationPose Dry-Run",
+        description=(
+            "For an existing captured run folder, run non-destructive "
+            "synchronization, prepare BlenderProc inputs, write a BlenderProc "
+            "render plan, export the BOP dataset shape, then write a "
+            "FoundationPose execution plan without starting Docker."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_prepare",
+                stage_id="blenderproc_prepare",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_render",
+                stage_id="blenderproc_render",
+                depends_on=("blenderproc_prepare",),
+                options={"dry_run": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_export",
+                stage_id="bop_export",
+                depends_on=("blenderproc_render",),
+            ),
+            PipelineSequenceStepSpec(
+                id="foundationpose",
+                stage_id="foundationpose",
+                depends_on=("bop_export",),
+                options={"dry_run": True},
+            ),
+        ),
+    ),
+    "fake_capture_to_bop_foundationpose_dry_run": PipelineSequenceSpec(
+        id="fake_capture_to_bop_foundationpose_dry_run",
+        label="Fake Capture To BOP And FoundationPose Dry-Run",
+        description=(
+            "Run the safe pose-only fake capture path, synthesize one RGB-D "
+            "sensor folder from the raw robot poses, then exercise "
+            "non-destructive sync, BlenderProc preparation/render planning, BOP "
+            "export, and FoundationPose planning without camera hardware or Docker."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="capture_plan", stage_id="capture_plan"),
+            PipelineSequenceStepSpec(
+                id="capture_plan_preflight",
+                stage_id="capture_plan_preflight",
+                depends_on=("capture_plan",),
+                options={"no_sensors": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_execution_plan",
+                stage_id="capture_execution_plan",
+                depends_on=("capture_plan_preflight",),
+                options={"mode": "pose_only_fake"},
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_execution",
+                stage_id="capture_execution",
+                depends_on=("capture_execution_plan",),
+                options={"mode": "pose_only_fake"},
+            ),
+            PipelineSequenceStepSpec(
+                id="synthetic_rgbd_fixture",
+                stage_id="synthetic_rgbd_fixture",
+                depends_on=("capture_execution",),
+                options={"overwrite": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="sync_run",
+                stage_id="sync_run",
+                depends_on=("synthetic_rgbd_fixture",),
+            ),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_prepare",
+                stage_id="blenderproc_prepare",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_render",
+                stage_id="blenderproc_render",
+                depends_on=("blenderproc_prepare",),
+                options={"dry_run": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_export",
+                stage_id="bop_export",
+                depends_on=("blenderproc_render",),
+            ),
+            PipelineSequenceStepSpec(
+                id="foundationpose",
+                stage_id="foundationpose",
+                depends_on=("bop_export",),
+                options={"dry_run": True},
+            ),
+        ),
+    ),
+    "fake_capture_to_bop_eval_dry_run": PipelineSequenceSpec(
+        id="fake_capture_to_bop_eval_dry_run",
+        label="Fake Capture To BOP Evaluation Dry-Run",
+        description=(
+            "Run the safe fake capture path, synthesize RGB-D frames, sync and "
+            "export BOP, write synthetic BOP19 result rows, then validate them "
+            "through the dry-run BOP Toolkit bridge."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="capture_plan", stage_id="capture_plan"),
+            PipelineSequenceStepSpec(
+                id="capture_plan_preflight",
+                stage_id="capture_plan_preflight",
+                depends_on=("capture_plan",),
+                options={"no_sensors": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_execution_plan",
+                stage_id="capture_execution_plan",
+                depends_on=("capture_plan_preflight",),
+                options={"mode": "pose_only_fake"},
+            ),
+            PipelineSequenceStepSpec(
+                id="capture_execution",
+                stage_id="capture_execution",
+                depends_on=("capture_execution_plan",),
+                options={"mode": "pose_only_fake"},
+            ),
+            PipelineSequenceStepSpec(
+                id="synthetic_rgbd_fixture",
+                stage_id="synthetic_rgbd_fixture",
+                depends_on=("capture_execution",),
+                options={"overwrite": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="sync_run",
+                stage_id="sync_run",
+                depends_on=("synthetic_rgbd_fixture",),
+            ),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_export",
+                stage_id="bop_export",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="synthetic_bop_results",
+                stage_id="synthetic_bop_results",
+                depends_on=("bop_export",),
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_evaluation",
+                stage_id="bop_evaluation",
+                depends_on=("synthetic_bop_results",),
+                options={
+                    "result_file": "{run_root}/results/bop/synthetic_bop-test.csv",
+                    "dry_run": True,
+                },
+            ),
+        ),
+    ),
+    "foundationpose_to_bop_eval_dry_run": PipelineSequenceSpec(
+        id="foundationpose_to_bop_eval_dry_run",
+        label="FoundationPose To BOP Evaluation Dry-Run",
+        description=(
+            "Export synchronized run data to BOP, convert FoundationPose outputs "
+            "to BOP19 result CSVs, then write a dry-run BOP Toolkit evaluation "
+            "plan."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
+            PipelineSequenceStepSpec(
+                id="bop_result_export",
+                stage_id="bop_result_export",
+                depends_on=("bop_export",),
+                options={"source": "foundationpose"},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_evaluation",
+                stage_id="bop_evaluation",
+                depends_on=("bop_result_export",),
+                options={
+                    "result_file": (
+                        "{run_root}/results/bop/foundationpose_bop-test.csv"
+                    ),
+                    "dry_run": True,
+                },
+            ),
+        ),
+    ),
+    "foundationpose_runtime_to_bop_eval": PipelineSequenceSpec(
+        id="foundationpose_runtime_to_bop_eval",
+        label="FoundationPose Runtime To BOP Evaluation",
+        description=(
+            "Export synchronized run data to BOP, run FoundationPose through the "
+            "configured runtime wrapper, convert its outputs to BOP19 result "
+            "CSVs, then run BOP Toolkit evaluation."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
+            PipelineSequenceStepSpec(
+                id="foundationpose",
+                stage_id="foundationpose",
+                depends_on=("bop_export",),
+                options={"dry_run": False},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_result_export",
+                stage_id="bop_result_export",
+                depends_on=("foundationpose",),
+                options={"source": "foundationpose"},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_evaluation",
+                stage_id="bop_evaluation",
+                depends_on=("bop_result_export",),
+                options={
+                    "result_file": (
+                        "{run_root}/results/bop/"
+                        "foundationpose_bop-test_est5_track2.csv"
+                    ),
+                    "dry_run": False,
+                },
+            ),
+        ),
+    ),
+    "aruco_to_bop_eval_dry_run": PipelineSequenceSpec(
+        id="aruco_to_bop_eval_dry_run",
+        label="ArUco To BOP Evaluation Dry-Run",
+        description=(
+            "Export synchronized run data to BOP, convert ArUco pose estimates "
+            "to BOP19 result CSVs, then write a dry-run BOP Toolkit evaluation "
+            "plan."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
+            PipelineSequenceStepSpec(
+                id="bop_result_export",
+                stage_id="bop_result_export",
+                depends_on=("bop_export",),
+                options={
+                    "source": "aruco",
+                    "aruco_object_name": "aruco",
+                },
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_evaluation",
+                stage_id="bop_evaluation",
+                depends_on=("bop_result_export",),
+                options={
+                    "result_file": "{run_root}/results/bop/aruco_bop-test.csv",
+                    "dry_run": True,
+                },
+            ),
+        ),
+    ),
+    "megapose_to_bop_eval_dry_run": PipelineSequenceSpec(
+        id="megapose_to_bop_eval_dry_run",
+        label="MegaPose To BOP Evaluation Dry-Run",
+        description=(
+            "Export synchronized run data to BOP, write a dry-run MegaPose "
+            "adapter plan, convert MegaPose outputs to BOP19 result CSVs, then "
+            "write a dry-run BOP Toolkit evaluation plan."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
+            PipelineSequenceStepSpec(
+                id="megapose",
+                stage_id="megapose",
+                depends_on=("bop_export",),
+                options={"dry_run": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_result_export",
+                stage_id="bop_result_export",
+                depends_on=("megapose",),
+                options={"source": "megapose"},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_evaluation",
+                stage_id="bop_evaluation",
+                depends_on=("bop_result_export",),
+                options={
+                    "result_file": "{run_root}/results/bop/megapose_bop-test.csv",
+                    "dry_run": True,
+                },
+            ),
+        ),
+    ),
+    "megapose_runtime_to_bop_eval": PipelineSequenceSpec(
+        id="megapose_runtime_to_bop_eval",
+        label="MegaPose Runtime To BOP Evaluation",
+        description=(
+            "Export synchronized run data to BOP, run MegaPose through the "
+            "configured wrapper, convert its outputs to BOP19 result CSVs, then "
+            "run BOP Toolkit evaluation."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
+            PipelineSequenceStepSpec(
+                id="megapose",
+                stage_id="megapose",
+                depends_on=("bop_export",),
+                options={"dry_run": False},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_result_export",
+                stage_id="bop_result_export",
+                depends_on=("megapose",),
+                options={"source": "megapose"},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_evaluation",
+                stage_id="bop_evaluation",
+                depends_on=("bop_result_export",),
+                options={
+                    "result_file": "{run_root}/results/bop/megapose_bop-test.csv",
+                    "dry_run": False,
+                },
+            ),
+        ),
+    ),
+    "sam6d_to_bop_eval_dry_run": PipelineSequenceSpec(
+        id="sam6d_to_bop_eval_dry_run",
+        label="SAM6D To BOP Evaluation Dry-Run",
+        description=(
+            "Export synchronized run data to BOP, write a dry-run SAM6D adapter "
+            "plan, convert SAM6D outputs to BOP19 result CSVs, then write a "
+            "dry-run BOP Toolkit evaluation plan."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
+            PipelineSequenceStepSpec(
+                id="sam6d",
+                stage_id="sam6d",
+                depends_on=("bop_export",),
+                options={"dry_run": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_result_export",
+                stage_id="bop_result_export",
+                depends_on=("sam6d",),
+                options={"source": "sam6d"},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_evaluation",
+                stage_id="bop_evaluation",
+                depends_on=("bop_result_export",),
+                options={
+                    "result_file": "{run_root}/results/bop/sam6d_bop-test.csv",
+                    "dry_run": True,
+                },
+            ),
+        ),
+    ),
+    "sam6d_runtime_to_bop_eval": PipelineSequenceSpec(
+        id="sam6d_runtime_to_bop_eval",
+        label="SAM6D Runtime To BOP Evaluation",
+        description=(
+            "Export synchronized run data to BOP, run SAM6D through the "
+            "configured wrapper, convert its outputs to BOP19 result CSVs, then "
+            "run BOP Toolkit evaluation."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
+            PipelineSequenceStepSpec(
+                id="sam6d",
+                stage_id="sam6d",
+                depends_on=("bop_export",),
+                options={"dry_run": False},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_result_export",
+                stage_id="bop_result_export",
+                depends_on=("sam6d",),
+                options={"source": "sam6d"},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_evaluation",
+                stage_id="bop_evaluation",
+                depends_on=("bop_result_export",),
+                options={
+                    "result_file": "{run_root}/results/bop/sam6d_bop-test.csv",
+                    "dry_run": False,
+                },
+            ),
+        ),
+    ),
+}

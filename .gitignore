@@ -170,8 +170,5 @@ output
 nohup.out
 *.log
 
-# ignore all files in the tests folder
-tests/
-
 # ruff
 .ruff_cache

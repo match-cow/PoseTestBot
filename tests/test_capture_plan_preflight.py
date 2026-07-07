@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from posetestbot.io.artifacts import (
+    CAPTURE_PLAN,
+    CAPTURE_PLAN_PREFLIGHT_REPORT,
+    DATASET_MANIFEST,
+)
+from posetestbot.pipeline.capture_plan import write_capture_plan_with_manifest
+from posetestbot.pipeline.capture_plan_preflight import (
+    build_capture_plan_preflight,
+    write_capture_plan_preflight_with_manifest,
+)
+from posetestbot.pipeline.run_config import (
+    create_run_config,
+    sensor_config_from_token,
+    write_run_config,
+)
+
+
+def fake_sensor_status() -> dict:
+    return {
+        "schema_version": "sensor_status.v1",
+        "generated_at": "2026-06-16T00:00:00+00:00",
+        "total_connected": 2,
+        "all_expected_connected": True,
+        "families": [
+            {
+                "sensor_type": "realsense_d435",
+                "display_name": "Intel RealSense D435",
+                "sdk_module": "pyrealsense2",
+                "sdk_available": True,
+                "connected_count": 1,
+                "devices": [
+                    {
+                        "sensor_type": "realsense_d435",
+                        "device_id": "123",
+                        "display_name": "RealSense 123",
+                        "connected": True,
+                        "metadata": {},
+                    }
+                ],
+            },
+            {
+                "sensor_type": "oak_d_pro",
+                "display_name": "Luxonis OAK-D Pro",
+                "sdk_module": "depthai",
+                "sdk_available": True,
+                "connected_count": 1,
+                "devices": [
+                    {
+                        "sensor_type": "oak_d_pro",
+                        "device_id": "mxid-1",
+                        "display_name": "OAK-D Pro",
+                        "connected": True,
+                        "metadata": {},
+                    }
+                ],
+            },
+            {
+                "sensor_type": "zed_2i",
+                "display_name": "Stereolabs ZED 2i",
+                "sdk_module": "pyzed.sl",
+                "sdk_available": True,
+                "connected_count": 0,
+                "devices": [],
+            },
+        ],
+    }
+
+
+def test_capture_plan_preflight_reports_ok_for_mocked_connected_sensors(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(
+            sensor_config_from_token("realsense:123:static:Cell RealSense"),
+            sensor_config_from_token("oak:auto:static:Cell OAK-D Pro"),
+        ),
+    )
+    write_run_config(run_root, config)
+    write_capture_plan_with_manifest(run_root, config.to_dict())
+
+    report = build_capture_plan_preflight(
+        run_root,
+        collect_sensors=fake_sensor_status,
+    )
+
+    assert report["schema_version"] == "capture_plan_preflight.v1"
+    assert report["overall_status"] == "ok"
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["robot_mode"]["status"] == "ok"
+    assert checks["sensor_adapter:realsense_d435:123"]["status"] == "ok"
+    assert checks["sensor_adapter:oak_d_pro:auto"]["status"] == "ok"
+    assert checks["sensor_output_folder:realsense_123"]["status"] == "ok"
+    assert checks["sensor:realsense_d435:123"]["status"] == "ok"
+    assert checks["sensor:oak_d_pro:auto"]["status"] == "ok"
+    assert checks["capture_plan_build"]["status"] == "ok"
+    assert report["capture_plan"]["schema_version"] == "capture_plan.v1"
+
+
+def test_capture_plan_preflight_includes_sensor_diagnostics_on_failures(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-diagnostics"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(
+            sensor_config_from_token("realsense:123:static:Cell RealSense"),
+            sensor_config_from_token("zed:auto:static:Cell ZED 2i"),
+        ),
+    )
+    write_run_config(run_root, config)
+    write_capture_plan_with_manifest(run_root, config.to_dict())
+
+    def diagnostic_sensor_status() -> dict:
+        return {
+            "schema_version": "sensor_status.v1",
+            "generated_at": "2026-06-16T00:00:00+00:00",
+            "total_connected": 0,
+            "all_expected_connected": False,
+            "families": [
+                {
+                    "sensor_type": "realsense_d435",
+                    "display_name": "Intel RealSense D435",
+                    "sdk_module": "pyrealsense2",
+                    "sdk_available": True,
+                    "connected_count": 0,
+                    "devices": [],
+                    "error": "RuntimeError: could not initialize udev monitor",
+                    "diagnostics": [
+                        {
+                            "code": "discovery_error",
+                            "severity": "error",
+                            "message": "RealSense discovery failed.",
+                            "hints": ["Check USB/udev access."],
+                        }
+                    ],
+                },
+                {
+                    "sensor_type": "zed_2i",
+                    "display_name": "Stereolabs ZED 2i",
+                    "sdk_module": "pyzed.sl",
+                    "sdk_available": False,
+                    "connected_count": 0,
+                    "devices": [],
+                    "error": None,
+                    "diagnostics": [
+                        {
+                            "code": "sdk_unavailable",
+                            "severity": "warning",
+                            "message": "pyzed.sl is not importable.",
+                            "hints": ["Install the ZED SDK."],
+                        }
+                    ],
+                },
+            ],
+        }
+
+    report = build_capture_plan_preflight(
+        run_root,
+        collect_sensors=diagnostic_sensor_status,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    realsense_check = checks["sensor:realsense_d435:123"]
+    assert realsense_check["status"] == "error"
+    assert realsense_check["details"]["diagnostics"][0]["code"] == "discovery_error"
+    assert "udev" in realsense_check["details"]["diagnostics"][0]["hints"][0]
+    zed_check = checks["sensor:zed_2i:auto"]
+    assert zed_check["status"] == "error"
+    assert zed_check["details"]["diagnostics"][0]["code"] == "sdk_unavailable"
+
+
+def test_capture_plan_preflight_errors_for_real_robot_without_override(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    config = create_run_config(
+        run_root=run_root,
+        robot_mode="real",
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+    )
+    write_run_config(run_root, config)
+
+    report = build_capture_plan_preflight(
+        run_root,
+        include_sensor_status=False,
+        write_plan_if_missing=False,
+    )
+
+    assert report["overall_status"] == "error"
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["robot_mode"]["status"] == "error"
+    assert checks["robot_controller_command"]["status"] == "ok"
+
+
+def test_capture_plan_preflight_reports_unsupported_resolution_without_throwing(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-bad-resolution"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        resolution="360p",
+    )
+    write_run_config(run_root, config)
+
+    report = build_capture_plan_preflight(
+        run_root,
+        include_sensor_status=False,
+        write_plan_if_missing=False,
+    )
+
+    assert report["overall_status"] == "error"
+    assert report["capture_plan"] is None
+    assert report["capture_plan_build_error"]
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["sensor_adapter:realsense_d435:123"]["status"] == "error"
+    assert checks["capture_plan_build"]["status"] == "error"
+    assert "supported: 720p" in checks["sensor_adapter:realsense_d435:123"]["message"]
+    assert not (run_root / CAPTURE_PLAN).exists()
+
+
+def test_capture_plan_preflight_warns_about_nonempty_sensor_folder(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-existing-folder"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+    )
+    write_run_config(run_root, config)
+    sensor_folder = run_root / "realsense_123"
+    sensor_folder.mkdir()
+    (sensor_folder / "old_frame.png").write_text("placeholder")
+
+    report = build_capture_plan_preflight(
+        run_root,
+        include_sensor_status=False,
+        write_plan_if_missing=False,
+    )
+
+    assert report["overall_status"] == "warning"
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["sensor_output_folder:realsense_123"]["status"] == "warning"
+    assert checks["sensor_output_folder:realsense_123"]["details"]["child_count"] == 1
+
+
+def test_capture_plan_preflight_errors_for_duplicate_output_folder(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-duplicate-folder"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(
+            sensor_config_from_token("zed:auto:static:Cell ZED 2i A"),
+            sensor_config_from_token("zed:auto:static:Cell ZED 2i B"),
+        ),
+    )
+    write_run_config(run_root, config)
+
+    report = build_capture_plan_preflight(
+        run_root,
+        include_sensor_status=False,
+        write_plan_if_missing=False,
+    )
+
+    assert report["overall_status"] == "error"
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["sensor_output_folder_duplicate:zed_2i_auto"]["status"] == "error"
+    assert checks["capture_plan_build"]["status"] == "error"
+
+
+def test_capture_plan_preflight_writes_report_and_manifest(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+    )
+    write_run_config(run_root, config)
+
+    path, report = write_capture_plan_preflight_with_manifest(
+        run_root,
+        include_sensor_status=False,
+    )
+
+    assert path == run_root / CAPTURE_PLAN_PREFLIGHT_REPORT
+    assert report["overall_status"] == "warning"
+    assert (run_root / CAPTURE_PLAN).is_file()
+    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
+    stage = next(
+        stage for stage in manifest["stages"] if stage["name"] == "capture_plan_preflight"
+    )
+    assert stage["status"] == "succeeded"
+    assert stage["artifacts"][CAPTURE_PLAN_PREFLIGHT_REPORT] == (
+        CAPTURE_PLAN_PREFLIGHT_REPORT
+    )
+    assert stage["artifacts"][CAPTURE_PLAN] == CAPTURE_PLAN
+    assert manifest["robot_profile"]["mode"] == "fake"
+    assert manifest["capture_config"]["fps"] == 6
