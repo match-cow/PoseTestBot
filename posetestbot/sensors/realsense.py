@@ -104,6 +104,74 @@ def _cv2_for_preview(cv2_module: Any | None) -> Any:
     return cv2
 
 
+def _frame_timestamp_ns(frame: Any) -> int | None:
+    try:
+        return int(float(frame.get_timestamp()) * 1_000_000)
+    except Exception:
+        return None
+
+
+def _frame_stem_from_sensor_timestamp_ns(timestamp_ns: int) -> str:
+    return str(int(timestamp_ns) // 1_000_000)
+
+
+def _timestamp_domain_name(frame: Any) -> str | None:
+    try:
+        domain = frame.get_frame_timestamp_domain()
+    except Exception:
+        return None
+
+    name = getattr(domain, "name", None)
+    if isinstance(name, str):
+        return name
+    if callable(name):
+        try:
+            return str(name())
+        except Exception:
+            pass
+
+    value = str(domain)
+    return value.rsplit(".", 1)[-1] if value else None
+
+
+def _metadata_value(frame: Any, rs: Any, name: str) -> int | None:
+    try:
+        metadata_key = getattr(rs.frame_metadata_value, name)
+    except Exception:
+        return None
+    try:
+        if not frame.supports_frame_metadata(metadata_key):
+            return None
+        return int(frame.get_frame_metadata(metadata_key))
+    except Exception:
+        return None
+
+
+def _realsense_timestamp_metadata(
+    color_frame: Any,
+    depth_frame: Any,
+    rs: Any,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "color_timestamp_domain": _timestamp_domain_name(color_frame),
+        "depth_timestamp_domain": _timestamp_domain_name(depth_frame),
+    }
+    for frame_name, frame in (
+        ("color", color_frame),
+        ("depth", depth_frame),
+    ):
+        for metadata_name in (
+            "backend_timestamp",
+            "frame_timestamp",
+            "sensor_timestamp",
+            "time_of_arrival",
+        ):
+            value = _metadata_value(frame, rs, metadata_name)
+            if value is not None:
+                metadata[f"{frame_name}_{metadata_name}"] = value
+    return metadata
+
+
 def capture_realsense_rgbd(
     output_path: str | Path | None,
     *,
@@ -218,6 +286,18 @@ def capture_realsense_rgbd(
                 if host_wall_timestamp_ns < min_next_wall_timestamp_ns:
                     host_wall_timestamp_ns = min_next_wall_timestamp_ns
                 last_frame_wall_timestamp_ns = host_wall_timestamp_ns
+                color_timestamp_ns = _frame_timestamp_ns(color_frame)
+                depth_timestamp_ns = _frame_timestamp_ns(aligned_depth_frame)
+                frame_stem = (
+                    _frame_stem_from_sensor_timestamp_ns(color_timestamp_ns)
+                    if color_timestamp_ns is not None
+                    else None
+                )
+                timestamp_metadata = _realsense_timestamp_metadata(
+                    color_frame,
+                    aligned_depth_frame,
+                    rs,
+                )
                 metadata = write_legacy_rgbd_frame(
                     output,
                     rgb_image=color_image,
@@ -225,16 +305,16 @@ def capture_realsense_rgbd(
                     sensor_type=SensorType.REALSENSE_D435,
                     sensor_id=resolved_serial,
                     frame_index=captured_frames,
-                    sensor_timestamp_ns=int(color_frame.get_timestamp() * 1_000_000),
-                    depth_sensor_timestamp_ns=int(
-                        aligned_depth_frame.get_timestamp() * 1_000_000
-                    ),
+                    sensor_timestamp_ns=color_timestamp_ns,
+                    depth_sensor_timestamp_ns=depth_timestamp_ns,
                     host_received_timestamp_ns=time.monotonic_ns(),
                     host_wall_timestamp_ns=host_wall_timestamp_ns,
+                    frame_stem=frame_stem,
                     extra_metadata={
                         "color_frame_number": color_frame.get_frame_number(),
                         "depth_frame_number": aligned_depth_frame.get_frame_number(),
                         "product_line": product_line,
+                        **timestamp_metadata,
                     },
                 )
                 metadata_records.append(metadata)
