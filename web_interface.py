@@ -37,10 +37,8 @@ from posetestbot.calibration.validation import (
 from posetestbot.io.artifact_browser import (
     ArtifactPathError,
     bop_frame_detail,
-    bop_result_detail,
     bop_scene_detail,
     collect_run_artifacts,
-    metric_dashboard_summary,
     preview_artifact,
     render_bop_frame_overlay_png,
     resolve_artifact_path,
@@ -695,7 +693,6 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                     <h2 class="h5 mb-0">Artifacts</h2>
                     <div class="d-flex gap-2">
                         <button class="btn btn-sm btn-outline-secondary" onclick="listArtifacts()">List</button>
-                        <button class="btn btn-sm btn-outline-secondary" onclick="loadMetrics()">Metrics</button>
                     </div>
                 </div>
                 <div class="input-group input-group-sm mb-3">
@@ -704,9 +701,6 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                     <button class="btn btn-outline-secondary" onclick="previewArtifact()">Preview</button>
                 </div>
                 <div id="artifactsPanel" class="list-group"></div>
-                <div id="metricsPanel" class="list-group small mt-3">
-                    <div class="list-group-item text-muted">Load metrics for a compact dashboard.</div>
-                </div>
             </section>
 
             <section class="border rounded p-3 mb-4">
@@ -714,7 +708,6 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                     <h2 class="h5 mb-0">BOP Inspect</h2>
                     <div class="d-flex gap-2">
                         <button class="btn btn-sm btn-outline-secondary" onclick="loadBopFrame()">Frame</button>
-                        <button class="btn btn-sm btn-outline-secondary" onclick="loadBopResult()">Result</button>
                     </div>
                 </div>
                 <div class="row g-2 mb-3">
@@ -726,13 +719,9 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                         <label for="bopImageId" class="form-label small mb-1">Image ID</label>
                         <input id="bopImageId" type="number" min="0" class="form-control form-control-sm" value="0">
                     </div>
-                    <div class="col-md-4">
-                        <label for="bopResultPath" class="form-label small mb-1">Result CSV</label>
-                        <input id="bopResultPath" class="form-control form-control-sm" value="results/bop/foundationpose_bop-test.csv">
-                    </div>
                 </div>
                 <div id="bopInspectorPanel" class="border rounded p-3 small text-muted">
-                    Load a BOP frame or result file for compact inspection.
+                    Load a BOP frame for RGB/depth, GT, mask, and provenance inspection.
                 </div>
             </section>
 
@@ -2268,190 +2257,8 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                 .catch(error => output(error.message));
             }
 
-            function loadMetrics() {
-                fetch('/artifacts/metrics?run_root=' + encodeURIComponent(runRootValue()))
-                .then(response => response.json().then(data => ({ok: response.ok, data: data})))
-                .then(result => {
-                    if (!result.ok) {
-                        throw new Error(result.data.output || 'Metric summary failed');
-                    }
-                    renderMetrics(result.data);
-                    output(JSON.stringify(result.data, null, 2));
-                })
-                .catch(error => output(error.message));
-            }
-
-            function clearMetricsPanel() {
-                const panel = document.getElementById('metricsPanel');
-                panel.className = 'list-group small mt-3';
-                panel.innerHTML = '';
-                return panel;
-            }
-
-            function metricText(value) {
-                if (value === undefined || value === null || value === '') {
-                    return '';
-                }
-                const number = Number(value);
-                if (Number.isFinite(number)) {
-                    return number.toFixed(3);
-                }
-                return String(value);
-            }
-
-            function metricBestText(best) {
-                if (!best) {
-                    return 'No AP_p result';
-                }
-                const context = best.context ? ' · ' + best.context : '';
-                return best.method + ' AP_p=' + metricText(best.AP_p) + context;
-            }
-
-            function renderMetricRow(parent, label, values) {
-                const item = document.createElement('div');
-                item.className = 'list-group-item';
-                const title = document.createElement('div');
-                title.className = 'fw-semibold';
-                title.textContent = label;
-                item.appendChild(title);
-                (values || []).filter(Boolean).forEach(value => {
-                    const line = document.createElement('div');
-                    line.className = 'text-muted';
-                    line.textContent = value;
-                    item.appendChild(line);
-                });
-                parent.appendChild(item);
-            }
-
-            function renderDirectMetricTable(parent, rows) {
-                const table = document.createElement('table');
-                table.className = 'table table-sm align-middle mb-0';
-                const header = document.createElement('thead');
-                header.innerHTML = '<tr><th>Method</th><th>AP_p</th><th>Samples</th><th>Artifact</th></tr>';
-                table.appendChild(header);
-                const body = document.createElement('tbody');
-                (rows || []).slice(0, 12).forEach(row => {
-                    const tr = document.createElement('tr');
-                    const allMotions = row.all_motions || {};
-                    [
-                        row.method,
-                        metricText(allMotions.AP_p),
-                        row.sample_count,
-                        row.relative_path,
-                    ].forEach(value => {
-                        const td = document.createElement('td');
-                        td.textContent = value === undefined || value === null ? '' : String(value);
-                        tr.appendChild(td);
-                    });
-                    body.appendChild(tr);
-                });
-                table.appendChild(body);
-                parent.appendChild(table);
-                if (!body.children.length) {
-                    const empty = document.createElement('div');
-                    empty.className = 'text-muted';
-                    empty.textContent = 'No direct metric rows found.';
-                    parent.appendChild(empty);
-                }
-            }
-
-            function renderCombinedMetricGroups(parent, groups) {
-                const visibleGroups = (groups || []).slice(0, 8);
-                visibleGroups.forEach(group => {
-                    renderMetricRow(parent, group.context || '(combined result)', [
-                        'Methods: ' + (group.methods || []).join(', '),
-                        'Best: ' + metricBestText(group.best_by_AP_p),
-                        group.relative_path,
-                    ]);
-                });
-                if (!visibleGroups.length) {
-                    renderMetricRow(parent, 'Combined groups', ['No combined metric groups found.']);
-                }
-            }
-
-            function bopScoreBestText(best) {
-                if (!best) {
-                    return 'No BOP19 average recall';
-                }
-                return (best.result_filename || 'BOP result')
-                    + ' AR=' + metricText(best.bop19_average_recall);
-            }
-
-            function renderBopScoreTable(parent, rows) {
-                const table = document.createElement('table');
-                table.className = 'table table-sm align-middle mb-0';
-                const header = document.createElement('thead');
-                header.innerHTML = '<tr><th>Result</th><th>AR</th><th>Metrics</th><th>Artifact</th></tr>';
-                table.appendChild(header);
-                const body = document.createElement('tbody');
-                (rows || []).slice(0, 12).forEach(row => {
-                    const tr = document.createElement('tr');
-                    const metrics = row.metrics || {};
-                    [
-                        row.result_filename,
-                        metricText(metrics.bop19_average_recall),
-                        row.score_metric_count,
-                        row.relative_path,
-                    ].forEach(value => {
-                        const td = document.createElement('td');
-                        td.textContent = value === undefined || value === null ? '' : String(value);
-                        tr.appendChild(td);
-                    });
-                    body.appendChild(tr);
-                });
-                table.appendChild(body);
-                parent.appendChild(table);
-                if (!body.children.length) {
-                    const empty = document.createElement('div');
-                    empty.className = 'text-muted';
-                    empty.textContent = 'No BOP Toolkit score rows found.';
-                    parent.appendChild(empty);
-                }
-            }
-
-            function renderMetrics(detail) {
-                const panel = clearMetricsPanel();
-                renderMetricRow(panel, 'Summary', [
-                    'Artifacts: ' + detail.metric_artifact_count,
-                    'Methods: ' + detail.method_count + ' (' + (detail.methods || []).join(', ') + ')',
-                    'Direct rows: ' + detail.direct_method_count,
-                    'Combined groups: ' + detail.combined_group_count,
-                    'Best: ' + metricBestText(detail.best_by_AP_p),
-                    'BOP score rows: ' + (detail.bop_score_count || 0),
-                    'Best BOP19 AR: ' + bopScoreBestText(detail.best_bop19_average_recall),
-                ]);
-
-                const directItem = document.createElement('div');
-                directItem.className = 'list-group-item';
-                const directTitle = document.createElement('div');
-                directTitle.className = 'fw-semibold mb-2';
-                directTitle.textContent = 'Direct Methods';
-                directItem.appendChild(directTitle);
-                renderDirectMetricTable(directItem, detail.direct_methods);
-                panel.appendChild(directItem);
-
-                const groupTitle = document.createElement('div');
-                groupTitle.className = 'list-group-item fw-semibold';
-                groupTitle.textContent = 'Combined Groups';
-                panel.appendChild(groupTitle);
-                renderCombinedMetricGroups(panel, detail.combined_groups);
-
-                const bopItem = document.createElement('div');
-                bopItem.className = 'list-group-item';
-                const bopTitle = document.createElement('div');
-                bopTitle.className = 'fw-semibold mb-2';
-                bopTitle.textContent = 'BOP Toolkit Scores';
-                bopItem.appendChild(bopTitle);
-                renderBopScoreTable(bopItem, detail.bop_scores);
-                panel.appendChild(bopItem);
-            }
-
             function bopScenePathValue() {
                 return document.getElementById('bopScenePath').value.trim();
-            }
-
-            function bopResultPathValue() {
-                return document.getElementById('bopResultPath').value.trim();
             }
 
             function artifactFileUrl(path) {
@@ -2462,17 +2269,12 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
             }
 
             function bopFrameOverlayUrl() {
-                const resultPath = bopResultPathValue();
-                let url = '/artifacts/bop-frame-overlay?run_root='
+                return '/artifacts/bop-frame-overlay?run_root='
                     + encodeURIComponent(runRootValue())
                     + '&path='
                     + encodeURIComponent(bopScenePathValue())
                     + '&image_id='
                     + encodeURIComponent(document.getElementById('bopImageId').value);
-                if (resultPath) {
-                    url += '&result_path=' + encodeURIComponent(resultPath);
-                }
-                return url;
             }
 
             function clearBopInspector() {
@@ -2595,35 +2397,6 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                 parent.appendChild(table);
             }
 
-            function renderPoseRows(parent, rows) {
-                const table = document.createElement('table');
-                table.className = 'table table-sm align-middle mb-0';
-                const header = document.createElement('thead');
-                header.innerHTML = '<tr><th>Scene</th><th>Image</th><th>Obj</th><th>Score</th><th>t</th><th>Time</th></tr>';
-                table.appendChild(header);
-                const body = document.createElement('tbody');
-                (rows || []).slice(0, 20).forEach(row => {
-                    const tr = document.createElement('tr');
-                    const translation = Array.isArray(row.t)
-                        ? row.t.map(value => Number(value).toFixed(2)).join(', ')
-                        : '';
-                    [row.scene_id, row.im_id, row.obj_id, row.score, translation, row.time].forEach(value => {
-                        const td = document.createElement('td');
-                        td.textContent = value === undefined || value === null ? '' : String(value);
-                        tr.appendChild(td);
-                    });
-                    body.appendChild(tr);
-                });
-                table.appendChild(body);
-                parent.appendChild(table);
-                if (!body.children.length) {
-                    const empty = document.createElement('div');
-                    empty.className = 'text-muted';
-                    empty.textContent = 'No pose rows in this view.';
-                    parent.appendChild(empty);
-                }
-            }
-
             function renderBopFrame(detail) {
                 const panel = clearBopInspector();
                 const row = document.createElement('div');
@@ -2668,46 +2441,20 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                     appendTextLine(infoColumn, 'Camera K', compactJson(detail.camera.cam_K));
                 }
                 renderGtRows(infoColumn, detail.gt, detail.gt_info);
-                const result = detail.result;
-                if (result) {
-                    const heading = document.createElement('div');
-                    heading.className = 'fw-semibold mt-3 mb-1';
-                    heading.textContent = 'Matching pose rows: ' + result.matching_row_count + ' of ' + result.row_count;
-                    infoColumn.appendChild(heading);
-                    renderPoseRows(infoColumn, result.rows);
-                }
 
                 row.appendChild(imageColumn);
                 row.appendChild(infoColumn);
                 panel.appendChild(row);
             }
 
-            function renderBopResult(detail) {
-                const panel = clearBopInspector();
-                const summary = document.createElement('div');
-                summary.className = 'mb-3';
-                appendTextLine(summary, 'Result', detail.relative_path);
-                appendTextLine(summary, 'Method', detail.metadata && detail.metadata.method);
-                appendTextLine(summary, 'Dataset', detail.metadata && detail.metadata.dataset);
-                appendTextLine(summary, 'Split', detail.metadata && detail.metadata.split);
-                appendTextLine(summary, 'Rows', detail.row_count);
-                appendTextLine(summary, 'Scenes', detail.scene_count);
-                panel.appendChild(summary);
-                renderPoseRows(panel, detail.rows);
-            }
-
             function loadBopFrame() {
                 const scenePath = bopScenePathValue();
-                const resultPath = bopResultPathValue();
-                let url = '/artifacts/bop-frame?run_root='
+                const url = '/artifacts/bop-frame?run_root='
                     + encodeURIComponent(runRootValue())
                     + '&path='
                     + encodeURIComponent(scenePath)
                     + '&image_id='
                     + encodeURIComponent(document.getElementById('bopImageId').value);
-                if (resultPath) {
-                    url += '&result_path=' + encodeURIComponent(resultPath);
-                }
                 fetch(url)
                 .then(response => response.json().then(data => ({ok: response.ok, data: data})))
                 .then(result => {
@@ -2715,20 +2462,6 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                         throw new Error(result.data.output || 'BOP frame load failed');
                     }
                     renderBopFrame(result.data);
-                    output(JSON.stringify(result.data, null, 2));
-                })
-                .catch(error => output(error.message));
-            }
-
-            function loadBopResult() {
-                const resultPath = bopResultPathValue();
-                fetch('/artifacts/bop-result?run_root=' + encodeURIComponent(runRootValue()) + '&path=' + encodeURIComponent(resultPath))
-                .then(response => response.json().then(data => ({ok: response.ok, data: data})))
-                .then(result => {
-                    if (!result.ok) {
-                        throw new Error(result.data.output || 'BOP result load failed');
-                    }
-                    renderBopResult(result.data);
                     output(JSON.stringify(result.data, null, 2));
                 })
                 .catch(error => output(error.message));
@@ -3008,23 +2741,6 @@ def artifact_file():
     return send_file(path, conditional=True, as_attachment=download)
 
 
-@app.route('/artifacts/metrics', methods=['GET'])
-def artifact_metrics():
-    run_root = request.args.get('run_root')
-    if not run_root:
-        return jsonify({'output': 'Missing run_root'}), 400
-    if not Path(run_root).exists():
-        return jsonify({'output': f'Run root not found: {run_root}'}), 404
-    try:
-        group_limit = int(request.args.get('group_limit', '200'))
-    except ValueError:
-        return jsonify({'output': 'group_limit must be an integer'}), 400
-    try:
-        return jsonify(metric_dashboard_summary(run_root, group_limit=group_limit))
-    except ValueError as exc:
-        return jsonify({'output': str(exc)}), 400
-
-
 @app.route('/artifacts/bop-scene', methods=['GET'])
 def artifact_bop_scene():
     run_root = request.args.get('run_root')
@@ -3041,26 +2757,6 @@ def artifact_bop_scene():
         return jsonify(
             bop_scene_detail(run_root, scene_path, frame_limit=frame_limit)
         )
-    except FileNotFoundError as exc:
-        return jsonify({'output': str(exc)}), 404
-    except (ArtifactPathError, ValueError) as exc:
-        return jsonify({'output': str(exc)}), 400
-
-
-@app.route('/artifacts/bop-result', methods=['GET'])
-def artifact_bop_result():
-    run_root = request.args.get('run_root')
-    result_path = request.args.get('path')
-    if not run_root or not result_path:
-        return jsonify({'output': 'Missing run_root or path'}), 400
-    if not Path(run_root).exists():
-        return jsonify({'output': f'Run root not found: {run_root}'}), 404
-    try:
-        row_limit = int(request.args.get('row_limit', '500'))
-    except ValueError:
-        return jsonify({'output': 'row_limit must be an integer'}), 400
-    try:
-        return jsonify(bop_result_detail(run_root, result_path, row_limit=row_limit))
     except FileNotFoundError as exc:
         return jsonify({'output': str(exc)}), 404
     except (ArtifactPathError, ValueError) as exc:
@@ -3086,7 +2782,6 @@ def artifact_bop_frame():
                 run_root,
                 scene_path,
                 image_id=image_id,
-                result_path=request.args.get('result_path'),
                 row_limit=row_limit,
             )
         )
@@ -3114,14 +2809,9 @@ def artifact_bop_frame_overlay():
             run_root,
             scene_path,
             image_id=image_id,
-            result_path=request.args.get('result_path'),
             row_limit=row_limit,
             include_masks=not _truthy(request.args.get('no_masks'), default=False),
             include_gt=not _truthy(request.args.get('no_gt'), default=False),
-            include_results=not _truthy(
-                request.args.get('no_results'),
-                default=False,
-            ),
         )
     except FileNotFoundError as exc:
         return jsonify({'output': str(exc)}), 404

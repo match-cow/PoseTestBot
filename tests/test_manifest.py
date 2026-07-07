@@ -4,12 +4,9 @@ from pathlib import Path
 
 from posetestbot.config import robot_profile
 from posetestbot.io.artifacts import (
-    ACCURACY_ARUCO_HRC_HUB,
-    ACCURACY_HRC_HUB,
-    ALL_RESULTS_JSON,
     ARUCO_COVERAGE_REPORT,
-    BOP_EVALUATION_PLAN,
-    BOP_RESULT_EXPORT_MANIFEST,
+    BOP_EXPORT_MANIFEST,
+    BOP_TARGETS_BOP19,
     CAPTURE_EXECUTION_LOGS_DIR,
     CAPTURE_EXECUTION_PLAN,
     CAPTURE_EXECUTION_REPORT,
@@ -21,9 +18,6 @@ from posetestbot.io.artifacts import (
     DATASET_MANIFEST,
     DEPTH_DIR,
     FRAME_METADATA_JSONL,
-    METRIC_REPORT_CSV,
-    METRIC_REPORT_JSON,
-    METRIC_REPORT_XLSX,
     PIPELINE_SEQUENCE_PLAN,
     RAW_ROBOT_EE_POSES,
     RGB_DIR,
@@ -51,8 +45,8 @@ def test_artifact_names_are_stable() -> None:
     assert RAW_ROBOT_EE_POSES == "raw_robot_ee_poses.json"
     assert ARUCO_COVERAGE_REPORT == "aruco_coverage_report.json"
     assert FRAME_METADATA_JSONL == "frame_metadata.jsonl"
-    assert BOP_EVALUATION_PLAN == "bop_evaluation_plan.json"
-    assert BOP_RESULT_EXPORT_MANIFEST == "bop_result_export_manifest.json"
+    assert BOP_EXPORT_MANIFEST == "bop_export_manifest.json"
+    assert BOP_TARGETS_BOP19 == "test_targets_bop19.json"
     assert CAPTURE_EXECUTION_PLAN == "capture_execution_plan.json"
     assert CAPTURE_EXECUTION_REPORT == "capture_execution_report.json"
     assert CAPTURE_EXECUTION_LOGS_DIR == "capture_execution_logs"
@@ -66,12 +60,6 @@ def test_artifact_names_are_stable() -> None:
     assert CALIBRATION_PREFLIGHT_REPORT == "calibration_preflight_report.json"
     assert SYNC_QUALITY_REPORT == "sync_quality_report.json"
     assert PIPELINE_SEQUENCE_PLAN == "pipeline_sequence_plan.json"
-    assert ACCURACY_HRC_HUB == "accuracy_HRC-Hub.json"
-    assert ACCURACY_ARUCO_HRC_HUB == "accuracy_ArUco_HRC-Hub.json"
-    assert ALL_RESULTS_JSON == "all_results.json"
-    assert METRIC_REPORT_JSON == "metric_report.json"
-    assert METRIC_REPORT_CSV == "metric_methods.csv"
-    assert METRIC_REPORT_XLSX == "metric_report.xlsx"
 
 
 def test_sensor_type_from_legacy_folder_names() -> None:

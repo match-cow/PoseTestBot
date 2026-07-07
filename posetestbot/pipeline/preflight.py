@@ -24,10 +24,6 @@ from posetestbot.sensors.status import collect_sensor_status
 SCHEMA_VERSION = "run_preflight.v1"
 STAGE_RUNTIME_REQUIREMENTS = {
     "blenderproc_render": ("blenderproc",),
-    "foundationpose": ("foundationpose",),
-    "megapose": ("megapose",),
-    "sam6d": ("sam6d",),
-    "bop_evaluation": ("bop_toolkit",),
 }
 
 
@@ -363,8 +359,14 @@ def build_run_preflight(
         )
 
     if runtimes is not None:
+        requirements = _runtime_requirements(plan, runtimes)
+        missing_requirements = [
+            requirement
+            for requirement in requirements
+            if not requirement["available"]
+        ]
         runtime_status = "ok" if runtimes["all_available"] else "warning"
-        if not plan_only and not runtimes["all_available"]:
+        if missing_requirements and not plan_only:
             runtime_status = "error"
         checks.append(
             _check(
@@ -373,7 +375,7 @@ def build_run_preflight(
                 (
                     f"{runtimes['available_count']} of {runtimes['runtime_count']} external runtime(s) available."
                     + (
-                        " Dry-run planning can still proceed."
+                        " Only selected non-dry-run stage requirements can block queueing."
                         if plan_only and runtime_status == "warning"
                         else ""
                     )
@@ -383,15 +385,15 @@ def build_run_preflight(
                     "runtime_count": runtimes["runtime_count"],
                     "all_available": runtimes["all_available"],
                     "plan_only": plan_only,
+                    "missing_required_runtime_ids": sorted(
+                        {
+                            str(requirement["runtime_id"])
+                            for requirement in missing_requirements
+                        }
+                    ),
                 },
             )
         )
-        requirements = _runtime_requirements(plan, runtimes)
-        missing_requirements = [
-            requirement
-            for requirement in requirements
-            if not requirement["available"]
-        ]
         if requirements:
             if missing_requirements:
                 requirements_status = "warning" if plan_only else "error"

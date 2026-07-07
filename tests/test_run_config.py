@@ -218,10 +218,11 @@ def test_create_run_config_cli_lists_sequence_choices() -> None:
         capture_output=True,
     )
 
-    assert "foundationpose_runtime_to_bop_eval" in result.stdout
-    assert "megapose_runtime_to_bop_eval" in result.stdout
+    assert "capture_to_bop_dataset_dry_run" in result.stdout
+    assert "fake_capture_to_bop_dataset_dry_run" in result.stdout
     assert "real_full_capture_validation" in result.stdout
-    assert "sam6d_runtime_to_bop_eval" in result.stdout
+    assert "foundationpose_runtime_to_bop_eval" not in result.stdout
+    assert "sam6d_runtime_to_bop_eval" not in result.stdout
 
 
 def test_create_run_config_cli_rejects_unknown_sequence(tmp_path: Path) -> None:

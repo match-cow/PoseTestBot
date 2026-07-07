@@ -25,7 +25,7 @@ SCHEMA_VERSION = "frame_metadata.v1"
 
 
 def ensure_legacy_rgbd_folders(output_path: str | Path) -> Path:
-    """Create the legacy capture folder shape used by downstream scripts."""
+    """Create the legacy capture folder shape used by later acquisition stages."""
 
     output = Path(output_path)
     (output / RGB_DIR).mkdir(parents=True, exist_ok=True)
@@ -64,7 +64,7 @@ def write_legacy_camera_sidecars(
     *,
     include_distortion_in_cam_k: bool = False,
 ) -> dict[str, Path]:
-    """Write legacy camera sidecars shared by current pose-estimator wrappers."""
+    """Write legacy camera sidecars shared by calibration and BOP export stages."""
 
     output = Path(output_path)
     output.mkdir(parents=True, exist_ok=True)

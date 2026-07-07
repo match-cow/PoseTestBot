@@ -254,7 +254,7 @@ def build_aruco_coverage_report(
                     if sensor_status == "ok"
                     else (
                         f"{sensor_name} has {valid_pose_count}/{frame_count} valid "
-                        "ArUco pose frame(s); inspect marker visibility before downstream calibration."
+                        "ArUco pose frame(s); inspect marker visibility before calibration extraction."
                     )
                 ),
                 details={

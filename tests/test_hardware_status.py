@@ -73,10 +73,10 @@ def fake_runtime_status() -> dict:
                 "checks": [],
             },
             {
-                "runtime_id": "foundationpose",
-                "display_name": "FoundationPose",
-                "category": "estimator",
-                "required_for": "pose estimation",
+                "runtime_id": "zed_sdk_python",
+                "display_name": "Stereolabs ZED SDK Python",
+                "category": "camera_sdk",
+                "required_for": "ZED 2i capture",
                 "available": False,
                 "checks": [],
             },
@@ -100,7 +100,7 @@ def test_hardware_status_report_combines_robot_sensor_runtime_status(
     assert checks["robot_profile"]["status"] == "ok"
     assert checks["sensor_status"]["status"] == "warning"
     assert checks["sensor:oak_d_pro"]["status"] == "warning"
-    assert checks["runtime:foundationpose"]["status"] == "warning"
+    assert checks["runtime:zed_sdk_python"]["status"] == "warning"
     assert report["sensor_status"]["total_connected"] == 4
 
 

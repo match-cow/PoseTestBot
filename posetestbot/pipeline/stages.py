@@ -251,12 +251,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             PipelineParameter(
                 name="gate",
                 flag="--gate",
-                default="rewrite_fake_end_to_end.v1",
+                default="rewrite_fake_acquisition_to_bop.v1",
                 choices=(
-                    "rewrite_fake_end_to_end.v1",
+                    "rewrite_fake_acquisition_to_bop.v1",
                     "rewrite_full_capture.v1",
-                    "rewrite_foundationpose_runtime.v1",
                     "rewrite_calibration_validation.v1",
+                    "rewrite_bop_export_readiness.v1",
                 ),
             ),
             PipelineParameter(
@@ -1090,89 +1090,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             ),
         ),
     ),
-    "foundationpose": PipelineStageSpec(
-        id="foundationpose",
-        label="FoundationPose",
-        script="scripts/run_foundationpose_stage.py",
-        description=(
-            "Plan or run FoundationPose on synchronized sensor folders through "
-            "the legacy Docker wrapper."
-        ),
-        resources=("estimator", "disk_io"),
-        parameters=(
-            PipelineParameter(name="input_folder", flag="--input-folder", kind="path"),
-            PipelineParameter(
-                name="foundationpose_folder",
-                flag="--foundationpose-folder",
-                kind="path",
-            ),
-            PipelineParameter(name="no_tracking", flag="--no-tracking", kind="bool"),
-            PipelineParameter(name="est_refine_iter", flag="--est-refine-iter", kind="int"),
-            PipelineParameter(
-                name="track_refine_iter",
-                flag="--track-refine-iter",
-                kind="int",
-            ),
-            PipelineParameter(name="object_id", flag="--object-id", kind="int"),
-            PipelineParameter(name="run_level", flag="--run-level", kind="bool"),
-            PipelineParameter(
-                name="dry_run",
-                flag="--dry-run",
-                kind="bool",
-                default=True,
-                help="Write a FoundationPose plan without starting Docker.",
-            ),
-        ),
-    ),
-    "megapose": PipelineStageSpec(
-        id="megapose",
-        label="MegaPose",
-        script="scripts/run_megapose_stage.py",
-        description=(
-            "Plan or run MegaPose on synchronized sensor folders through a "
-            "configured legacy wrapper."
-        ),
-        resources=("estimator", "disk_io"),
-        parameters=(
-            PipelineParameter(name="input_folder", flag="--input-folder", kind="path"),
-            PipelineParameter(name="wrapper_script", flag="--wrapper-script", kind="path"),
-            PipelineParameter(name="model", flag="--model"),
-            PipelineParameter(name="roi_scale", flag="--roi-scale", kind="float"),
-            PipelineParameter(name="object_id", flag="--object-id", kind="int"),
-            PipelineParameter(name="result_id", flag="--result-id"),
-            PipelineParameter(
-                name="dry_run",
-                flag="--dry-run",
-                kind="bool",
-                default=True,
-                help="Write a MegaPose plan without starting the wrapper.",
-            ),
-        ),
-    ),
-    "sam6d": PipelineStageSpec(
-        id="sam6d",
-        label="SAM6D",
-        script="scripts/run_sam6d_stage.py",
-        description=(
-            "Plan or run SAM6D on synchronized sensor folders through a "
-            "configured legacy wrapper."
-        ),
-        resources=("estimator", "disk_io"),
-        parameters=(
-            PipelineParameter(name="input_folder", flag="--input-folder", kind="path"),
-            PipelineParameter(name="wrapper_script", flag="--wrapper-script", kind="path"),
-            PipelineParameter(name="segmentor_model", flag="--segmentor-model"),
-            PipelineParameter(name="object_id", flag="--object-id", kind="int"),
-            PipelineParameter(name="result_id", flag="--result-id"),
-            PipelineParameter(
-                name="dry_run",
-                flag="--dry-run",
-                kind="bool",
-                default=True,
-                help="Write a SAM6D plan without starting the wrapper.",
-            ),
-        ),
-    ),
     "bop_export": PipelineStageSpec(
         id="bop_export",
         label="BOP Dataset Export",
@@ -1214,161 +1131,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 kind="bool",
                 default=False,
             ),
-        ),
-    ),
-    "bop_result_export": PipelineStageSpec(
-        id="bop_result_export",
-        label="BOP Result Export",
-        script="scripts/run_bop_result_export_stage.py",
-        description="Convert estimator outputs into BOP19 result CSV files.",
-        resources=("disk_io",),
-        parameters=(
-            PipelineParameter(
-                name="source",
-                flag="--source",
-                choices=("foundationpose", "aruco", "megapose", "sam6d"),
-            ),
-            PipelineParameter(name="input_folder", flag="--input-folder", kind="path"),
-            PipelineParameter(
-                name="foundationpose_output",
-                flag="--foundationpose-output",
-                kind="path",
-                multiple=True,
-            ),
-            PipelineParameter(
-                name="aruco_pose_file",
-                flag="--aruco-pose-file",
-                kind="path",
-                multiple=True,
-            ),
-            PipelineParameter(
-                name="megapose_output",
-                flag="--megapose-output",
-                kind="path",
-                multiple=True,
-            ),
-            PipelineParameter(
-                name="sam6d_output",
-                flag="--sam6d-output",
-                kind="path",
-                multiple=True,
-            ),
-            PipelineParameter(
-                name="aruco_object_name",
-                flag="--aruco-object-name",
-            ),
-            PipelineParameter(
-                name="min_marker_count",
-                flag="--min-marker-count",
-                kind="int",
-            ),
-            PipelineParameter(name="bop_root", flag="--bop-root", kind="path"),
-            PipelineParameter(name="output_folder", flag="--output-folder", kind="path"),
-            PipelineParameter(name="dataset_name", flag="--dataset-name"),
-            PipelineParameter(
-                name="default_score",
-                flag="--default-score",
-                kind="float",
-            ),
-            PipelineParameter(
-                name="default_time",
-                flag="--default-time",
-                kind="float",
-            ),
-            PipelineParameter(
-                name="translation_scale_to_mm",
-                flag="--translation-scale-to-mm",
-                kind="float",
-            ),
-        ),
-    ),
-    "synthetic_bop_results": PipelineStageSpec(
-        id="synthetic_bop_results",
-        label="Synthetic BOP Results",
-        script="scripts/create_synthetic_bop_results.py",
-        description=(
-            "Write deterministic BOP19 result CSV rows from the BOP export "
-            "manifest for hardware-free rewrite validation."
-        ),
-        resources=("disk_io",),
-        parameters=(
-            PipelineParameter(name="bop_root", flag="--bop-root", kind="path"),
-            PipelineParameter(name="output_folder", flag="--output-folder", kind="path"),
-            PipelineParameter(name="dataset_name", flag="--dataset-name"),
-            PipelineParameter(name="method", flag="--method", default="synthetic"),
-            PipelineParameter(name="object_name", flag="--object-name"),
-            PipelineParameter(name="score", flag="--score", kind="float", default=1.0),
-            PipelineParameter(name="time", flag="--time", kind="float", default=-1.0),
-            PipelineParameter(name="json", flag="--json", kind="bool", default=False),
-        ),
-    ),
-    "bop_evaluation": PipelineStageSpec(
-        id="bop_evaluation",
-        label="BOP Toolkit Evaluation",
-        script="scripts/run_bop_evaluation_stage.py",
-        description=(
-            "Validate a BOP19 result CSV and plan or run BOP Toolkit evaluation."
-        ),
-        resources=("evaluation",),
-        parameters=(
-            PipelineParameter(
-                name="result_file",
-                flag="--result-file",
-                kind="path",
-                required=True,
-            ),
-            PipelineParameter(name="bop_root", flag="--bop-root", kind="path"),
-            PipelineParameter(name="bop_path", flag="--bop-path", kind="path"),
-            PipelineParameter(name="eval_path", flag="--eval-path", kind="path"),
-            PipelineParameter(name="targets_filename", flag="--targets-filename"),
-            PipelineParameter(
-                name="bop_toolkit_root",
-                flag="--bop-toolkit-root",
-                kind="path",
-            ),
-            PipelineParameter(name="eval_script", flag="--eval-script", kind="path"),
-            PipelineParameter(
-                name="python_executable",
-                flag="--python-executable",
-                kind="path",
-            ),
-            PipelineParameter(name="renderer_type", flag="--renderer-type"),
-            PipelineParameter(name="num_workers", flag="--num-workers", kind="int"),
-            PipelineParameter(name="use_gpu", flag="--use-gpu", kind="bool"),
-            PipelineParameter(name="device", flag="--device"),
-            PipelineParameter(
-                name="cleanup_eval",
-                flag="--cleanup-eval",
-                kind="bool",
-                default=False,
-            ),
-            PipelineParameter(
-                name="dry_run",
-                flag="--dry-run",
-                kind="bool",
-                default=True,
-                help="Write the evaluation plan without executing BOP Toolkit.",
-            ),
-        ),
-    ),
-    "metric_report_export": PipelineStageSpec(
-        id="metric_report_export",
-        label="Metric Report Export",
-        script="scripts/run_metric_report_export_stage.py",
-        description=(
-            "Export discovered legacy metric artifacts as JSON, CSV, and XLSX "
-            "reports under results/metrics."
-        ),
-        resources=("disk_io",),
-        parameters=(
-            PipelineParameter(name="output_folder", flag="--output-folder", kind="path"),
-            PipelineParameter(
-                name="group_limit",
-                flag="--group-limit",
-                kind="int",
-                default=200,
-            ),
-            PipelineParameter(name="json", flag="--json", kind="bool", default=False),
         ),
     ),
 }

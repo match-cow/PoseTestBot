@@ -13,8 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Check lightweight readiness for external PoseTestBot runtimes such "
-            "as BlenderProc, FoundationPose, MegaPose, SAM6D, BOP Toolkit, "
-            "and the ZED SDK."
+            "as BlenderProc for optional GT rendering and the ZED SDK."
         )
     )
     parser.add_argument(

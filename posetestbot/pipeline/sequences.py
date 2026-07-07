@@ -746,14 +746,13 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
             ),
         ),
     ),
-    "capture_to_bop_foundationpose_dry_run": PipelineSequenceSpec(
-        id="capture_to_bop_foundationpose_dry_run",
-        label="Captured Run To BOP And FoundationPose Dry-Run",
+    "capture_to_bop_dataset_dry_run": PipelineSequenceSpec(
+        id="capture_to_bop_dataset_dry_run",
+        label="Captured Run To BOP Dataset Dry-Run",
         description=(
             "For an existing captured run folder, run non-destructive "
             "synchronization, prepare BlenderProc inputs, write a BlenderProc "
-            "render plan, export the BOP dataset shape, then write a "
-            "FoundationPose execution plan without starting Docker."
+            "render plan, then export the BOP dataset shape."
         ),
         steps=(
             PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
@@ -778,22 +777,16 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 stage_id="bop_export",
                 depends_on=("blenderproc_render",),
             ),
-            PipelineSequenceStepSpec(
-                id="foundationpose",
-                stage_id="foundationpose",
-                depends_on=("bop_export",),
-                options={"dry_run": True},
-            ),
         ),
     ),
-    "fake_capture_to_bop_foundationpose_dry_run": PipelineSequenceSpec(
-        id="fake_capture_to_bop_foundationpose_dry_run",
-        label="Fake Capture To BOP And FoundationPose Dry-Run",
+    "fake_capture_to_bop_dataset_dry_run": PipelineSequenceSpec(
+        id="fake_capture_to_bop_dataset_dry_run",
+        label="Fake Capture To BOP Dataset Dry-Run",
         description=(
             "Run the safe pose-only fake capture path, synthesize one RGB-D "
             "sensor folder from the raw robot poses, then exercise "
             "non-destructive sync, BlenderProc preparation/render planning, BOP "
-            "export, and FoundationPose planning without camera hardware or Docker."
+            "export without camera hardware or external pose-estimation runtimes."
         ),
         steps=(
             PipelineSequenceStepSpec(id="capture_plan", stage_id="capture_plan"),
@@ -846,304 +839,6 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 id="bop_export",
                 stage_id="bop_export",
                 depends_on=("blenderproc_render",),
-            ),
-            PipelineSequenceStepSpec(
-                id="foundationpose",
-                stage_id="foundationpose",
-                depends_on=("bop_export",),
-                options={"dry_run": True},
-            ),
-        ),
-    ),
-    "fake_capture_to_bop_eval_dry_run": PipelineSequenceSpec(
-        id="fake_capture_to_bop_eval_dry_run",
-        label="Fake Capture To BOP Evaluation Dry-Run",
-        description=(
-            "Run the safe fake capture path, synthesize RGB-D frames, sync and "
-            "export BOP, write synthetic BOP19 result rows, then validate them "
-            "through the dry-run BOP Toolkit bridge."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="capture_plan", stage_id="capture_plan"),
-            PipelineSequenceStepSpec(
-                id="capture_plan_preflight",
-                stage_id="capture_plan_preflight",
-                depends_on=("capture_plan",),
-                options={"no_sensors": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="capture_execution_plan",
-                stage_id="capture_execution_plan",
-                depends_on=("capture_plan_preflight",),
-                options={"mode": "pose_only_fake"},
-            ),
-            PipelineSequenceStepSpec(
-                id="capture_execution",
-                stage_id="capture_execution",
-                depends_on=("capture_execution_plan",),
-                options={"mode": "pose_only_fake"},
-            ),
-            PipelineSequenceStepSpec(
-                id="synthetic_rgbd_fixture",
-                stage_id="synthetic_rgbd_fixture",
-                depends_on=("capture_execution",),
-                options={"overwrite": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="sync_run",
-                stage_id="sync_run",
-                depends_on=("synthetic_rgbd_fixture",),
-            ),
-            PipelineSequenceStepSpec(
-                id="sync_quality",
-                stage_id="sync_quality",
-                depends_on=("sync_run",),
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_export",
-                stage_id="bop_export",
-                depends_on=("sync_quality",),
-            ),
-            PipelineSequenceStepSpec(
-                id="synthetic_bop_results",
-                stage_id="synthetic_bop_results",
-                depends_on=("bop_export",),
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_evaluation",
-                stage_id="bop_evaluation",
-                depends_on=("synthetic_bop_results",),
-                options={
-                    "result_file": "{run_root}/results/bop/synthetic_bop-test.csv",
-                    "dry_run": True,
-                },
-            ),
-        ),
-    ),
-    "foundationpose_to_bop_eval_dry_run": PipelineSequenceSpec(
-        id="foundationpose_to_bop_eval_dry_run",
-        label="FoundationPose To BOP Evaluation Dry-Run",
-        description=(
-            "Export synchronized run data to BOP, convert FoundationPose outputs "
-            "to BOP19 result CSVs, then write a dry-run BOP Toolkit evaluation "
-            "plan."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
-            PipelineSequenceStepSpec(
-                id="bop_result_export",
-                stage_id="bop_result_export",
-                depends_on=("bop_export",),
-                options={"source": "foundationpose"},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_evaluation",
-                stage_id="bop_evaluation",
-                depends_on=("bop_result_export",),
-                options={
-                    "result_file": (
-                        "{run_root}/results/bop/foundationpose_bop-test.csv"
-                    ),
-                    "dry_run": True,
-                },
-            ),
-        ),
-    ),
-    "foundationpose_runtime_to_bop_eval": PipelineSequenceSpec(
-        id="foundationpose_runtime_to_bop_eval",
-        label="FoundationPose Runtime To BOP Evaluation",
-        description=(
-            "Export synchronized run data to BOP, run FoundationPose through the "
-            "configured runtime wrapper, convert its outputs to BOP19 result "
-            "CSVs, then run BOP Toolkit evaluation."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
-            PipelineSequenceStepSpec(
-                id="foundationpose",
-                stage_id="foundationpose",
-                depends_on=("bop_export",),
-                options={"dry_run": False},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_result_export",
-                stage_id="bop_result_export",
-                depends_on=("foundationpose",),
-                options={"source": "foundationpose"},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_evaluation",
-                stage_id="bop_evaluation",
-                depends_on=("bop_result_export",),
-                options={
-                    "result_file": (
-                        "{run_root}/results/bop/"
-                        "foundationpose_bop-test_est5_track2.csv"
-                    ),
-                    "dry_run": False,
-                },
-            ),
-        ),
-    ),
-    "aruco_to_bop_eval_dry_run": PipelineSequenceSpec(
-        id="aruco_to_bop_eval_dry_run",
-        label="ArUco To BOP Evaluation Dry-Run",
-        description=(
-            "Export synchronized run data to BOP, convert ArUco pose estimates "
-            "to BOP19 result CSVs, then write a dry-run BOP Toolkit evaluation "
-            "plan."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
-            PipelineSequenceStepSpec(
-                id="bop_result_export",
-                stage_id="bop_result_export",
-                depends_on=("bop_export",),
-                options={
-                    "source": "aruco",
-                    "aruco_object_name": "aruco",
-                },
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_evaluation",
-                stage_id="bop_evaluation",
-                depends_on=("bop_result_export",),
-                options={
-                    "result_file": "{run_root}/results/bop/aruco_bop-test.csv",
-                    "dry_run": True,
-                },
-            ),
-        ),
-    ),
-    "megapose_to_bop_eval_dry_run": PipelineSequenceSpec(
-        id="megapose_to_bop_eval_dry_run",
-        label="MegaPose To BOP Evaluation Dry-Run",
-        description=(
-            "Export synchronized run data to BOP, write a dry-run MegaPose "
-            "adapter plan, convert MegaPose outputs to BOP19 result CSVs, then "
-            "write a dry-run BOP Toolkit evaluation plan."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
-            PipelineSequenceStepSpec(
-                id="megapose",
-                stage_id="megapose",
-                depends_on=("bop_export",),
-                options={"dry_run": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_result_export",
-                stage_id="bop_result_export",
-                depends_on=("megapose",),
-                options={"source": "megapose"},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_evaluation",
-                stage_id="bop_evaluation",
-                depends_on=("bop_result_export",),
-                options={
-                    "result_file": "{run_root}/results/bop/megapose_bop-test.csv",
-                    "dry_run": True,
-                },
-            ),
-        ),
-    ),
-    "megapose_runtime_to_bop_eval": PipelineSequenceSpec(
-        id="megapose_runtime_to_bop_eval",
-        label="MegaPose Runtime To BOP Evaluation",
-        description=(
-            "Export synchronized run data to BOP, run MegaPose through the "
-            "configured wrapper, convert its outputs to BOP19 result CSVs, then "
-            "run BOP Toolkit evaluation."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
-            PipelineSequenceStepSpec(
-                id="megapose",
-                stage_id="megapose",
-                depends_on=("bop_export",),
-                options={"dry_run": False},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_result_export",
-                stage_id="bop_result_export",
-                depends_on=("megapose",),
-                options={"source": "megapose"},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_evaluation",
-                stage_id="bop_evaluation",
-                depends_on=("bop_result_export",),
-                options={
-                    "result_file": "{run_root}/results/bop/megapose_bop-test.csv",
-                    "dry_run": False,
-                },
-            ),
-        ),
-    ),
-    "sam6d_to_bop_eval_dry_run": PipelineSequenceSpec(
-        id="sam6d_to_bop_eval_dry_run",
-        label="SAM6D To BOP Evaluation Dry-Run",
-        description=(
-            "Export synchronized run data to BOP, write a dry-run SAM6D adapter "
-            "plan, convert SAM6D outputs to BOP19 result CSVs, then write a "
-            "dry-run BOP Toolkit evaluation plan."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
-            PipelineSequenceStepSpec(
-                id="sam6d",
-                stage_id="sam6d",
-                depends_on=("bop_export",),
-                options={"dry_run": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_result_export",
-                stage_id="bop_result_export",
-                depends_on=("sam6d",),
-                options={"source": "sam6d"},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_evaluation",
-                stage_id="bop_evaluation",
-                depends_on=("bop_result_export",),
-                options={
-                    "result_file": "{run_root}/results/bop/sam6d_bop-test.csv",
-                    "dry_run": True,
-                },
-            ),
-        ),
-    ),
-    "sam6d_runtime_to_bop_eval": PipelineSequenceSpec(
-        id="sam6d_runtime_to_bop_eval",
-        label="SAM6D Runtime To BOP Evaluation",
-        description=(
-            "Export synchronized run data to BOP, run SAM6D through the "
-            "configured wrapper, convert its outputs to BOP19 result CSVs, then "
-            "run BOP Toolkit evaluation."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="bop_export", stage_id="bop_export"),
-            PipelineSequenceStepSpec(
-                id="sam6d",
-                stage_id="sam6d",
-                depends_on=("bop_export",),
-                options={"dry_run": False},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_result_export",
-                stage_id="bop_result_export",
-                depends_on=("sam6d",),
-                options={"source": "sam6d"},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_evaluation",
-                stage_id="bop_evaluation",
-                depends_on=("bop_result_export",),
-                options={
-                    "result_file": "{run_root}/results/bop/sam6d_bop-test.csv",
-                    "dry_run": False,
-                },
             ),
         ),
     ),

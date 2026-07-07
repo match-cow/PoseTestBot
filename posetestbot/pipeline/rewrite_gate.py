@@ -8,9 +8,7 @@ from typing import Any, Mapping
 
 from posetestbot.io.artifacts import (
     BOP_DIR,
-    BOP_EVALUATION_REPORT,
     BOP_EXPORT_MANIFEST,
-    BOP_RESULT_EXPORT_MANIFEST,
     CALIBRATION_PROFILES,
     CALIBRATION_VALIDATION_REPORT,
     CAPTURE_EXECUTION_PLAN,
@@ -19,12 +17,9 @@ from posetestbot.io.artifacts import (
     CAPTURE_PLAN_PREFLIGHT_REPORT,
     DEPTH_DIR,
     FRAME_METADATA_JSONL,
-    FOUNDATIONPOSE_PLAN,
     HARDWARE_STATUS_REPORT,
-    METRIC_REPORT_JSON,
-    METRICS_DIR,
+    MODELS_DIR,
     PIPELINE_SEQUENCE_PLAN,
-    RESULTS_DIR,
     REWRITE_GATE_REPORT,
     REWRITE_STATUS_REPORT,
     RGB_DIR,
@@ -32,20 +27,22 @@ from posetestbot.io.artifacts import (
     RUN_PREFLIGHT_REPORT,
     SYNTHETIC_RGBD_REPORT,
     SYNC_QUALITY_REPORT,
+    BOP_TARGETS_BOP19,
 )
 
 
 SCHEMA_VERSION = "rewrite_gate_report.v1"
 STATUS_SCHEMA_VERSION = "rewrite_status_report.v1"
-FAKE_E2E_GATE_ID = "rewrite_fake_end_to_end.v1"
+FAKE_ACQUISITION_TO_BOP_GATE_ID = "rewrite_fake_acquisition_to_bop.v1"
+FAKE_E2E_GATE_ID = FAKE_ACQUISITION_TO_BOP_GATE_ID
 FULL_CAPTURE_GATE_ID = "rewrite_full_capture.v1"
-FOUNDATIONPOSE_RUNTIME_GATE_ID = "rewrite_foundationpose_runtime.v1"
 CALIBRATION_VALIDATION_GATE_ID = "rewrite_calibration_validation.v1"
+BOP_EXPORT_READINESS_GATE_ID = "rewrite_bop_export_readiness.v1"
 GATE_IDS = (
-    FAKE_E2E_GATE_ID,
+    FAKE_ACQUISITION_TO_BOP_GATE_ID,
     FULL_CAPTURE_GATE_ID,
-    FOUNDATIONPOSE_RUNTIME_GATE_ID,
     CALIBRATION_VALIDATION_GATE_ID,
+    BOP_EXPORT_READINESS_GATE_ID,
 )
 
 
@@ -351,12 +348,151 @@ def _artifact_path(root: Path, value: object) -> Path | None:
     return path if path.is_absolute() else root / path
 
 
+def _bop_export_readiness_checks(
+    root: Path,
+    *,
+    require_targets: bool = True,
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+
+    bop_manifest_path = root / BOP_DIR / BOP_EXPORT_MANIFEST
+    check, bop_export = _json_file_check("bop_export", bop_manifest_path)
+    exports: list[Mapping[str, Any]] = []
+    if bop_export is not None:
+        raw_exports = bop_export.get("exports")
+        exports = [
+            export for export in raw_exports if isinstance(export, Mapping)
+        ] if isinstance(raw_exports, list) else []
+        ok = len(exports) > 0
+        check = _check(
+            name="bop_export",
+            path=bop_manifest_path,
+            ok=ok,
+            message=(
+                "bop_export_manifest.json contains exported scene entries."
+                if ok
+                else "bop_export_manifest.json must contain at least one export."
+            ),
+            details={"export_count": len(exports)},
+        )
+    checks.append(check)
+
+    for index, export in enumerate(exports):
+        scene_folder = _artifact_path(root, export.get("scene_folder"))
+        scene_label = str(export.get("sensor_name") or f"scene_{index}")
+        if scene_folder is None:
+            checks.append(
+                _check(
+                    name=f"bop_scene:{scene_label}",
+                    path=root / BOP_DIR,
+                    ok=False,
+                    message="BOP export scene entry is missing scene_folder.",
+                    details={"export_index": index},
+                )
+            )
+            continue
+        rgb_count = _png_count(scene_folder / RGB_DIR)
+        depth_count = _png_count(scene_folder / DEPTH_DIR)
+        ok = (
+            scene_folder.is_dir()
+            and (scene_folder / "scene_camera.json").is_file()
+            and (scene_folder / "scene_gt.json").is_file()
+            and rgb_count > 0
+            and depth_count > 0
+            and rgb_count == depth_count
+        )
+        checks.append(
+            _check(
+                name=f"bop_scene:{scene_label}",
+                path=scene_folder,
+                ok=ok,
+                message=(
+                    f"{scene_label} has scene camera/GT files and RGB-D frames."
+                    if ok
+                    else (
+                        f"{scene_label} must include scene_camera.json, "
+                        "scene_gt.json, and matching rgb/depth PNG counts."
+                    )
+                ),
+                details={
+                    "export_index": index,
+                    "rgb_count": rgb_count,
+                    "depth_count": depth_count,
+                    "has_scene_camera": (scene_folder / "scene_camera.json").is_file(),
+                    "has_scene_gt": (scene_folder / "scene_gt.json").is_file(),
+                },
+            )
+        )
+
+    targets_path = root / BOP_DIR / BOP_TARGETS_BOP19
+    check, targets = _json_file_check("bop_targets", targets_path)
+    if targets is not None:
+        check = _check(
+            name="bop_targets",
+            path=targets_path,
+            ok=False,
+            message="test_targets_bop19.json must contain a JSON list.",
+            details={"target_count": 0},
+        )
+    elif targets_path.is_file():
+        try:
+            target_rows = json.loads(targets_path.read_text())
+        except json.JSONDecodeError as exc:
+            check = _check(
+                name="bop_targets",
+                path=targets_path,
+                ok=False,
+                message=f"test_targets_bop19.json is invalid_json: {exc.msg}.",
+                details={"target_count": 0},
+            )
+        else:
+            target_count = len(target_rows) if isinstance(target_rows, list) else 0
+            ok = isinstance(target_rows, list) and (
+                target_count > 0 or not require_targets
+            )
+            check = _check(
+                name="bop_targets",
+                path=targets_path,
+                ok=ok,
+                message=(
+                    "test_targets_bop19.json contains target rows."
+                    if ok and target_count > 0
+                    else "test_targets_bop19.json exists as an explicit empty target list."
+                    if ok
+                    else "test_targets_bop19.json must contain at least one target row."
+                ),
+                details={"target_count": target_count},
+            )
+    checks.append(check)
+
+    models_info_path = root / BOP_DIR / MODELS_DIR / "models_info.json"
+    check, models_info = _json_file_check("bop_models_info", models_info_path)
+    if models_info is not None:
+        model_count = len(models_info)
+        ok = model_count > 0
+        check = _check(
+            name="bop_models_info",
+            path=models_info_path,
+            ok=ok,
+            message=(
+                "models_info.json contains exported model metadata."
+                if ok
+                else "models_info.json must contain at least one exported model."
+            ),
+            details={"model_count": model_count},
+        )
+    checks.append(check)
+
+    return checks
+
+
 def build_fake_end_to_end_gate_report(run_root: str | Path) -> dict[str, Any]:
     """Report whether the first rewrite proof path is actually satisfied.
 
     This gate is intentionally stricter than sequence planning. A dry-run plan
     is useful, but the gate only passes when the run folder contains evidence
-    from capture, sync, BOP export/result/evaluation, and metric reporting.
+    from fake capture, synthetic RGB-D fixture creation, synchronization, and
+    structural BOP dataset export.
     """
 
     root = Path(run_root)
@@ -461,92 +597,7 @@ def build_fake_end_to_end_gate_report(run_root: str | Path) -> dict[str, Any]:
         )
     checks.append(check)
 
-    bop_manifest_path = root / BOP_DIR / BOP_EXPORT_MANIFEST
-    check, bop_export = _json_file_check("bop_export", bop_manifest_path)
-    if bop_export is not None:
-        exports = bop_export.get("exports")
-        ok = isinstance(exports, list) and len(exports) > 0
-        check = _check(
-            name="bop_export",
-            path=bop_manifest_path,
-            ok=ok,
-            message=(
-                "bop_export_manifest.json contains exported scene entries."
-                if ok
-                else "bop_export_manifest.json must contain at least one export."
-            ),
-            details={"export_count": len(exports) if isinstance(exports, list) else 0},
-        )
-    checks.append(check)
-
-    check, result_export = _json_file_check(
-        "bop_result_export",
-        root / BOP_RESULT_EXPORT_MANIFEST,
-    )
-    if result_export is not None:
-        results = result_export.get("results")
-        row_count = 0
-        if isinstance(results, list):
-            row_count = sum(int(result.get("row_count") or 0) for result in results if isinstance(result, dict))
-        ok = isinstance(results, list) and row_count > 0
-        check = _check(
-            name="bop_result_export",
-            path=root / BOP_RESULT_EXPORT_MANIFEST,
-            ok=ok,
-            message=(
-                "bop_result_export_manifest.json records exported result rows."
-                if ok
-                else "bop_result_export_manifest.json must record at least one result row."
-            ),
-            details={
-                "result_count": len(results) if isinstance(results, list) else 0,
-                "row_count": row_count,
-            },
-        )
-    checks.append(check)
-
-    check, bop_eval = _json_file_check(
-        "bop_evaluation",
-        root / BOP_EVALUATION_REPORT,
-    )
-    if bop_eval is not None:
-        status = bop_eval.get("status")
-        result = bop_eval.get("result")
-        ok = status in {"planned", "succeeded"} and isinstance(result, dict)
-        check = _check(
-            name="bop_evaluation",
-            path=root / BOP_EVALUATION_REPORT,
-            ok=ok,
-            message=(
-                "bop_evaluation_report.json records a planned or completed evaluation."
-                if ok
-                else "bop_evaluation_report.json must be planned or succeeded with result metadata."
-            ),
-            details={"status": status, "dry_run": bop_eval.get("dry_run")},
-        )
-    checks.append(check)
-
-    metric_report_path = root / RESULTS_DIR / METRICS_DIR / METRIC_REPORT_JSON
-    check, metric_report = _json_file_check("metric_report", metric_report_path)
-    if metric_report is not None:
-        rows = metric_report.get("rows")
-        row_count = metric_report.get("row_count")
-        if row_count is None and isinstance(rows, list):
-            row_count = len(rows)
-        dashboard = metric_report.get("dashboard")
-        ok = isinstance(dashboard, dict) and int(row_count or 0) > 0
-        check = _check(
-            name="metric_report",
-            path=metric_report_path,
-            ok=ok,
-            message=(
-                "metric_report.json records exported metric rows."
-                if ok
-                else "metric_report.json must include dashboard data and at least one row."
-            ),
-            details={"row_count": row_count},
-        )
-    checks.append(check)
+    checks.extend(_bop_export_readiness_checks(root, require_targets=False))
 
     return _gate_report(gate_id=FAKE_E2E_GATE_ID, run_root=root, checks=checks)
 
@@ -828,169 +879,6 @@ def build_full_capture_gate_report(run_root: str | Path) -> dict[str, Any]:
     return _gate_report(gate_id=FULL_CAPTURE_GATE_ID, run_root=root, checks=checks)
 
 
-def build_foundationpose_runtime_gate_report(run_root: str | Path) -> dict[str, Any]:
-    """Report whether real FoundationPose plus BOP scoring has been validated."""
-
-    root = Path(run_root)
-    checks: list[dict[str, Any]] = []
-
-    check, plan = _json_file_check("foundationpose_runtime", root / FOUNDATIONPOSE_PLAN)
-    if plan is not None:
-        dry_run = bool(plan.get("dry_run", True))
-        jobs = plan.get("jobs")
-        job_summaries = []
-        output_pose_file_count = 0
-        if isinstance(jobs, list):
-            for job in jobs:
-                if not isinstance(job, dict):
-                    continue
-                output_folder = _artifact_path(root, job.get("expected_output_folder"))
-                pose_count = (
-                    _numeric_pose_file_count(output_folder / "ob_in_cam")
-                    if output_folder is not None
-                    else 0
-                )
-                output_pose_file_count += pose_count
-                job_summaries.append(
-                    {
-                        "sensor_name": job.get("sensor_name"),
-                        "expected_output_folder": (
-                            output_folder.as_posix()
-                            if output_folder is not None
-                            else None
-                        ),
-                        "pose_file_count": pose_count,
-                    }
-                )
-        jobs_ready = bool(job_summaries) and all(
-            int(job["pose_file_count"]) > 0 for job in job_summaries
-        )
-        ok = dry_run is False and jobs_ready
-        check = _check(
-            name="foundationpose_runtime",
-            path=root / FOUNDATIONPOSE_PLAN,
-            ok=ok,
-            message=(
-                "foundationpose_plan.json records non-dry-run outputs."
-                if ok
-                else (
-                    "foundationpose_plan.json must be non-dry-run and each "
-                    "planned job must have ob_in_cam pose files."
-                )
-            ),
-            details={
-                "dry_run": dry_run,
-                "job_count": len(job_summaries),
-                "output_pose_file_count": output_pose_file_count,
-                "jobs": job_summaries,
-            },
-        )
-    checks.append(check)
-
-    check, result_export = _json_file_check(
-        "foundationpose_bop_results",
-        root / BOP_RESULT_EXPORT_MANIFEST,
-    )
-    if result_export is not None:
-        source_type = result_export.get("source_type")
-        results = result_export.get("results")
-        result_summaries = []
-        row_count = 0
-        if isinstance(results, list):
-            for result in results:
-                if not isinstance(result, dict):
-                    continue
-                result_rows = int(result.get("row_count") or 0)
-                row_count += result_rows
-                result_path = _artifact_path(root, result.get("path"))
-                result_summaries.append(
-                    {
-                        "filename": result.get("filename"),
-                        "row_count": result_rows,
-                        "path": (
-                            result_path.as_posix()
-                            if result_path is not None
-                            else None
-                        ),
-                        "exists": bool(result_path and result_path.is_file()),
-                    }
-                )
-        results_ready = bool(result_summaries) and all(
-            result["row_count"] > 0 and result["exists"]
-            for result in result_summaries
-        )
-        ok = source_type == "foundationpose" and results_ready
-        check = _check(
-            name="foundationpose_bop_results",
-            path=root / BOP_RESULT_EXPORT_MANIFEST,
-            ok=ok,
-            message=(
-                "bop_result_export_manifest.json records FoundationPose result rows."
-                if ok
-                else (
-                    "bop_result_export_manifest.json must be source_type="
-                    "foundationpose and reference existing result CSVs with rows."
-                )
-            ),
-            details={
-                "source_type": source_type,
-                "result_count": len(result_summaries),
-                "row_count": row_count,
-                "results": result_summaries,
-            },
-        )
-    checks.append(check)
-
-    check, bop_eval = _json_file_check(
-        "foundationpose_bop_evaluation",
-        root / BOP_EVALUATION_REPORT,
-    )
-    if bop_eval is not None:
-        status = bop_eval.get("status")
-        dry_run = bool(bop_eval.get("dry_run", True))
-        result = bop_eval.get("result")
-        method = result.get("method") if isinstance(result, dict) else None
-        score_summary = bop_eval.get("score_summary")
-        score_metrics = (
-            score_summary.get("metrics", {})
-            if isinstance(score_summary, dict)
-            else {}
-        )
-        score_metric_count = len(score_metrics) if isinstance(score_metrics, dict) else 0
-        ok = (
-            status == "succeeded"
-            and dry_run is False
-            and method == "foundationpose"
-            and score_metric_count > 0
-        )
-        check = _check(
-            name="foundationpose_bop_evaluation",
-            path=root / BOP_EVALUATION_REPORT,
-            ok=ok,
-            message=(
-                "bop_evaluation_report.json records completed FoundationPose scoring."
-                if ok
-                else (
-                    "bop_evaluation_report.json must be a succeeded non-dry-run "
-                    "FoundationPose evaluation with score metrics."
-                )
-            ),
-            details={
-                "status": status,
-                "dry_run": dry_run,
-                "method": method,
-                "score_metric_count": score_metric_count,
-            },
-        )
-    checks.append(check)
-
-    return _gate_report(
-        gate_id=FOUNDATIONPOSE_RUNTIME_GATE_ID,
-        run_root=root,
-        checks=checks,
-    )
-
-
 def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, Any]:
     """Report whether production calibration profiles were validated and promoted."""
 
@@ -1131,15 +1019,27 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
     )
 
 
+def build_bop_export_readiness_gate_report(run_root: str | Path) -> dict[str, Any]:
+    """Report whether a run folder contains a structurally usable BOP dataset."""
+
+    root = Path(run_root)
+    checks = _bop_export_readiness_checks(root)
+    return _gate_report(
+        gate_id=BOP_EXPORT_READINESS_GATE_ID,
+        run_root=root,
+        checks=checks,
+    )
+
+
 def build_gate_report(run_root: str | Path, *, gate_id: str) -> dict[str, Any]:
     if gate_id == FAKE_E2E_GATE_ID:
         return build_fake_end_to_end_gate_report(run_root)
     if gate_id == FULL_CAPTURE_GATE_ID:
         return build_full_capture_gate_report(run_root)
-    if gate_id == FOUNDATIONPOSE_RUNTIME_GATE_ID:
-        return build_foundationpose_runtime_gate_report(run_root)
     if gate_id == CALIBRATION_VALIDATION_GATE_ID:
         return build_calibration_validation_gate_report(run_root)
+    if gate_id == BOP_EXPORT_READINESS_GATE_ID:
+        return build_bop_export_readiness_gate_report(run_root)
     raise ValueError(f"Unknown rewrite gate: {gate_id}")
 
 
@@ -1536,92 +1436,6 @@ def _rewrite_status_next_actions(
         )
         return actions
 
-    if gate_id == FOUNDATIONPOSE_RUNTIME_GATE_ID:
-        if "foundationpose_runtime" in blocker_names:
-            actions.append(
-                _action(
-                    gate_id=gate_id,
-                    label="Run FoundationPose runtime",
-                    command=[
-                        "uv",
-                        "run",
-                        "python",
-                        "scripts/run_foundationpose_stage.py",
-                        run_root,
-                    ],
-                    reason=(
-                        "The runtime gate requires a non-dry-run "
-                        "foundationpose_plan.json and ob_in_cam pose outputs."
-                    ),
-                    blocks_on=["foundationpose_runtime"],
-                )
-            )
-        if "foundationpose_bop_results" in blocker_names:
-            actions.append(
-                _action(
-                    gate_id=gate_id,
-                    label="Export FoundationPose BOP results",
-                    command=[
-                        "uv",
-                        "run",
-                        "python",
-                        "scripts/run_bop_result_export_stage.py",
-                        run_root,
-                        "--source",
-                        "foundationpose",
-                    ],
-                    reason=(
-                        "Convert FoundationPose ob_in_cam outputs into BOP19 "
-                        "result CSV rows."
-                    ),
-                    blocks_on=["foundationpose_bop_results"],
-                )
-            )
-        if "foundationpose_bop_evaluation" in blocker_names:
-            actions.append(
-                _action(
-                    gate_id=gate_id,
-                    label="Run BOP Toolkit evaluation",
-                    command=[
-                        "uv",
-                        "run",
-                        "python",
-                        "scripts/run_bop_evaluation_stage.py",
-                        run_root,
-                        "--result-file",
-                        (
-                            gate_run_root
-                            / RESULTS_DIR
-                            / BOP_DIR
-                            / "foundationpose_bop-test.csv"
-                        ).as_posix(),
-                    ],
-                    reason=(
-                        "The runtime gate needs a succeeded non-dry-run BOP "
-                        "Toolkit report with score metrics."
-                    ),
-                    blocks_on=["foundationpose_bop_evaluation"],
-                )
-            )
-        actions.append(
-            _action(
-                gate_id=gate_id,
-                label="Audit FoundationPose runtime gate",
-                command=[
-                    "uv",
-                    "run",
-                    "python",
-                    "scripts/run_rewrite_gate.py",
-                    run_root,
-                    "--gate",
-                    FOUNDATIONPOSE_RUNTIME_GATE_ID,
-                    "--write",
-                ],
-                reason="Confirm the real runtime and scoring evidence satisfies the gate.",
-            )
-        )
-        return actions
-
     if gate_id == CALIBRATION_VALIDATION_GATE_ID:
         if "calibration_validation" in blocker_names or "calibration_profiles" in blocker_names:
             actions.append(
@@ -1658,6 +1472,68 @@ def _rewrite_status_next_actions(
                     "--write",
                 ],
                 reason="Confirm promoted calibration profile evidence satisfies the gate.",
+            )
+        )
+        return actions
+
+    if gate_id == BOP_EXPORT_READINESS_GATE_ID:
+        if "bop_export" in blocker_names or any(
+            name.startswith("bop_scene:") for name in blocker_names
+        ):
+            actions.append(
+                _action(
+                    gate_id=gate_id,
+                    label="Export BOP dataset",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_bop_export_stage.py",
+                        run_root,
+                        "--overwrite",
+                    ],
+                    reason=(
+                        "The BOP readiness gate requires a structural BOP "
+                        "dataset export with scene RGB/depth, camera, and GT files."
+                    ),
+                    blocks_on=blocker_names,
+                )
+            )
+        if "bop_targets" in blocker_names or "bop_models_info" in blocker_names:
+            actions.append(
+                _action(
+                    gate_id=gate_id,
+                    label="Re-export BOP dataset with models",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_bop_export_stage.py",
+                        run_root,
+                        "--overwrite",
+                    ],
+                    reason=(
+                        "Rebuild BOP targets and model metadata from the object "
+                        "registry used by acquisition exports."
+                    ),
+                    blocks_on=blocker_names,
+                )
+            )
+        actions.append(
+            _action(
+                gate_id=gate_id,
+                label="Audit BOP export readiness gate",
+                command=[
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/run_rewrite_gate.py",
+                    run_root,
+                    "--gate",
+                    BOP_EXPORT_READINESS_GATE_ID,
+                    "--write",
+                ],
+                reason="Confirm the exported BOP dataset satisfies the acquisition gate.",
             )
         )
         return actions

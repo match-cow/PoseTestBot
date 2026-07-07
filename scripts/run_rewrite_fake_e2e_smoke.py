@@ -26,8 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Create a fake run, execute supervised fake capture, synthesize "
-            "RGB-D frames, export BOP, write synthetic BOP results, dry-run BOP "
-            "evaluation, export metrics, then write rewrite_gate_report.json."
+            "RGB-D frames, sync them, export a BOP dataset, then write "
+            "rewrite_gate_report.json."
         )
     )
     parser.add_argument("run_root", help="Run root to create/use for the smoke.")
@@ -84,7 +84,7 @@ def main() -> None:
             "--sensor",
             "realsense:synthetic:static:Synthetic",
             "--sequence",
-            "fake_capture_to_bop_eval_dry_run",
+            "fake_capture_to_bop_dataset_dry_run",
             "--sequence-options-json",
             options_json,
         ],
@@ -121,16 +121,6 @@ def main() -> None:
             run_root.as_posix(),
             "--overwrite",
         ],
-        [*base, "scripts/create_synthetic_bop_results.py", run_root.as_posix()],
-        [
-            *base,
-            "scripts/run_bop_evaluation_stage.py",
-            run_root.as_posix(),
-            "--result-file",
-            (run_root / "results" / "bop" / "synthetic_bop-test.csv").as_posix(),
-            "--dry-run",
-        ],
-        [*base, "scripts/run_metric_report_export_stage.py", run_root.as_posix()],
         [
             *base,
             "scripts/run_rewrite_gate.py",

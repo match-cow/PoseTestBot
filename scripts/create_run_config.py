@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--object-folder",
         default="object_models",
-        help="Object registry folder for downstream preparation/export stages.",
+        help="Object registry folder for preparation and BOP export stages.",
     )
     parser.add_argument(
         "--calibration-profiles",

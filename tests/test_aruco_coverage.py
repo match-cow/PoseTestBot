@@ -105,11 +105,11 @@ def test_aruco_coverage_writes_manifest_and_artifact_summary(tmp_path: Path) -> 
         if record.key == ARUCO_COVERAGE_REPORT and record.source == "known"
     )
     assert coverage.summary["type"] == "aruco_coverage_report"
-    assert coverage.summary["aruco_coverage_ready_for_downstream"] is True
-    assert coverage.summary["aruco_coverage_blocker"] is None
+    assert coverage.summary["ready_for_calibration"] is True
+    assert coverage.summary["blocker"] is None
     assert coverage.summary["sensor_names"] == ["realsense_123"]
     assert coverage.summary["valid_pose_count"] == 1
-    assert "aruco_coverage=ready" in coverage.to_dict()["display_label"]
+    assert "aruco_coverage_report" in coverage.to_dict()["display_label"]
 
 
 def test_aruco_coverage_stage_cli_prints_json(tmp_path: Path) -> None:
@@ -156,7 +156,7 @@ def test_aruco_coverage_pipeline_stage_and_recommendation(tmp_path: Path) -> Non
     recommendation = next(
         item
         for item in recommendations["recommendations"]
-        if item["id"] == "check_aruco_coverage"
+        if item["id"] == "write_aruco_coverage"
     )
     assert recommendation["stage_id"] == "aruco_coverage"
     assert recommendation["expected_artifacts"] == [ARUCO_COVERAGE_REPORT]
