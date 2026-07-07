@@ -253,6 +253,37 @@ def test_pipeline_stage_builds_capture_execution_command(
     assert job.parameters["options"]["timeout_s"] == 5.0
 
 
+def test_pipeline_stage_builds_realsense_capture_smoke_command(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+
+    job = build_pipeline_job(
+        stage_id="realsense_capture_smoke",
+        run_root=run_root,
+        options={"max_frames": "3", "warmup_frames": "1"},
+    )
+
+    assert job.command == [
+        "uv",
+        "run",
+        "python",
+        "scripts/run_realsense_capture_smoke.py",
+        run_root.as_posix(),
+        "--expected-count",
+        "3",
+        "--fps",
+        "6",
+        "--max-frames",
+        "3",
+        "--warmup-frames",
+        "1",
+    ]
+    assert job.resources == ["camera", "disk_io"]
+    assert job.parameters["pipeline_stage"] == "realsense_capture_smoke"
+    assert job.parameters["options"]["preview"] is False
+
+
 def test_pipeline_stage_builds_rewrite_gate_command(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
 

@@ -115,6 +115,7 @@ CAPTURE_JOB_STAGE_IDS = {
     "capture_execution_plan",
     "capture_execution",
     "capture_rehearsal",
+    "realsense_capture_smoke",
 }
 CAPTURE_JOB_SEQUENCE_IDS = {
     "fake_capture_rehearsal",

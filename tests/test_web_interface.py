@@ -665,6 +665,7 @@ def test_pipeline_stages_endpoint_lists_stage_specs() -> None:
     assert any(stage["id"] == "capture_execution_plan" for stage in stages)
     assert any(stage["id"] == "capture_execution" for stage in stages)
     assert any(stage["id"] == "capture_rehearsal" for stage in stages)
+    assert any(stage["id"] == "realsense_capture_smoke" for stage in stages)
     assert any(stage["id"] == "sync_quality" for stage in stages)
     assert any(stage["id"] == "calibration_observations" for stage in stages)
     assert any(stage["id"] == "calibration_candidates" for stage in stages)

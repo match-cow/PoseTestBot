@@ -1,6 +1,6 @@
 # PoseTestBot Rewrite Progress
 
-Last updated: 2026-06-22
+Last updated: 2026-07-07
 
 ## Current Phase
 
@@ -91,6 +91,18 @@ MegaPose, SAM6D, BOP Toolkit, and ZED SDK Python. These checks do not prove the
 lab hardware itself is absent, but they do prove this workspace currently cannot
 claim the real full-capture or runtime gates are passing.
 
+Read-only RealSense status on 2026-07-07 still reports `pyrealsense2` as
+importable but blocks discovery with
+`RuntimeError: could not initialize udev monitor`, so the next lab action is
+USB/udev/container visibility rather than robot motion. Use the RealSense-only
+gate while OAK-D Pro, ZED, and real iiwa work stay out of scope:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/sensor_status.py --json \
+  --expected realsense_d435=3 --expected oak_d_pro=none --expected zed_2i=none \
+  --check-expected
+```
+
 ## Done
 
 - Added a `posetestbot` package skeleton for shared rewrite code.
@@ -118,6 +130,17 @@ claim the real full-capture or runtime gates are passing.
   `raw_robot_ee_poses.json` is now copied into sensor folders for sync.
 - Added sensor contracts for RealSense D435, OAK-D Pro, and ZED 2i aligned
   RGB-D frames.
+- Added `posetestbot.sensors.realsense` and
+  `scripts/run_realsense_capture_smoke.py` as the first RealSense-only camera
+  proof path. The smoke runner reads a RealSense-only `run_config.json`,
+  requires three explicit visible D435/D435i serials, refuses nonempty raw
+  sensor folders, captures short sequential RGB-D samples, writes
+  `realsense_capture_smoke_report.json`, and records a manifest
+  `realsense_capture_smoke` stage.
+- Hardened `scripts/capture_realsense_720p.py` for headless lab capture:
+  preview windows are opt-in via `--preview`, `--warmup-frames` discards
+  startup frames before writing, and startup/device failures now return clear
+  stderr messages instead of exiting from the middle of the capture script.
 - Added best-effort sensor discovery helpers.
 - Added `posetestbot.sensors.registry` and `scripts/sensor_adapters.py` as a
   static adapter registry for supported RGB-D families. It centralizes display

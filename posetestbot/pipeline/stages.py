@@ -533,6 +533,49 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             ),
         ),
     ),
+    "realsense_capture_smoke": PipelineStageSpec(
+        id="realsense_capture_smoke",
+        label="RealSense Capture Smoke",
+        script="scripts/run_realsense_capture_smoke.py",
+        description=(
+            "Validate a RealSense-only run config and capture short sequential "
+            "RGB-D samples from the configured D435/D435i serials."
+        ),
+        resources=("camera", "disk_io"),
+        parameters=(
+            PipelineParameter(
+                name="expected_count",
+                flag="--expected-count",
+                kind="int",
+                default=3,
+            ),
+            PipelineParameter(name="fps", flag="--fps", kind="int", default=6),
+            PipelineParameter(
+                name="max_frames",
+                flag="--max-frames",
+                kind="int",
+                default=30,
+            ),
+            PipelineParameter(
+                name="warmup_frames",
+                flag="--warmup-frames",
+                kind="int",
+                default=10,
+            ),
+            PipelineParameter(
+                name="preview",
+                flag="--preview",
+                kind="bool",
+                default=False,
+            ),
+            PipelineParameter(
+                name="print_json",
+                flag="--print-json",
+                kind="bool",
+                default=False,
+            ),
+        ),
+    ),
     "synthetic_rgbd_fixture": PipelineStageSpec(
         id="synthetic_rgbd_fixture",
         label="Synthetic RGB-D Fixture",
