@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from posetestbot.sensors import discovery
 from posetestbot.sensors import status as sensor_status
 from posetestbot.sensors.contracts import SensorDeviceInfo, SensorType
 
@@ -44,6 +45,20 @@ def test_collect_sensor_status_reports_expected_counts(monkeypatch) -> None:
     assert families["oak_d_pro"]["meets_expected"] is True
     assert families["zed_2i"]["sdk_available"] is True
     assert families["zed_2i"]["meets_expected"] is False
+
+
+def test_depthai_device_id_accepts_v3_device_info_shape() -> None:
+    class FakeDepthAIV3DeviceInfo:
+        deviceId = "18443010314F3B1300"
+        name = "2.10"
+
+        def getDeviceId(self) -> str:
+            return self.deviceId
+
+    assert (
+        discovery._depthai_device_id(FakeDepthAIV3DeviceInfo())
+        == "18443010314F3B1300"
+    )
 
 
 def test_collect_sensor_status_records_discovery_errors(monkeypatch) -> None:
@@ -112,6 +127,36 @@ def test_collect_sensor_status_adds_udev_and_sdk_diagnostics(
         "sdk_unavailable",
         "expected_count_not_met",
     ]
+
+
+def test_collect_sensor_status_reports_unsupported_depthai_version(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(sensor_status, "sdk_module_available", lambda _: True)
+
+    def sdk_version(module_name: str) -> str | None:
+        return "2.30.0.0" if module_name == "depthai" else None
+
+    monkeypatch.setattr(sensor_status, "sdk_module_version", sdk_version)
+
+    status = sensor_status.collect_sensor_status(
+        expected_counts={
+            SensorType.REALSENSE_D435: None,
+            SensorType.OAK_D_PRO: None,
+            SensorType.ZED_2I: None,
+        },
+        discoverers={
+            SensorType.REALSENSE_D435: lambda: [],
+            SensorType.OAK_D_PRO: lambda: [],
+            SensorType.ZED_2I: lambda: [],
+        },
+    )
+
+    families = {family["sensor_type"]: family for family in status["families"]}
+    oak = families["oak_d_pro"]
+    assert oak["sdk_version"] == "2.30.0.0"
+    assert oak["sdk_requirement"] == ">=3,<4"
+    assert oak["diagnostics"][0]["code"] == "sdk_version_unsupported"
 
 
 def test_sensor_status_json_stdout_survives_noisy_sdk(monkeypatch, capfd) -> None:

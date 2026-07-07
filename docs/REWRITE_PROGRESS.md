@@ -158,6 +158,24 @@ UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/sensor_status.py --json \
   migrated all three capture scripts to that common sidecar writer.
 - Fixed Luxonis capture device selection (`--device`) and output folder
   ownership.
+- Moved OAK-D Pro capture to an importable DepthAI v3 adapter,
+  `posetestbot.sensors.oak_d_pro`, while keeping
+  `scripts/capture_luxonis_720p.py` as the command-line compatibility wrapper.
+  The adapter records host-synced DepthAI timestamps, device timestamps,
+  capture-wall filename stems, RGB/depth sync deltas, sequence numbers, and
+  legacy sidecars through the shared frame writer. Sensor status now reports
+  the installed DepthAI version and warns when OAK-D Pro capture is not on the
+  required `>=3,<4` SDK line.
+- Validated the DepthAI v3 OAK-D Pro adapter on the lab host after adding a
+  plugdev-scoped udev rule for vendor `03e7`. Device
+  `18443010314F3B1300` recorded 30 RGB/depth pairs at 720p into
+  `/tmp/posetestbot_oak_v3_probe` with 30 metadata rows, 0 rejected pairs,
+  sidecars present, capture-wall filename stems, and maximum RGB/depth
+  host-synced timestamp delta of 365 us. This proves the adapter records
+  synchronized, RGB-aligned depth frames structurally, but it does not prove the
+  OAK-D Pro factory intrinsics/processed RGB output are geometrically correct
+  enough for pose metrics. Run an explicit reprojection sanity check with an
+  ArUco/checkerboard target before treating Luxonis intrinsics as validated.
 - Added an initial ZED 2i capture script with the same legacy folder and
   metadata contract.
 - Added `trimesh` with `uv add` because the FoundationPose wrapper imports it.
@@ -1068,6 +1086,12 @@ UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/sensor_status.py --json \
   with compact preflight, metric, and BOP inspection panels, but it remains a
   bridge rather than the final
   FastAPI/Jinja2/HTMX UI.
+- The transition Flask app now binds to all interfaces by default
+  (`POSETESTBOT_WEB_HOST=0.0.0.0`, `POSETESTBOT_WEB_PORT=5000`) so lab operators
+  can reach it from other devices on the same network. `main.py` still opens a
+  local browser URL and prints the LAN access pattern. Debug mode is explicit
+  through `POSETESTBOT_WEB_DEBUG=1` instead of being enabled whenever the server
+  is reachable from the network.
 - Treating the artifact browser as the first transition API for surfacing
   manifest-backed outputs, plans, BOP files, evaluation files, and job logs from
   one central UI. It now provides lightweight summaries for run configs,
@@ -2426,3 +2450,11 @@ UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/sensor_status.py --json \
   RealSense discovery failed with `RuntimeError: could not initialize udev
   monitor`, DepthAI emitted the container USB access warning on stderr, and
   `pyzed.sl` remains unavailable.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall main.py web_interface.py`:
+  passed after making the transition Flask server bind to all interfaces by
+  default.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run python -c "import web_interface; print(web_interface.WEB_HOST, web_interface.WEB_PORT, web_interface.WEB_DEBUG)"`:
+  printed `0.0.0.0 5000 False`, confirming LAN binding is the default and debug
+  mode is opt-in.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_interface.py`:
+  54 passed after the LAN binding update.

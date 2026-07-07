@@ -5,6 +5,23 @@ from __future__ import annotations
 from posetestbot.sensors.contracts import SensorDeviceInfo, SensorType
 
 
+def _depthai_device_id(device_info) -> str:
+    for method_name in ("getMxId", "getDeviceId"):
+        method = getattr(device_info, method_name, None)
+        if callable(method):
+            try:
+                value = method()
+            except Exception:
+                continue
+            if value:
+                return str(value)
+    for attribute_name in ("mxid", "deviceId", "name"):
+        value = getattr(device_info, attribute_name, None)
+        if value:
+            return str(value)
+    return "unknown"
+
+
 def discover_realsense_d435() -> list[SensorDeviceInfo]:
     try:
         import pyrealsense2 as rs
@@ -36,13 +53,18 @@ def discover_oak_d_pro() -> list[SensorDeviceInfo]:
 
     devices: list[SensorDeviceInfo] = []
     for dev in dai.Device.getAllAvailableDevices():
-        mxid = dev.getMxId()
+        mxid = _depthai_device_id(dev)
         devices.append(
             SensorDeviceInfo(
                 sensor_type=SensorType.OAK_D_PRO,
                 device_id=mxid,
                 display_name=f"OAK-D Pro {mxid}",
-                metadata={"state": str(dev.state)},
+                metadata={
+                    "state": str(getattr(dev, "state", "unknown")),
+                    "name": str(getattr(dev, "name", "")),
+                    "platform": str(getattr(dev, "platform", "")),
+                    "protocol": str(getattr(dev, "protocol", "")),
+                },
             )
         )
     return devices
@@ -74,4 +96,3 @@ def discover_all() -> list[SensorDeviceInfo]:
         *discover_oak_d_pro(),
         *discover_zed_2i(),
     ]
-

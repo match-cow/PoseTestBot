@@ -1,4 +1,5 @@
 import json
+import os
 from html import escape
 from pathlib import Path
 
@@ -108,6 +109,18 @@ from posetestbot.sync.quality import (
 
 app = Flask(__name__)
 job_runner = LocalJobRunner(Path("working_data") / "jobs")
+
+
+def _env_bool(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+WEB_HOST = os.environ.get("POSETESTBOT_WEB_HOST", "0.0.0.0")
+WEB_PORT = int(os.environ.get("POSETESTBOT_WEB_PORT", "5000"))
+WEB_DEBUG = _env_bool("POSETESTBOT_WEB_DEBUG", default=False)
 
 CAPTURE_JOB_STAGE_IDS = {
     "capture_plan",
@@ -4071,4 +4084,4 @@ def run_pipeline_from_config():
     ), 202
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(host=WEB_HOST, port=WEB_PORT, debug=WEB_DEBUG)

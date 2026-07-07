@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+from importlib import metadata as importlib_metadata
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Callable, Mapping
 
 from posetestbot.sensors import discovery
 from posetestbot.sensors.contracts import SensorDeviceInfo, SensorType
+from posetestbot.sensors.oak_d_pro import depthai_version_supported
 from posetestbot.sensors.registry import SENSOR_ADAPTERS
 
 SCHEMA_VERSION = "sensor_status.v1"
@@ -21,6 +23,12 @@ SENSOR_FAMILY_LABELS: Mapping[SensorType, str] = {
 SENSOR_SDK_MODULES: Mapping[SensorType, str] = {
     sensor_type: adapter.sdk_module
     for sensor_type, adapter in SENSOR_ADAPTERS.items()
+}
+
+SENSOR_SDK_REQUIREMENTS: Mapping[SensorType, str | None] = {
+    SensorType.REALSENSE_D435: None,
+    SensorType.OAK_D_PRO: ">=3,<4",
+    SensorType.ZED_2I: None,
 }
 
 LAB_EXPECTED_SENSOR_COUNTS: Mapping[SensorType, int] = {
@@ -42,6 +50,8 @@ class SensorFamilyStatus:
     display_name: str
     sdk_module: str
     sdk_available: bool
+    sdk_version: str | None
+    sdk_requirement: str | None
     expected_count: int | None
     connected_count: int
     meets_expected: bool | None
@@ -74,11 +84,21 @@ def sdk_module_available(module_name: str) -> bool:
         return False
 
 
+def sdk_module_version(module_name: str) -> str | None:
+    distribution_name = module_name.split(".", 1)[0]
+    try:
+        return importlib_metadata.version(distribution_name)
+    except importlib_metadata.PackageNotFoundError:
+        return None
+
+
 def _sensor_family_diagnostics(
     *,
     sensor_type: SensorType,
     sdk_module: str,
     sdk_available: bool,
+    sdk_version: str | None,
+    sdk_requirement: str | None,
     expected_count: int | None,
     connected_count: int,
     error: str | None,
@@ -109,6 +129,25 @@ def _sensor_family_diagnostics(
                 "message": f"Python SDK module {sdk_module!r} is not importable.",
                 "hints": [
                     f"Install or activate the {sdk_module} Python SDK in the uv environment.",
+                ],
+            }
+        )
+    if (
+        sensor_type == SensorType.OAK_D_PRO
+        and sdk_available
+        and sdk_version is not None
+        and not depthai_version_supported(sdk_version)
+    ):
+        diagnostics.append(
+            {
+                "code": "sdk_version_unsupported",
+                "severity": "error",
+                "message": (
+                    f"Python SDK module {sdk_module!r} is {sdk_version}; "
+                    f"OAK-D Pro capture requires DepthAI {sdk_requirement}."
+                ),
+                "hints": [
+                    "Update the uv environment with `uv add \"depthai>=3,<4\"`.",
                 ],
             }
         )
@@ -146,6 +185,8 @@ def collect_sensor_family_status(
 ) -> SensorFamilyStatus:
     sdk_module = SENSOR_SDK_MODULES[sensor_type]
     sdk_available = sdk_module_available(sdk_module)
+    sdk_version = sdk_module_version(sdk_module) if sdk_available else None
+    sdk_requirement = SENSOR_SDK_REQUIREMENTS[sensor_type]
     discoverer = discoverer or DISCOVERERS[sensor_type]
 
     devices: list[SensorDeviceInfo] = []
@@ -163,6 +204,8 @@ def collect_sensor_family_status(
         sensor_type=sensor_type,
         sdk_module=sdk_module,
         sdk_available=sdk_available,
+        sdk_version=sdk_version,
+        sdk_requirement=sdk_requirement,
         expected_count=expected_count,
         connected_count=connected_count,
         error=error,
@@ -173,6 +216,8 @@ def collect_sensor_family_status(
         display_name=SENSOR_FAMILY_LABELS[sensor_type],
         sdk_module=sdk_module,
         sdk_available=sdk_available,
+        sdk_version=sdk_version,
+        sdk_requirement=sdk_requirement,
         expected_count=expected_count,
         connected_count=connected_count,
         meets_expected=meets_expected,
