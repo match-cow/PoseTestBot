@@ -122,6 +122,93 @@ def test_depthai_tcp_ip_devices_are_not_counted_as_local_oak(monkeypatch) -> Non
     assert discovery.discover_oak_d_pro() == []
 
 
+def test_realsense_discovery_merges_sdk_devices_with_usb_video_nodes(
+    monkeypatch,
+) -> None:
+    class FakeCameraInfo:
+        serial_number = "serial_number"
+        name = "name"
+        product_line = "product_line"
+        product_id = "product_id"
+        firmware_version = "firmware_version"
+        usb_type_descriptor = "usb_type_descriptor"
+        physical_port = "physical_port"
+
+    class FakeDevice:
+        def get_info(self, key):
+            values = {
+                "serial_number": "sdk-serial-1",
+                "name": "Intel RealSense D435",
+                "product_line": "D400",
+                "product_id": "0B07",
+                "firmware_version": "5.17.0.10",
+                "usb_type_descriptor": "3.2",
+                "physical_port": "/sys/devices/usb3/3-1/3-1:1.0/video4linux/video0",
+            }
+            return values[key]
+
+    class FakeContext:
+        def query_devices(self):
+            return [FakeDevice()]
+
+    fake_rs = type(
+        "FakeRS",
+        (),
+        {
+            "camera_info": FakeCameraInfo,
+            "context": staticmethod(lambda: FakeContext()),
+        },
+    )
+    monkeypatch.setitem(sys.modules, "pyrealsense2", fake_rs)
+    monkeypatch.setattr(
+        discovery,
+        "_udev_properties_for_node",
+        lambda _path: {"ID_SERIAL_SHORT": "usb-serial-1"},
+    )
+    monkeypatch.setattr(
+        discovery,
+        "_video_node_metadata_by_serial",
+        lambda: {
+            "usb-serial-1": {
+                "video_accessible": True,
+                "video_nodes": [
+                    {
+                        "path": "/dev/video4",
+                        "interface": "03",
+                        "capabilities": ":capture:",
+                        "accessible": True,
+                    }
+                ],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        discovery,
+        "_discover_realsense_from_lsusb",
+        lambda: [
+            SensorDeviceInfo(
+                sensor_type=SensorType.REALSENSE_D435,
+                device_id="usb-serial-1",
+                display_name="USB duplicate",
+            ),
+            SensorDeviceInfo(
+                sensor_type=SensorType.REALSENSE_D435,
+                device_id="usb-serial-2",
+                display_name="USB orphan",
+            ),
+        ],
+    )
+
+    devices = discovery.discover_realsense_d435()
+
+    assert [device.device_id for device in devices] == [
+        "sdk-serial-1",
+        "usb-serial-2",
+    ]
+    assert devices[0].metadata["usb_serial"] == "usb-serial-1"
+    assert devices[0].metadata["video_nodes"][0]["path"] == "/dev/video4"
+
+
 def test_collect_sensor_status_records_discovery_errors(monkeypatch) -> None:
     monkeypatch.setattr(sensor_status, "sdk_module_available", lambda _: True)
 

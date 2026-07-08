@@ -167,6 +167,7 @@ body {
 .step-card,
 .sensor-card,
 .snapshot-card,
+.preview-card,
 .list-row {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -331,7 +332,8 @@ body {
 }
 
 .sensor-warning,
-.snapshot-error {
+.snapshot-error,
+.preview-error {
   margin: 8px 0 0;
   padding: 8px;
   border-radius: 6px;
@@ -356,8 +358,45 @@ body {
   margin-top: 12px;
 }
 
-.snapshot-card {
+.preview-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.snapshot-card,
+.preview-card {
   padding: 10px;
+}
+
+.preview-card-header {
+  min-height: 30px;
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.preview-card-header strong {
+  overflow-wrap: anywhere;
+}
+
+.preview-card img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  display: block;
+  object-fit: contain;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #101820;
+  margin-top: 8px;
+}
+
+.preview-empty {
+  margin-top: 8px;
+  min-height: 160px;
+  aspect-ratio: 4 / 3;
 }
 
 .snapshot-images {

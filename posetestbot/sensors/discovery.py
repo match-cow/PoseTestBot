@@ -79,6 +79,22 @@ def _video_node_metadata_by_serial() -> dict[str, dict[str, object]]:
     return by_serial
 
 
+def _video_metadata_for_physical_port(
+    physical_port: str,
+    video_metadata_by_usb_serial: dict[str, dict[str, object]],
+) -> tuple[str | None, dict[str, object]]:
+    """Map a librealsense physical_port path back to the matching V4L2 nodes."""
+
+    node_name = Path(physical_port).name
+    if not node_name.startswith("video"):
+        return None, {}
+    properties = _udev_properties_for_node(Path("/dev") / node_name)
+    usb_serial = properties.get("ID_SERIAL_SHORT")
+    if not usb_serial:
+        return None, {}
+    return usb_serial, dict(video_metadata_by_usb_serial.get(usb_serial, {}))
+
+
 def _depthai_device_id(device_info) -> str:
     for method_name in ("getMxId", "getDeviceId"):
         method = getattr(device_info, method_name, None)
@@ -193,12 +209,14 @@ def _discover_realsense_from_lsusb() -> list[SensorDeviceInfo]:
 
 
 def discover_realsense_d435() -> list[SensorDeviceInfo]:
+    video_metadata_by_usb_serial = _video_node_metadata_by_serial()
     try:
         import pyrealsense2 as rs
     except ImportError:
         return _discover_realsense_from_lsusb()
 
     devices: list[SensorDeviceInfo] = []
+    sdk_usb_serials: set[str] = set()
     sdk_error = None
     try:
         context = rs.context()
@@ -206,12 +224,36 @@ def discover_realsense_d435() -> list[SensorDeviceInfo]:
             serial = dev.get_info(rs.camera_info.serial_number)
             name = dev.get_info(rs.camera_info.name)
             product_line = dev.get_info(rs.camera_info.product_line)
+            metadata: dict[str, object] = {"product_line": product_line}
+            for info_name, metadata_key in (
+                ("product_id", "product_id"),
+                ("firmware_version", "firmware_version"),
+                ("usb_type_descriptor", "usb_type_descriptor"),
+                ("physical_port", "physical_port"),
+            ):
+                info = getattr(rs.camera_info, info_name, None)
+                if info is None:
+                    continue
+                try:
+                    value = dev.get_info(info)
+                except Exception:
+                    continue
+                if value:
+                    metadata[metadata_key] = value
+            usb_serial, video_metadata = _video_metadata_for_physical_port(
+                str(metadata.get("physical_port") or ""),
+                video_metadata_by_usb_serial,
+            )
+            if usb_serial:
+                sdk_usb_serials.add(usb_serial)
+                metadata["usb_serial"] = usb_serial
+            metadata.update(video_metadata)
             devices.append(
                 SensorDeviceInfo(
                     sensor_type=SensorType.REALSENSE_D435,
                     device_id=serial,
                     display_name=f"{name} {serial}",
-                    metadata={"product_line": product_line},
+                    metadata=metadata,
                 )
             )
     except Exception as exc:
@@ -220,7 +262,7 @@ def discover_realsense_d435() -> list[SensorDeviceInfo]:
     fallback_devices = _discover_realsense_from_lsusb()
     known_ids = {device.device_id for device in devices}
     for device in fallback_devices:
-        if device.device_id in known_ids:
+        if device.device_id in known_ids or device.device_id in sdk_usb_serials:
             continue
         metadata = dict(device.metadata)
         if sdk_error:

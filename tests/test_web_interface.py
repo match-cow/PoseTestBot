@@ -304,6 +304,95 @@ def test_sensor_snapshot_submission_queues_camera_job(monkeypatch, tmp_path: Pat
     ]
 
 
+def test_sensor_preview_submission_queues_one_job_per_selected_sensor(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FakeJob:
+        def __init__(self, job_id: str, parameters: dict):
+            self.id = job_id
+            self.status = "queued"
+            self.parameters = parameters
+            self.message = None
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "status": self.status,
+                "parameters": self.parameters,
+                "message": self.message,
+            }
+
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def list(self):
+            return []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            return FakeJob(f"job{len(self.submitted)}", dict(kwargs["parameters"]))
+
+    roots = iter([tmp_path / "preview-1", tmp_path / "preview-2"])
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_sensors, "job_runner", fake_runner)
+    monkeypatch.setattr(web_sensors, "preview_stream_root", lambda: next(roots))
+    monkeypatch.setattr(
+        web_sensors,
+        "collect_sensor_status",
+        lambda: {
+            "schema_version": "sensor_status.v1",
+            "families": [
+                {
+                    "devices": [
+                        {
+                            "sensor_type": "realsense_d435",
+                            "device_id": "825412070181",
+                            "display_name": "RealSense 1",
+                            "connected": True,
+                            "metadata": {"video_nodes": []},
+                        },
+                        {
+                            "sensor_type": "realsense_d435",
+                            "device_id": "923322072633",
+                            "display_name": "RealSense 2",
+                            "connected": True,
+                            "metadata": {"video_nodes": []},
+                        },
+                    ]
+                }
+            ],
+            "total_connected": 2,
+        },
+    )
+    client = app.test_client()
+
+    response = client.post(
+        "/sensors/previews",
+        json={
+            "selected": [
+                "realsense_d435:825412070181",
+                "realsense_d435:923322072633",
+            ]
+        },
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 202
+    assert len(payload["jobs"]) == 2
+    assert [item["resources"] for item in fake_runner.submitted] == [
+        ["camera-preview:realsense_d435:825412070181"],
+        ["camera-preview:realsense_d435:923322072633"],
+    ]
+    assert fake_runner.submitted[0]["command"][:4] == [
+        "uv",
+        "run",
+        "python",
+        "scripts/stream_sensor_rgb_preview.py",
+    ]
+
+
 def test_snapshot_worker_reports_inaccessible_realsense_video_nodes(
     tmp_path: Path,
 ) -> None:

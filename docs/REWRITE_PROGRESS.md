@@ -77,7 +77,10 @@ Out of scope in this repository:
 - Changed sensor status to detection-first by default, while preserving
   explicit expected-count checks for CLI/preflight use.
 - Added ignored lab-local sensor aliases in `working_data/sensor_aliases.json`
-  and queued RGB-D snapshot previews under `working_data/sensor_snapshots/`.
+  and queued live RGB preview streams under `working_data/sensor_previews/`.
+- Reconciled RealSense SDK serials with USB/V4L2 node metadata so three
+  connected D435-class cameras appear as three devices, not duplicated SDK and
+  USB entries.
 - Updated root agent notes, README, and system overview for the acquisition
   boundary.
 - Rewrote stale downstream tests into acquisition-only coverage.

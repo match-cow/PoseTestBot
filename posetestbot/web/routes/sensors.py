@@ -13,6 +13,13 @@ from posetestbot.sensors.aliases import (
     save_sensor_aliases,
     sensor_alias_file_state,
 )
+from posetestbot.sensors.previews import (
+    build_preview_command,
+    load_preview_status,
+    preview_stream_root,
+    resolve_preview_image,
+    stop_preview,
+)
 from posetestbot.sensors.snapshots import (
     build_snapshot_command,
     load_snapshot_manifest,
@@ -25,6 +32,7 @@ from posetestbot.web.legacy import APP_ROOT, job_runner
 
 
 sensors_bp = Blueprint("sensors", __name__)
+ACTIVE_JOB_STATUSES = {"queued", "running"}
 
 
 def _json_payload() -> dict[str, Any]:
@@ -72,7 +80,7 @@ def put_sensor_aliases():
     return jsonify({"output": f"Wrote {path}", **state})
 
 
-def _requested_snapshot_specs(data: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict]:
+def _requested_sensor_specs(data: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict]:
     explicit_sensors = data.get("sensors")
     if isinstance(explicit_sensors, list) and explicit_sensors:
         specs = [dict(sensor) for sensor in explicit_sensors if isinstance(sensor, Mapping)]
@@ -86,11 +94,55 @@ def _requested_snapshot_specs(data: Mapping[str, Any]) -> tuple[list[dict[str, A
     return snapshot_specs_from_status(status, selected=selected), status
 
 
+def _sensor_key(spec: Mapping[str, Any]) -> str:
+    return f"{spec.get('sensor_type')}:{spec.get('device_id')}"
+
+
+def _active_preview_jobs_by_key() -> dict[str, Any]:
+    active = {}
+    for job in job_runner.list():
+        if not job.parameters.get("sensor_preview"):
+            continue
+        if job.status not in ACTIVE_JOB_STATUSES:
+            continue
+        sensor_key = job.parameters.get("sensor_key")
+        if sensor_key:
+            active[str(sensor_key)] = job
+    return active
+
+
+def _preview_job_payload(job) -> dict[str, Any]:
+    preview_root = job.parameters.get("preview_root")
+    preview_status = None
+    if preview_root:
+        try:
+            preview_status = load_preview_status(preview_root)
+        except (OSError, ValueError) as exc:
+            preview_status = {"status": "error", "error": str(exc)}
+    return {
+        "job": job.to_dict(),
+        "preview_root": preview_root,
+        "preview_status": preview_status,
+    }
+
+
+def _stop_preview_job(job) -> dict[str, Any]:
+    preview_root = job.parameters.get("preview_root")
+    if preview_root:
+        stop_preview(preview_root)
+    if job.status in ACTIVE_JOB_STATUSES:
+        try:
+            job = job_runner.cancel(job.id)
+        except KeyError:
+            pass
+    return _preview_job_payload(job)
+
+
 @sensors_bp.post("/sensors/snapshots")
 def post_sensor_snapshots():
     data = _json_payload()
     try:
-        specs, status = _requested_snapshot_specs(data)
+        specs, status = _requested_sensor_specs(data)
     except ValueError as exc:
         return jsonify({"output": str(exc)}), 400
     if not specs:
@@ -138,6 +190,143 @@ def post_sensor_snapshots():
         ),
         202,
     )
+
+
+@sensors_bp.post("/sensors/previews")
+def post_sensor_previews():
+    data = _json_payload()
+    try:
+        specs, status = _requested_sensor_specs(data)
+    except ValueError as exc:
+        return jsonify({"output": str(exc)}), 400
+    if not specs:
+        return jsonify({"output": "No connected sensors selected for preview"}), 400
+
+    active_by_key = _active_preview_jobs_by_key()
+    jobs = []
+    errors = []
+    for spec in specs:
+        key = _sensor_key(spec)
+        existing = active_by_key.get(key)
+        if existing is not None:
+            jobs.append(_preview_job_payload(existing))
+            continue
+
+        preview_root = preview_stream_root()
+        try:
+            command = build_preview_command(
+                preview_root=preview_root,
+                spec=spec,
+                fps=int(data.get("fps", 6)),
+                width=int(data.get("width", 640)),
+                height=int(data.get("height", 480)),
+                jpeg_quality=int(data.get("jpeg_quality", 82)),
+            )
+            job = job_runner.submit(
+                name=f"sensor-preview:{key}",
+                command=command,
+                cwd=APP_ROOT,
+                resources=[f"camera-preview:{key}"],
+                parameters={
+                    "preview_root": preview_root.as_posix(),
+                    "sensor_key": key,
+                    "sensor_type": spec.get("sensor_type"),
+                    "device_id": spec.get("device_id"),
+                    "sensor_preview": True,
+                },
+            )
+        except ResourceBusyError as exc:
+            errors.append({"sensor_key": key, "error": str(exc)})
+            continue
+        except (TypeError, ValueError) as exc:
+            errors.append({"sensor_key": key, "error": str(exc)})
+            continue
+        jobs.append(_preview_job_payload(job))
+
+    status_code = 202 if jobs else 409
+    return (
+        jsonify(
+            {
+                "output": f"Queued {len(jobs)} sensor preview(s)",
+                "jobs": jobs,
+                "errors": errors,
+                "sensor_status": status,
+                "sensors": specs,
+            }
+        ),
+        status_code,
+    )
+
+
+@sensors_bp.get("/sensors/previews")
+def get_sensor_previews():
+    include_terminal = request.args.get("include_terminal", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    jobs = []
+    for job in job_runner.list():
+        if not job.parameters.get("sensor_preview"):
+            continue
+        if not include_terminal and job.status not in ACTIVE_JOB_STATUSES:
+            continue
+        jobs.append(_preview_job_payload(job))
+    return jsonify({"jobs": jobs})
+
+
+@sensors_bp.get("/sensors/previews/<job_id>")
+def get_sensor_preview(job_id: str):
+    try:
+        job = job_runner.get(job_id)
+    except KeyError:
+        return jsonify({"output": "Unknown job"}), 404
+    if not job.parameters.get("sensor_preview"):
+        return jsonify({"output": "Job is not a sensor preview"}), 400
+    return jsonify(_preview_job_payload(job))
+
+
+@sensors_bp.post("/sensors/previews/stop")
+def stop_sensor_previews():
+    stopped = []
+    for job in job_runner.list():
+        if not job.parameters.get("sensor_preview"):
+            continue
+        if job.status not in ACTIVE_JOB_STATUSES:
+            continue
+        stopped.append(_stop_preview_job(job))
+    return jsonify({"output": f"Stopping {len(stopped)} preview(s)", "jobs": stopped})
+
+
+@sensors_bp.post("/sensors/previews/<job_id>/stop")
+def stop_sensor_preview(job_id: str):
+    try:
+        job = job_runner.get(job_id)
+    except KeyError:
+        return jsonify({"output": "Unknown job"}), 404
+    if not job.parameters.get("sensor_preview"):
+        return jsonify({"output": "Job is not a sensor preview"}), 400
+    return jsonify(_stop_preview_job(job))
+
+
+@sensors_bp.get("/sensors/previews/<job_id>/latest.jpg")
+def get_sensor_preview_image(job_id: str):
+    try:
+        job = job_runner.get(job_id)
+    except KeyError:
+        return jsonify({"output": "Unknown job"}), 404
+    if not job.parameters.get("sensor_preview"):
+        return jsonify({"output": "Job is not a sensor preview"}), 400
+    preview_root = job.parameters.get("preview_root")
+    if not preview_root:
+        return jsonify({"output": "Missing preview root"}), 400
+    try:
+        path = resolve_preview_image(Path(preview_root))
+    except FileNotFoundError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"output": str(exc)}), 400
+    return send_file(path, mimetype="image/jpeg", conditional=False)
 
 
 @sensors_bp.get("/sensors/snapshots/<job_id>")

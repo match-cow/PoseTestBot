@@ -2,7 +2,7 @@
   const state = {
     sensors: [],
     aliases: {},
-    snapshotJobId: null,
+    previewPollTimer: null,
   };
 
   function $(selector) {
@@ -154,9 +154,9 @@
     card.append(grid);
 
     const actions = el("div", "sensor-card-actions");
-    const previewButton = el("button", "btn btn-outline-primary btn-sm", "Preview");
+    const previewButton = el("button", "btn btn-outline-primary btn-sm", "Start RGB");
     previewButton.type = "button";
-    previewButton.addEventListener("click", () => requestSnapshot([key]));
+    previewButton.addEventListener("click", () => requestPreviews([key]));
     actions.append(previewButton);
     card.append(actions);
 
@@ -220,74 +220,88 @@
       .map((card) => card.dataset.sensorKey);
   }
 
-  async function requestSnapshot(sensorKeys) {
-    await saveAliases();
+  async function requestPreviews(sensorKeys) {
     const selected = sensorKeys || selectedSensorKeys();
+    await saveAliases();
     if (selected.length === 0) {
-      $("#snapshotPanel").innerHTML = "";
-      $("#snapshotPanel").append(el("div", "empty", "Select at least one sensor to preview."));
+      $("#previewPanel").innerHTML = "";
+      $("#previewPanel").append(el("div", "empty", "Select at least one sensor to preview."));
       return;
     }
-    const data = await api("/sensors/snapshots", {
+    const data = await api("/sensors/previews", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({selected}),
+      body: JSON.stringify({selected, fps: 6, width: 640, height: 480}),
     });
-    state.snapshotJobId = data.job_id;
-    renderSnapshotStatus(data);
-    pollSnapshot(data.job_id);
+    renderPreviewStatus(data);
+    startPreviewPolling();
   }
 
-  function renderSnapshotStatus(data) {
-    const panel = $("#snapshotPanel");
+  function previewJobs(data) {
+    if (Array.isArray(data.jobs)) return data.jobs;
+    if (data.job) return [{job: data.job, preview_status: data.preview_status}];
+    return [];
+  }
+
+  function renderPreviewStatus(data) {
+    const panel = $("#previewPanel");
     panel.innerHTML = "";
-    const manifest = data.manifest;
-    if (!manifest) {
-      panel.append(el("div", "empty", data.output || "Snapshot queued."));
+    const jobs = previewJobs(data);
+    if (jobs.length === 0) {
+      panel.append(el("div", "empty", data.output || "No active RGB previews."));
       return;
     }
-    (manifest.sensors || []).forEach((sensor) => {
-      const card = el("article", "snapshot-card");
-      card.append(el("strong", "", sensor.effective_display_name || sensor.sensor_key));
-      card.append(chip(sensor.status, sensor.status));
-      const images = el("div", "snapshot-images");
-      ["rgb_thumbnail", "depth_thumbnail"].forEach((field) => {
-        if (!sensor[field]) return;
+    jobs.forEach((entry) => {
+      const job = entry.job || {};
+      const status = entry.preview_status || {};
+      const sensorKey = status.sensor_key || job.parameters?.sensor_key || job.id;
+      const card = el("article", "preview-card");
+      const header = el("div", "preview-card-header");
+      header.append(el("strong", "", status.effective_display_name || sensorKey));
+      header.append(chip(status.status || job.status || "queued", status.status || job.status));
+      card.append(header);
+      if (status.latest_image) {
         const image = document.createElement("img");
-        image.alt = field;
-        image.src = "/sensors/snapshots/" + state.snapshotJobId + "/image?path=" + encodeURIComponent(sensor[field]);
-        images.append(image);
-      });
-      if (images.childNodes.length > 0) {
-        card.append(images);
+        image.alt = "RGB preview for " + sensorKey;
+        image.src = "/sensors/previews/" + job.id + "/latest.jpg?t=" + Date.now();
+        card.append(image);
       } else {
-        card.append(el("div", "empty snapshot-empty", "No preview image captured."));
+        card.append(el("div", "empty preview-empty", "Waiting for RGB frames."));
       }
-      if (sensor.error) {
-        card.append(el("p", "snapshot-error", sensor.error));
+      if (status.error || job.message) {
+        card.append(el("p", "preview-error", status.error || job.message));
       }
-      (sensor.diagnostics || []).forEach((diagnostic) => {
-        const details = el("div", "snapshot-diagnostic");
-        details.append(el("strong", "", diagnostic.code || "diagnostic"));
-        details.append(el("p", "", diagnostic.message || ""));
-        (diagnostic.hints || []).forEach((hint) => details.append(el("p", "", hint)));
-        card.append(details);
-      });
-      if (sensor.latest_frame_metadata) {
-        card.append(el("p", "sensor-meta", "Frame " + sensor.latest_frame_metadata.frame_index));
+      const meta = [];
+      if (status.frame_count !== undefined) meta.push("frames " + status.frame_count);
+      if (status.selected_node && status.selected_node.path) meta.push(status.selected_node.path);
+      if (meta.length > 0) {
+        card.append(el("p", "sensor-meta", meta.join(" · ")));
       }
       panel.append(card);
     });
   }
 
-  async function pollSnapshot(jobId) {
-    for (let attempt = 0; attempt < 120; attempt += 1) {
-      const data = await api("/sensors/snapshots/" + jobId);
-      renderSnapshotStatus(data);
-      const status = data.job && data.job.status;
-      if (["succeeded", "failed", "canceled"].includes(status)) return;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+  async function loadPreviews() {
+    const data = await api("/sensors/previews");
+    renderPreviewStatus(data);
+  }
+
+  function startPreviewPolling() {
+    if (state.previewPollTimer) clearInterval(state.previewPollTimer);
+    state.previewPollTimer = setInterval(() => {
+      loadPreviews().catch(() => {});
+    }, 1000);
+  }
+
+  async function stopPreviews(options) {
+    const silent = Boolean(options && options.silent);
+    const data = await api("/sensors/previews/stop", {method: "POST"});
+    if (state.previewPollTimer) {
+      clearInterval(state.previewPollTimer);
+      state.previewPollTimer = null;
     }
+    if (!silent) renderPreviewStatus({jobs: []});
+    return data;
   }
 
   function sensorPayloadFromCards() {
@@ -334,6 +348,7 @@
   }
 
   async function queueStage(stageId) {
+    await stopPreviews({silent: true});
     const data = await api("/pipeline/run", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -344,6 +359,7 @@
   }
 
   async function queueRunConfig() {
+    await stopPreviews({silent: true});
     const data = await api("/pipeline/run-config", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -403,7 +419,8 @@
     $("#refreshOverviewBtn").addEventListener("click", loadOverview);
     $("#refreshJobsBtn").addEventListener("click", loadJobs);
     $("#refreshSensorsBtn").addEventListener("click", loadSensors);
-    $("#snapshotSensorsBtn").addEventListener("click", requestSnapshot);
+    $("#previewSensorsBtn").addEventListener("click", requestPreviews);
+    $("#stopPreviewsBtn").addEventListener("click", () => stopPreviews());
     $("#saveAliasesBtn").addEventListener("click", saveAliases);
     $("#createRunConfigBtn").addEventListener("click", createRunConfig);
     $("#runConfigQueueBtn").addEventListener("click", queueRunConfig);
@@ -429,6 +446,12 @@
       await loadSensors();
     } catch (error) {
       $("#sensorSummary").textContent = error.message;
+    }
+    try {
+      await loadPreviews();
+      startPreviewPolling();
+    } catch (_error) {
+      // Preview polling is best-effort on initial page load.
     }
     loadJobs().catch(() => {});
   });

@@ -1,0 +1,84 @@
+"""Queued live RGB preview helpers for web/API surfaces."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from pathlib import Path
+from typing import Any, Mapping
+
+from posetestbot.sensors.snapshots import snapshot_specs_from_status
+
+
+DEFAULT_SENSOR_PREVIEW_ROOT = Path("working_data") / "sensor_previews"
+PREVIEW_STATUS_NAME = "preview_status.json"
+PREVIEW_IMAGE_NAME = "latest.jpg"
+PREVIEW_STOP_NAME = "stop"
+
+
+def preview_stream_root(
+    preview_root: str | Path = DEFAULT_SENSOR_PREVIEW_ROOT,
+    *,
+    preview_id: str | None = None,
+) -> Path:
+    return Path(preview_root) / (preview_id or uuid.uuid4().hex[:12])
+
+
+def build_preview_command(
+    *,
+    preview_root: str | Path,
+    spec: Mapping[str, Any],
+    fps: int = 6,
+    width: int = 640,
+    height: int = 480,
+    jpeg_quality: int = 82,
+) -> list[str]:
+    return [
+        "uv",
+        "run",
+        "python",
+        "scripts/stream_sensor_rgb_preview.py",
+        Path(preview_root).as_posix(),
+        "--sensor-json",
+        json.dumps(dict(spec), sort_keys=True),
+        "--fps",
+        str(fps),
+        "--width",
+        str(width),
+        "--height",
+        str(height),
+        "--jpeg-quality",
+        str(jpeg_quality),
+    ]
+
+
+def load_preview_status(preview_root: str | Path) -> dict[str, Any] | None:
+    path = Path(preview_root) / PREVIEW_STATUS_NAME
+    if not path.is_file():
+        return None
+    with open(path, "r") as f:
+        value = json.load(f)
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return value
+
+
+def stop_preview(preview_root: str | Path) -> Path:
+    path = Path(preview_root) / PREVIEW_STOP_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("stop\n")
+    return path
+
+
+def resolve_preview_image(preview_root: str | Path) -> Path:
+    root = Path(preview_root).resolve()
+    path = (root / PREVIEW_IMAGE_NAME).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Preview image path escapes preview root") from exc
+    if path.suffix.lower() not in {".jpg", ".jpeg"}:
+        raise ValueError("Preview image path must be a JPEG")
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path
