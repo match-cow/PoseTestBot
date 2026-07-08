@@ -41,7 +41,8 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=None,
         help=(
-            "Sensor entry sensor_type:device_id[:mounting_mode[:display_name]]. "
+            "Sensor entry sensor_type:device_id[:mounting_mode[:display_name[:orientation]]]. "
+            "Use orientation inverted/normal for RealSense mounts. "
             "May be repeated. Defaults to the current lab profile."
         ),
     )

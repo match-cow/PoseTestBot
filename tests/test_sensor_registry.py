@@ -33,6 +33,30 @@ def test_sensor_registry_builds_folder_names_and_uv_capture_commands() -> None:
     assert sensor_folder_name(SensorType.OAK_D_PRO, "auto") == "luxonis_auto"
     assert sensor_folder_name(SensorType.ZED_2I, "default") == "zed_2i_auto"
 
+    realsense_command = build_sensor_capture_command(
+        sensor_type=SensorType.REALSENSE_D435,
+        device_id="123",
+        output_folder="/tmp/run/realsense_123",
+        fps=6,
+        resolution="720p",
+        max_frames=2,
+        inverted=True,
+    )
+    assert realsense_command == [
+        "uv",
+        "run",
+        "python",
+        "scripts/capture_realsense_720p.py",
+        "/tmp/run/realsense_123",
+        "--fps",
+        "6",
+        "--max_frames",
+        "2",
+        "--device",
+        "123",
+        "--inverted",
+    ]
+
     command = build_sensor_capture_command(
         sensor_type=SensorType.ZED_2I,
         device_id="987",
@@ -57,6 +81,18 @@ def test_sensor_registry_builds_folder_names_and_uv_capture_commands() -> None:
         "--resolution",
         "360p",
     ]
+
+
+def test_sensor_registry_rejects_non_realsense_inverted_capture() -> None:
+    with pytest.raises(ValueError, match="only supported for RealSense"):
+        build_sensor_capture_command(
+            sensor_type=SensorType.OAK_D_PRO,
+            device_id="auto",
+            output_folder="/tmp/run/luxonis_auto",
+            fps=6,
+            resolution="720p",
+            inverted=True,
+        )
 
 
 def test_sensor_registry_rejects_unsupported_resolution() -> None:

@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-07
+Last updated: 2026-07-08
 
 PoseTestBot has been refocused as an acquisition, calibration,
 synchronization, and BOP dataset export repository. The BOP dataset export is
@@ -68,6 +68,9 @@ Out of scope in this repository:
 - Reworked artifact browser to list/preview acquisition artifacts and inspect
   BOP scene/frame data, GT, masks, and provenance.
 - Removed Flask metric dashboard and BOP result CSV endpoints.
+- Added per-RealSense inverted-mount capture support that rotates saved RGB-D
+  frames 180 degrees, corrects intrinsics, and carries orientation metadata
+  through run configs, capture plans, smoke reports, manifests, and the web UI.
 - Updated root agent notes, README, and system overview for the acquisition
   boundary.
 - Rewrote stale downstream tests into acquisition-only coverage.

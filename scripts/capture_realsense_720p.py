@@ -51,6 +51,13 @@ def parse_args() -> argparse.Namespace:
         help="Show an OpenCV RGB preview window while capturing.",
     )
     parser.add_argument(
+        "--inverted",
+        "--upside-down",
+        action="store_true",
+        dest="inverted",
+        help="Rotate captured RGB/depth frames 180 degrees for inverted mounts.",
+    )
+    parser.add_argument(
         "--print-json",
         action="store_true",
         help="Print the capture summary JSON after completion.",
@@ -75,6 +82,7 @@ def main() -> int:
             warmup_frames=args.warmup_frames,
             preview=args.preview,
             record=not args.test,
+            inverted=args.inverted,
         )
     except (RealSenseCaptureError, ValueError) as exc:
         print(f"capture_realsense_720p.py: {exc}", file=sys.stderr)
@@ -83,7 +91,8 @@ def main() -> int:
     print(
         "RealSense capture: "
         f"{summary['status']} {summary['sensor_id']} "
-        f"frames={summary['frame_count']} preview={summary['preview']}"
+        f"frames={summary['frame_count']} preview={summary['preview']} "
+        f"inverted={summary['inverted']}"
     )
     if args.print_json:
         print(json.dumps(summary, indent=2, sort_keys=True))

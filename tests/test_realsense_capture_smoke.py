@@ -133,7 +133,17 @@ def realsense_only_config(run_root: Path):
     )
 
 
-def fake_capture(output_path, *, device_id, max_frames, fps, warmup_frames, preview, record):
+def fake_capture(
+    output_path,
+    *,
+    device_id,
+    max_frames,
+    fps,
+    warmup_frames,
+    preview,
+    record,
+    inverted=False,
+):
     intrinsics = CameraIntrinsics(
         cam_k=(100.0, 0.0, 2.0, 0.0, 101.0, 2.0, 0.0, 0.0, 1.0),
         width=4,
@@ -154,6 +164,10 @@ def fake_capture(output_path, *, device_id, max_frames, fps, warmup_frames, prev
             sensor_timestamp_ns=1_000 + index,
             host_received_timestamp_ns=2_000 + index,
             host_wall_timestamp_ns=1_700_000_000_000_000_000 + index * 1_000_000,
+            extra_metadata={
+                "inverted": bool(inverted),
+                "image_rotation_degrees": 180 if inverted else 0,
+            },
         )
         first_frame_id = first_frame_id or metadata["frame_id"]
         last_frame_id = metadata["frame_id"]
@@ -166,6 +180,8 @@ def fake_capture(output_path, *, device_id, max_frames, fps, warmup_frames, prev
         "warmup_frames": warmup_frames,
         "preview": preview,
         "record": record,
+        "inverted": bool(inverted),
+        "image_rotation_degrees": 180 if inverted else 0,
         "first_frame_id": first_frame_id,
         "last_frame_id": last_frame_id,
     }
@@ -212,6 +228,48 @@ def test_realsense_capture_smoke_succeeds_with_three_mocked_devices(
         "captured",
         "captured",
     ]
+    assert manifest["sensors"][0]["metadata"]["inverted"] is False
+
+
+def test_realsense_capture_smoke_passes_configured_inversion_to_capture(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-inverted"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=tuple(
+            sensor_config_from_token(
+                (
+                    f"realsense:{serial}:static:RealSense {serial}:inverted"
+                    if serial == SERIALS[0]
+                    else f"realsense:{serial}:static:RealSense {serial}"
+                )
+            )
+            for serial in SERIALS
+        ),
+    )
+    write_run_config(run_root, config)
+    capture_calls = []
+
+    def recording_capture(output_path, *, device_id, **kwargs):
+        capture_calls.append({"device_id": device_id, **kwargs})
+        return fake_capture(output_path, device_id=device_id, **kwargs)
+
+    path, report = write_realsense_capture_smoke_with_manifest(
+        run_root,
+        max_frames=1,
+        discoverer=lambda: [realsense_device(serial) for serial in SERIALS],
+        capture_func=recording_capture,
+    )
+
+    assert path == run_root / REALSENSE_CAPTURE_SMOKE_REPORT
+    assert report["status"] == "succeeded"
+    assert [call["inverted"] for call in capture_calls] == [True, False, False]
+    assert report["captures"][0]["inverted"] is True
+    assert report["captures"][0]["summary"]["image_rotation_degrees"] == 180
+    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
+    assert manifest["sensors"][0]["metadata"]["inverted"] is True
+    assert manifest["sensors"][0]["metadata"]["image_rotation_degrees"] == 180
 
 
 def test_realsense_capture_smoke_fails_for_missing_visible_serial(

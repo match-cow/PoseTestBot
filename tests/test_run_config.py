@@ -12,6 +12,7 @@ from posetestbot.pipeline.run_config import (
     build_sequence_job_from_run_config,
     create_run_config,
     load_run_config_for_run_root,
+    sensor_config_from_mapping,
     sensor_config_from_token,
     sequence_plan_from_run_config,
     write_run_config,
@@ -34,6 +35,7 @@ def test_default_run_config_uses_fake_robot_and_lab_sensors(tmp_path: Path) -> N
     assert [sensor["sensor_type"] for sensor in sensors].count("realsense_d435") == 3
     assert [sensor["sensor_type"] for sensor in sensors].count("oak_d_pro") == 1
     assert [sensor["sensor_type"] for sensor in sensors].count("zed_2i") == 1
+    assert all(sensor["inverted"] is False for sensor in sensors)
 
     plan = sequence_plan_from_run_config(data)
 
@@ -49,6 +51,43 @@ def test_sensor_config_token_accepts_alias_and_mounting_mode() -> None:
     assert sensor.device_id == "mxid-1"
     assert sensor.mounting_mode == "static"
     assert sensor.display_name == "Cell OAK-D Pro"
+    assert sensor.inverted is False
+
+
+def test_sensor_config_accepts_realsense_inverted_orientation() -> None:
+    token_sensor = sensor_config_from_token(
+        "realsense:123:static:Cell RealSense:inverted"
+    )
+    mapping_sensor = sensor_config_from_mapping(
+        {
+            "sensor_type": "realsense",
+            "device_id": "456",
+            "mounting_mode": "eye_in_hand",
+            "display_name": "Wrist RealSense",
+            "inverted": "true",
+        }
+    )
+
+    assert token_sensor.sensor_type == "realsense_d435"
+    assert token_sensor.inverted is True
+    assert mapping_sensor.device_id == "456"
+    assert mapping_sensor.inverted is True
+
+
+def test_sensor_config_rejects_non_realsense_inverted_orientation() -> None:
+    with pytest.raises(ValueError, match="only supported for RealSense"):
+        sensor_config_from_token("oak:auto:static:Cell OAK-D Pro:inverted")
+
+    with pytest.raises(ValueError, match="only supported for RealSense"):
+        sensor_config_from_mapping(
+            {
+                "sensor_type": "zed_2i",
+                "device_id": "auto",
+                "mounting_mode": "static",
+                "display_name": "Cell ZED 2i",
+                "inverted": True,
+            }
+        )
 
 
 def test_sensor_config_token_rejects_unknown_type() -> None:
@@ -150,6 +189,7 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
             "device_id": "123",
             "display_name": "Cell RealSense",
             "enabled": True,
+            "inverted": False,
             "metadata": {},
             "mounting_mode": "static",
             "sensor_type": "realsense_d435",

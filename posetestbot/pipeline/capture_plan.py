@@ -17,7 +17,7 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
-from posetestbot.pipeline.run_config import validate_run_config
+from posetestbot.pipeline.run_config import normalize_inverted, validate_run_config
 from posetestbot.sensors.registry import (
     build_sensor_capture_command,
     sensor_folder_name,
@@ -219,6 +219,7 @@ def build_capture_plan(
     for index, sensor in enumerate(enabled_sensors):
         sensor_type = str(sensor["sensor_type"])
         device_id = str(sensor["device_id"])
+        inverted = normalize_inverted(sensor.get("inverted", False))
         folder_name = _sensor_folder_name(sensor_type, device_id)
         output_folder = run_root / folder_name
         command = build_sensor_capture_command(
@@ -228,6 +229,7 @@ def build_capture_plan(
             fps=fps,
             resolution=resolution,
             max_frames=max_frames,
+            inverted=inverted,
         )
 
         sensor_records.append(
@@ -242,6 +244,8 @@ def build_capture_plan(
                 metadata={
                     "capture_plan_index": index,
                     "calibration_profile_id": sensor.get("calibration_profile_id"),
+                    "inverted": inverted,
+                    "image_rotation_degrees": 180 if inverted else 0,
                     "configured_metadata": dict(sensor.get("metadata") or {}),
                 },
             )

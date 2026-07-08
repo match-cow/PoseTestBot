@@ -15,7 +15,7 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
-from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pipeline.run_config import load_run_config_for_run_root, normalize_inverted
 from posetestbot.sensors.contracts import SensorDeviceInfo, SensorType
 from posetestbot.sensors.discovery import discover_realsense_d435
 from posetestbot.sensors.realsense import capture_realsense_rgbd
@@ -319,6 +319,7 @@ def build_realsense_capture_smoke_report(
         for record in folder_records:
             serial = record["serial"]
             folder_path = record["folder_path"]
+            inverted = normalize_inverted(record["sensor"].get("inverted", False))
             try:
                 summary = capture_func(
                     folder_path,
@@ -328,6 +329,7 @@ def build_realsense_capture_smoke_report(
                     warmup_frames=warmup_frames,
                     preview=preview,
                     record=True,
+                    inverted=inverted,
                 )
                 frame_count = int(summary.get("frame_count") or 0)
                 if frame_count != max_frames:
@@ -340,6 +342,8 @@ def build_realsense_capture_smoke_report(
                         "sensor_id": serial,
                         "sensor_name": record["folder_name"],
                         "output_folder": folder_path.as_posix(),
+                        "inverted": inverted,
+                        "image_rotation_degrees": 180 if inverted else 0,
                         "summary": summary,
                     }
                 )
@@ -348,7 +352,11 @@ def build_realsense_capture_smoke_report(
                         f"capture:{serial}",
                         "ok",
                         f"Captured {frame_count} frame(s) from {serial}.",
-                        details={"frame_count": frame_count},
+                        details={
+                            "frame_count": frame_count,
+                            "inverted": inverted,
+                            "image_rotation_degrees": 180 if inverted else 0,
+                        },
                     )
                 )
             except Exception as exc:
@@ -358,6 +366,8 @@ def build_realsense_capture_smoke_report(
                         "sensor_id": serial,
                         "sensor_name": record["folder_name"],
                         "output_folder": folder_path.as_posix(),
+                        "inverted": inverted,
+                        "image_rotation_degrees": 180 if inverted else 0,
                         "error": f"{type(exc).__name__}: {exc}",
                     }
                 )
@@ -456,6 +466,7 @@ def write_realsense_capture_smoke_with_manifest(
         status = "captured" if capture and capture.get("status") == "succeeded" else "planned"
         if capture and capture.get("status") == "failed":
             status = "failed"
+        inverted = normalize_inverted(sensor.get("inverted", False))
         sensor_records.append(
             make_sensor_record(
                 sensor_type=SensorType.REALSENSE_D435,
@@ -467,6 +478,8 @@ def write_realsense_capture_smoke_with_manifest(
                 status=status,
                 metadata={
                     "realsense_capture_smoke": True,
+                    "inverted": inverted,
+                    "image_rotation_degrees": 180 if inverted else 0,
                     "frame_count": (
                         capture.get("summary", {}).get("frame_count")
                         if isinstance(capture, Mapping)

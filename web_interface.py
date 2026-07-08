@@ -581,7 +581,7 @@ def index():
                     </div>
                     <div class="col-md-6">
                         <label for="sensors" class="form-label">Sensors</label>
-                        <textarea id="sensors" class="form-control" rows="5">realsense:825412070181:eye_in_hand:RealSense 825412070181
+                        <textarea id="sensors" class="form-control" rows="5" oninput="renderRealsenseInversionControls()">realsense:825412070181:eye_in_hand:RealSense 825412070181
 realsense:033422071805:eye_in_hand:RealSense 033422071805
 realsense:923322072633:eye_in_hand:RealSense 923322072633
 luxonis:auto:eye_in_hand:Luxonis OAK-D Pro
@@ -590,6 +590,10 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                     <div class="col-md-6">
                         <label for="sequenceOptions" class="form-label">Sequence Options</label>
                         <textarea id="sequenceOptions" class="form-control" rows="5">{}</textarea>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Inverted RealSense</label>
+                        <div id="realsenseInversionPanel" class="list-group small"></div>
                     </div>
                     <div class="col-12 d-flex gap-2 align-items-center">
                         <div class="form-check me-2">
@@ -749,11 +753,114 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                 return document.getElementById('runRoot').value.trim();
             }
 
-            function runConfigPayload() {
-                const sensorLines = document.getElementById('sensors').value
+            function sensorLinesFromForm() {
+                return document.getElementById('sensors').value
                     .split('\\n')
                     .map(line => line.trim())
                     .filter(Boolean);
+            }
+
+            function normalizeSensorTypeToken(value) {
+                const key = String(value || '').trim().toLowerCase().replaceAll('-', '_');
+                if (key === 'realsense' || key === 'd435') {
+                    return 'realsense_d435';
+                }
+                if (key === 'luxonis' || key === 'oak' || key === 'oak_d') {
+                    return 'oak_d_pro';
+                }
+                if (key === 'zed' || key === 'zed2i') {
+                    return 'zed_2i';
+                }
+                return key;
+            }
+
+            function parseSensorOrientation(value) {
+                const key = String(value || '').trim().toLowerCase().replaceAll('-', '_');
+                return ['1', 'true', 'yes', 'y', 'inverted', 'upside_down'].includes(key);
+            }
+
+            function sensorConfigFromLine(line) {
+                const parts = line.split(':');
+                const sensorType = parts[0] || '';
+                const deviceId = parts[1] || '';
+                const mountingMode = parts[2] || 'eye_in_hand';
+                const hasOrientation = parts.length >= 5;
+                const displayParts = hasOrientation ? parts.slice(3, -1) : parts.slice(3);
+                const displayName = displayParts.join(':').trim()
+                    || (sensorType + ':' + deviceId);
+                return {
+                    sensor_type: sensorType,
+                    device_id: deviceId,
+                    mounting_mode: mountingMode,
+                    display_name: displayName,
+                    inverted: hasOrientation ? parseSensorOrientation(parts[parts.length - 1]) : false,
+                };
+            }
+
+            function sensorInversionKey(sensor) {
+                return normalizeSensorTypeToken(sensor.sensor_type) + ':' + String(sensor.device_id || '');
+            }
+
+            function realsenseInvertedState() {
+                const state = {};
+                document.querySelectorAll('#realsenseInversionPanel input[type="checkbox"]').forEach(input => {
+                    state[input.dataset.sensorKey] = input.checked;
+                });
+                return state;
+            }
+
+            function sensorPayloadFromForm() {
+                const invertedState = realsenseInvertedState();
+                return sensorLinesFromForm().map(line => {
+                    const sensor = sensorConfigFromLine(line);
+                    if (normalizeSensorTypeToken(sensor.sensor_type) === 'realsense_d435') {
+                        const key = sensorInversionKey(sensor);
+                        if (Object.prototype.hasOwnProperty.call(invertedState, key)) {
+                            sensor.inverted = invertedState[key];
+                        }
+                    } else {
+                        sensor.inverted = false;
+                    }
+                    return sensor;
+                });
+            }
+
+            function renderRealsenseInversionControls(sensors) {
+                const panel = document.getElementById('realsenseInversionPanel');
+                const currentState = realsenseInvertedState();
+                const preferCurrentState = sensors === undefined;
+                const sensorValues = sensors || sensorLinesFromForm().map(sensorConfigFromLine);
+                const realsenseSensors = sensorValues
+                    .filter(sensor => normalizeSensorTypeToken(sensor.sensor_type) === 'realsense_d435');
+                panel.innerHTML = '';
+                if (!realsenseSensors.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'list-group-item text-muted';
+                    empty.textContent = 'No RealSense sensors configured.';
+                    panel.appendChild(empty);
+                    return;
+                }
+                realsenseSensors.forEach((sensor, index) => {
+                    const key = sensorInversionKey(sensor);
+                    const item = document.createElement('label');
+                    item.className = 'list-group-item d-flex align-items-center gap-2';
+                    const input = document.createElement('input');
+                    input.className = 'form-check-input m-0';
+                    input.type = 'checkbox';
+                    input.dataset.sensorKey = key;
+                    input.checked = preferCurrentState && Object.prototype.hasOwnProperty.call(currentState, key)
+                        ? currentState[key]
+                        : Boolean(sensor.inverted);
+                    const text = document.createElement('span');
+                    text.textContent = (sensor.display_name || sensor.device_id || ('RealSense ' + index))
+                        + ' · ' + (sensor.device_id || 'auto');
+                    item.appendChild(input);
+                    item.appendChild(text);
+                    panel.appendChild(item);
+                });
+            }
+
+            function runConfigPayload() {
                 let sequenceOptions = {};
                 const optionsText = document.getElementById('sequenceOptions').value.trim();
                 if (optionsText) {
@@ -768,7 +875,7 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                     velocity: Number(document.getElementById('velocity').value),
                     object_folder: document.getElementById('objectFolder').value.trim(),
                     calibration_profiles: document.getElementById('calibrationProfiles').value.trim() || null,
-                    sensors: sensorLines,
+                    sensors: sensorPayloadFromForm(),
                     sequence_options: sequenceOptions,
                     plan_only: document.getElementById('planOnly').checked,
                 };
@@ -1149,6 +1256,7 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                     document.getElementById('sensors').value = config.capture.sensors
                         .map(sensor => [sensor.sensor_type, sensor.device_id, sensor.mounting_mode, sensor.display_name].join(':'))
                         .join('\\n');
+                    renderRealsenseInversionControls(config.capture.sensors || []);
                     document.getElementById('sequenceOptions').value = JSON.stringify(config.pipeline.options || {}, null, 2);
                     renderRunConfigPreflight(result.data.preflight);
                     showPayload(result.data);
@@ -2487,6 +2595,7 @@ zed_2i:auto:eye_in_hand:Stereolabs ZED 2i</textarea>
                     }
                 });
             }
+            renderRealsenseInversionControls();
             refreshJobs();
             refreshCaptureJobs();
         </script>

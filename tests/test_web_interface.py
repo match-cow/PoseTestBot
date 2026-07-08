@@ -69,6 +69,7 @@ def test_index_lists_acquisition_sequences_only() -> None:
     assert response.status_code == 200
     assert "fake_capture_to_bop_dataset_dry_run" in html
     assert "capture_to_bop_dataset_dry_run" in html
+    assert "Inverted RealSense" in html
     assert "foundationpose_runtime_to_bop_eval" not in html
     assert "megapose_to_bop_eval_dry_run" not in html
 
@@ -134,3 +135,49 @@ def test_pipeline_recommendations_endpoint_is_acquisition_only(tmp_path: Path) -
     assert "write_run_preflight" in ids
     assert "evaluate_bop_results" not in ids
     assert "plan_foundationpose" not in ids
+
+
+def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "run-inverted"
+
+    response = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "robot_mode": "fake",
+            "sequence": "sync_aruco",
+            "resolution": "720p",
+            "fps": 6,
+            "velocity": 0.2,
+            "object_folder": "object_models",
+            "sensors": [
+                {
+                    "sensor_type": "realsense",
+                    "device_id": "123",
+                    "mounting_mode": "static",
+                    "display_name": "Cell RealSense",
+                    "inverted": True,
+                },
+                {
+                    "sensor_type": "oak",
+                    "device_id": "auto",
+                    "mounting_mode": "static",
+                    "display_name": "Cell OAK-D Pro",
+                },
+            ],
+        },
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 201
+    assert payload["config"]["capture"]["sensors"][0]["inverted"] is True
+    assert payload["config"]["capture"]["sensors"][1]["inverted"] is False
+
+    loaded = client.get(
+        "/run-config",
+        query_string={"run_root": run_root.as_posix()},
+    ).get_json()
+
+    assert loaded["config"]["capture"]["sensors"][0]["inverted"] is True
+    assert loaded["config"]["capture"]["sensors"][0]["sensor_type"] == "realsense_d435"

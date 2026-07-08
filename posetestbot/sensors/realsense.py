@@ -45,6 +45,40 @@ def camera_intrinsics_from_realsense(
     )
 
 
+def _rotate_180(image: Any) -> np.ndarray:
+    return np.ascontiguousarray(np.rot90(np.asanyarray(image), 2))
+
+
+def _intrinsics_for_orientation(
+    intrinsics: CameraIntrinsics,
+    *,
+    inverted: bool,
+) -> CameraIntrinsics:
+    if not inverted:
+        return intrinsics
+
+    cam_k = list(intrinsics.cam_k)
+    cam_k[2] = float(intrinsics.width - 1) - float(cam_k[2])
+    cam_k[5] = float(intrinsics.height - 1) - float(cam_k[5])
+    return CameraIntrinsics(
+        cam_k=(
+            float(cam_k[0]),
+            float(cam_k[1]),
+            float(cam_k[2]),
+            float(cam_k[3]),
+            float(cam_k[4]),
+            float(cam_k[5]),
+            float(cam_k[6]),
+            float(cam_k[7]),
+            float(cam_k[8]),
+        ),
+        width=intrinsics.width,
+        height=intrinsics.height,
+        distortion=intrinsics.distortion,
+        depth_scale_to_mm=intrinsics.depth_scale_to_mm,
+    )
+
+
 def _import_realsense() -> Any:
     try:
         import pyrealsense2 as rs
@@ -181,6 +215,7 @@ def capture_realsense_rgbd(
     warmup_frames: int = 0,
     preview: bool = False,
     record: bool = True,
+    inverted: bool = False,
     rs_module: Any | None = None,
     cv2_module: Any | None = None,
 ) -> dict[str, Any]:
@@ -236,6 +271,8 @@ def capture_realsense_rgbd(
     sidecars_written = False
     started_at_ns = time.time_ns()
     last_frame_wall_timestamp_ns = 0
+    image_rotation_degrees = 180 if inverted else 0
+    orientation = "inverted" if inverted else "normal"
 
     depth_sensor = profile.get_device().first_depth_sensor()
     depth_scale_to_mm = float(depth_sensor.get_depth_scale()) * 1000.0
@@ -257,6 +294,8 @@ def capture_realsense_rgbd(
                 valid_frames_seen += 1
                 if cv2_preview is not None:
                     color_image = np.asanyarray(color_frame.get_data())
+                    if inverted:
+                        color_image = _rotate_180(color_image)
                     cv2_preview.imshow("RealSense Capture RGB aligned", color_image)
                     key = cv2_preview.waitKey(1)
                     if key & 0xFF == ord("q") or key == 27:
@@ -268,6 +307,10 @@ def capture_realsense_rgbd(
                 intrinsics,
                 depth_scale_to_mm,
             )
+            camera_intrinsics = _intrinsics_for_orientation(
+                camera_intrinsics,
+                inverted=inverted,
+            )
             if record and output is not None and not sidecars_written:
                 written = write_legacy_camera_sidecars(output, camera_intrinsics)
                 sidecar_paths = {key: path.name for key, path in written.items()}
@@ -275,6 +318,9 @@ def capture_realsense_rgbd(
 
             depth_image = np.asanyarray(aligned_depth_frame.get_data())
             color_image = np.asanyarray(color_frame.get_data())
+            if inverted:
+                depth_image = _rotate_180(depth_image)
+                color_image = _rotate_180(color_image)
             key = -1
             if cv2_preview is not None:
                 cv2_preview.imshow("RealSense Capture RGB aligned", color_image)
@@ -313,6 +359,9 @@ def capture_realsense_rgbd(
                     extra_metadata={
                         "color_frame_number": color_frame.get_frame_number(),
                         "depth_frame_number": aligned_depth_frame.get_frame_number(),
+                        "inverted": bool(inverted),
+                        "image_rotation_degrees": image_rotation_degrees,
+                        "orientation": orientation,
                         "product_line": product_line,
                         **timestamp_metadata,
                     },
@@ -343,6 +392,9 @@ def capture_realsense_rgbd(
         "output_path": output.as_posix() if output is not None else None,
         "record": record,
         "preview": preview,
+        "inverted": bool(inverted),
+        "image_rotation_degrees": image_rotation_degrees,
+        "orientation": orientation,
         "fps": fps,
         "max_frames": max_frames,
         "warmup_frames": warmup_frames,

@@ -18,7 +18,7 @@ from posetestbot.pipeline.run_config import (
 def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
     run_root = tmp_path / "run-capture-plan"
     sensors = (
-        sensor_config_from_token("realsense:123:eye_in_hand:Cell RealSense"),
+        sensor_config_from_token("realsense:123:eye_in_hand:Cell RealSense:inverted"),
         sensor_config_from_token("luxonis:auto:eye_in_hand:Cell OAK-D Pro"),
         sensor_config_from_token("zed:auto:static:Cell ZED 2i"),
     )
@@ -69,7 +69,10 @@ def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
         "5",
         "--device",
         "123",
+        "--inverted",
     ]
+    assert plan["sensors"][0]["metadata"]["inverted"] is True
+    assert plan["sensors"][0]["metadata"]["image_rotation_degrees"] == 180
 
     luxonis = plan["commands"][2]
     assert luxonis["command"] == [
@@ -83,10 +86,12 @@ def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
         "--max_frames",
         "5",
     ]
+    assert "--inverted" not in luxonis["command"]
 
     zed = plan["commands"][3]
     assert zed["command"][-2:] == ["--resolution", "720p"]
     assert "--device" not in zed["command"]
+    assert "--inverted" not in zed["command"]
 
     receiver = plan["commands"][-1]
     assert receiver["command"][:4] == [
@@ -109,6 +114,20 @@ def test_capture_plan_uses_adapter_resolution_validation(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="RealSense D435"):
         build_capture_plan(config)
+
+
+def test_capture_plan_treats_string_false_inverted_as_normal(tmp_path: Path) -> None:
+    run_root = tmp_path / "run-string-false"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+    ).to_dict()
+    config["capture"]["sensors"][0]["inverted"] = "false"
+
+    plan = build_capture_plan(config).to_dict()
+
+    assert "--inverted" not in plan["commands"][1]["command"]
+    assert plan["sensors"][0]["metadata"]["inverted"] is False
 
 
 def test_capture_plan_stage_writes_manifest_artifact(tmp_path: Path) -> None:

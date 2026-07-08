@@ -56,6 +56,7 @@ class SensorRunConfig:
     mounting_mode: str = MountingMode.EYE_IN_HAND.value
     enabled: bool = True
     calibration_profile_id: str | None = None
+    inverted: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -133,18 +134,40 @@ def normalize_mounting_mode(value: str) -> MountingMode:
         raise ValueError(f"Unknown mounting mode {value!r}; use one of: {choices}") from exc
 
 
+def normalize_inverted(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    key = str(value).strip().lower().replace("-", "_")
+    if key in {"1", "true", "yes", "y", "inverted", "upside_down"}:
+        return True
+    if key in {"0", "false", "no", "n", "normal", "upright", ""}:
+        return False
+    raise ValueError(
+        "Unknown sensor orientation "
+        f"{value!r}; use inverted, normal, true, false, 1, or 0"
+    )
+
+
+def _validate_sensor_orientation(sensor_type: SensorType | str, inverted: bool) -> None:
+    normalized = sensor_type if isinstance(sensor_type, SensorType) else SensorType(sensor_type)
+    if inverted and normalized != SensorType.REALSENSE_D435:
+        raise ValueError("Sensor inverted=true is only supported for RealSense D435")
+
+
 def sensor_config_from_token(
     token: str,
     *,
     default_mounting_mode: str = MountingMode.EYE_IN_HAND.value,
 ) -> SensorRunConfig:
-    """Parse ``sensor_type:device_id[:mounting_mode[:display_name]]``."""
+    """Parse ``sensor_type:device_id[:mounting_mode[:display_name[:orientation]]]``."""
 
     parts = token.split(":")
-    if len(parts) < 2 or len(parts) > 4:
+    if len(parts) < 2 or len(parts) > 5:
         raise ValueError(
             "Sensor entries must look like "
-            "sensor_type:device_id[:mounting_mode[:display_name]]"
+            "sensor_type:device_id[:mounting_mode[:display_name[:orientation]]]"
         )
     sensor_type = normalize_sensor_type(parts[0])
     device_id = parts[1].strip()
@@ -155,14 +178,17 @@ def sensor_config_from_token(
     )
     display_name = (
         parts[3].strip()
-        if len(parts) == 4 and parts[3].strip()
+        if len(parts) >= 4 and parts[3].strip()
         else f"{sensor_type.value}:{device_id}"
     )
+    inverted = normalize_inverted(parts[4]) if len(parts) == 5 else False
+    _validate_sensor_orientation(sensor_type, inverted)
     return SensorRunConfig(
         sensor_type=sensor_type.value,
         device_id=device_id,
         display_name=display_name,
         mounting_mode=mounting_mode.value,
+        inverted=inverted,
     )
 
 
@@ -171,7 +197,7 @@ def sensor_config_from_mapping(
     *,
     default_mounting_mode: str = MountingMode.EYE_IN_HAND.value,
 ) -> SensorRunConfig:
-    sensor_type = normalize_sensor_type(str(value.get("sensor_type", ""))).value
+    sensor_type = normalize_sensor_type(str(value.get("sensor_type", "")))
     device_id = str(value.get("device_id", "")).strip()
     if not device_id:
         raise ValueError("Sensor device_id must not be empty")
@@ -187,13 +213,16 @@ def sensor_config_from_mapping(
     calibration_profile_id = value.get("calibration_profile_id")
     if calibration_profile_id is not None:
         calibration_profile_id = str(calibration_profile_id)
+    inverted = normalize_inverted(value.get("inverted", False))
+    _validate_sensor_orientation(sensor_type, inverted)
     return SensorRunConfig(
-        sensor_type=sensor_type,
+        sensor_type=sensor_type.value,
         device_id=device_id,
         display_name=display_name,
         mounting_mode=mounting_mode,
         enabled=bool(value.get("enabled", True)),
         calibration_profile_id=calibration_profile_id,
+        inverted=inverted,
         metadata=dict(metadata),
     )
 
@@ -324,10 +353,12 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
     for index, sensor in enumerate(sensors):
         if not isinstance(sensor, Mapping):
             raise ValueError(f"Run config sensor {index} must be an object")
-        normalize_sensor_type(str(sensor.get("sensor_type", "")))
+        sensor_type = normalize_sensor_type(str(sensor.get("sensor_type", "")))
         normalize_mounting_mode(str(sensor.get("mounting_mode", "")))
         if not str(sensor.get("device_id", "")).strip():
             raise ValueError(f"Run config sensor {index} device_id must not be empty")
+        inverted = normalize_inverted(sensor.get("inverted", False))
+        _validate_sensor_orientation(sensor_type, inverted)
 
     pipeline = value.get("pipeline")
     if not isinstance(pipeline, Mapping):

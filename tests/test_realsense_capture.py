@@ -4,6 +4,7 @@ import json
 import sys
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 
 from posetestbot.io.artifacts import (
@@ -42,9 +43,10 @@ class FakeFrame:
     def get_data(self):
         if self.color:
             image = np.zeros((3, 4, 3), dtype=np.uint8)
+            image[:, :, 0] = np.arange(12, dtype=np.uint8).reshape(3, 4)
             image[:, :, 1] = self.index
             return image
-        return np.ones((3, 4), dtype=np.uint16) * self.index
+        return np.arange(12, dtype=np.uint16).reshape(3, 4) + self.index * 100
 
     def get_timestamp(self):
         return float(self.index * 10)
@@ -223,6 +225,8 @@ def test_capture_realsense_rgbd_writes_frames_without_preview(tmp_path) -> None:
     ]
     assert [record["frame_index"] for record in records] == [0, 1]
     assert records[0]["sensor_id"] == "825412070181"
+    assert records[0]["inverted"] is False
+    assert records[0]["image_rotation_degrees"] == 0
 
 
 def test_capture_realsense_rgbd_preview_is_optional(tmp_path) -> None:
@@ -243,6 +247,52 @@ def test_capture_realsense_rgbd_preview_is_optional(tmp_path) -> None:
     assert preview.imshow_calls == 1
     assert preview.wait_key_calls == 1
     assert preview.destroy_calls == 1
+
+
+def test_capture_realsense_rgbd_inverted_rotates_frames_and_intrinsics(tmp_path) -> None:
+    summary = capture_realsense_rgbd(
+        tmp_path,
+        device_id="123",
+        fps=6,
+        max_frames=1,
+        preview=False,
+        inverted=True,
+        rs_module=FakeRS("123"),
+    )
+
+    assert summary["inverted"] is True
+    assert summary["image_rotation_degrees"] == 180
+    assert summary["orientation"] == "inverted"
+
+    rgb_path = next((tmp_path / RGB_DIR).glob("*.png"))
+    depth_path = next((tmp_path / DEPTH_DIR).glob("*.png"))
+    written_rgb = cv2.imread(rgb_path.as_posix(), cv2.IMREAD_UNCHANGED)
+    written_depth = cv2.imread(depth_path.as_posix(), cv2.IMREAD_UNCHANGED)
+    expected_rgb = np.rot90(FakeFrame(1, color=True).get_data(), 2)
+    expected_depth = np.rot90(FakeFrame(1, color=False).get_data(), 2)
+
+    assert np.array_equal(written_rgb, expected_rgb)
+    assert np.array_equal(written_depth, expected_depth)
+
+    camera = json.loads((tmp_path / CAMERA_JSON).read_text())
+    assert camera["cam_K"] == [
+        600.0,
+        0.0,
+        959.0,
+        0.0,
+        601.0,
+        479.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / FRAME_METADATA_JSONL).read_text().splitlines()
+    ]
+    assert records[0]["inverted"] is True
+    assert records[0]["image_rotation_degrees"] == 180
+    assert records[0]["orientation"] == "inverted"
 
 
 def test_discover_realsense_d435_reads_mocked_sdk_devices(monkeypatch) -> None:
