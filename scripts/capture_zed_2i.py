@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 
 import cv2
@@ -68,6 +69,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of frames to capture. Use 0 for unlimited.",
     )
     parser.add_argument(
+        "--warmup-frames",
+        type=int,
+        default=0,
+        help="Discard this many valid frames before writing capture output.",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default=None,
@@ -79,10 +86,20 @@ def parse_args() -> argparse.Namespace:
         default="720p",
         help="Capture resolution profile.",
     )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show an OpenCV RGB preview window while capturing.",
+    )
+    parser.add_argument(
+        "--print-json",
+        action="store_true",
+        help="Print the capture summary JSON after completion.",
+    )
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
 
     try:
@@ -117,6 +134,15 @@ def main() -> None:
     depth = sl.Mat()
     camera_parameters_saved = False
     captured_frames = 0
+    valid_frames = 0
+    summary = {
+        "status": "running",
+        "sensor_type": SensorType.ZED_2I.value,
+        "sensor_id": args.device or "default",
+        "frame_count": 0,
+        "preview": bool(args.preview),
+        "resolution": args.resolution,
+    }
 
     try:
         while True:
@@ -141,6 +167,10 @@ def main() -> None:
                 np.uint16
             )
 
+            valid_frames += 1
+            if valid_frames <= args.warmup_frames:
+                continue
+
             if record_stream and not camera_parameters_saved:
                 camera_info = zed.get_camera_information()
                 config = camera_info.camera_configuration
@@ -153,8 +183,10 @@ def main() -> None:
                 )
                 camera_parameters_saved = True
 
-            cv2.imshow("ZED 2i Capture RGB aligned", rgb_image)
-            key = cv2.waitKey(1)
+            key = -1
+            if args.preview:
+                cv2.imshow("ZED 2i Capture RGB aligned", rgb_image)
+                key = cv2.waitKey(1)
 
             if record_stream:
                 sensor_timestamp = zed.get_timestamp(sl.TIME_REFERENCE.IMAGE)
@@ -177,7 +209,20 @@ def main() -> None:
                 break
     finally:
         zed.close()
+        if args.preview:
+            cv2.destroyAllWindows()
+
+    summary["status"] = "succeeded"
+    summary["frame_count"] = captured_frames
+    print(
+        "ZED 2i capture: "
+        f"{summary['status']} {summary['sensor_id']} "
+        f"frames={summary['frame_count']} preview={summary['preview']}"
+    )
+    if args.print_json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

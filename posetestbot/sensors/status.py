@@ -9,6 +9,10 @@ from datetime import datetime, timezone
 from typing import Callable, Mapping
 
 from posetestbot.sensors import discovery
+from posetestbot.sensors.aliases import (
+    alias_record_for_device,
+    load_sensor_aliases,
+)
 from posetestbot.sensors.contracts import SensorDeviceInfo, SensorType
 from posetestbot.sensors.oak_d_pro import depthai_version_supported
 from posetestbot.sensors.registry import SENSOR_ADAPTERS
@@ -59,21 +63,47 @@ class SensorFamilyStatus:
     error: str | None = None
     diagnostics: list[dict] | None = None
 
-    def as_dict(self) -> dict:
+    def as_dict(
+        self,
+        *,
+        aliases: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> dict:
         value = asdict(self)
         value["sensor_type"] = self.sensor_type.value
-        value["devices"] = [sensor_device_to_dict(device) for device in self.devices]
+        value["devices"] = [
+            sensor_device_to_dict(device, aliases=aliases) for device in self.devices
+        ]
         value["diagnostics"] = list(self.diagnostics or [])
         return value
 
 
-def sensor_device_to_dict(device: SensorDeviceInfo) -> dict:
-    return {
+def sensor_device_to_dict(
+    device: SensorDeviceInfo,
+    *,
+    aliases: Mapping[str, Mapping[str, object]] | None = None,
+) -> dict:
+    alias_record = alias_record_for_device(
+        aliases or {},
+        sensor_type=device.sensor_type,
+        device_id=device.device_id,
+    )
+    alias = str(alias_record.get("alias") or "").strip() or None
+    effective_display_name = alias or device.display_name
+    data = {
         "sensor_type": device.sensor_type.value,
         "device_id": device.device_id,
         "display_name": device.display_name,
+        "alias": alias,
+        "effective_display_name": effective_display_name,
         "connected": device.connected,
         "metadata": dict(device.metadata),
+    }
+    if alias_record.get("mounting_mode") not in {None, ""}:
+        data["mounting_mode"] = str(alias_record["mounting_mode"])
+    if alias_record.get("inverted") is not None:
+        data["inverted"] = bool(alias_record["inverted"])
+    return {
+        **data,
     }
 
 
@@ -231,9 +261,13 @@ def collect_sensor_status(
     *,
     expected_counts: Mapping[SensorType, int | None] | None = None,
     discoverers: Mapping[SensorType, Callable[[], list[SensorDeviceInfo]]] | None = None,
+    aliases: Mapping[str, Mapping[str, object]] | None = None,
+    alias_path: str | None = None,
 ) -> dict:
-    expected_counts = expected_counts or LAB_EXPECTED_SENSOR_COUNTS
+    expected_counts = expected_counts or {}
     discoverers = discoverers or DISCOVERERS
+    if aliases is None:
+        aliases = load_sensor_aliases(alias_path) if alias_path is not None else load_sensor_aliases()
     families = []
     for sensor_type in SensorType:
         families.append(
@@ -241,9 +275,12 @@ def collect_sensor_status(
                 sensor_type,
                 expected_count=expected_counts.get(sensor_type),
                 discoverer=discoverers.get(sensor_type),
-            ).as_dict()
+            ).as_dict(aliases=aliases)
         )
 
+    expected_counts_requested = any(
+        family["expected_count"] is not None for family in families
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -252,11 +289,12 @@ def collect_sensor_status(
         "all_expected_connected": all(
             family["meets_expected"] is not False for family in families
         ),
+        "expected_counts_requested": expected_counts_requested,
     }
 
 
 def parse_expected_counts(values: list[str]) -> dict[SensorType, int | None]:
-    expected_counts = dict(LAB_EXPECTED_SENSOR_COUNTS)
+    expected_counts: dict[SensorType, int | None] = {}
     for value in values:
         if "=" not in value:
             raise ValueError(f"Expected count must be SENSOR_TYPE=COUNT, got {value!r}")

@@ -200,21 +200,32 @@ def build_hardware_status_report(
             )
         )
     else:
+        expected_counts_requested = bool(sensors.get("expected_counts_requested")) or any(
+            isinstance(family, Mapping) and family.get("expected_count") is not None
+            for family in sensors.get("families", [])
+        )
         checks.append(
             _check(
                 "sensor_status",
-                "ok" if sensors.get("all_expected_connected") else "warning",
+                "ok"
+                if sensors.get("all_expected_connected") or not expected_counts_requested
+                else "warning",
                 (
-                    f"Connected {sensors.get('total_connected', 0)} sensor(s); expected profile complete."
+                    f"Detected {sensors.get('total_connected', 0)} connected sensor(s)."
+                    if not expected_counts_requested
+                    else (
+                        f"Connected {sensors.get('total_connected', 0)} sensor(s); requested sensor counts are satisfied."
+                    )
                     if sensors.get("all_expected_connected")
                     else (
                         f"Connected {sensors.get('total_connected', 0)} sensor(s); "
-                        "one or more expected lab sensors are missing or blocked."
+                        "one or more requested sensor counts are missing or blocked."
                     )
                 ),
                 details={
                     "total_connected": sensors.get("total_connected"),
                     "all_expected_connected": sensors.get("all_expected_connected"),
+                    "expected_counts_requested": expected_counts_requested,
                 },
             )
         )

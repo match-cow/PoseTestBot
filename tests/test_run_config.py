@@ -13,6 +13,7 @@ from posetestbot.pipeline.run_config import (
     create_run_config,
     load_run_config_for_run_root,
     sensor_config_from_mapping,
+    sensor_configs_from_status,
     sensor_config_from_token,
     sequence_plan_from_run_config,
     write_run_config,
@@ -72,6 +73,34 @@ def test_sensor_config_accepts_realsense_inverted_orientation() -> None:
     assert token_sensor.inverted is True
     assert mapping_sensor.device_id == "456"
     assert mapping_sensor.inverted is True
+
+
+def test_sensor_configs_from_status_uses_alias_defaults() -> None:
+    sensors = sensor_configs_from_status(
+        {
+            "families": [
+                {
+                    "devices": [
+                        {
+                            "sensor_type": "realsense_d435",
+                            "device_id": "123",
+                            "display_name": "Intel RealSense 123",
+                            "effective_display_name": "Wrist Camera",
+                            "mounting_mode": "eye_in_hand",
+                            "inverted": True,
+                            "metadata": {"model": "D435"},
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+
+    assert len(sensors) == 1
+    assert sensors[0].device_id == "123"
+    assert sensors[0].display_name == "Wrist Camera"
+    assert sensors[0].inverted is True
+    assert sensors[0].metadata == {"model": "D435"}
 
 
 def test_sensor_config_rejects_non_realsense_inverted_orientation() -> None:

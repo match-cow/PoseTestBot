@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PoseTestBot Control</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="{{ url_for('static', filename='styles.css') }}" rel="stylesheet">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-mark">PTB</div>
+        <div>
+          <h1>PoseTestBot</h1>
+          <p>Acquisition Control</p>
+        </div>
+      </div>
+      <nav class="workflow-nav" aria-label="Workflow">
+        <a href="#overview" class="active">Overview</a>
+        <a href="#sensors">Sensors</a>
+        <a href="#run-setup">Run Setup</a>
+        <a href="#preflight">Preflight</a>
+        <a href="#capture">Capture</a>
+        <a href="#sync">Sync</a>
+        <a href="#calibration">Calibration</a>
+        <a href="#bop">BOP Export</a>
+        <a href="#artifacts">Artifacts</a>
+        <a href="#jobs">Jobs</a>
+      </nav>
+      <div id="sidebarStatus" class="sidebar-status"></div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div class="run-root-field">
+          <label for="runRoot">Run Root</label>
+          <input id="runRoot" class="form-control" value="working_data/web_run">
+        </div>
+        <button class="btn btn-primary" id="refreshOverviewBtn" type="button">Refresh</button>
+        <button class="btn btn-outline-secondary" id="refreshJobsBtn" type="button">Jobs</button>
+      </header>
+
+      <section id="overview" class="content-band">
+        <div class="section-heading">
+          <div>
+            <h2>Overview</h2>
+            <p id="overviewSummary">Select a run root to inspect workflow status.</p>
+          </div>
+          <button class="btn btn-outline-primary btn-sm" id="runConfigQueueBtn" type="button">Queue Sequence</button>
+        </div>
+        <div id="stepOverview" class="step-grid"></div>
+        <div class="split-grid">
+          <div>
+            <h3>Next Actions</h3>
+            <div id="recommendationsPanel" class="stack-list"></div>
+          </div>
+          <div>
+            <h3>System Status</h3>
+            <div class="status-grid">
+              <button class="status-tile" id="robotStatusBtn" type="button">
+                <span>Robot</span>
+                <strong id="robotStatusText">Refresh</strong>
+              </button>
+              <button class="status-tile" id="runtimeStatusBtn" type="button">
+                <span>Runtime</span>
+                <strong id="runtimeStatusText">Refresh</strong>
+              </button>
+              <button class="status-tile" id="hardwareStatusBtn" type="button">
+                <span>Hardware</span>
+                <strong id="hardwareStatusText">Refresh</strong>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="sensors" class="content-band">
+        <div class="section-heading">
+          <div>
+            <h2>Sensors</h2>
+            <p id="sensorSummary">Detection-first status with lab-local aliases.</p>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-outline-secondary btn-sm" id="refreshSensorsBtn" type="button">Refresh</button>
+            <button class="btn btn-outline-primary btn-sm" id="snapshotSensorsBtn" type="button">Preview Selected</button>
+            <button class="btn btn-primary btn-sm" id="saveAliasesBtn" type="button">Save Aliases</button>
+          </div>
+        </div>
+        <div id="sensorCards" class="sensor-grid"></div>
+        <div id="snapshotPanel" class="snapshot-strip"></div>
+      </section>
+
+      <section id="run-setup" class="content-band">
+        <div class="section-heading">
+          <div>
+            <h2>Run Setup</h2>
+            <p>Create a run config from detected devices and selected workflow.</p>
+          </div>
+          <button class="btn btn-primary btn-sm" id="createRunConfigBtn" type="button">Write Run Config</button>
+        </div>
+        <div class="form-grid">
+          <label>Run Name<input id="runName" class="form-control" placeholder="optional"></label>
+          <label>Robot Mode
+            <select id="robotMode" class="form-select">
+              <option value="fake">fake</option>
+              <option value="real">real</option>
+            </select>
+          </label>
+          <label>Sequence
+            <select id="sequenceId" class="form-select">
+              {% for sequence in sequences %}
+              <option value="{{ sequence.id }}">{{ sequence.id }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>FPS<input id="fps" class="form-control" type="number" min="1" value="6"></label>
+          <label>Velocity m/s<input id="velocity" class="form-control" type="number" min="0" step="0.01" value="0.2"></label>
+          <label>Mounting Default
+            <select id="mountingMode" class="form-select">
+              <option value="eye_in_hand">eye_in_hand</option>
+              <option value="static">static</option>
+            </select>
+          </label>
+        </div>
+        <div class="check-row">
+          <label><input id="planOnly" type="checkbox" checked> Plan only</label>
+          <label><input id="useDetectedSensors" type="checkbox" checked> Use detected sensors</label>
+          <label><input id="includeInvertedDefaults" type="checkbox" checked> Inverted RealSense defaults</label>
+        </div>
+        <textarea id="sequenceOptions" class="form-control code-box" rows="5">{}</textarea>
+        <pre id="runConfigOutput" class="output-box"></pre>
+      </section>
+
+      <section id="preflight" class="content-band compact-actions">
+        <h2>Preflight</h2>
+        <button class="btn btn-outline-primary btn-sm" data-stage="run_preflight">Run Preflight</button>
+        <button class="btn btn-outline-primary btn-sm" data-stage="capture_plan_preflight">Capture Plan Preflight</button>
+        <button class="btn btn-outline-secondary btn-sm" id="writeHardwareStatusBtn" type="button">Hardware Snapshot</button>
+      </section>
+
+      <section id="capture" class="content-band compact-actions">
+        <h2>Capture</h2>
+        <button class="btn btn-outline-primary btn-sm" data-stage="capture_plan">Capture Plan</button>
+        <button class="btn btn-outline-primary btn-sm" data-stage="capture_execution_plan">Execution Plan</button>
+        <button class="btn btn-outline-danger btn-sm" data-stage="capture_execution">Queue Capture</button>
+      </section>
+
+      <section id="sync" class="content-band compact-actions">
+        <h2>Sync</h2>
+        <button class="btn btn-outline-primary btn-sm" data-stage="sync_run">Sync Run</button>
+        <button class="btn btn-outline-primary btn-sm" data-stage="sync_quality">Sync Quality</button>
+      </section>
+
+      <section id="calibration" class="content-band compact-actions">
+        <h2>Calibration</h2>
+        <button class="btn btn-outline-primary btn-sm" data-stage="calibration_preflight">Preflight</button>
+        <button class="btn btn-outline-primary btn-sm" data-stage="calibration_observations">Observations</button>
+        <button class="btn btn-outline-primary btn-sm" data-stage="calibration_candidates">Candidates</button>
+        <button class="btn btn-outline-primary btn-sm" data-stage="calibration_solver">Solver</button>
+        <button class="btn btn-outline-primary btn-sm" data-stage="calibration_validation">Validation</button>
+      </section>
+
+      <section id="bop" class="content-band compact-actions">
+        <h2>BOP Export</h2>
+        <button class="btn btn-outline-primary btn-sm" data-stage="blenderproc_prepare">Prepare GT</button>
+        <button class="btn btn-outline-primary btn-sm" data-stage="blenderproc_render">Render GT</button>
+        <button class="btn btn-primary btn-sm" data-stage="bop_export">Export BOP</button>
+      </section>
+
+      <section id="artifacts" class="content-band">
+        <div class="section-heading">
+          <div>
+            <h2>Artifacts</h2>
+            <p>Browse run files and previews.</p>
+          </div>
+          <button class="btn btn-outline-secondary btn-sm" id="loadArtifactsBtn" type="button">Load</button>
+        </div>
+        <div id="artifactsPanel" class="stack-list"></div>
+      </section>
+
+      <section id="jobs" class="content-band">
+        <div class="section-heading">
+          <div>
+            <h2>Jobs</h2>
+            <p>Queued local work and resource locks.</p>
+          </div>
+          <button class="btn btn-outline-secondary btn-sm" id="loadJobsBtn" type="button">Refresh</button>
+        </div>
+        <div id="jobsPanel" class="stack-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

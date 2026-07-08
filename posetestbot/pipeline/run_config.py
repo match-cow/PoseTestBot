@@ -255,6 +255,52 @@ def sensor_configs_from_values(
     return tuple(sensors)
 
 
+def sensor_configs_from_status(
+    sensor_status: Mapping[str, Any],
+    *,
+    default_mounting_mode: str = MountingMode.EYE_IN_HAND.value,
+) -> tuple[SensorRunConfig, ...]:
+    """Build run-config sensor entries from discovered status devices."""
+
+    sensors: list[SensorRunConfig] = []
+    mode = normalize_mounting_mode(default_mounting_mode).value
+    for family in sensor_status.get("families", []):
+        if not isinstance(family, Mapping):
+            continue
+        for device in family.get("devices", []):
+            if not isinstance(device, Mapping) or not device.get("connected", True):
+                continue
+            sensor_type = normalize_sensor_type(str(device.get("sensor_type", "")))
+            device_id = str(device.get("device_id", "")).strip()
+            if not device_id:
+                continue
+            display_name = str(
+                device.get("effective_display_name")
+                or device.get("alias")
+                or device.get("display_name")
+                or f"{sensor_type.value}:{device_id}"
+            )
+            mounting_mode = normalize_mounting_mode(
+                str(device.get("mounting_mode") or mode)
+            ).value
+            inverted = normalize_inverted(device.get("inverted", False))
+            _validate_sensor_orientation(sensor_type, inverted)
+            metadata = device.get("metadata", {})
+            if not isinstance(metadata, Mapping):
+                metadata = {}
+            sensors.append(
+                SensorRunConfig(
+                    sensor_type=sensor_type.value,
+                    device_id=device_id,
+                    display_name=display_name,
+                    mounting_mode=mounting_mode,
+                    inverted=inverted,
+                    metadata=dict(metadata),
+                )
+            )
+    return tuple(sensors)
+
+
 def default_lab_sensors(
     *,
     mounting_mode: str = MountingMode.EYE_IN_HAND.value,

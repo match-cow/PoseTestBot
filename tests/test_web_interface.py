@@ -9,6 +9,7 @@ import numpy as np
 
 from posetestbot.io.artifacts import BOP_DIR, BOP_EXPORT_MANIFEST, BOP_TARGETS_BOP19, DEPTH_DIR, RGB_DIR
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
+from posetestbot.web.routes import sensors as web_sensors
 
 
 def load_web_interface_app():
@@ -181,3 +182,156 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
 
     assert loaded["config"]["capture"]["sensors"][0]["inverted"] is True
     assert loaded["config"]["capture"]["sensors"][0]["sensor_type"] == "realsense_d435"
+
+
+def test_sensor_alias_endpoint_round_trips_lab_local_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    alias_path = tmp_path / "sensor_aliases.json"
+    monkeypatch.setattr(web_sensors, "DEFAULT_SENSOR_ALIASES_PATH", alias_path)
+    client = app.test_client()
+
+    response = client.put(
+        "/sensors/aliases",
+        json={
+            "aliases": {
+                "realsense_d435:123": {
+                    "alias": "Wrist Camera",
+                    "mounting_mode": "eye_in_hand",
+                    "inverted": True,
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["aliases"]["realsense_d435:123"]["alias"] == "Wrist Camera"
+
+    loaded = client.get("/sensors/aliases").get_json()
+    assert loaded["aliases"]["realsense_d435:123"]["inverted"] is True
+
+
+def test_overview_endpoint_reports_sequence_steps(tmp_path: Path) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "run-overview"
+    write_run_config(
+        run_root,
+        create_run_config(run_root=run_root, sequence_id="sync_to_bop_dry_run"),
+    )
+
+    response = client.get(
+        "/ui/overview",
+        query_string={"run_root": run_root.as_posix()},
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["config"]["pipeline"]["sequence_id"] == "sync_to_bop_dry_run"
+    assert any(step["stage_id"] == "sync_quality" for step in payload["steps"])
+    assert any(section["id"] == "sensors" for section in payload["sidebar"])
+
+
+def test_sensor_snapshot_submission_queues_camera_job(monkeypatch, tmp_path: Path) -> None:
+    class FakeJob:
+        id = "job123"
+        status = "queued"
+        parameters = {"snapshot_root": (tmp_path / "snapshots").as_posix()}
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "status": self.status,
+                "parameters": self.parameters,
+            }
+
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = None
+
+        def submit(self, **kwargs):
+            self.submitted = kwargs
+            return FakeJob()
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_sensors, "job_runner", fake_runner)
+    monkeypatch.setattr(
+        web_sensors,
+        "snapshot_batch_root",
+        lambda: tmp_path / "snapshots",
+    )
+    monkeypatch.setattr(
+        web_sensors,
+        "collect_sensor_status",
+        lambda: {
+            "schema_version": "sensor_status.v1",
+            "families": [
+                {
+                    "devices": [
+                        {
+                            "sensor_type": "realsense_d435",
+                            "device_id": "123",
+                            "display_name": "RealSense 123",
+                            "effective_display_name": "Wrist Camera",
+                            "connected": True,
+                            "metadata": {},
+                        }
+                    ]
+                }
+            ],
+            "total_connected": 1,
+            "all_expected_connected": True,
+            "expected_counts_requested": False,
+        },
+    )
+    client = app.test_client()
+
+    response = client.post(
+        "/sensors/snapshots",
+        json={"selected": ["realsense_d435:123"]},
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 202
+    assert payload["job_id"] == "job123"
+    assert fake_runner.submitted["resources"] == ["camera"]
+    assert fake_runner.submitted["command"][:4] == [
+        "uv",
+        "run",
+        "python",
+        "scripts/capture_sensor_snapshot.py",
+    ]
+
+
+def test_snapshot_worker_reports_inaccessible_realsense_video_nodes(
+    tmp_path: Path,
+) -> None:
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "capture_sensor_snapshot.py"
+    spec = importlib.util.spec_from_file_location(
+        "posetestbot_snapshot_worker_test",
+        script_path,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    record = module._capture_one(
+        snapshot_root=tmp_path / "snapshots",
+        spec={
+            "sensor_type": "realsense_d435",
+            "device_id": "123",
+            "metadata": {
+                "video_nodes": [{"path": "/dev/video0", "accessible": False}],
+                "video_accessible": False,
+            },
+        },
+        fps=6,
+        resolution="720p",
+        max_frames=1,
+    )
+
+    assert record["status"] == "failed"
+    assert "not accessible" in record["error"]
+    assert record["diagnostics"][0]["code"] == "video_permission_denied"

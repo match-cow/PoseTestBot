@@ -7,6 +7,12 @@ import sys
 from pathlib import Path
 
 from posetestbot.sensors import discovery
+from posetestbot.sensors.aliases import (
+    load_sensor_aliases,
+    save_sensor_aliases,
+    sensor_alias_key,
+    sensor_alias_file_state,
+)
 from posetestbot.sensors import status as sensor_status
 from posetestbot.sensors.contracts import SensorDeviceInfo, SensorType
 
@@ -20,7 +26,7 @@ def device(sensor_type: SensorType, device_id: str) -> SensorDeviceInfo:
     )
 
 
-def test_collect_sensor_status_reports_expected_counts(monkeypatch) -> None:
+def test_collect_sensor_status_is_detection_first_by_default(monkeypatch) -> None:
     monkeypatch.setattr(sensor_status, "sdk_module_available", lambda _: True)
     discoverers = {
         SensorType.REALSENSE_D435: lambda: [
@@ -36,14 +42,42 @@ def test_collect_sensor_status_reports_expected_counts(monkeypatch) -> None:
 
     assert status["schema_version"] == sensor_status.SCHEMA_VERSION
     assert status["total_connected"] == 4
-    assert status["all_expected_connected"] is False
+    assert status["expected_counts_requested"] is False
+    assert status["all_expected_connected"] is True
 
     families = {family["sensor_type"]: family for family in status["families"]}
+    assert families["realsense_d435"]["meets_expected"] is None
+    assert families["realsense_d435"]["expected_count"] is None
+    assert families["realsense_d435"]["devices"][0]["device_id"] == "rs-1"
+    assert families["oak_d_pro"]["meets_expected"] is None
+    assert families["zed_2i"]["sdk_available"] is True
+
+
+def test_collect_sensor_status_reports_explicit_expected_counts(monkeypatch) -> None:
+    monkeypatch.setattr(sensor_status, "sdk_module_available", lambda _: True)
+    status = sensor_status.collect_sensor_status(
+        expected_counts={
+            SensorType.REALSENSE_D435: 3,
+            SensorType.OAK_D_PRO: 1,
+            SensorType.ZED_2I: 1,
+        },
+        discoverers={
+            SensorType.REALSENSE_D435: lambda: [
+                device(SensorType.REALSENSE_D435, "rs-1"),
+                device(SensorType.REALSENSE_D435, "rs-2"),
+                device(SensorType.REALSENSE_D435, "rs-3"),
+            ],
+            SensorType.OAK_D_PRO: lambda: [device(SensorType.OAK_D_PRO, "oak-1")],
+            SensorType.ZED_2I: lambda: [],
+        },
+    )
+
+    families = {family["sensor_type"]: family for family in status["families"]}
+    assert status["expected_counts_requested"] is True
+    assert status["all_expected_connected"] is False
     assert families["realsense_d435"]["meets_expected"] is True
     assert families["realsense_d435"]["expected_count"] == 3
-    assert families["realsense_d435"]["devices"][0]["device_id"] == "rs-1"
-    assert families["oak_d_pro"]["meets_expected"] is True
-    assert families["zed_2i"]["sdk_available"] is True
+    assert families["zed_2i"]["meets_expected"] is False
     assert families["zed_2i"]["meets_expected"] is False
 
 
@@ -59,6 +93,33 @@ def test_depthai_device_id_accepts_v3_device_info_shape() -> None:
         discovery._depthai_device_id(FakeDepthAIV3DeviceInfo())
         == "18443010314F3B1300"
     )
+
+
+def test_depthai_tcp_ip_devices_are_not_counted_as_local_oak(monkeypatch) -> None:
+    class FakeDevice:
+        deviceId = "1965890851"
+        name = "10.145.8.163"
+        platform = "XLinkPlatform.X_LINK_RVC4"
+        protocol = "XLinkProtocol.X_LINK_TCP_IP"
+        state = "XLinkDeviceState.X_LINK_GATE_BOOTED"
+
+        def getDeviceId(self) -> str:
+            return self.deviceId
+
+    fake_depthai = type(
+        "FakeDepthAI",
+        (),
+        {
+            "Device": type(
+                "FakeDepthAIDevice",
+                (),
+                {"getAllAvailableDevices": staticmethod(lambda: [FakeDevice()])},
+            )
+        },
+    )
+    monkeypatch.setitem(sys.modules, "depthai", fake_depthai)
+
+    assert discovery.discover_oak_d_pro() == []
 
 
 def test_collect_sensor_status_records_discovery_errors(monkeypatch) -> None:
@@ -199,6 +260,7 @@ def test_parse_expected_counts_validates_sensor_type_and_count() -> None:
     assert counts[SensorType.REALSENSE_D435] == 2
     assert counts[SensorType.OAK_D_PRO] is None
     assert counts[SensorType.ZED_2I] == 0
+    assert sensor_status.parse_expected_counts([]) == {}
 
     try:
         sensor_status.parse_expected_counts(["unknown=1"])
@@ -213,3 +275,50 @@ def test_parse_expected_counts_validates_sensor_type_and_count() -> None:
         assert "cannot be negative" in str(exc)
     else:
         raise AssertionError("negative expected count was accepted")
+
+
+def test_sensor_aliases_round_trip_and_merge_into_status(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    alias_path = tmp_path / "sensor_aliases.json"
+    save_sensor_aliases(
+        {
+            sensor_alias_key(SensorType.REALSENSE_D435, "rs-1"): {
+                "alias": "Wrist RealSense",
+                "mounting_mode": "eye_in_hand",
+                "inverted": True,
+            }
+        },
+        alias_path,
+    )
+    aliases = load_sensor_aliases(alias_path)
+    assert aliases["realsense_d435:rs-1"]["alias"] == "Wrist RealSense"
+
+    monkeypatch.setattr(sensor_status, "sdk_module_available", lambda _: True)
+    status = sensor_status.collect_sensor_status(
+        aliases=aliases,
+        discoverers={
+            SensorType.REALSENSE_D435: lambda: [
+                device(SensorType.REALSENSE_D435, "rs-1"),
+            ],
+            SensorType.OAK_D_PRO: lambda: [],
+            SensorType.ZED_2I: lambda: [],
+        },
+    )
+
+    device_payload = status["families"][0]["devices"][0]
+    assert device_payload["alias"] == "Wrist RealSense"
+    assert device_payload["effective_display_name"] == "Wrist RealSense"
+    assert device_payload["mounting_mode"] == "eye_in_hand"
+    assert device_payload["inverted"] is True
+
+
+def test_corrupted_sensor_alias_file_reports_state(tmp_path: Path) -> None:
+    alias_path = tmp_path / "sensor_aliases.json"
+    alias_path.write_text("{not json")
+
+    assert load_sensor_aliases(alias_path) == {}
+    state = sensor_alias_file_state(alias_path)
+    assert state["aliases"] == {}
+    assert "JSONDecodeError" in state["error"]

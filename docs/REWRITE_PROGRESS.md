@@ -71,6 +71,13 @@ Out of scope in this repository:
 - Added per-RealSense inverted-mount capture support that rotates saved RGB-D
   frames 180 degrees, corrects intrinsics, and carries orientation metadata
   through run configs, capture plans, smoke reports, manifests, and the web UI.
+- Moved the Flask UI behind `posetestbot.web`, with `web_interface.py` kept as
+  a compatibility shim, and added a sidebar workflow overview backed by
+  run artifacts, recommendations, jobs, and sequence plans.
+- Changed sensor status to detection-first by default, while preserving
+  explicit expected-count checks for CLI/preflight use.
+- Added ignored lab-local sensor aliases in `working_data/sensor_aliases.json`
+  and queued RGB-D snapshot previews under `working_data/sensor_snapshots/`.
 - Updated root agent notes, README, and system overview for the acquisition
   boundary.
 - Rewrote stale downstream tests into acquisition-only coverage.

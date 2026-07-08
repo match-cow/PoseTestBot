@@ -30,6 +30,7 @@ def fake_sensor_status() -> dict:
         "schema_version": "sensor_status.v1",
         "total_connected": 4,
         "all_expected_connected": False,
+        "expected_counts_requested": True,
         "families": [
             {
                 "sensor_type": "realsense_d435",

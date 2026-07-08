@@ -14,7 +14,10 @@ from posetestbot.io.artifacts import (
     RGB_DIR,
 )
 from posetestbot.sensors.contracts import SensorType
-from posetestbot.sensors.discovery import discover_realsense_d435
+from posetestbot.sensors.discovery import (
+    _parse_realsense_lsusb_devices,
+    discover_realsense_d435,
+)
 from posetestbot.sensors.realsense import capture_realsense_rgbd
 
 
@@ -316,3 +319,23 @@ def test_discover_realsense_d435_reads_mocked_sdk_devices(monkeypatch) -> None:
     assert devices[0].sensor_type == SensorType.REALSENSE_D435
     assert devices[0].device_id == "rs-1"
     assert devices[0].metadata["product_line"] == "D400"
+
+
+def test_parse_realsense_lsusb_fallback_reads_d435_and_d435i() -> None:
+    devices = _parse_realsense_lsusb_devices(
+        """
+Bus 003 Device 005: ID 8086:0b07 Intel Corp. RealSense D435
+  iProduct                2 Intel(R) RealSense(TM) Depth Camera 435
+  iSerial                 3 926223021865
+Bus 003 Device 008: ID 8086:0b3a Intel Corp. Intel(R) RealSense(TM) Depth Camera 435i
+  iProduct                2 Intel(R) RealSense(TM) Depth Camera 435i
+  iSerial                 3 923322072633
+"""
+    )
+
+    assert [device.device_id for device in devices] == [
+        "926223021865",
+        "923322072633",
+    ]
+    assert devices[0].metadata["product_id"] == "0b07"
+    assert devices[1].metadata["product_id"] == "0b3a"

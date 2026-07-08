@@ -339,21 +339,32 @@ def build_run_preflight(
         )
 
     if sensors is not None:
+        expected_counts_requested = bool(sensors.get("expected_counts_requested")) or any(
+            isinstance(family, Mapping) and family.get("expected_count") is not None
+            for family in sensors.get("families", [])
+        )
         checks.append(
             _check(
                 "sensor_status",
-                "ok" if sensors["all_expected_connected"] else "warning",
+                "ok"
+                if sensors["all_expected_connected"] or not expected_counts_requested
+                else "warning",
                 (
-                    f"Connected {sensors['total_connected']} sensor(s); expected profile complete."
+                    f"Detected {sensors['total_connected']} connected sensor(s)."
+                    if not expected_counts_requested
+                    else (
+                        f"Connected {sensors['total_connected']} sensor(s); requested sensor counts are satisfied."
+                    )
                     if sensors["all_expected_connected"]
                     else (
                         f"Connected {sensors['total_connected']} sensor(s); "
-                        "one or more expected lab sensors are missing or unchecked."
+                        "one or more requested sensor counts are missing or unchecked."
                     )
                 ),
                 details={
                     "total_connected": sensors["total_connected"],
                     "all_expected_connected": sensors["all_expected_connected"],
+                    "expected_counts_requested": expected_counts_requested,
                 },
             )
         )

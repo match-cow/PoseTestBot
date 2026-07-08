@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print connected RGB-D sensor status for the current lab profile."""
+"""Print connected RGB-D sensor status."""
 
 from __future__ import annotations
 
@@ -17,7 +17,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Discover RealSense D435, OAK-D Pro, and ZED 2i devices and print a "
-            "JSON-friendly status snapshot."
+            "JSON-friendly status snapshot. Expected-count checks run only when "
+            "--expected values are provided."
         )
     )
     parser.add_argument(
@@ -31,7 +32,7 @@ def parse_args() -> argparse.Namespace:
         default=[],
         metavar="SENSOR_TYPE=COUNT",
         help=(
-            "Override expected lab counts. Valid sensor types: realsense_d435, "
+            "Request expected-count checks. Valid sensor types: realsense_d435, "
             "oak_d_pro, zed_2i. Use COUNT=none to leave a type unchecked."
         ),
     )
