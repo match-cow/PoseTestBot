@@ -81,6 +81,8 @@ Out of scope in this repository:
 - Reconciled RealSense SDK serials with USB/V4L2 node metadata so three
   connected D435-class cameras appear as three devices, not duplicated SDK and
   USB entries.
+- Added a conservative installation script and `INSTALL.md` covering uv setup,
+  optional BlenderProc, vendor SDK caveats, and acquisition readiness checks.
 - Updated root agent notes, README, and system overview for the acquisition
   boundary.
 - Rewrote stale downstream tests into acquisition-only coverage.

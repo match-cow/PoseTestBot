@@ -12,6 +12,10 @@ and metric reporting belong in a separate consumer repo.
 - Run scripts as `uv run python ...`.
 - Add dependencies with `uv add ...`; do not hand-edit dependency locks unless
   a tool-generated update is impossible.
+- Keep `INSTALL.md` and `scripts/install.sh` current when dependency lists,
+  SDK/runtime expectations, setup commands, or validation checks change.
+- Prefer running or checking `scripts/install.sh` before adding ad hoc setup
+  instructions.
 - Keep the default robot path fake-iiwa-first unless the user explicitly asks to
   target the physical robot.
 - Do not add blocking request handlers for long-running or hardware-touching
