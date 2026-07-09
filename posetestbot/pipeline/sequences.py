@@ -479,6 +479,7 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 id="capture_plan",
                 stage_id="capture_plan",
                 depends_on=("hardware_status",),
+                options={"warmup_frames": 30},
             ),
             PipelineSequenceStepSpec(
                 id="capture_plan_preflight",
@@ -506,6 +507,8 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                     "allow_cameras": True,
                     "allow_real_robot": True,
                     "include_sensors": True,
+                    "timeout_s": 120.0,
+                    "startup_wait_s": 6.0,
                 },
             ),
             PipelineSequenceStepSpec(

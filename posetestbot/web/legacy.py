@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ from posetestbot.calibration.validation import (
     build_calibration_validation,
     write_calibration_validation_with_manifest,
 )
+from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
 from posetestbot.io.artifact_browser import (
     ArtifactPathError,
     bop_frame_detail,
@@ -134,6 +136,7 @@ CAPTURE_JOB_SEQUENCE_IDS = {
     "fake_capture_execution",
 }
 ACTIVE_JOB_STATUSES = {"queued", "running"}
+ROBOT_CONTROL_COMMANDS = {"start_iiwa", "stop_iiwa"}
 
 COMMANDS = {
     "start_iiwa": {
@@ -161,6 +164,47 @@ def command_spec(command_name: str) -> dict | None:
     if isinstance(value, list):
         return {"label": command_name, "command": value}
     return value
+
+
+def _robot_control_command_args(command_name: str, data: dict) -> tuple[list[str], dict]:
+    if command_name not in ROBOT_CONTROL_COMMANDS:
+        return [], {}
+
+    ip_value = data.get("robot_ip", LAB_ROBOT_IP)
+    if ip_value is None:
+        ip_value = LAB_ROBOT_IP
+    robot_ip = str(ip_value).strip()
+    try:
+        ipaddress.IPv4Address(robot_ip)
+    except ipaddress.AddressValueError as exc:
+        raise ValueError("robot_ip must be a valid IPv4 address") from exc
+
+    port_value = data.get("robot_port", DEFAULT_ROBOT_PORT)
+    if port_value is None:
+        port_value = DEFAULT_ROBOT_PORT
+    if isinstance(port_value, bool):
+        raise ValueError("robot_port must be an integer from 1 to 65535")
+    try:
+        robot_port = int(str(port_value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("robot_port must be an integer from 1 to 65535") from exc
+    if not 1 <= robot_port <= 65535:
+        raise ValueError("robot_port must be an integer from 1 to 65535")
+
+    args = [
+        "--robot_mode",
+        "real",
+        "--ip_robot",
+        robot_ip,
+        "--port_robot",
+        str(robot_port),
+    ]
+    parameters = {
+        "robot_mode": "real",
+        "robot_ip": robot_ip,
+        "robot_port": robot_port,
+    }
+    return args, parameters
 
 
 def _same_path(left: str | Path, right: str | Path) -> bool:
@@ -494,17 +538,23 @@ def run_command():
     spec = command_spec(command)
     if spec is None:
         return jsonify({'output': 'Unknown command'}), 404
+    try:
+        command_args, command_parameters = _robot_control_command_args(command, data)
+    except ValueError as exc:
+        return jsonify({'output': str(exc)}), 400
+    command_array = list(spec["command"]) + command_args
 
     try:
         job = job_runner.submit(
             name=command,
-            command=spec["command"],
+            command=command_array,
             cwd=APP_ROOT,
             resources=spec.get("resources", []),
             parameters={
                 "command": command,
                 "label": spec.get("label", command),
                 "resources": spec.get("resources", []),
+                **command_parameters,
             },
         )
     except ResourceBusyError as exc:

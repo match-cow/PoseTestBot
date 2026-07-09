@@ -1,3 +1,5 @@
+<img src="assets/cow200.png" alt="PoseTestBot cow logo" width="96" align="right">
+
 # PoseTestBot
 
 PoseTestBot is a local lab data-acquisition and BOP dataset export tool for
@@ -245,6 +247,7 @@ uv run python web_interface.py
 Important endpoints:
 
 - `GET /robot/status`
+- `POST /run-command`
 - `GET /sensors/status`
 - `GET /runtime/status`
 - `POST /hardware/status`

@@ -83,6 +83,43 @@ def test_sensor_registry_builds_folder_names_and_uv_capture_commands() -> None:
     ]
 
 
+def test_sensor_registry_adds_warmup_frames_to_capture_commands() -> None:
+    command = build_sensor_capture_command(
+        sensor_type=SensorType.REALSENSE_D435,
+        device_id="123",
+        output_folder="/tmp/run/realsense_123",
+        fps=6,
+        resolution="720p",
+        warmup_frames=30,
+    )
+
+    assert command == [
+        "uv",
+        "run",
+        "python",
+        "scripts/capture_realsense_720p.py",
+        "/tmp/run/realsense_123",
+        "--fps",
+        "6",
+        "--warmup-frames",
+        "30",
+        "--device",
+        "123",
+    ]
+
+
+def test_sensor_registry_rejects_negative_warmup_frames() -> None:
+    with pytest.raises(ValueError, match="warmup_frames"):
+        build_sensor_capture_command(
+            sensor_type=SensorType.REALSENSE_D435,
+            device_id="123",
+            output_folder="/tmp/run/realsense_123",
+            fps=6,
+            resolution="720p",
+            warmup_frames=-1,
+        )
+
+
 def test_sensor_registry_rejects_non_realsense_inverted_capture() -> None:
     with pytest.raises(ValueError, match="only supported for RealSense"):
         build_sensor_capture_command(

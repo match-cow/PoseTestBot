@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PoseTestBot Control</title>
+  <link rel="icon" type="image/png" href="{{ url_for('brand_logo') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('brand_logo') }}">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="{{ url_for('static', filename='styles.css') }}" rel="stylesheet">
 </head>
@@ -11,7 +13,7 @@
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand-block">
-        <div class="brand-mark">PTB</div>
+        <img class="brand-mark" src="{{ url_for('brand_logo') }}" alt="PoseTestBot logo" width="46" height="46">
         <div>
           <h1>PoseTestBot</h1>
           <p>Acquisition Control</p>
@@ -30,6 +32,37 @@
         <a href="#jobs">Jobs</a>
       </nav>
       <div id="sidebarStatus" class="sidebar-status"></div>
+      <section
+        class="robot-control-panel"
+        aria-label="Manual IIWA controls"
+        data-default-robot-ip="{{ robot_control_defaults.robot_ip }}"
+        data-default-robot-port="{{ robot_control_defaults.robot_port }}"
+      >
+        <h2>IIWA Control</h2>
+        <label for="robotControlIp">Robot IP
+          <input
+            id="robotControlIp"
+            class="form-control form-control-sm"
+            inputmode="decimal"
+            value="{{ robot_control_defaults.robot_ip }}"
+          >
+        </label>
+        <label for="robotControlPort">Port
+          <input
+            id="robotControlPort"
+            class="form-control form-control-sm"
+            type="number"
+            min="1"
+            max="65535"
+            value="{{ robot_control_defaults.robot_port }}"
+          >
+        </label>
+        <div class="robot-control-actions">
+          <button class="btn btn-sm btn-primary" id="startIiwaBtn" type="button">Start IIWA</button>
+          <button class="btn btn-sm btn-outline-light" id="stopIiwaBtn" type="button">Stop IIWA</button>
+        </div>
+        <p id="robotControlStatus" class="robot-control-status">Ready</p>
+      </section>
     </aside>
 
     <main class="main-panel">

@@ -385,6 +385,15 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 help="Optional max frame count to include in planned camera commands.",
             ),
             PipelineParameter(
+                name="warmup_frames",
+                flag="--warmup-frames",
+                kind="int",
+                help=(
+                    "Optional valid frame count for camera commands to discard "
+                    "before writing capture output."
+                ),
+            ),
+            PipelineParameter(
                 name="print_json",
                 flag="--print-json",
                 kind="bool",

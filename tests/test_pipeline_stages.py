@@ -53,6 +53,18 @@ def test_blenderproc_render_defaults_to_dry_run(tmp_path: Path) -> None:
     assert job.resources == ["render", "disk_io"]
 
 
+def test_capture_plan_stage_accepts_warmup_frames(tmp_path: Path) -> None:
+    job = build_pipeline_job(
+        stage_id="capture_plan",
+        run_root=tmp_path / "run",
+        options={"warmup_frames": 30},
+    )
+
+    assert "--warmup-frames" in job.command
+    assert "30" in job.command
+    assert job.parameters["options"]["warmup_frames"] == 30
+
+
 def test_rewrite_gate_choices_are_acquisition_only(tmp_path: Path) -> None:
     job = build_pipeline_job(stage_id="rewrite_gate", run_root=tmp_path / "run")
 

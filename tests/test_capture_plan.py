@@ -29,11 +29,12 @@ def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
         velocity_m_s=0.15,
     ).to_dict()
 
-    plan = build_capture_plan(config, max_frames=5).to_dict()
+    plan = build_capture_plan(config, max_frames=5, warmup_frames=30).to_dict()
 
     assert plan["schema_version"] == "capture_plan.v1"
     assert plan["dry_run"] is True
     assert plan["capture"]["enabled_sensor_count"] == 3
+    assert plan["capture"]["warmup_frames"] == 30
     assert [sensor["folder"] for sensor in plan["sensors"]] == [
         "realsense_123",
         "luxonis_auto",
@@ -67,6 +68,8 @@ def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
         "12",
         "--max_frames",
         "5",
+        "--warmup-frames",
+        "30",
         "--device",
         "123",
         "--inverted",
@@ -85,6 +88,8 @@ def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
         "12",
         "--max_frames",
         "5",
+        "--warmup-frames",
+        "30",
     ]
     assert "--inverted" not in luxonis["command"]
 
@@ -114,6 +119,17 @@ def test_capture_plan_uses_adapter_resolution_validation(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="RealSense D435"):
         build_capture_plan(config)
+
+
+def test_capture_plan_rejects_negative_warmup_frames(tmp_path: Path) -> None:
+    run_root = tmp_path / "run-bad-warmup"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+    ).to_dict()
+
+    with pytest.raises(ValueError, match="warmup_frames"):
+        build_capture_plan(config, warmup_frames=-1)
 
 
 def test_capture_plan_treats_string_false_inverted_as_normal(tmp_path: Path) -> None:
@@ -149,6 +165,8 @@ def test_capture_plan_stage_writes_manifest_artifact(tmp_path: Path) -> None:
             run_root.as_posix(),
             "--max-frames",
             "2",
+            "--warmup-frames",
+            "3",
         ],
         cwd=repo_root,
         check=True,
@@ -161,9 +179,12 @@ def test_capture_plan_stage_writes_manifest_artifact(tmp_path: Path) -> None:
 
     plan = json.loads((run_root / CAPTURE_PLAN).read_text())
     assert plan["capture"]["max_frames"] == 2
-    assert plan["commands"][1]["command"][-4:] == [
+    assert plan["capture"]["warmup_frames"] == 3
+    assert plan["commands"][1]["command"][-6:] == [
         "--max_frames",
         "2",
+        "--warmup-frames",
+        "3",
         "--device",
         "123",
     ]

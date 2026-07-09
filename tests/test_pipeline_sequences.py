@@ -85,6 +85,15 @@ def test_real_full_capture_sequence_keeps_explicit_hardware_gates(tmp_path: Path
         "capture_plan",
         "capture_plan_preflight",
     ]
+    capture_plan = next(step for step in plan.steps if step.id == "capture_plan")
+    capture_execution = next(
+        step for step in plan.steps if step.id == "capture_execution"
+    )
+    assert capture_plan.options["warmup_frames"] == 30
+    assert "--warmup-frames" in capture_plan.command
+    assert capture_execution.options["timeout_s"] == 120.0
+    assert capture_execution.options["startup_wait_s"] == 6.0
+    assert "--startup-wait" in capture_execution.command
     assert plan.steps[-1].options["gate"] == "rewrite_full_capture.v1"
 
 

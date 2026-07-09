@@ -7,8 +7,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
 from posetestbot.io.artifacts import BOP_DIR, BOP_EXPORT_MANIFEST, BOP_TARGETS_BOP19, DEPTH_DIR, RGB_DIR
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
+from posetestbot.web import legacy as web_legacy
 from posetestbot.web.routes import sensors as web_sensors
 
 
@@ -75,6 +77,36 @@ def test_index_lists_acquisition_sequences_only() -> None:
     assert "megapose_to_bop_eval_dry_run" not in html
 
 
+def test_index_uses_cow_branding_asset() -> None:
+    client = app.test_client()
+
+    response = client.get("/")
+    html = response.get_data(as_text=True)
+    logo = client.get("/assets/cow200.png")
+
+    assert response.status_code == 200
+    assert 'rel="icon" type="image/png" href="/assets/cow200.png"' in html
+    assert 'rel="apple-touch-icon" href="/assets/cow200.png"' in html
+    assert 'class="brand-mark" src="/assets/cow200.png"' in html
+    assert logo.status_code == 200
+    assert logo.mimetype == "image/png"
+
+
+def test_index_includes_sidebar_robot_control_defaults() -> None:
+    client = app.test_client()
+
+    response = client.get("/")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert 'id="robotControlIp"' in html
+    assert f'data-default-robot-ip="{LAB_ROBOT_IP}"' in html
+    assert 'id="robotControlPort"' in html
+    assert f'data-default-robot-port="{DEFAULT_ROBOT_PORT}"' in html
+    assert "Start IIWA" in html
+    assert "Stop IIWA" in html
+
+
 def test_pipeline_stage_and_sequence_endpoints_hide_downstream_ids() -> None:
     client = app.test_client()
 
@@ -88,6 +120,152 @@ def test_pipeline_stage_and_sequence_endpoints_hide_downstream_ids() -> None:
     assert "metric_report_export" not in stage_ids
     assert "fake_capture_to_bop_dataset_dry_run" in sequence_ids
     assert "foundationpose_to_bop_eval_dry_run" not in sequence_ids
+
+
+def test_start_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
+    class FakeJob:
+        id = "robotjob1"
+        status = "queued"
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "status": self.status,
+            }
+
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            return FakeJob()
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    client = app.test_client()
+
+    response = client.post(
+        "/run-command",
+        json={
+            "command": "start_iiwa",
+            "robot_ip": "172.31.1.150",
+            "robot_port": 30305,
+        },
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 202
+    assert payload["job_id"] == "robotjob1"
+    assert fake_runner.submitted[0]["resources"] == ["robot_command"]
+    assert fake_runner.submitted[0]["command"] == [
+        "uv",
+        "run",
+        "python",
+        "start_iiwa.py",
+        "--robot_mode",
+        "real",
+        "--ip_robot",
+        "172.31.1.150",
+        "--port_robot",
+        "30305",
+    ]
+    assert fake_runner.submitted[0]["parameters"]["robot_mode"] == "real"
+    assert fake_runner.submitted[0]["parameters"]["robot_ip"] == "172.31.1.150"
+    assert fake_runner.submitted[0]["parameters"]["robot_port"] == 30305
+
+
+def test_stop_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
+    class FakeJob:
+        id = "robotjob2"
+        status = "queued"
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "status": self.status,
+            }
+
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            return FakeJob()
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    client = app.test_client()
+
+    response = client.post(
+        "/run-command",
+        json={
+            "command": "stop_iiwa",
+            "robot_ip": "172.31.1.151",
+            "robot_port": "30306",
+        },
+    )
+
+    assert response.status_code == 202
+    assert fake_runner.submitted[0]["resources"] == ["robot_command"]
+    assert fake_runner.submitted[0]["command"] == [
+        "uv",
+        "run",
+        "python",
+        "stop_iiwa.py",
+        "--robot_mode",
+        "real",
+        "--ip_robot",
+        "172.31.1.151",
+        "--port_robot",
+        "30306",
+    ]
+    assert fake_runner.submitted[0]["parameters"]["robot_port"] == 30306
+
+
+def test_iiwa_command_rejects_invalid_robot_target(monkeypatch) -> None:
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            raise AssertionError("invalid robot target should not queue a job")
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    client = app.test_client()
+
+    invalid_ip = client.post(
+        "/run-command",
+        json={
+            "command": "start_iiwa",
+            "robot_ip": "not-an-ip",
+            "robot_port": 30300,
+        },
+    )
+    invalid_port = client.post(
+        "/run-command",
+        json={
+            "command": "stop_iiwa",
+            "robot_ip": LAB_ROBOT_IP,
+            "robot_port": 70000,
+        },
+    )
+
+    assert invalid_ip.status_code == 400
+    assert invalid_port.status_code == 400
+    assert fake_runner.submitted == []
+
+
+def test_run_command_unknown_command_still_returns_404() -> None:
+    client = app.test_client()
+
+    response = client.post("/run-command", json={"command": "does_not_exist"})
+
+    assert response.status_code == 404
+    assert response.get_json()["output"] == "Unknown command"
 
 
 def test_removed_metric_and_bop_result_endpoints_are_not_registered(tmp_path: Path) -> None:

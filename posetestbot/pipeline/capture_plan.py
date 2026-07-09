@@ -106,6 +106,7 @@ def build_capture_plan(
     *,
     run_config_path: str | Path | None = None,
     max_frames: int | None = None,
+    warmup_frames: int | None = None,
     robot_ip: str | None = None,
     receiver_ip: str | None = None,
     robot_port: int | None = None,
@@ -131,6 +132,8 @@ def build_capture_plan(
 
     if max_frames is not None and max_frames < 0:
         raise ValueError("max_frames must be greater than or equal to 0")
+    if warmup_frames is not None and warmup_frames < 0:
+        raise ValueError("warmup_frames must be greater than or equal to 0")
     if fake_controller_duration_s is not None and fake_controller_duration_s < 0:
         raise ValueError(
             "fake_controller_duration_s must be greater than or equal to 0"
@@ -229,6 +232,7 @@ def build_capture_plan(
             fps=fps,
             resolution=resolution,
             max_frames=max_frames,
+            warmup_frames=warmup_frames,
             inverted=inverted,
         )
 
@@ -302,6 +306,7 @@ def build_capture_plan(
         "sensor_count": len(capture.get("sensors", [])),
         "enabled_sensor_count": len(enabled_sensors),
         "max_frames": max_frames,
+        "warmup_frames": warmup_frames,
     }
 
     return CapturePlan(
@@ -349,6 +354,7 @@ def write_capture_plan_with_manifest(
     *,
     run_config_path: str | Path | None = None,
     max_frames: int | None = None,
+    warmup_frames: int | None = None,
 ) -> tuple[Path, CapturePlan]:
     """Write ``capture_plan.json`` and record the planning stage in the manifest."""
 
@@ -368,6 +374,7 @@ def write_capture_plan_with_manifest(
             config,
             run_config_path=run_config_path,
             max_frames=max_frames,
+            warmup_frames=warmup_frames,
         )
         path = write_capture_plan(run_root_path, plan)
         set_manifest_sensors(manifest, plan.sensors)

@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-08
+Last updated: 2026-07-09
 
 PoseTestBot has been refocused as an acquisition, calibration,
 synchronization, and BOP dataset export repository. The BOP dataset export is
@@ -74,6 +74,8 @@ Out of scope in this repository:
 - Moved the Flask UI behind `posetestbot.web`, with `web_interface.py` kept as
   a compatibility shim, and added a sidebar workflow overview backed by
   run artifacts, recommendations, jobs, and sequence plans.
+- Added sidebar manual IIWA Start/Stop controls that queue non-blocking
+  real-robot command jobs with an operator-set robot IP/port target.
 - Changed sensor status to detection-first by default, while preserving
   explicit expected-count checks for CLI/preflight use.
 - Added ignored lab-local sensor aliases in `working_data/sensor_aliases.json`

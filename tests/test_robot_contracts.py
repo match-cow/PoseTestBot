@@ -17,7 +17,9 @@ from posetestbot.robot import udp
 
 
 def load_fake_controller_module():
-    module_path = Path(__file__).resolve().parents[1] / "iiwa" / "fake_iiwa_controller.py"
+    module_path = (
+        Path(__file__).resolve().parents[1] / "iiwa" / "fake_iiwa_controller.py"
+    )
     spec = importlib.util.spec_from_file_location("fake_iiwa_controller", module_path)
     assert spec is not None
     assert spec.loader is not None
@@ -71,12 +73,33 @@ def test_robot_profile_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_robot_udp_command_shapes() -> None:
     assert udp.legacy_start_command(0.2) == {"start": 0.2}
+    assert udp.legacy_start_command(0.2, receiver_ip=LAB_ROBOT_RECEIVER_IP) == {
+        "start": 0.2,
+        "receiver_ip": LAB_ROBOT_RECEIVER_IP,
+    }
+    assert udp.legacy_start_command(0.2, receiver_port=18080) == {
+        "start": 0.2,
+        "receiver_port": 18080,
+    }
     assert udp.legacy_stop_command() == {"stop": True}
     assert udp.structured_start_command(0.2, "run-1") == {
         "schema_version": "robot_command.v1",
         "command": "start_capture",
         "cartesian_velocity_m_s": 0.2,
         "run_id": "run-1",
+    }
+    assert udp.structured_start_command(
+        0.2,
+        "run-1",
+        receiver_ip=LAB_ROBOT_RECEIVER_IP,
+        receiver_port=18080,
+    ) == {
+        "schema_version": "robot_command.v1",
+        "command": "start_capture",
+        "cartesian_velocity_m_s": 0.2,
+        "run_id": "run-1",
+        "receiver_ip": LAB_ROBOT_RECEIVER_IP,
+        "receiver_port": 18080,
     }
     assert udp.structured_stop_command("pause_capture") == {
         "schema_version": "robot_command.v1",
@@ -103,7 +126,33 @@ def test_send_start_uses_selected_protocol(monkeypatch: pytest.MonkeyPatch) -> N
     message = udp.send_start(profile, protocol="v1", run_id="run-1")
 
     assert message["command"] == "start_capture"
+    assert message["receiver_ip"] == "127.0.0.1"
+    assert message["receiver_port"] == 18080
     assert sent == [(message, "127.0.0.1", 30301)]
+
+
+def test_send_start_omits_wildcard_receiver_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = []
+
+    def fake_send(message, ip, port):
+        sent.append((message, ip, port))
+
+    monkeypatch.setattr(udp, "send_udp_json", fake_send)
+    profile = RobotProfile(
+        mode="real",
+        robot_ip="172.31.1.147",
+        command_port=30300,
+        receiver_ip="0.0.0.0",
+        receiver_port=18080,
+        cartesian_velocity_m_s=0.12,
+    )
+
+    message = udp.send_start(profile)
+
+    assert message == {"start": 0.12, "receiver_port": 18080}
+    assert sent == [(message, "172.31.1.147", 30300)]
 
 
 def test_fake_controller_accepts_legacy_and_v1_commands() -> None:
@@ -128,4 +177,3 @@ def test_fake_controller_accepts_legacy_and_v1_commands() -> None:
         }
     )
     assert fake_controller.start_value_from_command({"command": "noop"}) is None
-

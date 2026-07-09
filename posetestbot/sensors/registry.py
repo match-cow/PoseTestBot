@@ -129,6 +129,7 @@ def build_sensor_capture_command(
     fps: int,
     resolution: str,
     max_frames: int | None = None,
+    warmup_frames: int | None = None,
     inverted: bool = False,
 ) -> list[str]:
     """Build the current script-backed capture command for one sensor."""
@@ -136,6 +137,8 @@ def build_sensor_capture_command(
     normalized = sensor_type if isinstance(sensor_type, SensorType) else SensorType(sensor_type)
     if inverted and normalized != SensorType.REALSENSE_D435:
         raise ValueError("Sensor inverted=true is only supported for RealSense D435")
+    if warmup_frames is not None and warmup_frames < 0:
+        raise ValueError("warmup_frames must be greater than or equal to 0")
 
     script = capture_script_for_sensor(sensor_type, resolution)
     command = [
@@ -149,6 +152,8 @@ def build_sensor_capture_command(
     ]
     if max_frames and max_frames > 0:
         command.extend(["--max_frames", str(max_frames)])
+    if warmup_frames and warmup_frames > 0:
+        command.extend(["--warmup-frames", str(warmup_frames)])
     if not is_auto_device_id(device_id):
         command.extend(["--device", device_id])
     if normalized == SensorType.REALSENSE_D435 and inverted:

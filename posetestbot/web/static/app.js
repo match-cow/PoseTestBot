@@ -1,4 +1,5 @@
 (function () {
+  const ROBOT_CONTROL_STORAGE_KEY = "posetestbot.robotControlTarget.v1";
   const state = {
     sensors: [],
     aliases: {},
@@ -234,7 +235,7 @@
       body: JSON.stringify({selected, fps: 6, width: 640, height: 480}),
     });
     renderPreviewStatus(data);
-    startPreviewPolling();
+    if (previewJobs(data).length > 0) startPreviewPolling();
   }
 
   function previewJobs(data) {
@@ -284,22 +285,31 @@
   async function loadPreviews() {
     const data = await api("/sensors/previews");
     renderPreviewStatus(data);
+    return data;
+  }
+
+  function stopPreviewPolling() {
+    if (!state.previewPollTimer) return;
+    clearInterval(state.previewPollTimer);
+    state.previewPollTimer = null;
   }
 
   function startPreviewPolling() {
     if (state.previewPollTimer) clearInterval(state.previewPollTimer);
-    state.previewPollTimer = setInterval(() => {
-      loadPreviews().catch(() => {});
+    state.previewPollTimer = setInterval(async () => {
+      try {
+        const data = await loadPreviews();
+        if (previewJobs(data).length === 0) stopPreviewPolling();
+      } catch (_error) {
+        stopPreviewPolling();
+      }
     }, 1000);
   }
 
   async function stopPreviews(options) {
     const silent = Boolean(options && options.silent);
     const data = await api("/sensors/previews/stop", {method: "POST"});
-    if (state.previewPollTimer) {
-      clearInterval(state.previewPollTimer);
-      state.previewPollTimer = null;
-    }
+    stopPreviewPolling();
     if (!silent) renderPreviewStatus({jobs: []});
     return data;
   }
@@ -400,6 +410,100 @@
     $("#robotStatusText").textContent = data.mode || data.status || "ready";
   }
 
+  function robotControlElements() {
+    return {
+      panel: document.querySelector(".robot-control-panel"),
+      ip: $("#robotControlIp"),
+      port: $("#robotControlPort"),
+      start: $("#startIiwaBtn"),
+      stop: $("#stopIiwaBtn"),
+      status: $("#robotControlStatus"),
+    };
+  }
+
+  function robotControlDefaults(panel) {
+    return {
+      robot_ip: panel?.dataset.defaultRobotIp || "172.31.1.147",
+      robot_port: panel?.dataset.defaultRobotPort || "30300",
+    };
+  }
+
+  function loadRobotControlTarget() {
+    const controls = robotControlElements();
+    if (!controls.panel || !controls.ip || !controls.port) return;
+    const defaults = robotControlDefaults(controls.panel);
+    let stored = {};
+    try {
+      stored = JSON.parse(localStorage.getItem(ROBOT_CONTROL_STORAGE_KEY) || "{}");
+    } catch (_error) {
+      stored = {};
+    }
+    controls.ip.value = stored.robot_ip || defaults.robot_ip;
+    controls.port.value = stored.robot_port || defaults.robot_port;
+  }
+
+  function currentRobotControlTarget() {
+    const controls = robotControlElements();
+    return {
+      robot_ip: controls.ip.value.trim(),
+      robot_port: controls.port.value.trim(),
+    };
+  }
+
+  function storeRobotControlTarget() {
+    const target = currentRobotControlTarget();
+    try {
+      localStorage.setItem(ROBOT_CONTROL_STORAGE_KEY, JSON.stringify(target));
+    } catch (_error) {
+      // Browser storage is a convenience; the current target still submits.
+    }
+    return target;
+  }
+
+  function setRobotControlBusy(busy) {
+    const controls = robotControlElements();
+    if (controls.start) controls.start.disabled = busy;
+    if (controls.stop) controls.stop.disabled = busy;
+  }
+
+  function setRobotControlStatus(text, status) {
+    const controls = robotControlElements();
+    if (!controls.status) return;
+    controls.status.textContent = text;
+    controls.status.dataset.status = status || "neutral";
+  }
+
+  async function queueRobotControl(command) {
+    const target = storeRobotControlTarget();
+    const label = command === "start_iiwa" ? "Start IIWA" : "Stop IIWA";
+    if (
+      command === "start_iiwa" &&
+      !window.confirm("Queue Start IIWA for " + target.robot_ip + ":" + target.robot_port + "?")
+    ) {
+      return;
+    }
+
+    setRobotControlBusy(true);
+    setRobotControlStatus("Queueing " + label + "...", "running");
+    try {
+      const data = await api("/run-command", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          command,
+          robot_ip: target.robot_ip,
+          robot_port: target.robot_port,
+        }),
+      });
+      setRobotControlStatus("Queued " + label + " as job " + data.job_id, "ok");
+      await loadJobs();
+    } catch (error) {
+      setRobotControlStatus(error.message, "error");
+    } finally {
+      setRobotControlBusy(false);
+    }
+  }
+
   async function loadRuntimeStatus() {
     const data = await api("/runtime/status");
     $("#runtimeStatusText").textContent = data.all_available ? "ready" : "check";
@@ -430,12 +534,17 @@
     $("#runtimeStatusBtn").addEventListener("click", loadRuntimeStatus);
     $("#hardwareStatusBtn").addEventListener("click", writeHardwareStatus);
     $("#writeHardwareStatusBtn").addEventListener("click", writeHardwareStatus);
+    $("#startIiwaBtn").addEventListener("click", () => queueRobotControl("start_iiwa"));
+    $("#stopIiwaBtn").addEventListener("click", () => queueRobotControl("stop_iiwa"));
+    $("#robotControlIp").addEventListener("change", storeRobotControlTarget);
+    $("#robotControlPort").addEventListener("change", storeRobotControlTarget);
     document.querySelectorAll("[data-stage]").forEach((button) => {
       button.addEventListener("click", () => queueStage(button.dataset.stage));
     });
   }
 
   window.addEventListener("DOMContentLoaded", async () => {
+    loadRobotControlTarget();
     bindEvents();
     try {
       await loadOverview();
@@ -446,12 +555,6 @@
       await loadSensors();
     } catch (error) {
       $("#sensorSummary").textContent = error.message;
-    }
-    try {
-      await loadPreviews();
-      startPreviewPolling();
-    } catch (_error) {
-      // Preview polling is best-effort on initial page load.
     }
     loadJobs().catch(() => {});
   });

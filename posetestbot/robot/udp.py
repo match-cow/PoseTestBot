@@ -9,12 +9,33 @@ from typing import Any
 from posetestbot.config import RobotProfile
 
 
-def legacy_start_command(cartesian_velocity_m_s: float) -> dict[str, float]:
-    return {"start": cartesian_velocity_m_s}
+def _advertised_receiver_ip(receiver_ip: str) -> str | None:
+    normalized = receiver_ip.strip()
+    if normalized in {"", "0.0.0.0", "::"}:
+        return None
+    return normalized
+
+
+def legacy_start_command(
+    cartesian_velocity_m_s: float,
+    *,
+    receiver_ip: str | None = None,
+    receiver_port: int | None = None,
+) -> dict[str, float | int | str]:
+    command: dict[str, float | int | str] = {"start": cartesian_velocity_m_s}
+    if receiver_ip:
+        command["receiver_ip"] = receiver_ip
+    if receiver_port is not None:
+        command["receiver_port"] = receiver_port
+    return command
 
 
 def structured_start_command(
-    cartesian_velocity_m_s: float, run_id: str | None = None
+    cartesian_velocity_m_s: float,
+    run_id: str | None = None,
+    *,
+    receiver_ip: str | None = None,
+    receiver_port: int | None = None,
 ) -> dict[str, Any]:
     command: dict[str, Any] = {
         "schema_version": "robot_command.v1",
@@ -23,6 +44,10 @@ def structured_start_command(
     }
     if run_id:
         command["run_id"] = run_id
+    if receiver_ip:
+        command["receiver_ip"] = receiver_ip
+    if receiver_port is not None:
+        command["receiver_port"] = receiver_port
     return command
 
 
@@ -49,10 +74,20 @@ def send_start(
     protocol: str = "legacy",
     run_id: str | None = None,
 ) -> dict[str, Any]:
+    receiver_ip = _advertised_receiver_ip(profile.receiver_ip)
     if protocol == "v1":
-        message = structured_start_command(profile.cartesian_velocity_m_s, run_id)
+        message = structured_start_command(
+            profile.cartesian_velocity_m_s,
+            run_id,
+            receiver_ip=receiver_ip,
+            receiver_port=profile.receiver_port,
+        )
     elif protocol == "legacy":
-        message = legacy_start_command(profile.cartesian_velocity_m_s)
+        message = legacy_start_command(
+            profile.cartesian_velocity_m_s,
+            receiver_ip=receiver_ip,
+            receiver_port=profile.receiver_port,
+        )
     else:
         raise ValueError("protocol must be 'legacy' or 'v1'")
 
@@ -75,4 +110,3 @@ def send_stop(
 
     send_udp_json(message, profile.robot_ip, profile.command_port)
     return message
-

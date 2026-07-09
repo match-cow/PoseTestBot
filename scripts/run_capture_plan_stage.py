@@ -31,6 +31,15 @@ def parse_args() -> argparse.Namespace:
         help="Optional max frame count to include in planned camera commands.",
     )
     parser.add_argument(
+        "--warmup-frames",
+        type=int,
+        default=None,
+        help=(
+            "Optional valid frame count for camera commands to discard before "
+            "writing capture output."
+        ),
+    )
+    parser.add_argument(
         "--print-json",
         action="store_true",
         help="Print the full capture plan JSON after writing it.",
@@ -61,6 +70,7 @@ def main() -> None:
         config,
         run_config_path=args.run_config,
         max_frames=args.max_frames,
+        warmup_frames=args.warmup_frames,
     )
 
     print(f"Wrote {path}")
