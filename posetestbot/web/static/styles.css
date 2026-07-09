@@ -52,7 +52,7 @@ body {
   height: 46px;
   display: block;
   flex: 0 0 auto;
-  border-radius: 8px;
+  border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: #0b1219;
   object-fit: cover;
@@ -61,12 +61,6 @@ body {
 .brand-block h1 {
   margin: 0;
   font-size: 1.2rem;
-}
-
-.brand-block p {
-  margin: 0;
-  color: #b7c4d0;
-  font-size: 0.86rem;
 }
 
 .workflow-nav {
@@ -406,6 +400,73 @@ body {
   margin-top: 8px;
 }
 
+.preview-toggle {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.preview-toggle .form-check-input {
+  margin: 0;
+}
+
+.preview-toggle-label {
+  color: var(--ink);
+}
+
+.sensor-card.preview-active {
+  border-color: #93c5fd;
+}
+
+.sensor-preview-slot {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.sensor-preview-slot[hidden] {
+  display: none;
+}
+
+.sensor-preview-header {
+  min-height: 28px;
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sensor-preview-header strong {
+  overflow-wrap: anywhere;
+}
+
+.sensor-preview-image {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  display: block;
+  object-fit: contain;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #101820;
+}
+
+.sensor-preview-empty {
+  min-height: 146px;
+  aspect-ratio: 4 / 3;
+}
+
+.sensor-preview-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
 .sensor-warning,
 .snapshot-error,
 .preview-error {
@@ -416,6 +477,11 @@ body {
   color: #7c4a03;
   font-size: 0.82rem;
   overflow-wrap: anywhere;
+}
+
+.preview-error {
+  background: #fee2e2;
+  color: var(--red);
 }
 
 .checkbox-label {

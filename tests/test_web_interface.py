@@ -88,6 +88,7 @@ def test_index_uses_cow_branding_asset() -> None:
     assert 'rel="icon" type="image/png" href="/assets/cow200.png"' in html
     assert 'rel="apple-touch-icon" href="/assets/cow200.png"' in html
     assert 'class="brand-mark" src="/assets/cow200.png"' in html
+    assert "Acquisition Control" not in html
     assert logo.status_code == 200
     assert logo.mimetype == "image/png"
 
@@ -411,6 +412,23 @@ def test_overview_endpoint_reports_sequence_steps(tmp_path: Path) -> None:
     assert any(section["id"] == "sensors" for section in payload["sidebar"])
 
 
+def test_overview_endpoint_treats_missing_run_config_as_empty_setup(tmp_path: Path) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "empty-web-run"
+    run_root.mkdir()
+
+    response = client.get(
+        "/ui/overview",
+        query_string={"run_root": run_root.as_posix()},
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["config"] is None
+    assert payload["config_error"] is None
+    assert payload["steps"] == []
+
+
 def test_sensor_snapshot_submission_queues_camera_job(monkeypatch, tmp_path: Path) -> None:
     class FakeJob:
         id = "job123"
@@ -569,6 +587,164 @@ def test_sensor_preview_submission_queues_one_job_per_selected_sensor(
         "python",
         "scripts/stream_sensor_rgb_preview.py",
     ]
+
+
+def test_sensor_preview_submission_passes_explicit_inverted_spec(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FakeJob:
+        def __init__(self, job_id: str, parameters: dict):
+            self.id = job_id
+            self.status = "queued"
+            self.parameters = parameters
+            self.message = None
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "status": self.status,
+                "parameters": self.parameters,
+                "message": self.message,
+            }
+
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def list(self):
+            return []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            return FakeJob("job1", dict(kwargs["parameters"]))
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_sensors, "job_runner", fake_runner)
+    monkeypatch.setattr(web_sensors, "preview_stream_root", lambda: tmp_path / "preview")
+    client = app.test_client()
+
+    response = client.post(
+        "/sensors/previews",
+        json={
+            "sensors": [
+                {
+                    "sensor_type": "realsense_d435",
+                    "device_id": "825412070181",
+                    "display_name": "Wrist RealSense",
+                    "inverted": True,
+                    "metadata": {"video_nodes": [{"path": "/dev/video4"}]},
+                }
+            ]
+        },
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 202
+    assert len(payload["jobs"]) == 1
+    command = fake_runner.submitted[0]["command"]
+    sensor_json = command[command.index("--sensor-json") + 1]
+    spec = json.loads(sensor_json)
+    assert spec["inverted"] is True
+    assert spec["metadata"]["video_nodes"][0]["path"] == "/dev/video4"
+    assert fake_runner.submitted[0]["parameters"]["inverted"] is True
+    assert fake_runner.submitted[0]["parameters"]["sensor_spec"]["metadata"][
+        "video_nodes"
+    ][0]["path"] == "/dev/video4"
+
+
+def test_sensor_preview_detail_reports_missing_status_payload(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FakeJob:
+        id = "preview-missing"
+        status = "running"
+        message = None
+        parameters = {
+            "preview_root": (tmp_path / "preview").as_posix(),
+            "sensor_key": "realsense_d435:825412070181",
+            "sensor_type": "realsense_d435",
+            "device_id": "825412070181",
+            "inverted": True,
+            "sensor_preview": True,
+        }
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "status": self.status,
+                "message": self.message,
+                "parameters": self.parameters,
+            }
+
+    class FakeRunner:
+        def get(self, job_id):
+            assert job_id == "preview-missing"
+            return FakeJob()
+
+    monkeypatch.setattr(web_sensors, "job_runner", FakeRunner())
+    client = app.test_client()
+
+    response = client.get("/sensors/previews/preview-missing")
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["preview_status"]["status"] == "waiting"
+    assert payload["preview_status"]["sensor_key"] == "realsense_d435:825412070181"
+    assert payload["preview_status"]["inverted"] is True
+    assert payload["preview_status"]["latest_image"] is None
+
+
+def test_sensor_preview_detail_reports_failed_status_payload(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    preview_root = tmp_path / "preview"
+    write_json(
+        preview_root / "preview_status.json",
+        {
+            "schema_version": "sensor_rgb_preview.v1",
+            "status": "failed",
+            "sensor_key": "realsense_d435:825412070181",
+            "frame_count": 0,
+            "latest_image": None,
+            "error": "RuntimeError: camera missing",
+        },
+    )
+
+    class FakeJob:
+        id = "preview-failed"
+        status = "failed"
+        message = "Command exited with status 2."
+        parameters = {
+            "preview_root": preview_root.as_posix(),
+            "sensor_key": "realsense_d435:825412070181",
+            "sensor_preview": True,
+        }
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "status": self.status,
+                "message": self.message,
+                "parameters": self.parameters,
+            }
+
+    class FakeRunner:
+        def get(self, job_id):
+            assert job_id == "preview-failed"
+            return FakeJob()
+
+    monkeypatch.setattr(web_sensors, "job_runner", FakeRunner())
+    client = app.test_client()
+
+    response = client.get("/sensors/previews/preview-failed")
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["preview_status"]["status"] == "failed"
+    assert payload["preview_status"]["error"] == "RuntimeError: camera missing"
 
 
 def test_snapshot_worker_reports_inaccessible_realsense_video_nodes(

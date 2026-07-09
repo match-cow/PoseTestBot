@@ -22,6 +22,7 @@ This safe project bootstrap:
 - lists registered sensor adapters without opening hardware.
 
 If `UV_CACHE_DIR` is unset, the installer uses `/tmp/uv-cache`.
+Browser binaries for Playwright UI tests are not installed by default.
 
 Use check-only mode to inspect an already configured environment without
 installing or syncing:
@@ -45,6 +46,14 @@ vendor camera SDKs or proprietary packages.
 
 `--with-blenderproc` installs BlenderProc as a `uv` tool when the
 `blenderproc` executable is missing.
+
+`--with-playwright-browsers` installs Chromium for Playwright browser UI tests
+after the uv environment has been synchronized. Keep this opt-in on lab hosts
+unless you are actively running browser coverage:
+
+```bash
+bash scripts/install.sh --with-playwright-browsers
+```
 
 ## Manual Prerequisites
 
@@ -117,6 +126,22 @@ Verify:
 uv run python scripts/runtime_status.py --json
 ```
 
+### Playwright Browser Tests
+
+The Python Playwright package is a dev dependency installed by
+`uv sync --all-groups`, but browser binaries are intentionally optional. Install
+Chromium only when running browser UI coverage:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium
+```
+
+Then run the sensor preview browser test:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
+```
+
 ## Fake Robot Default
 
 The default robot profile is fake. Use it for setup and hardware-free smoke
@@ -142,6 +167,7 @@ bash -n scripts/install.sh
 bash scripts/install.sh --help
 bash scripts/install.sh --check-only
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_runtime_status.py tests/test_hardware_status.py
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 git diff --check
 ```
 
@@ -165,4 +191,7 @@ uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke \
   device permissions, and vendor udev rules on the lab host.
 - BlenderProc missing: install it with `bash scripts/install.sh --with-blenderproc`
   or keep using dry-run render planning.
+- Playwright reports a missing Chromium executable: run
+  `UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium`, or use
+  `bash scripts/install.sh --with-playwright-browsers`.
 - Real robot commands should only be run with deliberate real-mode selection.

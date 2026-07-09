@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from flask import Blueprint, jsonify, request, send_file
 
 from posetestbot.jobs.runner import ResourceBusyError
+from posetestbot.pipeline.run_config import normalize_inverted
 from posetestbot.sensors.aliases import (
     DEFAULT_SENSOR_ALIASES_PATH,
     save_sensor_aliases,
@@ -115,10 +116,25 @@ def _preview_job_payload(job) -> dict[str, Any]:
     preview_root = job.parameters.get("preview_root")
     preview_status = None
     if preview_root:
+        status_name = "waiting" if job.status in ACTIVE_JOB_STATUSES else job.status
+        preview_status = {
+            "status": status_name,
+            "preview_root": preview_root,
+            "sensor_key": job.parameters.get("sensor_key"),
+            "sensor_type": job.parameters.get("sensor_type"),
+            "device_id": job.parameters.get("device_id"),
+            "inverted": job.parameters.get("inverted"),
+            "frame_count": 0,
+            "latest_image": None,
+            "selected_node": None,
+            "error": job.message if job.status == "failed" else None,
+        }
         try:
-            preview_status = load_preview_status(preview_root)
+            loaded = load_preview_status(preview_root)
+            if loaded is not None:
+                preview_status = loaded
         except (OSError, ValueError) as exc:
-            preview_status = {"status": "error", "error": str(exc)}
+            preview_status.update({"status": "error", "error": str(exc)})
     return {
         "job": job.to_dict(),
         "preview_root": preview_root,
@@ -232,6 +248,8 @@ def post_sensor_previews():
                     "sensor_key": key,
                     "sensor_type": spec.get("sensor_type"),
                     "device_id": spec.get("device_id"),
+                    "inverted": normalize_inverted(spec.get("inverted", False)),
+                    "sensor_spec": dict(spec),
                     "sensor_preview": True,
                 },
             )

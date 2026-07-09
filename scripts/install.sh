@@ -4,6 +4,7 @@ set -Eeuo pipefail
 CHECK_ONLY=false
 WITH_SYSTEM_PACKAGES=false
 WITH_BLENDERPROC=false
+WITH_PLAYWRIGHT_BROWSERS=false
 SKIP_RUNTIME_CHECKS=false
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -20,6 +21,8 @@ Options:
   --check-only             Verify the current environment without installing.
   --with-system-packages   Install common Ubuntu packages for local lab use.
   --with-blenderproc       Install BlenderProc as a uv tool when missing.
+  --with-playwright-browsers
+                           Install Chromium for Playwright browser UI tests.
   --skip-runtime-checks    Skip runtime and sensor adapter verification.
   -h, --help               Show this help text.
 
@@ -78,6 +81,9 @@ parse_args() {
         ;;
       --with-blenderproc)
         WITH_BLENDERPROC=true
+        ;;
+      --with-playwright-browsers)
+        WITH_PLAYWRIGHT_BROWSERS=true
         ;;
       --skip-runtime-checks)
         SKIP_RUNTIME_CHECKS=true
@@ -203,6 +209,20 @@ install_blenderproc() {
   command_exists blenderproc || warn "BlenderProc was installed but is not on PATH; check uv's tool install output."
 }
 
+install_playwright_browsers() {
+  if [[ "${WITH_PLAYWRIGHT_BROWSERS}" != true ]]; then
+    return 0
+  fi
+
+  if [[ "${CHECK_ONLY}" == true ]]; then
+    warn "Playwright browser installation requested, but --check-only was provided."
+    return
+  fi
+
+  log "Installing Chromium for Playwright browser UI tests."
+  run uv run playwright install chromium
+}
+
 uv_python() {
   if [[ "${CHECK_ONLY}" == true ]]; then
     run uv run --no-sync python "$@"
@@ -282,6 +302,7 @@ main() {
   install_system_packages
   sync_python_environment
   install_blenderproc
+  install_playwright_browsers
   run_readiness_checks
   print_followup_notes
 }

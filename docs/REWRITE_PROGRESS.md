@@ -80,6 +80,12 @@ Out of scope in this repository:
   explicit expected-count checks for CLI/preflight use.
 - Added ignored lab-local sensor aliases in `working_data/sensor_aliases.json`
   and queued live RGB preview streams under `working_data/sensor_previews/`.
+- Changed live RGB preview controls to card-local stream slots with per-sensor
+  toggles, terminal error retention, selected-node/frame metadata, and current
+  RealSense inverted orientation restart behavior.
+- Added Playwright browser coverage for the sensor preview DOM workflow while
+  keeping browser binary installation opt-in.
+- Polished the transition web UI empty-run overview state and sidebar branding.
 - Reconciled RealSense SDK serials with USB/V4L2 node metadata so three
   connected D435-class cameras appear as three devices, not duplicated SDK and
   USB entries.
@@ -150,7 +156,8 @@ UV_CACHE_DIR=/tmp/uv-cache uv run pytest \
   tests/test_rewrite_gate.py \
   tests/test_artifact_browser.py \
   tests/test_pipeline_recommendations.py \
-  tests/test_web_interface.py
+  tests/test_web_interface.py \
+  tests/test_web_preview_playwright.py
 ```
 
 Full validation:

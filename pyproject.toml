@@ -30,5 +30,6 @@ exclude = [
 
 [dependency-groups]
 dev = [
+    "playwright>=1.61.0",
     "pytest>=9.1.0",
 ]

@@ -12,6 +12,8 @@ and metric reporting belong in a separate consumer repo.
 - Run scripts as `uv run python ...`.
 - Add dependencies with `uv add ...`; do not hand-edit dependency locks unless
   a tool-generated update is impossible.
+- Browser UI regressions should use Playwright tests. Keep Playwright in the dev
+  dependency group, and install browser binaries only when explicitly requested.
 - Keep `INSTALL.md` and `scripts/install.sh` current when dependency lists,
   SDK/runtime expectations, setup commands, or validation checks change.
 - Prefer running or checking `scripts/install.sh` before adding ad hoc setup
@@ -176,6 +178,8 @@ Use `uv` for tests:
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 git diff --check
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
+UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium  # only if browser binaries are missing
 uv run python scripts/run_rewrite_fake_e2e_smoke.py /tmp/posetestbot_fake_bop_smoke --overwrite
 uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke --gate rewrite_fake_acquisition_to_bop.v1 --write
 ```

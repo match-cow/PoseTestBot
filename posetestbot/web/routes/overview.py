@@ -206,7 +206,9 @@ def ui_overview():
     if root.exists():
         try:
             config = load_run_config_for_run_root(root)
-        except (FileNotFoundError, ValueError) as exc:
+        except FileNotFoundError:
+            config_error = None
+        except ValueError as exc:
             config_error = str(exc)
     else:
         config_error = f"Run root not found: {root}"
