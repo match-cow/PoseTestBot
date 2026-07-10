@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.config import RobotProfile, robot_profile
 from posetestbot.io.artifacts import RUN_CONFIG
 from posetestbot.io.manifest import (
@@ -91,6 +93,46 @@ class PipelineRunConfig:
 
 
 @dataclass(frozen=True)
+class FixedFrameTransform:
+    """One operator-supplied fixed edge in the run frame graph."""
+
+    from_frame: str
+    to_frame: str
+    rotation_quaternion_wxyz: tuple[float, float, float, float]
+    translation_mm: tuple[float, float, float]
+    source: str = "operator_configured"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "from": self.from_frame,
+            "to": self.to_frame,
+            "rotation_quaternion_wxyz": list(self.rotation_quaternion_wxyz),
+            "translation_mm": list(self.translation_mm),
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class RunFramesConfig:
+    robot_pose: Mapping[str, str] = field(
+        default_factory=lambda: {
+            "from": "robot_flange",
+            "to": "template_base",
+            "convention": "kuka_abc_radians",
+        }
+    )
+    dataset_reference_frame: str = "template_base"
+    fixed_transforms: tuple[FixedFrameTransform, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "robot_pose": dict(self.robot_pose),
+            "dataset_reference_frame": self.dataset_reference_frame,
+            "fixed_transforms": [item.to_dict() for item in self.fixed_transforms],
+        }
+
+
+@dataclass(frozen=True)
 class PoseTestBotRunConfig:
     """Top-level versioned run configuration artifact."""
 
@@ -99,6 +141,7 @@ class PoseTestBotRunConfig:
     run_root: str
     robot_profile: RobotProfile
     capture: CaptureRunConfig
+    frames: RunFramesConfig = field(default_factory=RunFramesConfig)
     object_folder: str = "object_models"
     calibration_profiles: str | None = None
     pipeline: PipelineRunConfig = field(default_factory=PipelineRunConfig)
@@ -110,6 +153,7 @@ class PoseTestBotRunConfig:
             "run_root": self.run_root,
             "robot_profile": asdict(self.robot_profile),
             "capture": self.capture.to_dict(),
+            "frames": self.frames.to_dict(),
             "object_folder": self.object_folder,
             "calibration_profiles": self.calibration_profiles,
             "pipeline": self.pipeline.to_dict(),
@@ -351,6 +395,7 @@ def create_run_config(
     sequence_id: str = "sync_to_bop_dry_run",
     sequence_options: Mapping[str, Any] | None = None,
     plan_only: bool = True,
+    fixed_transforms: tuple[FixedFrameTransform, ...] = (),
 ) -> PoseTestBotRunConfig:
     run_root_path = Path(run_root)
     sensor_configs = sensors if sensors is not None else default_lab_sensors()
@@ -367,6 +412,7 @@ def create_run_config(
             velocity_m_s=velocity_m_s,
             sensors=tuple(sensor_configs),
         ),
+        frames=RunFramesConfig(fixed_transforms=fixed_transforms),
         object_folder=object_folder,
         calibration_profiles=calibration_profiles,
         pipeline=PipelineRunConfig(
@@ -377,6 +423,22 @@ def create_run_config(
     )
     validate_run_config(config.to_dict())
     return config
+
+
+def fixed_transform_from_mapping(value: Mapping[str, Any]) -> FixedFrameTransform:
+    quaternion = value.get("rotation_quaternion_wxyz")
+    translation = value.get("translation_mm")
+    if not isinstance(quaternion, (list, tuple)) or len(quaternion) != 4:
+        raise ValueError("Fixed transform rotation_quaternion_wxyz must have 4 values")
+    if not isinstance(translation, (list, tuple)) or len(translation) != 3:
+        raise ValueError("Fixed transform translation_mm must have 3 values")
+    return FixedFrameTransform(
+        from_frame=str(value.get("from", "")),
+        to_frame=str(value.get("to", "")),
+        rotation_quaternion_wxyz=tuple(float(item) for item in quaternion),
+        translation_mm=tuple(float(item) for item in translation),
+        source=str(value.get("source") or "operator_configured"),
+    )
 
 
 def validate_run_config(value: Mapping[str, Any]) -> None:
@@ -392,6 +454,39 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         raise ValueError("Run config capture.resolution must not be empty")
     if not str(value.get("object_folder", "")).strip():
         raise ValueError("Run config object_folder must not be empty")
+
+    frames = value.get("frames")
+    if frames is not None:
+        if not isinstance(frames, Mapping):
+            raise ValueError("Run config frames must be an object")
+        robot_pose = frames.get("robot_pose")
+        if not isinstance(robot_pose, Mapping) or robot_pose.get("from") != "robot_flange" or robot_pose.get("to") != "template_base":
+            raise ValueError(
+                "Run config frames.robot_pose must map robot_flange to template_base"
+            )
+        if robot_pose.get("convention") != "kuka_abc_radians":
+            raise ValueError("Run config robot pose convention must be kuka_abc_radians")
+        if frames.get("dataset_reference_frame") != "template_base":
+            raise ValueError("Run config dataset_reference_frame must be template_base")
+        fixed_transforms = frames.get("fixed_transforms", [])
+        if not isinstance(fixed_transforms, list):
+            raise ValueError("Run config frames.fixed_transforms must be a list")
+        for index, transform in enumerate(fixed_transforms):
+            if not isinstance(transform, Mapping):
+                raise ValueError(f"Fixed transform {index} must be an object")
+            if not str(transform.get("from", "")) or not str(transform.get("to", "")):
+                raise ValueError(f"Fixed transform {index} requires from/to endpoints")
+            quaternion = transform.get("rotation_quaternion_wxyz")
+            translation = transform.get("translation_mm")
+            if not isinstance(quaternion, list) or len(quaternion) != 4:
+                raise ValueError(f"Fixed transform {index} quaternion must have 4 values")
+            if not isinstance(translation, list) or len(translation) != 3:
+                raise ValueError(f"Fixed transform {index} translation must have 3 values")
+            values = [float(item) for item in [*quaternion, *translation]]
+            if not all(math.isfinite(item) for item in values):
+                raise ValueError(f"Fixed transform {index} must be finite")
+            if not math.isclose(sum(float(item) ** 2 for item in quaternion), 1.0, abs_tol=1e-3):
+                raise ValueError(f"Fixed transform {index} quaternion must be normalized")
 
     sensors = capture.get("sensors")
     if not isinstance(sensors, list) or not sensors:
@@ -425,11 +520,7 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
 
 def write_run_config(run_root: str | Path, config: PoseTestBotRunConfig) -> Path:
     path = Path(run_root) / RUN_CONFIG
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(config.to_dict(), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, config.to_dict())
 
 
 def write_run_config_with_manifest(
@@ -461,6 +552,21 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
         value = json.load(f)
     if not isinstance(value, dict):
         raise ValueError(f"Run config must be a JSON object: {path}")
+    if "frames" not in value:
+        value["frames"] = RunFramesConfig().to_dict()
+        warnings = value.setdefault("warnings", [])
+        if not isinstance(warnings, list):
+            raise ValueError("Run config warnings must be a list")
+        warnings.append(
+            {
+                "code": "legacy_frames_inferred",
+                "message": (
+                    "Run config omitted frames; inferred robot_flange -> "
+                    "template_base with kuka_abc_radians. Rewrite the config "
+                    "to make frame semantics explicit."
+                ),
+            }
+        )
     validate_run_config(value)
     return value
 

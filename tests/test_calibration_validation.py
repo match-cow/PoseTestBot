@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 from posetestbot.calibration.profiles import (
@@ -231,6 +232,37 @@ def test_write_calibration_validation_promotes_profiles_when_requested(
         CALIBRATION_VALIDATION_REPORT
     )
     assert stage["artifacts"][CALIBRATION_PROFILES] == CALIBRATION_PROFILES
+
+
+def test_calibration_promotion_preserves_unrelated_valid_profiles(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    write_candidate_fixture(run_root)
+    unrelated = replace(
+        candidate_profile(profile_id="oak_existing_valid"),
+        sensor_id="oak-1",
+        sensor_type=SensorType.OAK_D_PRO,
+        rig_position="cell_left",
+        status=CalibrationStatus.VALID,
+    )
+    write_profile_collection([unrelated], run_root / CALIBRATION_PROFILES)
+
+    _report_path, promoted_path, report = write_calibration_validation_with_manifest(
+        run_root,
+        min_inliers=6,
+        max_mean_translation_residual_mm=2.0,
+        max_mean_rotation_residual_deg=1.0,
+        max_outlier_ratio=0.25,
+        promote=True,
+    )
+
+    profiles = load_profile_collection(promoted_path)
+    assert {profile.profile_id for profile in profiles} == {
+        "oak_existing_valid",
+        "realsense_123_static_aruco_candidate",
+    }
+    assert report["promotion"]["preserved_profile_ids"] == ["oak_existing_valid"]
 
 
 def test_calibration_validation_cli_writes_report(tmp_path: Path) -> None:

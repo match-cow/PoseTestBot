@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.pipeline.run_config import normalize_inverted, normalize_mounting_mode
 from posetestbot.sensors.contracts import SensorType
 
@@ -72,11 +73,7 @@ def save_sensor_aliases(
 ) -> Path:
     alias_path = Path(path)
     normalized = normalize_sensor_aliases(aliases)
-    alias_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(alias_path, "w") as f:
-        json.dump(normalized, f, indent=2, sort_keys=True)
-        f.write("\n")
-    return alias_path
+    return atomic_write_json(alias_path, normalized)
 
 
 def sensor_alias_file_state(path: str | Path = DEFAULT_SENSOR_ALIASES_PATH) -> dict[str, Any]:

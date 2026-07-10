@@ -72,6 +72,7 @@ Run project scripts through `uv`:
 
 ```bash
 uv run python scripts/robot_status.py --json
+uv run posetestbot-web
 ```
 
 ### RealSense D435
@@ -166,8 +167,10 @@ Recommended local validation:
 bash -n scripts/install.sh
 bash scripts/install.sh --help
 bash scripts/install.sh --check-only
+UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_runtime_status.py tests/test_hardware_status.py
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
+UV_CACHE_DIR=/tmp/uv-cache uv build
 git diff --check
 ```
 

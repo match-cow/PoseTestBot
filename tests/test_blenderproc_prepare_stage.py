@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+from posetestbot.blenderproc.preparation import (
+    load_camera_transformations,
+    prepare_sensor_folders,
+)
 from posetestbot.calibration.profiles import (
     SCHEMA_VERSION,
     CalibrationProfile,
+    CalibrationQuality,
+    CalibrationStatus,
     RigidTransform,
     TransformFrame,
     write_profile_collection,
@@ -141,6 +149,35 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
     )
 
 
+def test_blenderproc_prepare_prefers_rectified_sensor_tree(tmp_path: Path) -> None:
+    run_root, object_folder, camera_transforms = create_blenderproc_prepare_fixture(
+        tmp_path
+    )
+    synchronized = run_root / "processed" / "synchronized" / "realsense_123"
+    rectified = run_root / "processed" / "rectified" / "realsense_123"
+    shutil.copytree(synchronized, rectified)
+    repo_root = Path(__file__).resolve().parents[1]
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
+            str(run_root),
+            "--object-folder",
+            str(object_folder),
+            "--camera-transformations",
+            str(camera_transforms),
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert (rectified / "blenderproc" / "camera_matrix.npy").is_file()
+    assert not (synchronized / "blenderproc").exists()
+
+
 def test_blenderproc_prepare_stage_accepts_calibration_profiles(
     tmp_path: Path,
 ) -> None:
@@ -166,6 +203,8 @@ def test_blenderproc_prepare_stage_accepts_calibration_profiles(
                     rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
                     translation_mm=(10.0, 20.0, 30.0),
                 ),
+                status=CalibrationStatus.VALID,
+                quality=CalibrationQuality(num_observations=8, num_inliers=8),
             )
         ],
         calibration_profiles,
@@ -265,6 +304,8 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
                     rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
                     translation_mm=(100.0, 200.0, 300.0),
                 ),
+                status=CalibrationStatus.VALID,
+                quality=CalibrationQuality(num_observations=8, num_inliers=8),
             )
         ],
         calibration_profiles,
@@ -292,10 +333,38 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
     )
     transform_map = json.loads(derived_transform.read_text())
     assert transform_map["realsense_123"]["mounting_mode"] == "static"
-    assert transform_map["realsense_123"]["to"] == "robot_base"
+    assert transform_map["realsense_123"]["to"] == "template_base"
 
     blenderproc_folder = sensor_folder / "blenderproc"
     camera_poses = np.load(blenderproc_folder / "camera_poses.npy")
     assert camera_poses.shape == (2, 4, 4)
     np.testing.assert_allclose(camera_poses[0, :3, 3], [0.1, 0.2, 0.3])
     np.testing.assert_allclose(camera_poses[1, :3, 3], [0.1, 0.2, 0.3])
+
+
+def test_blenderproc_prepare_failure_preserves_all_existing_outputs(
+    tmp_path: Path,
+) -> None:
+    run_root, object_folder, camera_transforms = create_blenderproc_prepare_fixture(
+        tmp_path
+    )
+    synchronized = run_root / "processed" / "synchronized"
+    first_output = synchronized / "realsense_123" / "blenderproc"
+    first_output.mkdir()
+    (first_output / "previous.txt").write_text("keep")
+    invalid_sensor = synchronized / "zed_2i_456"
+    invalid_sensor.mkdir()
+    (invalid_sensor / CAM_K).write_text("50 0 40\n0 50 40\n0 0 1\n")
+
+    transforms = dict(load_camera_transformations(camera_transforms))
+    transforms["zed_2i"] = transforms["realsense"]
+    with pytest.raises(FileNotFoundError, match="matched robot poses"):
+        prepare_sensor_folders(
+            input_folder=synchronized,
+            object_folder=object_folder,
+            camera_transformations=transforms,
+        )
+
+    assert (first_output / "previous.txt").read_text() == "keep"
+    assert not (invalid_sensor / "blenderproc").exists()
+    assert not list(synchronized.rglob("*.staging"))

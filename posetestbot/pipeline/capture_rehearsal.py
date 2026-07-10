@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import CAPTURE_REHEARSAL_REPORT, RAW_ROBOT_EE_POSES
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -126,11 +127,7 @@ def capture_rehearsal_report_path(run_root: str | Path) -> Path:
 
 def _write_report(run_root: Path, report: Mapping[str, Any]) -> Path:
     path = capture_rehearsal_report_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def _raw_pose_count(run_root: Path) -> int:

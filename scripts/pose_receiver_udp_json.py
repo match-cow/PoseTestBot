@@ -5,6 +5,7 @@ import socket
 import time
 
 from posetestbot.config import robot_profile
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import RAW_ROBOT_EE_POSES
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -164,8 +165,12 @@ def main():
             received_frames += 1
             print(f"Received poses: {received_frames}", end="\r")
 
-    with open(os.path.join(output_path, RAW_ROBOT_EE_POSES), "w") as f:
-        json.dump(poses, f, indent=4)
+    atomic_write_json(
+        os.path.join(output_path, RAW_ROBOT_EE_POSES),
+        poses,
+        indent=4,
+        sort_keys=False,
+    )
 
     record_raw_robot_pose_artifact(manifest, output_path)
     write_run_manifest(manifest, output_path)

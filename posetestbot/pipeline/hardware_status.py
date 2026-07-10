@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import HARDWARE_STATUS_REPORT, RUN_CONFIG
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -294,11 +295,7 @@ def write_hardware_status_report(
     report: Mapping[str, Any],
 ) -> Path:
     path = hardware_status_report_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def write_hardware_status_report_with_manifest(

@@ -124,6 +124,8 @@ def test_sequence_listing_is_acquisition_only() -> None:
         "sync_to_bop_dry_run",
         "sync_to_bop_calibrated_dry_run",
         "real_full_capture_validation",
+        "aruco_grid_full_calibration",
+        "calibrated_capture_to_bop_dataset_dry_run",
     } <= sequence_ids
     assert "foundationpose_runtime_to_bop_eval" not in sequence_ids
     assert "megapose_runtime_to_bop_eval" not in sequence_ids
@@ -151,3 +153,39 @@ def test_pipeline_sequence_registry_references_known_stages() -> None:
     for sequence_id in PIPELINE_SEQUENCES:
         plan = build_sequence_plan(sequence_id=sequence_id, run_root="/tmp/run")
         assert plan.steps
+
+
+def test_full_grid_calibration_keeps_sync_quality_adjacent_and_splits_phases(
+    tmp_path: Path,
+) -> None:
+    plan = build_sequence_plan(
+        sequence_id="aruco_grid_full_calibration",
+        run_root=tmp_path / "run",
+    )
+
+    assert step_ids(plan)[1:4] == ["sync_run", "sync_quality", "aruco_detection"]
+    assert step_ids(plan)[4:7] == [
+        "intrinsic_calibration",
+        "aruco_pose",
+        "calibration_observations",
+    ]
+    solver = next(step for step in plan.steps if step.id == "calibration_solver")
+    assert solver.options["mode"] == "compare"
+
+
+def test_calibrated_capture_to_bop_rectifies_before_consumers(tmp_path: Path) -> None:
+    plan = build_sequence_plan(
+        sequence_id="calibrated_capture_to_bop_dataset_dry_run",
+        run_root=tmp_path / "run",
+    )
+
+    assert step_ids(plan) == [
+        "sync_run",
+        "sync_quality",
+        "calibration_preflight",
+        "camera_rectification",
+        "blenderproc_prepare",
+        "blenderproc_render",
+        "bop_export",
+    ]
+    assert plan.steps[4].depends_on == ["camera_rectification"]

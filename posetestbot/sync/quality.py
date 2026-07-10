@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     PROCESSED_DIR,
     SYNC_QUALITY_REPORT,
@@ -20,7 +21,8 @@ from posetestbot.io.manifest import (
 )
 
 
-SCHEMA_VERSION = "sync_quality_report.v1"
+SCHEMA_VERSION = "sync_quality_report.v2"
+SUPPORTED_SYNC_REPORT_SCHEMAS = {"sync_report.v1", "sync_report.v2"}
 
 
 def _check(
@@ -83,20 +85,48 @@ def _sensor_summary(
     matched_frames = int(report.get("matched_frames", 0))
     dropped_frames = int(report.get("dropped_frames", 0))
     match_ratio = (matched_frames / total_frames) if total_frames else 0.0
+    report_schema = str(report.get("schema_version") or "")
+    if report_schema not in SUPPORTED_SYNC_REPORT_SCHEMAS:
+        raise ValueError(f"Unsupported sync report schema: {report_schema!r}")
+    motion_intervals = report.get("motion_intervals")
     motion_windows = report.get("motion_windows", {})
+    timestamp_source_counts = report.get("timestamp_source_counts")
+    provenance_audited = report_schema == "sync_report.v2" and isinstance(
+        timestamp_source_counts, Mapping
+    )
     return {
+        "sync_report_schema_version": report_schema,
         "sensor_name": report_path.parent.name,
         "report_path": _relative(report_path, root),
         "sensor_folder": report.get("sensor_folder"),
         "output_folder": report.get("output_folder"),
         "timestamp_source": report.get("timestamp_source"),
+        "requested_timestamp_source": report.get(
+            "requested_timestamp_source", report.get("timestamp_source")
+        ),
+        "timestamp_source_counts": (
+            dict(timestamp_source_counts)
+            if isinstance(timestamp_source_counts, Mapping)
+            else {}
+        ),
+        "timestamp_fallback_count": int(
+            report.get("timestamp_fallback_count", 0) or 0
+        ),
+        "timestamp_missing_count": int(
+            report.get("timestamp_missing_count", 0) or 0
+        ),
+        "timestamp_provenance_audited": provenance_audited,
         "sync_delta_ms": report.get("sync_delta_ms"),
         "total_frames": total_frames,
         "matched_frames": matched_frames,
         "dropped_frames": dropped_frames,
         "match_ratio": match_ratio,
         "motion_count": (
-            len(motion_windows) if isinstance(motion_windows, Mapping) else 0
+            len(motion_intervals)
+            if isinstance(motion_intervals, list)
+            else len(motion_windows)
+            if isinstance(motion_windows, Mapping)
+            else 0
         ),
         "mean_abs_nearest_pose_delta_ns": report.get("mean_abs_nearest_pose_delta_ns"),
         "max_abs_nearest_pose_delta_ns": report.get("max_abs_nearest_pose_delta_ns"),
@@ -195,20 +225,41 @@ def _sensor_checks(
 
     if require_timestamp_source:
         timestamp_source = str(sensor.get("timestamp_source"))
+        requested_source = str(sensor.get("requested_timestamp_source"))
+        counts = sensor.get("timestamp_source_counts")
+        if not isinstance(counts, Mapping):
+            counts = {}
+        fallback_count = int(sensor.get("timestamp_fallback_count", 0) or 0)
+        missing_count = int(sensor.get("timestamp_missing_count", 0) or 0)
+        audited = bool(sensor.get("timestamp_provenance_audited"))
+        actual_sources = {str(key) for key, count in counts.items() if int(count) > 0}
+        source_ok = (
+            audited
+            and requested_source == require_timestamp_source
+            and actual_sources <= {require_timestamp_source}
+            and fallback_count == 0
+            and missing_count == 0
+        )
         checks.append(
             _check(
                 f"sync_timestamp_source:{name}",
-                "ok" if timestamp_source == require_timestamp_source else "warning",
+                "ok" if source_ok else "error",
                 (
-                    f"{name} used timestamp source {timestamp_source}."
-                    if timestamp_source == require_timestamp_source
+                    f"{name} exclusively used timestamp source {timestamp_source}."
+                    if source_ok
                     else (
-                        f"{name} used timestamp source {timestamp_source}; "
-                        f"expected {require_timestamp_source}."
+                        f"{name} did not prove exclusive use of "
+                        f"{require_timestamp_source}; actual={timestamp_source}, "
+                        f"fallbacks={fallback_count}, missing={missing_count}."
                     )
                 ),
                 details={
                     "timestamp_source": timestamp_source,
+                    "requested_timestamp_source": requested_source,
+                    "timestamp_source_counts": dict(counts),
+                    "timestamp_fallback_count": fallback_count,
+                    "timestamp_missing_count": missing_count,
+                    "timestamp_provenance_audited": audited,
                     "require_timestamp_source": require_timestamp_source,
                 },
             )
@@ -233,10 +284,11 @@ def build_sync_quality_report(
         raise ValueError("max_nearest_pose_delta_ms cannot be negative")
 
     root = Path(run_root)
+    reports_were_discovered = report_paths is None
     paths = (
-        [Path(path) for path in report_paths]
-        if report_paths is not None
-        else discover_sync_reports(root)
+        discover_sync_reports(root)
+        if reports_were_discovered
+        else [Path(path) for path in report_paths or ()]
     )
     checks: list[dict[str, Any]] = []
     sensors: list[dict[str, Any]] = []
@@ -265,7 +317,14 @@ def build_sync_quality_report(
         )
 
     for path in paths:
-        resolved = path if path.is_absolute() else root / path
+        # Discovery already returns paths rooted at ``run_root``. When that root
+        # is relative, prepending it again produces ``run/run/processed/...``.
+        # Explicit report paths retain the documented run-root-relative behavior.
+        resolved = (
+            path
+            if path.is_absolute() or reports_were_discovered
+            else root / path
+        )
         try:
             report = _read_json(resolved)
             sensor = _sensor_summary(resolved, report, root)
@@ -320,11 +379,7 @@ def write_sync_quality_report(
     report: Mapping[str, Any],
 ) -> Path:
     path = sync_quality_report_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def write_sync_quality_report_with_manifest(

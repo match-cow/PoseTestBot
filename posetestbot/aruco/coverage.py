@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     ARUCO_COVERAGE_REPORT,
     ARUCO_POSE_ESTIMATION,
@@ -299,11 +300,7 @@ def write_aruco_coverage_report(
     report: Mapping[str, Any],
 ) -> Path:
     path = aruco_coverage_report_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def write_aruco_coverage_report_with_manifest(

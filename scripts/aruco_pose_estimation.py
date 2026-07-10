@@ -6,6 +6,8 @@ from typing import Any, Dict, Tuple
 
 import cv2 as cv
 import numpy as np
+
+from posetestbot.io.atomic import atomic_write_json
 from tqdm import tqdm
 
 """ 
@@ -225,8 +227,7 @@ def process_sensor_folder(
             )
 
     output_json_file = os.path.join(sensor_folder, "aruco_pose_estimation.json")
-    with open(output_json_file, "w") as f:
-        json.dump(data, f, indent=4, default=str)
+    atomic_write_json(output_json_file, data, indent=4, default=str)
 
 
 if __name__ == "__main__":

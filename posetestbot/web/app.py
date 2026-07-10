@@ -9,19 +9,29 @@ from flask import Flask, send_from_directory
 
 from posetestbot.web.legacy import WEB_DEBUG, WEB_HOST, WEB_PORT
 from posetestbot.web.legacy import app as legacy_api
+from posetestbot.web.routes.monitoring import monitoring_bp
 from posetestbot.web.routes.overview import overview_bp
 from posetestbot.web.routes.pages import pages_bp
 from posetestbot.web.routes.sensors import sensors_bp
+from posetestbot.web.security import install_request_security
 
 
-BRAND_ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
+BRAND_ASSET_DIR = Path(__file__).resolve().parent / "static"
 BRAND_LOGO_FILENAME = "cow200.png"
 
 
 class _PreviewPollLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        return '"GET /sensors/previews' not in message
+        successful_poll = message.rstrip().endswith('" 200 -')
+        noisy_preview_get = any(
+            marker in message
+            for marker in (
+                '"GET /sensors/previews',
+                '"GET /monitoring/webcam',
+            )
+        )
+        return not (successful_poll and noisy_preview_get)
 
 
 def _install_preview_poll_log_filter() -> None:
@@ -38,6 +48,7 @@ def create_app() -> Flask:
         static_folder="static",
         static_url_path="/static",
     )
+    install_request_security(app)
 
     @app.get("/assets/cow200.png")
     def brand_logo():
@@ -50,6 +61,7 @@ def create_app() -> Flask:
 
     app.register_blueprint(pages_bp)
     app.register_blueprint(sensors_bp)
+    app.register_blueprint(monitoring_bp)
     app.register_blueprint(overview_bp)
     app.register_blueprint(legacy_api)
     _install_preview_poll_log_filter()

@@ -14,8 +14,10 @@ from pytransform3d import rotations as pr
 from pytransform3d import transformations as pt
 from pytransform3d.transform_manager import TransformManager
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.calibration.observations import SCHEMA_VERSION as OBSERVATION_SCHEMA
 from posetestbot.calibration.profiles import (
+    SCHEMA_VERSION as PROFILE_SCHEMA_VERSION,
     CalibrationProfile,
     CalibrationQuality,
     CalibrationStatus,
@@ -24,12 +26,14 @@ from posetestbot.calibration.profiles import (
     TransformFrame,
     profile_from_dict,
     profile_to_dict,
+    rectified_intrinsics_from_native,
     write_profile_collection,
 )
 from posetestbot.io.artifacts import (
     CALIBRATION_CANDIDATES,
     CALIBRATION_OBSERVATIONS,
     CALIBRATION_PROFILES_FROM_OBSERVATIONS,
+    CAMERA_DATA_JSON,
     CAM_K,
     DEPTH_SCALE,
 )
@@ -321,20 +325,40 @@ def _safe_profile_id(sensor_name: str, mounting_mode: MountingMode) -> str:
 
 
 def _intrinsics_from_sensor_folder(sensor_folder: Path) -> CameraIntrinsics:
-    cam_k = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
-    if (sensor_folder / CAM_K).is_file():
-        rows = []
-        for line in (sensor_folder / CAM_K).read_text().splitlines()[:3]:
-            rows.extend(float(item) for item in line.split())
-        if len(rows) == 9:
-            cam_k = tuple(rows)  # type: ignore[assignment]
-    depth_scale = 1.0
-    if (sensor_folder / DEPTH_SCALE).is_file():
-        try:
-            depth_scale = float((sensor_folder / DEPTH_SCALE).read_text().strip())
-        except ValueError:
-            depth_scale = 1.0
-    return CameraIntrinsics(cam_k=cam_k, width=0, height=0, depth_scale_to_mm=depth_scale)
+    cam_k_path = sensor_folder / CAM_K
+    depth_scale_path = sensor_folder / DEPTH_SCALE
+    camera_data_path = sensor_folder / CAMERA_DATA_JSON
+    for required in (cam_k_path, depth_scale_path, camera_data_path):
+        if not required.is_file():
+            raise FileNotFoundError(f"Missing calibration camera sidecar: {required}")
+
+    camera_lines = cam_k_path.read_text().splitlines()
+    rows: list[float] = []
+    for line in camera_lines[:3]:
+        rows.extend(float(item) for item in line.split())
+    if len(rows) != 9:
+        raise ValueError(f"Camera matrix must contain 9 values: {cam_k_path}")
+    depth_scale = float(depth_scale_path.read_text().strip())
+    camera_data = _read_json(camera_data_path)
+    resolution = camera_data.get("resolution")
+    if not isinstance(resolution, list) or len(resolution) != 2:
+        raise ValueError(
+            f"Camera data resolution must be [height, width]: {camera_data_path}"
+        )
+    height, width = (int(resolution[0]), int(resolution[1]))
+    distortion = (
+        [float(item) for item in camera_lines[3].split()]
+        if len(camera_lines) > 3
+        else []
+    )
+    distortion = distortion[:5] + [0.0] * max(0, 5 - len(distortion))
+    return CameraIntrinsics(
+        cam_k=tuple(rows),  # type: ignore[arg-type]
+        width=width,
+        height=height,
+        distortion=tuple(distortion),
+        depth_scale_to_mm=depth_scale,
+    )
 
 
 def _profile_from_average(
@@ -356,14 +380,16 @@ def _profile_from_average(
     sensor_name = str(sensor["sensor_name"])
     sensor_type = SensorType(str(sensor["sensor_type"]))
     device_id = str(sensor.get("device_id") or sensor_name)
+    intrinsics = _intrinsics_from_sensor_folder(sensor_folder)
     return CalibrationProfile(
-        schema_version="calibration.v1",
+        schema_version=PROFILE_SCHEMA_VERSION,
         profile_id=_safe_profile_id(sensor_name, mounting_mode),
         sensor_id=device_id,
         sensor_type=sensor_type,
         mounting_mode=mounting_mode,
         rig_position="wrist" if mounting_mode == MountingMode.EYE_IN_HAND else "static",
-        intrinsics=_intrinsics_from_sensor_folder(sensor_folder),
+        intrinsics=intrinsics,
+        rectified_intrinsics=rectified_intrinsics_from_native(intrinsics),
         extrinsics=RigidTransform(
             from_frame=TransformFrame.CAMERA,
             to_frame=to_frame,
@@ -722,10 +748,7 @@ def write_calibration_candidates(
 ) -> tuple[Path, Path]:
     root = Path(run_root)
     report_path = calibration_candidates_path(root)
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(report_path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
+    atomic_write_json(report_path, dict(report))
 
     profiles = [profile_from_dict(profile) for profile in report.get("profiles", [])]
     profile_path = calibration_profiles_from_observations_path(root)

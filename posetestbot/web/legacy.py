@@ -61,7 +61,6 @@ from posetestbot.pipeline.capture_plan_preflight import (
     write_capture_plan_preflight_with_manifest,
 )
 from posetestbot.pipeline.hardware_status import (
-    build_hardware_status_report,
     load_hardware_status_report,
     write_hardware_status_report_with_manifest,
 )
@@ -100,16 +99,16 @@ from posetestbot.pipeline.sequences import (
 )
 from posetestbot.runtime.status import collect_runtime_status
 from posetestbot.sensors.registry import list_sensor_adapters
-from posetestbot.sensors.status import collect_sensor_status, parse_expected_counts
+from posetestbot.sensors.status import collect_sensor_status
 from posetestbot.robot.status import collect_robot_status
 from posetestbot.sync.quality import (
     build_sync_quality_report,
     write_sync_quality_report_with_manifest,
 )
+from posetestbot.web.paths import APP_ROOT
 
-APP_ROOT = Path(__file__).resolve().parents[2]
 app = Blueprint("legacy_api", __name__)
-job_runner = LocalJobRunner(Path("working_data") / "jobs")
+job_runner = LocalJobRunner(APP_ROOT / "working_data" / "jobs")
 
 
 def _env_bool(name: str, *, default: bool = False) -> bool:
@@ -135,7 +134,7 @@ CAPTURE_JOB_SEQUENCE_IDS = {
     "fake_capture_rehearsal",
     "fake_capture_execution",
 }
-ACTIVE_JOB_STATUSES = {"queued", "running"}
+ACTIVE_JOB_STATUSES = {"queued", "running", "canceling"}
 ROBOT_CONTROL_COMMANDS = {"start_iiwa", "stop_iiwa"}
 
 COMMANDS = {
@@ -148,11 +147,6 @@ COMMANDS = {
         "label": "Stop IIWA",
         "command": ["uv", "run", "python", "stop_iiwa.py"],
         "resources": ["robot_command"],
-    },
-    "realsense_multi": {
-        "label": "Run RealSense",
-        "command": ["uv", "run", "python", "realsense_multi.py"],
-        "resources": ["camera"],
     },
 }
 
@@ -245,14 +239,14 @@ def _capture_job_kind(job) -> str | None:
     parameters = job.parameters or {}
     stage = parameters.get("pipeline_stage")
     sequence = parameters.get("pipeline_sequence")
-    command = parameters.get("command")
     if stage in CAPTURE_JOB_STAGE_IDS:
         return "stage"
     if sequence in CAPTURE_JOB_SEQUENCE_IDS:
         return "sequence"
-    if command == "realsense_multi":
-        return "legacy_command"
-    if "camera" in (job.resources or []):
+    if any(
+        resource == "camera" or resource.startswith("camera:")
+        for resource in (job.resources or [])
+    ):
         return "camera_resource"
     return None
 
@@ -348,7 +342,7 @@ def _run_config_from_payload(data: dict):
         calibration_profiles=data.get("calibration_profiles") or None,
         sequence_id=data.get("sequence", data.get("sequence_id", "sync_to_bop_dry_run")),
         sequence_options=sequence_options,
-        plan_only=bool(data.get("plan_only", True)),
+        plan_only=_truthy(data.get("plan_only"), default=True),
     )
 
 
@@ -499,7 +493,14 @@ def _truthy(value, *, default: bool = False) -> bool:
         return default
     if isinstance(value, bool):
         return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        "Boolean value must be one of: true, false, 1, 0, yes, no, on, off"
+    )
 
 
 def _sync_quality_options(data: dict) -> dict:
@@ -664,19 +665,6 @@ def stop_capture_job(job_id):
 @app.route('/sensors/adapters', methods=['GET'])
 def sensor_adapters():
     return jsonify({'adapters': list_sensor_adapters()})
-
-
-@app.route('/sensors/status', methods=['GET'])
-def sensor_status():
-    try:
-        expected_counts = (
-            parse_expected_counts(request.args.getlist('expected'))
-            if request.args.getlist('expected')
-            else None
-        )
-    except ValueError as exc:
-        return jsonify({'output': str(exc)}), 400
-    return jsonify(collect_sensor_status(expected_counts=expected_counts))
 
 
 @app.route('/runtime/status', methods=['GET'])
@@ -998,8 +986,8 @@ def capture_plan_preflight_endpoint():
         data = request.get_json()
         if not isinstance(data, dict) or 'run_root' not in data:
             return jsonify({'output': 'Invalid request: run_root required'}), 400
-        include_sensors = not bool(data.get('no_sensors', False))
-        allow_real_robot = bool(data.get('allow_real_robot', False))
+        include_sensors = not _truthy(data.get('no_sensors'), default=False)
+        allow_real_robot = _truthy(data.get('allow_real_robot'), default=False)
         try:
             path, report = write_capture_plan_preflight_with_manifest(
                 data['run_root'],
@@ -1107,7 +1095,7 @@ def calibration_preflight_endpoint():
         data = request.get_json()
         if not isinstance(data, dict) or 'run_root' not in data:
             return jsonify({'output': 'Invalid request: run_root required'}), 400
-        require_valid = bool(data.get('require_valid', False))
+        require_valid = _truthy(data.get('require_valid'), default=False)
         min_observations = int(data.get('min_observations', 6))
         max_error = data.get('max_mean_reprojection_error_px', 2.0)
         max_error = None if max_error is None else float(max_error)
@@ -1433,7 +1421,7 @@ def calibration_validation_endpoint():
                     data['run_root'],
                     candidates_path=data.get('candidates'),
                     profiles_path=data.get('profiles'),
-                    promote=bool(data.get('promote', False)),
+                    promote=_truthy(data.get('promote'), default=False),
                     output_profiles_path=data.get('output_profiles'),
                     operator=data.get('operator') or None,
                     **validation_options,

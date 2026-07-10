@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     CAPTURE_EXECUTION_LOGS_DIR,
     CAPTURE_EXECUTION_PLAN,
@@ -35,6 +36,10 @@ STATUS_SCHEMA_VERSION = "capture_execution_status.v1"
 REPORT_SCHEMA_VERSION = "capture_execution_report.v1"
 EXECUTION_MODES = ("plan_only", "pose_only_fake", "full")
 POSE_ONLY_ROLES = {"robot_controller", "robot_pose_receiver"}
+
+
+class CaptureExecutionCanceled(RuntimeError):
+    """Raised by supervisor signal handlers to trigger complete cleanup."""
 
 
 @dataclass(frozen=True)
@@ -489,11 +494,7 @@ def write_capture_execution_plan(
     plan: Mapping[str, Any],
 ) -> Path:
     path = capture_execution_plan_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(plan), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(plan))
 
 
 def write_capture_execution_plan_with_manifest(
@@ -577,11 +578,7 @@ def write_capture_execution_status(
     status: Mapping[str, Any],
 ) -> Path:
     path = capture_execution_status_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(status), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(status))
 
 
 def write_capture_execution_report(
@@ -589,11 +586,7 @@ def write_capture_execution_report(
     report: Mapping[str, Any],
 ) -> Path:
     path = capture_execution_report_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def _command_array(command: Mapping[str, Any]) -> list[str]:
@@ -803,6 +796,46 @@ def run_capture_execution(
 
     status_path = record_status("starting", "Capture execution supervisor starting.")
 
+    def cleanup_processes(reason: str) -> None:
+        for info in process_infos:
+            process = info.get("process")
+            if process is None:
+                continue
+            if process.poll() is None:
+                _terminate_process_group(process, timeout_s=terminate_timeout_s)
+                _mark_process_ended(info)
+                info["status"] = "terminated"
+                info["termination_reason"] = reason
+            elif info.get("status") == "running":
+                _mark_process_ended(info)
+                info["status"] = (
+                    "succeeded" if process.returncode == 0 else "failed"
+                )
+                info["termination_reason"] = f"exited_during_{reason}"
+            log_file = info.get("log_file")
+            if log_file is not None and not log_file.closed:
+                log_file.close()
+
+    previous_signal_handlers: dict[int, Any] = {}
+
+    def cancel_from_signal(signum: int, _frame: Any) -> None:
+        try:
+            signal_name = signal.Signals(signum).name
+        except ValueError:
+            signal_name = str(signum)
+        raise CaptureExecutionCanceled(
+            f"Capture execution canceled by {signal_name}."
+        )
+
+    for supervisor_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_signal_handlers[supervisor_signal] = signal.getsignal(
+                supervisor_signal
+            )
+            signal.signal(supervisor_signal, cancel_from_signal)
+        except (ValueError, OSError):
+            previous_signal_handlers.pop(supervisor_signal, None)
+
     try:
         plan = build_capture_execution_plan(
             run_root_path,
@@ -910,32 +943,51 @@ def run_capture_execution(
             "status": "running",
             "termination_reason": None,
         }
-        process_infos.append(receiver_info)
-        record_status("running", "Robot pose receiver is running.")
-        with open(receiver_log, "w", buffering=1) as log_file:
+        log_file = open(receiver_log, "w", buffering=1)
+        try:
             log_file.write(f"$ {shlex.join(receiver_array)}\n")
-            result = subprocess.run(
+            receiver_process = subprocess.Popen(
                 receiver_array,
                 cwd=_repo_root(),
                 env=os.environ.copy(),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
-                timeout=timeout_s,
-                check=False,
+                start_new_session=(os.name != "nt"),
             )
-        receiver_info["returncode"] = result.returncode
+        except Exception:
+            log_file.close()
+            raise
+        receiver_info["process"] = receiver_process
+        receiver_info["pid"] = getattr(receiver_process, "pid", None)
+        receiver_info["log_file"] = log_file
+        process_infos.append(receiver_info)
+        record_status("running", "Robot pose receiver is running.")
+        try:
+            returncode = receiver_process.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_group(receiver_process, timeout_s=terminate_timeout_s)
+            _mark_process_ended(receiver_info)
+            receiver_info["returncode"] = receiver_process.returncode
+            receiver_info["status"] = "failed"
+            receiver_info["termination_reason"] = "receiver_timeout"
+            log_file.close()
+            raise RuntimeError(
+                f"Robot pose receiver exceeded timeout of {timeout_s} seconds."
+            ) from exc
+        log_file.close()
+        receiver_info["returncode"] = returncode
         _mark_process_ended(receiver_info)
-        receiver_info["status"] = "succeeded" if result.returncode == 0 else "failed"
+        receiver_info["status"] = "succeeded" if returncode == 0 else "failed"
         receiver_info["termination_reason"] = "receiver_completed"
         record_status(
-            "running" if result.returncode == 0 else "failed",
-            f"Robot pose receiver exited with status {result.returncode}.",
+            "running" if returncode == 0 else "failed",
+            f"Robot pose receiver exited with status {returncode}.",
         )
-        if result.returncode != 0:
+        if returncode != 0:
             raise RuntimeError(
                 "Robot pose receiver exited with status "
-                f"{result.returncode}."
+                f"{returncode}."
             )
 
         for info in background_processes:
@@ -967,24 +1019,24 @@ def run_capture_execution(
                     "Fake iiwa controller exited with status "
                     f"{process.returncode}."
                 )
+    except CaptureExecutionCanceled as exc:
+        status = "canceled"
+        message = str(exc)
+        cleanup_processes("cancellation_cleanup")
+        record_status("canceled", message)
+        if plan is None:
+            plan = {
+                "schema_version": SCHEMA_VERSION,
+                "run_root": run_root_path.as_posix(),
+                "mode": mode,
+                "status": "canceled",
+                "message": message,
+            }
+        plan_path = run_root_path / CAPTURE_EXECUTION_PLAN
     except Exception as exc:
         status = "failed"
         message = str(exc)
-        for info in background_processes:
-            process = info["process"]
-            if process.poll() is None:
-                _terminate_process_group(process, timeout_s=terminate_timeout_s)
-                _mark_process_ended(info)
-                info["status"] = "terminated"
-                info["termination_reason"] = "failure_cleanup"
-            elif info.get("status") == "running":
-                _mark_process_ended(info)
-                info["status"] = (
-                    "succeeded" if process.returncode == 0 else "failed"
-                )
-                info["termination_reason"] = "exited_during_failure_cleanup"
-            if info.get("log_file") is not None and not info["log_file"].closed:
-                info["log_file"].close()
+        cleanup_processes("failure_cleanup")
         record_status("failed", message)
         if plan is None:
             plan = {
@@ -995,6 +1047,9 @@ def run_capture_execution(
                 "message": message,
             }
         plan_path = run_root_path / CAPTURE_EXECUTION_PLAN
+    finally:
+        for supervisor_signal, previous_handler in previous_signal_handlers.items():
+            signal.signal(supervisor_signal, previous_handler)
 
     process_records = []
     for info in process_infos:
@@ -1065,7 +1120,13 @@ def run_capture_execution(
     upsert_stage(
         manifest,
         name="capture_execution",
-        status="succeeded" if status == "succeeded" else "failed",
+        status=(
+            "succeeded"
+            if status == "succeeded"
+            else "canceled"
+            if status == "canceled"
+            else "failed"
+        ),
         artifacts=artifacts,
         run_root=run_root_path,
         message=message,

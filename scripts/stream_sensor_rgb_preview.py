@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 import cv2
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.manifest import utc_now_iso
 from posetestbot.pipeline.run_config import normalize_inverted, normalize_sensor_type
 from posetestbot.sensors.previews import (
@@ -19,7 +20,10 @@ from posetestbot.sensors.previews import (
     PREVIEW_STATUS_NAME,
     PREVIEW_STOP_NAME,
 )
-from posetestbot.sensors.v4l2_preview import select_realsense_rgb_node
+from posetestbot.sensors.v4l2_preview import (
+    select_realsense_rgb_node,
+    select_usb_rgb_node,
+)
 
 
 _STOP_REQUESTED = False
@@ -49,7 +53,12 @@ def _load_sensor_spec(value: str) -> dict[str, Any]:
     loaded = json.loads(value)
     if not isinstance(loaded, Mapping):
         raise ValueError("--sensor-json must be a JSON object")
-    sensor_type = normalize_sensor_type(str(loaded.get("sensor_type", ""))).value
+    raw_sensor_type = str(loaded.get("sensor_type", "")).strip()
+    sensor_type = (
+        raw_sensor_type
+        if raw_sensor_type == "monitor_webcam"
+        else normalize_sensor_type(raw_sensor_type).value
+    )
     device_id = str(loaded.get("device_id", "")).strip()
     if not device_id:
         raise ValueError("sensor_json device_id must not be empty")
@@ -61,12 +70,7 @@ def _load_sensor_spec(value: str) -> dict[str, Any]:
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w") as f:
-        json.dump(value, f, indent=2, sort_keys=True)
-        f.write("\n")
-    tmp.replace(path)
+    atomic_write_json(path, value)
 
 
 def _atomic_jpeg(path: Path, frame, *, jpeg_quality: int) -> None:
@@ -120,12 +124,19 @@ def _base_status(preview_root: Path, spec: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _open_capture(path: str, *, width: int, height: int, fps: int):
+def _open_capture(
+    path: str,
+    *,
+    width: int,
+    height: int,
+    fps: int,
+    pixel_format: str = "YUYV",
+):
     capture = cv2.VideoCapture(path, cv2.CAP_V4L2)
+    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*pixel_format))
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
     capture.set(cv2.CAP_PROP_FPS, float(fps))
-    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUYV"))
     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not capture.isOpened():
         raise RuntimeError(f"Could not open RGB preview node {path}.")
@@ -142,7 +153,29 @@ def run_preview(args: argparse.Namespace) -> int:
     status = _base_status(preview_root, spec)
     _atomic_json(status_path, status)
 
-    if spec["sensor_type"] != "realsense_d435":
+    if spec["sensor_type"] == "realsense_d435":
+        selection = select_realsense_rgb_node(
+            str(spec["device_id"]),
+            metadata=(
+                spec.get("metadata")
+                if isinstance(spec.get("metadata"), Mapping)
+                else None
+            ),
+        )
+        pixel_format = "YUYV"
+    elif spec["sensor_type"] == "monitor_webcam":
+        metadata = (
+            spec.get("metadata")
+            if isinstance(spec.get("metadata"), Mapping)
+            else {}
+        )
+        vendor_id = str(metadata.get("usb_vendor_id", "")).strip()
+        product_id = str(metadata.get("usb_product_id", "")).strip()
+        if not vendor_id or not product_id:
+            raise ValueError("Monitor webcam requires USB vendor and product IDs.")
+        selection = select_usb_rgb_node(vendor_id, product_id)
+        pixel_format = "MJPG" if "MJPG" in selection.formats else "YUYV"
+    else:
         status.update(
             {
                 "status": "failed",
@@ -152,11 +185,6 @@ def run_preview(args: argparse.Namespace) -> int:
         )
         _atomic_json(status_path, status)
         return 2
-
-    selection = select_realsense_rgb_node(
-        str(spec["device_id"]),
-        metadata=spec.get("metadata") if isinstance(spec.get("metadata"), Mapping) else None,
-    )
     status.update(
         {
             "status": "opening",
@@ -175,6 +203,7 @@ def run_preview(args: argparse.Namespace) -> int:
         width=max(1, int(args.width)),
         height=max(1, int(args.height)),
         fps=max(1, int(args.fps)),
+        pixel_format=pixel_format,
     )
     frame_count = 0
     failure_count = 0

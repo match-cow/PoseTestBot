@@ -16,6 +16,7 @@ from playwright.sync_api import expect, sync_playwright
 
 from posetestbot.web import legacy as web_legacy
 from posetestbot.web.app import create_app
+from posetestbot.web.routes import monitoring as web_monitoring
 from posetestbot.web.routes import sensors as web_sensors
 
 
@@ -178,10 +179,18 @@ class LiveServer:
 @pytest.fixture
 def preview_server(monkeypatch, tmp_path: Path):
     runner = FakePreviewRunner()
+    monitor_runner = FakePreviewRunner()
+    runner.monitor_runner = monitor_runner
     monkeypatch.setattr(web_sensors, "job_runner", runner)
     monkeypatch.setattr(web_sensors, "collect_sensor_status", fake_sensor_status)
     monkeypatch.setattr(web_sensors, "preview_stream_root", PreviewRootFactory(tmp_path))
     monkeypatch.setattr(web_sensors, "DEFAULT_SENSOR_ALIASES_PATH", tmp_path / "aliases.json")
+    monkeypatch.setattr(web_monitoring, "job_runner", monitor_runner)
+    monkeypatch.setattr(
+        web_monitoring,
+        "preview_stream_root",
+        PreviewRootFactory(tmp_path / "monitor"),
+    )
     monkeypatch.setattr(web_legacy, "job_runner", EmptyRunner())
     app = create_app()
     app.config.update(TESTING=True)
@@ -213,6 +222,33 @@ def page():
 
 def sensor_card(page, sensor_key: str):
     return page.locator(f'[data-testid="sensor-card"][data-sensor-key="{sensor_key}"]')
+
+
+def test_sidebar_webcam_monitor_displays_latest_frame(preview_server, page) -> None:
+    server, runner = preview_server
+    page.goto(server.url, wait_until="domcontentloaded")
+
+    monitor_runner = runner.monitor_runner
+    wait_for(lambda: len(monitor_runner.jobs) == 1)
+    job = next(iter(monitor_runner.jobs.values()))
+    preview_root = Path(job.parameters["preview_root"])
+    write_jpeg(preview_root / "latest.jpg")
+    write_json(
+        preview_root / "preview_status.json",
+        {
+            "schema_version": "sensor_rgb_preview.v1",
+            "status": "running",
+            "frame_count": 3,
+            "latest_image": "latest.jpg",
+            "selected_node": {"path": "/dev/video18"},
+            "error": None,
+        },
+    )
+    job.status = "running"
+
+    expect(page.locator("#webcamMonitorImage")).to_be_visible(timeout=4000)
+    expect(page.locator("#webcamMonitorStatus")).to_have_text("running")
+    expect(page.locator("#retryWebcamBtn")).to_be_hidden()
 
 
 def test_card_local_preview_stream_lifecycle(preview_server, page) -> None:

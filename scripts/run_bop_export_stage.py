@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
+import uuid
 from pathlib import Path
 
 from posetestbot.bop.writer import (
@@ -11,16 +14,25 @@ from posetestbot.bop.writer import (
     export_sensor_scene_to_bop,
     object_registry_from_folder,
     targets_filename,
+    validate_bop_dataset,
     write_bop_coco_annotations,
+    write_bop_dataset_info,
     write_bop_export_manifest,
+    write_bop_frame_map,
     write_bop_multiview_targets,
     write_bop_targets,
 )
-from posetestbot.calibration.profiles import load_profile_collection, select_profile_for_sensor
+from posetestbot.calibration.profiles import (
+    load_profile_collection,
+    select_valid_profile_for_sensor,
+)
+from posetestbot.io.atomic import replace_directory
 from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_COCO_ANNOTATIONS,
     BOP_EXPORT_MANIFEST,
+    BOP_FRAME_MAP_JSON,
+    BOP_MULTIVIEW_TARGETS,
     BOP_TARGETS_BOP19,
     CALIBRATION_PROFILES,
     DEPTH_DIR,
@@ -32,6 +44,7 @@ from posetestbot.io.artifacts import (
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
     upsert_stage,
+    utc_now_iso,
     write_run_manifest,
 )
 
@@ -100,7 +113,7 @@ def parse_args() -> argparse.Namespace:
         "--calibration-profiles",
         default=None,
         help=(
-            "Optional calibration.v1 profile collection. Matching profiles are "
+            "Optional calibration.v2 profile collection. Matching profiles are "
             "recorded in scene_camera.json and bop_export_manifest.json."
         ),
     )
@@ -110,6 +123,9 @@ def parse_args() -> argparse.Namespace:
 def default_input_folder(run_root: Path, explicit_input_folder: str | None) -> Path:
     if explicit_input_folder:
         return Path(explicit_input_folder)
+    rectified = run_root / PROCESSED_DIR / "rectified"
+    if rectified.is_dir():
+        return rectified
     return run_root / PROCESSED_DIR / SYNCHRONIZED_DIR
 
 
@@ -146,68 +162,98 @@ def main() -> None:
     upsert_stage(manifest, name="bop_export", status="running")
     write_run_manifest(manifest, run_root)
 
+    staging_folder = output_folder.with_name(
+        f".{output_folder.name}.{uuid.uuid4().hex}.tmp"
+    )
     try:
+        if output_folder.exists() and not args.overwrite:
+            raise FileExistsError(
+                f"BOP dataset already exists: {output_folder}; pass --overwrite"
+            )
         sensor_folders = discover_exportable_sensor_folders(input_folder)
         calibration_profiles = (
             load_profile_collection(calibration_profiles_path)
             if calibration_profiles_path is not None
             else []
         )
+        if calibration_profiles_path is not None and not calibration_profiles:
+            raise ValueError("Calibration profile collection must not be empty")
+
+        staging_folder.parent.mkdir(parents=True, exist_ok=True)
+        staging_folder.mkdir(parents=False, exist_ok=False)
         object_name_to_id = None
         object_models = []
         if not args.no_model_export:
             object_name_to_id = object_registry_from_folder(object_folder)
-            object_models = copy_bop_models(output_folder, object_folder)
+            geometry_cache = None
+            previous_models_info = output_folder / MODELS_DIR / "models_info.json"
+            if previous_models_info.is_file():
+                try:
+                    loaded_cache = json.loads(previous_models_info.read_text())
+                except json.JSONDecodeError:
+                    loaded_cache = None
+                if isinstance(loaded_cache, dict):
+                    geometry_cache = loaded_cache
+            object_models = copy_bop_models(
+                staging_folder,
+                object_folder,
+                geometry_cache=geometry_cache,
+            )
         exports = []
-        artifacts: dict[str, Path] = {BOP_DIR: output_folder}
-        if object_models:
-            artifacts[MODELS_DIR] = output_folder / MODELS_DIR
-        if calibration_profiles_path is not None:
-            artifacts[CALIBRATION_PROFILES] = calibration_profiles_path
         for offset, sensor_folder in enumerate(sensor_folders):
             calibration_profile = (
-                select_profile_for_sensor(calibration_profiles, sensor_folder.name)
-                if calibration_profiles
+                select_valid_profile_for_sensor(
+                    calibration_profiles, sensor_folder.name
+                )
+                if calibration_profiles_path is not None
                 else None
             )
-            export = export_sensor_scene_to_bop(
-                sensor_folder,
-                output_folder,
-                split=args.split,
-                scene_id=args.scene_start + offset,
-                overwrite=args.overwrite,
-                calibration_profile=calibration_profile,
-                object_name_to_id=object_name_to_id,
+            exports.append(
+                export_sensor_scene_to_bop(
+                    sensor_folder,
+                    staging_folder,
+                    split=args.split,
+                    scene_id=args.scene_start + offset,
+                    overwrite=False,
+                    calibration_profile=calibration_profile,
+                    object_name_to_id=object_name_to_id,
+                )
             )
-            exports.append(export)
-            artifacts[f"{sensor_folder.name}:bop_scene"] = Path(export.scene_folder)
 
         targets_path = None
         multiview_targets_path = None
         coco_annotations_path = None
-        if not args.no_model_export:
-            targets_path = write_bop_targets(output_folder, exports, split=args.split)
-            artifacts[targets_filename(args.split)] = targets_path
-            if args.split == "test":
-                artifacts[BOP_TARGETS_BOP19] = targets_path
-            if args.write_multiview_targets:
-                multiview_targets_path = write_bop_multiview_targets(
-                    output_folder,
-                    exports,
-                    split=args.split,
-                )
-                artifacts[multiview_targets_path.name] = multiview_targets_path
-            if args.write_coco_annotations:
-                coco_annotations_path = write_bop_coco_annotations(
-                    output_folder,
-                    exports,
-                    split=args.split,
-                    object_models=object_models,
-                )
-                artifacts[BOP_COCO_ANNOTATIONS] = coco_annotations_path
+        if not args.no_model_export and args.split == "test":
+            targets_path = write_bop_targets(staging_folder, exports, split=args.split)
+        if args.write_multiview_targets:
+            multiview_targets_path = write_bop_multiview_targets(
+                staging_folder,
+                exports,
+                split=args.split,
+            )
+        if args.write_coco_annotations:
+            coco_annotations_path = write_bop_coco_annotations(
+                staging_folder,
+                exports,
+                split=args.split,
+                object_models=object_models,
+            )
 
-        export_manifest = write_bop_export_manifest(
-            output_folder,
+        frame_map_path = write_bop_frame_map(staging_folder, exports)
+        dataset_info_path = write_bop_dataset_info(
+            staging_folder,
+            exports,
+            dataset_name=run_root.name,
+            generated_at=utc_now_iso(),
+        )
+        validation = validate_bop_dataset(
+            staging_folder,
+            exports,
+            object_models=object_models,
+            targets_path=targets_path,
+        )
+        write_bop_export_manifest(
+            staging_folder,
             exports,
             calibration_profiles_path=calibration_profiles_path,
             calibration_profiles=calibration_profiles,
@@ -215,8 +261,35 @@ def main() -> None:
             targets_path=targets_path,
             multiview_targets_path=multiview_targets_path,
             coco_annotations_path=coco_annotations_path,
+            frame_map_path=frame_map_path,
+            dataset_info_path=dataset_info_path,
+            validation=validation,
         )
-        artifacts[BOP_EXPORT_MANIFEST] = export_manifest
+        replace_directory(staging_folder, output_folder)
+
+        artifacts: dict[str, Path] = {
+            BOP_DIR: output_folder,
+            BOP_EXPORT_MANIFEST: output_folder / BOP_EXPORT_MANIFEST,
+            BOP_FRAME_MAP_JSON: output_folder / BOP_FRAME_MAP_JSON,
+            "dataset_info.json": output_folder / "dataset_info.json",
+        }
+        if object_models:
+            artifacts[MODELS_DIR] = output_folder / MODELS_DIR
+        if calibration_profiles_path is not None:
+            artifacts[CALIBRATION_PROFILES] = calibration_profiles_path
+        for export in exports:
+            artifacts[f"{export.sensor_name}:bop_scene"] = (
+                output_folder / export.scene_folder
+            )
+        if targets_path is not None:
+            artifacts[targets_filename(args.split)] = (
+                output_folder / targets_filename(args.split)
+            )
+            artifacts[BOP_TARGETS_BOP19] = output_folder / BOP_TARGETS_BOP19
+        if multiview_targets_path is not None:
+            artifacts[BOP_MULTIVIEW_TARGETS] = output_folder / BOP_MULTIVIEW_TARGETS
+        if coco_annotations_path is not None:
+            artifacts[BOP_COCO_ANNOTATIONS] = output_folder / BOP_COCO_ANNOTATIONS
         message = f"Exported {len(exports)} synchronized sensor folder(s) to BOP."
         upsert_stage(
             manifest,
@@ -228,6 +301,8 @@ def main() -> None:
         )
         write_run_manifest(manifest, run_root)
     except Exception as exc:
+        if staging_folder.exists():
+            shutil.rmtree(staging_folder)
         upsert_stage(manifest, name="bop_export", status="failed", message=str(exc))
         write_run_manifest(manifest, run_root)
         raise

@@ -8,6 +8,7 @@ import pytest
 
 from posetestbot.io.artifacts import DATASET_MANIFEST, RUN_CONFIG
 from posetestbot.pipeline.run_config import (
+    FixedFrameTransform,
     SCHEMA_VERSION,
     build_sequence_job_from_run_config,
     create_run_config,
@@ -32,6 +33,12 @@ def test_default_run_config_uses_fake_robot_and_lab_sensors(tmp_path: Path) -> N
     assert data["object_folder"] == "object_models"
     assert data["pipeline"]["sequence_id"] == "sync_to_bop_dry_run"
     assert data["pipeline"]["plan_only"] is True
+    assert data["frames"]["robot_pose"] == {
+        "from": "robot_flange",
+        "to": "template_base",
+        "convention": "kuka_abc_radians",
+    }
+    assert data["frames"]["dataset_reference_frame"] == "template_base"
     sensors = data["capture"]["sensors"]
     assert [sensor["sensor_type"] for sensor in sensors].count("realsense_d435") == 3
     assert [sensor["sensor_type"] for sensor in sensors].count("oak_d_pro") == 1
@@ -315,3 +322,42 @@ def test_create_run_config_cli_rejects_unknown_sequence(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "invalid choice" in result.stderr
     assert not (tmp_path / "run-bad-sequence" / RUN_CONFIG).exists()
+
+
+def test_legacy_run_config_loads_with_frame_warning(tmp_path: Path) -> None:
+    run_root = tmp_path / "legacy-run"
+    value = create_run_config(run_root=run_root).to_dict()
+    value.pop("frames")
+    run_root.mkdir()
+    (run_root / RUN_CONFIG).write_text(json.dumps(value))
+
+    loaded = load_run_config_for_run_root(run_root)
+
+    assert loaded["frames"]["robot_pose"]["from"] == "robot_flange"
+    assert loaded["frames"]["robot_pose"]["to"] == "template_base"
+    assert loaded["warnings"][0]["code"] == "legacy_frames_inferred"
+
+
+def test_create_run_config_records_typed_fixed_frame_edges(tmp_path: Path) -> None:
+    config = create_run_config(
+        run_root=tmp_path / "fixed-run",
+        fixed_transforms=(
+            FixedFrameTransform(
+                from_frame="robot_flange",
+                to_frame="tcp",
+                rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+                translation_mm=(0.0, 0.0, 125.0),
+                source="tool_measurement",
+            ),
+        ),
+    ).to_dict()
+
+    assert config["frames"]["fixed_transforms"] == [
+        {
+            "from": "robot_flange",
+            "to": "tcp",
+            "rotation_quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+            "translation_mm": [0.0, 0.0, 125.0],
+            "source": "tool_measurement",
+        }
+    ]

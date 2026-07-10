@@ -35,6 +35,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("run_root", help="Run folder containing calibration candidates.")
     parser.add_argument(
+        "--select-profile",
+        action="append",
+        default=[],
+        metavar="SENSOR=PROFILE_ID",
+        help=(
+            "Select exactly one candidate for a sensor. Repeat for multiple sensors; "
+            "required when comparison emitted two wrist candidates."
+        ),
+    )
+    parser.add_argument(
         "--candidates",
         help="Path to calibration_candidates.json. Relative paths are run-root relative.",
     )
@@ -96,6 +106,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _profile_selections(values: list[str]) -> dict[str, str]:
+    selections: dict[str, str] = {}
+    for value in values:
+        sensor, separator, profile_id = value.partition("=")
+        if not separator or not sensor.strip() or not profile_id.strip():
+            raise ValueError("--select-profile must be SENSOR=PROFILE_ID")
+        sensor = sensor.strip()
+        if sensor in selections:
+            raise ValueError(f"Duplicate --select-profile sensor: {sensor}")
+        selections[sensor] = profile_id.strip()
+    return selections
+
+
 def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
@@ -106,6 +129,7 @@ def main() -> None:
         "max_mean_translation_residual_mm": args.max_mean_translation_residual_mm,
         "max_mean_rotation_residual_deg": args.max_mean_rotation_residual_deg,
         "max_outlier_ratio": args.max_outlier_ratio,
+        "select_profiles": _profile_selections(args.select_profile),
     }
     if args.no_write:
         report = build_calibration_validation(run_root, **report_args)

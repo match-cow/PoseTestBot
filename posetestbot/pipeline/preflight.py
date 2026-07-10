@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import CALIBRATION_PROFILES, RUN_PREFLIGHT_REPORT
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -464,11 +465,7 @@ def write_run_preflight_report(
     filename: str = RUN_PREFLIGHT_REPORT,
 ) -> Path:
     path = Path(run_root) / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def write_run_preflight_with_manifest(

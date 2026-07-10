@@ -1,34 +1,20 @@
 from __future__ import annotations
 
-import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+from posetestbot.blenderproc.rendering import discover_render_jobs, run_render_jobs
 from posetestbot.io.artifacts import (
     BLENDERPROC_RENDER_PLAN,
     DATASET_MANIFEST,
     MASKS_DIR,
 )
-
-
-def load_render_stage_module():
-    module_path = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "run_blenderproc_render_stage.py"
-    )
-    spec = importlib.util.spec_from_file_location("run_blenderproc_render_stage", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
 
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,19 +78,83 @@ def test_blenderproc_render_stage_dry_run_writes_plan_and_manifest(
     assert stage["artifacts"][BLENDERPROC_RENDER_PLAN] == BLENDERPROC_RENDER_PLAN
 
 
-def test_cleanup_blenderproc_output_moves_masks_and_output(tmp_path: Path) -> None:
-    module = load_render_stage_module()
-    sensor_folder = tmp_path / "realsense_123"
-    bproc_folder = sensor_folder / "blenderproc"
-    mask_folder = bproc_folder / "train_pbr" / "000000" / "mask"
-    mask_folder.mkdir(parents=True)
-    (mask_folder / "000000_000000.png").write_bytes(b"mask")
-    (bproc_folder / "train_pbr" / "000000" / "scene_gt.json").write_text("{}")
+def write_fake_render_output(workspace: Path) -> None:
+    scene = workspace / "train_pbr" / "000000"
+    for folder in ("rgb", "depth", "mask", "mask_visib"):
+        (scene / folder).mkdir(parents=True, exist_ok=True)
+    (scene / "rgb" / "000000.png").write_bytes(b"rgb")
+    (scene / "depth" / "000000.png").write_bytes(b"depth")
+    (scene / "mask" / "000000_000000.png").write_bytes(b"mask")
+    (scene / "mask_visib" / "000000_000000.png").write_bytes(b"visible")
+    write_json(scene / "scene_camera.json", {"0": {}})
+    write_json(scene / "scene_gt.json", {"0": [{"obj_id": 1}]})
+    write_json(scene / "scene_gt_info.json", {"0": [{}]})
 
-    artifacts = module.cleanup_blenderproc_output(sensor_folder, bproc_folder)
+
+def test_render_jobs_promote_validated_masks_and_output(tmp_path: Path) -> None:
+    run_root, bproc_folder = create_prepared_render_fixture(tmp_path)
+    sensor_folder = bproc_folder.parent
+    (sensor_folder / MASKS_DIR).mkdir()
+    (sensor_folder / MASKS_DIR / "old.txt").write_text("old")
+    (bproc_folder / "output").mkdir()
+    (bproc_folder / "output" / "old.txt").write_text("old")
+    jobs = discover_render_jobs(
+        input_folder=run_root / "processed" / "synchronized",
+        render_script=Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "blenderproc_render_720p_multi.py",
+        subdir="blenderproc",
+        blenderproc_executable="blenderproc",
+    )
+
+    def fake_runner(command: list[str], *, check: bool) -> None:
+        assert check is True
+        write_fake_render_output(Path(command[-1]))
+
+    artifacts = run_render_jobs(jobs, command_runner=fake_runner)
 
     assert (sensor_folder / MASKS_DIR / "000000_000000.png").read_bytes() == b"mask"
-    assert (bproc_folder / "output" / "scene_gt.json").read_text() == "{}"
-    assert not (bproc_folder / "train_pbr").exists()
+    assert not (sensor_folder / MASKS_DIR / "old.txt").exists()
+    assert (bproc_folder / "output" / "scene_gt.json").is_file()
+    assert not (bproc_folder / "output" / "old.txt").exists()
     assert artifacts["realsense_123:masks"] == sensor_folder / MASKS_DIR
     assert artifacts["realsense_123:blenderproc_output"] == bproc_folder / "output"
+
+
+def test_render_failure_preserves_every_previous_sensor_output(tmp_path: Path) -> None:
+    run_root, first_prepared = create_prepared_render_fixture(tmp_path)
+    synchronized = run_root / "processed" / "synchronized"
+    second_prepared = synchronized / "zed_2i_456" / "blenderproc"
+    shutil.copytree(first_prepared, second_prepared)
+    for prepared in (first_prepared, second_prepared):
+        sensor = prepared.parent
+        (sensor / MASKS_DIR).mkdir()
+        (sensor / MASKS_DIR / "previous.txt").write_text(sensor.name)
+        (prepared / "output").mkdir()
+        (prepared / "output" / "previous.txt").write_text(sensor.name)
+    jobs = discover_render_jobs(
+        input_folder=synchronized,
+        render_script=Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "blenderproc_render_720p_multi.py",
+        subdir="blenderproc",
+        blenderproc_executable="blenderproc",
+    )
+    calls = 0
+
+    def failing_runner(command: list[str], *, check: bool) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise subprocess.CalledProcessError(1, command)
+        write_fake_render_output(Path(command[-1]))
+
+    with pytest.raises(subprocess.CalledProcessError):
+        run_render_jobs(jobs, command_runner=failing_runner)
+
+    for prepared in (first_prepared, second_prepared):
+        sensor = prepared.parent
+        assert (sensor / MASKS_DIR / "previous.txt").read_text() == sensor.name
+        assert (prepared / "output" / "previous.txt").read_text() == sensor.name
+    assert not list(synchronized.rglob("*.staging"))
+    assert not list(synchronized.rglob("*.work"))

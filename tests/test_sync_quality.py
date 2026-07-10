@@ -21,6 +21,7 @@ def write_sync_report(
     dropped_frames: int = 2,
     timestamp_source: str = "host_received",
     max_delta_ns: int = 10_000_000,
+    schema_version: str = "sync_report.v2",
 ) -> Path:
     report_path = (
         run_root
@@ -33,15 +34,21 @@ def write_sync_report(
     report_path.write_text(
         json.dumps(
             {
-                "schema_version": "sync_report.v1",
+                "schema_version": schema_version,
                 "sensor_folder": str(run_root / sensor_name),
                 "output_folder": str(report_path.parent),
                 "timestamp_source": timestamp_source,
+                "requested_timestamp_source": timestamp_source,
+                "timestamp_source_counts": {timestamp_source: total_frames},
+                "timestamp_fallback_count": 0,
+                "timestamp_missing_count": 0,
                 "sync_delta_ms": 0,
                 "total_frames": total_frames,
                 "matched_frames": matched_frames,
                 "dropped_frames": dropped_frames,
-                "motion_windows": {"circ_far": {"count": matched_frames}},
+                "motion_intervals": [
+                    {"motion": "circ_far", "pose_count": matched_frames}
+                ],
                 "mean_abs_nearest_pose_delta_ns": 5_000_000,
                 "max_abs_nearest_pose_delta_ns": max_delta_ns,
             }
@@ -64,7 +71,7 @@ def test_build_sync_quality_report_summarizes_sync_reports(tmp_path: Path) -> No
     )
 
     assert discover_sync_reports(run_root) == [report_path]
-    assert report["schema_version"] == "sync_quality_report.v1"
+    assert report["schema_version"] == "sync_quality_report.v2"
     assert report["overall_status"] == "ok"
     assert report["sensor_count"] == 1
     assert report["matched_frames"] == 8
@@ -72,6 +79,23 @@ def test_build_sync_quality_report_summarizes_sync_reports(tmp_path: Path) -> No
     assert report["overall_match_ratio"] == 0.8
     assert report["sensors"][0]["sensor_name"] == "realsense_123"
     assert {check["status"] for check in report["checks"]} == {"ok"}
+
+
+def test_build_sync_quality_report_accepts_relative_run_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    run_root = Path("run")
+    write_sync_report(run_root)
+
+    report = build_sync_quality_report(run_root, min_match_ratio=0.5)
+
+    assert report["overall_status"] == "ok"
+    assert report["sensor_count"] == 1
+    assert report["sensors"][0]["report_path"] == (
+        "processed/synchronized/realsense_123/sync_report.json"
+    )
 
 
 def test_build_sync_quality_report_warns_on_quality_thresholds(
@@ -99,13 +123,33 @@ def test_build_sync_quality_report_warns_on_quality_thresholds(
         for check in report["checks"]
         if check["status"] == "warning"
     }
-    assert report["overall_status"] == "warning"
+    assert report["overall_status"] == "error"
     assert warnings == {
         "sync_match_ratio:realsense_123",
         "sync_dropped_frames:realsense_123",
         "sync_nearest_pose_delta:realsense_123",
-        "sync_timestamp_source:realsense_123",
     }
+    timestamp_check = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "sync_timestamp_source:realsense_123"
+    )
+    assert timestamp_check["status"] == "error"
+
+
+def test_v1_sync_report_cannot_prove_required_timestamp_source(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    write_sync_report(run_root, schema_version="sync_report.v1")
+
+    report = build_sync_quality_report(
+        run_root,
+        require_timestamp_source="host_received",
+    )
+
+    assert report["overall_status"] == "error"
+    assert report["sensors"][0]["timestamp_provenance_audited"] is False
 
 
 def test_build_sync_quality_report_errors_without_sync_reports(

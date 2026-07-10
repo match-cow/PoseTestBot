@@ -156,6 +156,36 @@ def _candidates_for_usb_serial(device_id: str) -> list[V4L2NodeCandidate]:
     return _candidates_from_video_metadata(metadata, usb_serial=device_id)
 
 
+def candidates_for_usb_id(
+    vendor_id: str,
+    product_id: str,
+) -> list[V4L2NodeCandidate]:
+    """Return V4L2 nodes belonging to one USB vendor/product pair."""
+
+    expected_vendor = vendor_id.strip().lower()
+    expected_product = product_id.strip().lower()
+    candidates = []
+    for path in sorted(
+        Path("/dev").glob("video*"),
+        key=lambda item: _numeric_video_index(item.as_posix()),
+    ):
+        properties = _udev_properties_for_node(path)
+        if properties.get("ID_VENDOR_ID", "").lower() != expected_vendor:
+            continue
+        if properties.get("ID_MODEL_ID", "").lower() != expected_product:
+            continue
+        candidates.append(
+            V4L2NodeCandidate(
+                path=path.as_posix(),
+                interface=properties.get("ID_USB_INTERFACE_NUM"),
+                capabilities=properties.get("ID_V4L_CAPABILITIES"),
+                usb_serial=properties.get("ID_SERIAL_SHORT"),
+                accessible=os.access(path, os.R_OK | os.W_OK),
+            )
+        )
+    return candidates
+
+
 def _score_candidate(candidate: V4L2NodeCandidate, formats: tuple[str, ...]) -> int | None:
     if not candidate.accessible:
         return None
@@ -235,4 +265,18 @@ def select_realsense_rgb_node(
         candidates = _candidates_for_usb_serial(device_id)
     if not candidates:
         raise RuntimeError(f"No V4L2 nodes found for RealSense device {device_id}.")
+    return select_best_rgb_node(candidates, format_reader=format_reader)
+
+
+def select_usb_rgb_node(
+    vendor_id: str,
+    product_id: str,
+    *,
+    format_reader: Callable[[str], tuple[str, ...]] = list_v4l2_pixel_formats,
+) -> V4L2PreviewSelection:
+    candidates = candidates_for_usb_id(vendor_id, product_id)
+    if not candidates:
+        raise RuntimeError(
+            f"No accessible V4L2 nodes found for USB camera {vendor_id}:{product_id}."
+        )
     return select_best_rgb_node(candidates, format_reader=format_reader)

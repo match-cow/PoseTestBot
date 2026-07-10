@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import REALSENSE_CAPTURE_SMOKE_REPORT
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -414,11 +414,7 @@ def write_realsense_capture_smoke_report(
     report: Mapping[str, Any],
 ) -> Path:
     path = realsense_capture_smoke_report_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def write_realsense_capture_smoke_with_manifest(

@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import logging
+import os
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+os.environ.setdefault("POSETESTBOT_WEB_RUN_ROOTS", "/tmp")
+os.environ.setdefault("POSETESTBOT_WEB_INPUT_ROOTS", "/tmp")
+
 from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
 from posetestbot.io.artifacts import BOP_DIR, BOP_EXPORT_MANIFEST, BOP_TARGETS_BOP19, DEPTH_DIR, RGB_DIR
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.web import legacy as web_legacy
+from posetestbot.web.app import _PreviewPollLogFilter
+from posetestbot.web.routes import monitoring as web_monitoring
 from posetestbot.web.routes import sensors as web_sensors
 
 
@@ -106,6 +113,103 @@ def test_index_includes_sidebar_robot_control_defaults() -> None:
     assert f'data-default-robot-port="{DEFAULT_ROBOT_PORT}"' in html
     assert "Start IIWA" in html
     assert "Stop IIWA" in html
+
+
+def test_index_includes_ugreen_sidebar_monitor_below_iiwa_controls() -> None:
+    client = app.test_client()
+
+    response = client.get("/")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert 'class="webcam-monitor-panel"' in html
+    assert 'id="webcamMonitorImage"' in html
+    assert 'id="retryWebcamBtn"' in html
+    assert html.index('class="webcam-monitor-panel"') > html.index('class="robot-control-panel"')
+
+
+def test_webcam_poll_log_filter_hides_successes_but_keeps_errors() -> None:
+    poll_filter = _PreviewPollLogFilter()
+
+    def record(message: str) -> logging.LogRecord:
+        return logging.LogRecord("werkzeug", logging.INFO, "", 0, message, (), None)
+
+    assert not poll_filter.filter(
+        record('10.145.8.50 - - "GET /monitoring/webcam HTTP/1.1" 200 -')
+    )
+    assert not poll_filter.filter(
+        record(
+            '10.145.8.50 - - "GET /monitoring/webcam/job/latest.jpg?t=1 '
+            'HTTP/1.1" 200 -'
+        )
+    )
+    assert poll_filter.filter(
+        record('10.145.8.50 - - "GET /monitoring/webcam HTTP/1.1" 500 -')
+    )
+    assert poll_filter.filter(
+        record('10.145.8.50 - - "POST /monitoring/webcam HTTP/1.1" 202 -')
+    )
+
+
+def test_ugreen_sidebar_monitor_queues_low_bandwidth_preview(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FakeJob:
+        id = "webcam-job"
+        status = "queued"
+        message = None
+
+        def __init__(self, parameters: dict):
+            self.parameters = parameters
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "status": self.status,
+                "message": self.message,
+                "parameters": self.parameters,
+            }
+
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def list(self):
+            return []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            return FakeJob(dict(kwargs["parameters"]))
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_monitoring, "job_runner", fake_runner)
+    monkeypatch.setattr(
+        web_monitoring,
+        "preview_stream_root",
+        lambda: tmp_path / "webcam-preview",
+    )
+    client = app.test_client()
+
+    response = client.post("/monitoring/webcam")
+
+    assert response.status_code == 202
+    submission = fake_runner.submitted[0]
+    assert submission["resources"] == ["monitoring_camera:0c45:2283"]
+    assert submission["parameters"]["monitor_webcam"] is True
+    command = submission["command"]
+    assert command[:4] == [
+        "uv",
+        "run",
+        "python",
+        "scripts/stream_sensor_rgb_preview.py",
+    ]
+    assert command[command.index("--fps") + 1] == "5"
+    assert command[command.index("--width") + 1] == "320"
+    assert command[command.index("--height") + 1] == "240"
+    webcam_spec = json.loads(command[command.index("--sensor-json") + 1])
+    assert webcam_spec["sensor_type"] == "monitor_webcam"
+    assert webcam_spec["device_id"] == "0c45:2283"
 
 
 def test_pipeline_stage_and_sequence_endpoints_hide_downstream_ids() -> None:
@@ -429,6 +533,82 @@ def test_overview_endpoint_treats_missing_run_config_as_empty_setup(tmp_path: Pa
     assert payload["steps"] == []
 
 
+def test_web_rejects_run_roots_outside_configured_boundaries() -> None:
+    response = app.test_client().get(
+        "/ui/overview", query_string={"run_root": "/etc"}
+    )
+
+    assert response.status_code == 400
+    assert "allowed root" in response.get_json()["output"]
+
+
+def test_web_rejects_run_root_symlink_escape(tmp_path: Path) -> None:
+    escape = tmp_path / "escape"
+    escape.symlink_to("/etc", target_is_directory=True)
+
+    response = app.test_client().get(
+        "/ui/overview", query_string={"run_root": escape.as_posix()}
+    )
+
+    assert response.status_code == 400
+    assert "allowed root" in response.get_json()["output"]
+
+
+def test_web_rejects_invalid_boolean_instead_of_using_truthiness(tmp_path: Path) -> None:
+    response = app.test_client().post(
+        "/run-config",
+        json={
+            "run_root": (tmp_path / "invalid-bool").as_posix(),
+            "plan_only": "definitely",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "plan_only must be" in response.get_json()["output"]
+
+
+def test_web_accepts_recognized_false_boolean_string(tmp_path: Path) -> None:
+    response = app.test_client().post(
+        "/run-config",
+        json={
+            "run_root": (tmp_path / "false-bool").as_posix(),
+            "plan_only": "false",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["config"]["pipeline"]["plan_only"] is False
+
+
+def test_web_pipeline_output_path_must_remain_under_run_root(tmp_path: Path) -> None:
+    run_root = tmp_path / "scoped-run"
+    response = app.test_client().post(
+        "/pipeline/run",
+        json={
+            "run_root": run_root.as_posix(),
+            "stage": "bop_export",
+            "options": {"output_folder": "../outside"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "output_folder" in response.get_json()["output"]
+
+
+def test_web_pipeline_input_path_must_use_run_or_input_roots(tmp_path: Path) -> None:
+    response = app.test_client().post(
+        "/pipeline/run",
+        json={
+            "run_root": (tmp_path / "scoped-input-run").as_posix(),
+            "stage": "bop_export",
+            "options": {"object_folder": "/etc"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "object_folder" in response.get_json()["output"]
+
+
 def test_sensor_snapshot_submission_queues_camera_job(monkeypatch, tmp_path: Path) -> None:
     class FakeJob:
         id = "job123"
@@ -491,7 +671,10 @@ def test_sensor_snapshot_submission_queues_camera_job(monkeypatch, tmp_path: Pat
     payload = response.get_json()
     assert response.status_code == 202
     assert payload["job_id"] == "job123"
-    assert fake_runner.submitted["resources"] == ["camera"]
+    assert fake_runner.submitted["resources"] == [
+        "camera:realsense_d435:123",
+        "disk_io",
+    ]
     assert fake_runner.submitted["command"][:4] == [
         "uv",
         "run",
@@ -578,8 +761,8 @@ def test_sensor_preview_submission_queues_one_job_per_selected_sensor(
     assert response.status_code == 202
     assert len(payload["jobs"]) == 2
     assert [item["resources"] for item in fake_runner.submitted] == [
-        ["camera-preview:realsense_d435:825412070181"],
-        ["camera-preview:realsense_d435:923322072633"],
+        ["camera:realsense_d435:825412070181"],
+        ["camera:realsense_d435:923322072633"],
     ]
     assert fake_runner.submitted[0]["command"][:4] == [
         "uv",

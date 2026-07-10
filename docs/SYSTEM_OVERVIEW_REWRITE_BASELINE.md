@@ -38,7 +38,10 @@ PoseTestBot does not own:
 - `posetestbot.config`: robot profile configuration and fake/real selection.
 - `posetestbot.robot`: read-only robot status and UDP helper contracts.
 - `posetestbot.sensors`: static registry, discovery/status helpers, frame
-  writer contracts, and sensor-specific capture support.
+  writer contracts, and testable RealSense, OAK-D Pro, and ZED 2i capture
+  support.
+- `posetestbot.blenderproc`: transactional preparation and render orchestration
+  for optional GT/mask artifacts.
 - `posetestbot.jobs`: local job runner with resource conflict rejection,
   persistent job records, logs, and cancellation.
 - `posetestbot.pipeline`: run config, preflight, capture planning/execution,
@@ -49,8 +52,8 @@ PoseTestBot does not own:
   observations, candidate generation, solver, and validation/promotion.
 - `posetestbot.aruco`: calibration target coverage summaries.
 - `posetestbot.bop`: BOP writer and geometry helpers.
-- `posetestbot.io`: artifact constants, manifest helpers, and acquisition
-  artifact browser.
+- `posetestbot.io`: atomic artifact/directory promotion, artifact constants,
+  manifest helpers, and acquisition artifact browser.
 
 Scripts under `scripts/` should stay thin wrappers over importable modules.
 
@@ -63,11 +66,13 @@ Scripts under `scripts/` should stay thin wrappers over importable modules.
 4. Write `capture_execution_plan.json`.
 5. Execute supervised capture when explicitly requested.
 6. Preserve raw sensor folders and `raw_robot_ee_poses.json`.
-7. Create derived synchronized folders under `processed/synchronized/`.
+7. Transactionally create derived synchronized folders under
+   `processed/synchronized/` and emit `sync_report.v2`.
 8. Write `sync_quality_report.json`.
 9. Generate calibration target outputs and calibration reports when required.
 10. Optionally prepare/render BlenderProc GT/mask artifacts.
-11. Export `bop/` dataset scenes, model metadata, targets, and frame maps.
+11. Transactionally export standard `bop/<split>/<scene_id>/` scenes, model
+    metadata, targets, root frame provenance, and `bop_export_manifest.v2`.
 12. Inspect artifacts and gates through Flask or CLI.
 
 ## Artifact Contracts
@@ -114,9 +119,11 @@ Calibration artifacts:
 BOP artifacts:
 
 - `bop/bop_export_manifest.json`
-- scene `rgb/`, `depth/`, `scene_camera.json`, `scene_gt.json`,
-  optional `scene_gt_info.json`, optional `mask/`, optional `mask_visib/`,
-  and `posetestbot_bop_frame_map.json`
+- `bop/dataset_info.json`
+- `bop/posetestbot_bop_frame_map.json`
+- scene `bop/<split>/<scene_id>/rgb/`, `depth/`, `scene_camera.json`,
+  `scene_gt.json`, `scene_gt_info.json`, optional `mask/`, and optional
+  `mask_visib/`
 - `bop/models/obj_XXXXXX.ply`
 - `bop/models/models_info.json`
 - `bop/test_targets_bop19.json`
@@ -164,7 +171,8 @@ The typed stage registry includes:
 - `bop_export`
 
 Stage specs build command arrays rather than shell strings and declare
-resources before job submission.
+resources before job submission. Path parameters also declare run, output,
+external-input, or repository scope for web submission validation.
 
 ## Pipeline Sequences
 
@@ -216,12 +224,20 @@ The Flask transition app exposes local operator endpoints for:
 
 It no longer exposes metric dashboards or BOP result CSV inspection.
 
+The app remains intentionally unauthenticated and LAN-facing. Web run roots
+default to `working_data` and external inputs to `object_models` plus
+`scripts/default_data`; environment path lists can add trusted roots. All web
+paths resolve symlinks before containment checks. Job records are anchored at
+the repository `working_data/jobs` directory, and camera resources use
+hierarchical device-specific locks.
+
 ## Validation
 
 Baseline validation:
 
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
+UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 git diff --check
 uv run python scripts/run_rewrite_fake_e2e_smoke.py /tmp/posetestbot_fake_bop_smoke --overwrite
 uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke --gate rewrite_fake_acquisition_to_bop.v1 --write

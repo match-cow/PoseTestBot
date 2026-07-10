@@ -226,7 +226,7 @@ def test_capture_plan_preflight_reports_unsupported_resolution_without_throwing(
     assert not (run_root / CAPTURE_PLAN).exists()
 
 
-def test_capture_plan_preflight_warns_about_nonempty_sensor_folder(
+def test_capture_plan_preflight_blocks_nonempty_sensor_folder(
     tmp_path: Path,
 ) -> None:
     run_root = tmp_path / "run-existing-folder"
@@ -245,10 +245,30 @@ def test_capture_plan_preflight_warns_about_nonempty_sensor_folder(
         write_plan_if_missing=False,
     )
 
-    assert report["overall_status"] == "warning"
+    assert report["overall_status"] == "error"
     checks = {check["name"]: check for check in report["checks"]}
-    assert checks["sensor_output_folder:realsense_123"]["status"] == "warning"
+    assert checks["sensor_output_folder:realsense_123"]["status"] == "error"
     assert checks["sensor_output_folder:realsense_123"]["details"]["child_count"] == 1
+
+
+def test_capture_plan_preflight_blocks_existing_raw_robot_pose_artifact(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-existing-poses"
+    config = create_run_config(run_root=run_root)
+    write_run_config(run_root, config)
+    (run_root / "raw_robot_ee_poses.json").write_text("{}\n")
+
+    report = build_capture_plan_preflight(
+        run_root,
+        include_sensor_status=False,
+        write_plan_if_missing=False,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["overall_status"] == "error"
+    assert checks["raw_robot_pose_output"]["status"] == "error"
+    assert "Use a new run root" in checks["raw_robot_pose_output"]["message"]
 
 
 def test_capture_plan_preflight_errors_for_duplicate_output_folder(

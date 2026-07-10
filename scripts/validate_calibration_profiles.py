@@ -18,7 +18,7 @@ from posetestbot.calibration.profiles import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Validate calibration.v1 profile files, or migrate legacy "
+            "Validate calibration.v2 profile files (with calibration.v1 loading), or migrate legacy "
             "camera_ee_transform.json data into calibration profiles."
         )
     )

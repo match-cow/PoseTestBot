@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
 import cv2
+import numpy as np
 
+from posetestbot.io.atomic import atomic_write_json, atomic_write_text
 from posetestbot.io.artifacts import (
     CAMERA_DATA_JSON,
     CAMERA_JSON,
@@ -38,8 +42,21 @@ def append_frame_metadata(output_path: str | Path, metadata: Mapping[str, Any]) 
 
     output = Path(output_path)
     metadata_path = output / FRAME_METADATA_JSONL
-    with open(metadata_path, "a") as f:
-        f.write(json.dumps(dict(metadata), separators=(",", ":")) + "\n")
+    line = json.dumps(
+        dict(metadata), separators=(",", ":"), allow_nan=False
+    ) + "\n"
+    previous_size = metadata_path.stat().st_size if metadata_path.exists() else 0
+    try:
+        with open(metadata_path, "a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+    # Preserve the last complete JSONL record even when capture is interrupted.
+    except BaseException:
+        if metadata_path.exists():
+            with open(metadata_path, "r+b") as handle:
+                handle.truncate(previous_size)
+        raise
     return metadata_path
 
 
@@ -58,6 +75,28 @@ def _write_png(path: Path, image: Any) -> None:
         raise OSError(f"Failed to write image: {path}")
 
 
+def _validate_rgbd_images(rgb_image: Any, depth_image: Any) -> tuple[np.ndarray, np.ndarray]:
+    rgb = np.asarray(rgb_image)
+    depth = np.asarray(depth_image)
+    if rgb.ndim != 3 or rgb.shape[2] not in {3, 4}:
+        raise ValueError("rgb_image must have shape (height, width, 3|4)")
+    if rgb.dtype != np.uint8:
+        raise ValueError("rgb_image must use uint8 pixels")
+    if depth.ndim != 2:
+        raise ValueError("depth_image must have shape (height, width)")
+    if depth.dtype != np.uint16:
+        raise ValueError("depth_image must use uint16 pixels")
+    if rgb.shape[:2] != depth.shape:
+        raise ValueError("RGB and depth image dimensions must match")
+    if not rgb.size or not depth.size:
+        raise ValueError("RGB and depth images must not be empty")
+    return rgb, depth
+
+
+def _temporary_png_path(path: Path) -> Path:
+    return path.with_name(f".{path.stem}.{uuid.uuid4().hex}.png")
+
+
 def write_legacy_camera_sidecars(
     output_path: str | Path,
     intrinsics: CameraIntrinsics,
@@ -68,41 +107,71 @@ def write_legacy_camera_sidecars(
 
     output = Path(output_path)
     output.mkdir(parents=True, exist_ok=True)
+    if intrinsics.width <= 0 or intrinsics.height <= 0:
+        raise ValueError("Camera intrinsic width and height must be positive")
+    if len(intrinsics.cam_k) != 9 or not all(
+        np.isfinite(value) for value in intrinsics.cam_k
+    ):
+        raise ValueError("Camera intrinsic matrix must contain 9 finite values")
+    if not np.isfinite(intrinsics.depth_scale_to_mm) or intrinsics.depth_scale_to_mm <= 0:
+        raise ValueError("Camera depth scale must be finite and positive")
     cam_k = [float(value) for value in intrinsics.cam_k]
     matrix_rows = intrinsics.as_matrix_rows()
 
     cam_k_path = output / CAM_K
-    with open(cam_k_path, "w") as f:
-        for row in matrix_rows:
-            f.write(f"{row[0]} {row[1]} {row[2]}\n")
-        if include_distortion_in_cam_k and intrinsics.distortion:
-            f.write(" ".join(str(float(value)) for value in intrinsics.distortion))
-            f.write("\n")
-
     depth_scale_path = output / DEPTH_SCALE
-    with open(depth_scale_path, "w") as f:
-        f.write(f"{float(intrinsics.depth_scale_to_mm)}\n")
-
     camera_json_path = output / CAMERA_JSON
-    with open(camera_json_path, "w") as f:
-        json.dump(
-            {
-                "cam_K": cam_k,
-                "depth_scale": float(intrinsics.depth_scale_to_mm),
-            },
-            f,
-            indent=4,
+    camera_data_path = output / CAMERA_DATA_JSON
+    paths = [cam_k_path, depth_scale_path, camera_json_path, camera_data_path]
+    existing = [path for path in paths if path.exists()]
+    if existing:
+        raise FileExistsError(
+            "Refusing to overwrite camera sidecar(s): "
+            + ", ".join(path.as_posix() for path in existing)
         )
 
-    camera_data_path = output / CAMERA_DATA_JSON
-    with open(camera_data_path, "w") as f:
-        json.dump(
-            {
-                "K": [[float(value) for value in row] for row in matrix_rows],
-                "resolution": [int(intrinsics.height), int(intrinsics.width)],
-            },
-            f,
+    cam_k_text = "".join(
+        f"{row[0]} {row[1]} {row[2]}\n" for row in matrix_rows
+    )
+    if include_distortion_in_cam_k and intrinsics.distortion:
+        cam_k_text += " ".join(
+            str(float(value)) for value in intrinsics.distortion
+        ) + "\n"
+
+    created: list[Path] = []
+    try:
+        created.append(atomic_write_text(cam_k_path, cam_k_text))
+        created.append(
+            atomic_write_text(
+                depth_scale_path, f"{float(intrinsics.depth_scale_to_mm)}\n"
+            )
         )
+        created.append(
+            atomic_write_json(
+                camera_json_path,
+                {
+                    "cam_K": cam_k,
+                    "depth_scale": float(intrinsics.depth_scale_to_mm),
+                },
+                indent=4,
+                sort_keys=False,
+            )
+        )
+        created.append(
+            atomic_write_json(
+                camera_data_path,
+                {
+                    "K": [[float(value) for value in row] for row in matrix_rows],
+                    "resolution": [int(intrinsics.height), int(intrinsics.width)],
+                },
+                indent=None,
+                sort_keys=False,
+            )
+        )
+    except Exception:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
 
     return {
         CAM_K: cam_k_path,
@@ -129,15 +198,26 @@ def write_legacy_rgbd_frame(
 ) -> dict[str, Any]:
     """Write one RGB-D pair and append its metadata sidecar record."""
 
+    rgb, depth = _validate_rgbd_images(rgb_image, depth_image)
+    if frame_index < 0:
+        raise ValueError("frame_index must be greater than or equal to 0")
+    if not sensor_id:
+        raise ValueError("sensor_id must not be empty")
     output = ensure_legacy_rgbd_folders(output_path)
-    wall_timestamp = host_wall_timestamp_ns if host_wall_timestamp_ns else time.time_ns()
+    wall_timestamp = (
+        host_wall_timestamp_ns
+        if host_wall_timestamp_ns is not None
+        else time.time_ns()
+    )
     stem = frame_stem or frame_stem_from_host_wall_ns(wall_timestamp)
+    if not stem.isdigit():
+        raise ValueError("frame_stem must contain only digits")
     frame_id = f"{stem}.png"
     rgb_path = output / RGB_DIR / frame_id
     depth_path = output / DEPTH_DIR / frame_id
-
-    _write_png(rgb_path, rgb_image)
-    _write_png(depth_path, depth_image)
+    metadata_path = output / FRAME_METADATA_JSONL
+    if rgb_path.exists() or depth_path.exists():
+        raise FileExistsError(f"Refusing to overwrite RGB-D frame {frame_id}")
 
     metadata: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -154,9 +234,39 @@ def write_legacy_rgbd_frame(
     if depth_sensor_timestamp_ns is not None:
         metadata["depth_sensor_timestamp_ns"] = int(depth_sensor_timestamp_ns)
     if extra_metadata:
+        overlaps = sorted(set(extra_metadata) & set(metadata))
+        if overlaps:
+            raise ValueError(
+                "extra_metadata may not override core field(s): "
+                + ", ".join(overlaps)
+            )
         metadata.update(dict(extra_metadata))
 
-    append_frame_metadata(output, metadata)
+    rgb_temporary = _temporary_png_path(rgb_path)
+    depth_temporary = _temporary_png_path(depth_path)
+    created: list[Path] = []
+    try:
+        _write_png(rgb_temporary, rgb)
+        _write_png(depth_temporary, depth)
+        os.replace(rgb_temporary, rgb_path)
+        created.append(rgb_path)
+        os.replace(depth_temporary, depth_path)
+        created.append(depth_path)
+        append_frame_metadata(output, metadata)
+    # Cleanup must also run for control-flow exceptions such as KeyboardInterrupt.
+    # Capture processes may receive a shutdown signal while committing a frame;
+    # leaving only one member of the RGB/depth/metadata tuple makes the raw run
+    # fail its integrity gate.
+    except BaseException:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        rgb_temporary.unlink(missing_ok=True)
+        depth_temporary.unlink(missing_ok=True)
+
+    if not metadata_path.is_file():
+        raise OSError(f"Frame metadata was not written: {metadata_path}")
     return metadata
 
 

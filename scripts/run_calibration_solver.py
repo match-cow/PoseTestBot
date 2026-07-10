@@ -20,6 +20,18 @@ from posetestbot.calibration.solver import (
     build_calibration_solver,
     write_calibration_solver_with_manifest,
 )
+from posetestbot.calibration.extrinsics import (
+    DEFAULT_MAX_CROSS_ROTATION_DEG,
+    DEFAULT_MAX_CROSS_TRANSLATION_MM,
+    DEFAULT_MAX_MEAN_ROTATION_DEG,
+    DEFAULT_MAX_MEAN_TRANSLATION_MM,
+    DEFAULT_MAX_OUTLIER_RATIO,
+    MODES,
+    build_grid_extrinsic_solver,
+    write_grid_extrinsic_solver_with_manifest,
+)
+from posetestbot.calibration.targets import load_calibration_target_spec
+from posetestbot.io.artifacts import CALIBRATION_TARGET, RUN_CONFIG
 
 
 def _residual_threshold(value: str) -> float | None:
@@ -45,6 +57,33 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("run_root", help="Run folder containing calibration observations.")
     parser.add_argument(
+        "--mode",
+        choices=MODES,
+        help=(
+            "Use explicit grid calibration mode. Omit only for the legacy solver "
+            "compatibility path."
+        ),
+    )
+    parser.add_argument(
+        "--calibration-target",
+        help="calibration_target.v1 path; defaults to <run_root>/calibration_target.json.",
+    )
+    parser.add_argument(
+        "--max-outlier-ratio",
+        type=_residual_threshold,
+        default=DEFAULT_MAX_OUTLIER_RATIO,
+    )
+    parser.add_argument(
+        "--max-cross-translation-mm",
+        type=_residual_threshold,
+        default=DEFAULT_MAX_CROSS_TRANSLATION_MM,
+    )
+    parser.add_argument(
+        "--max-cross-rotation-deg",
+        type=_residual_threshold,
+        default=DEFAULT_MAX_CROSS_ROTATION_DEG,
+    )
+    parser.add_argument(
         "--observations",
         help="Path to calibration_observations.json. Relative paths are run-root relative.",
     )
@@ -57,7 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-to-reference",
         help=(
-            "Optional JSON transform from calibration_target to robot_base. "
+            "Legacy JSON transform from calibration_target to robot_base. "
             "Used for static sensors and recorded in the report."
         ),
     )
@@ -70,7 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-translation-residual-mm",
         type=_residual_threshold,
-        default=DEFAULT_MAX_TRANSLATION_RESIDUAL_MM,
+        default=None,
         help=(
             "Reject solved observations farther than this translation residual "
             "from the refined consistency estimate. Use 'none' or 'off' to disable."
@@ -79,7 +118,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-rotation-residual-deg",
         type=_residual_threshold,
-        default=DEFAULT_MAX_ROTATION_RESIDUAL_DEG,
+        default=None,
         help=(
             "Reject solved observations farther than this rotation residual "
             "from the refined consistency estimate. Use 'none' or 'off' to disable."
@@ -141,11 +180,33 @@ def main() -> None:
         args.target_to_reference,
         run_root=run_root,
     )
+    default_translation = (
+        DEFAULT_MAX_MEAN_TRANSLATION_MM
+        if args.mode
+        else DEFAULT_MAX_TRANSLATION_RESIDUAL_MM
+    )
+    default_rotation = (
+        DEFAULT_MAX_MEAN_ROTATION_DEG
+        if args.mode
+        else DEFAULT_MAX_ROTATION_RESIDUAL_DEG
+    )
     max_translation_residual_mm = (
-        None if args.no_residual_thresholds else args.max_translation_residual_mm
+        None
+        if args.no_residual_thresholds
+        else (
+            args.max_translation_residual_mm
+            if args.max_translation_residual_mm is not None
+            else default_translation
+        )
     )
     max_rotation_residual_deg = (
-        None if args.no_residual_thresholds else args.max_rotation_residual_deg
+        None
+        if args.no_residual_thresholds
+        else (
+            args.max_rotation_residual_deg
+            if args.max_rotation_residual_deg is not None
+            else default_rotation
+        )
     )
     report_args = {
         "observations_path": args.observations,
@@ -157,7 +218,44 @@ def main() -> None:
         "holdout_fraction": args.holdout_fraction,
         "compare_hand_eye_methods": args.compare_hand_eye_methods,
     }
-    if args.no_write:
+    if args.mode:
+        target_path = (
+            Path(args.calibration_target)
+            if args.calibration_target
+            else run_root / CALIBRATION_TARGET
+        )
+        if not target_path.is_absolute() and not target_path.exists():
+            target_path = run_root / target_path
+        target = load_calibration_target_spec(target_path)
+        fixed_transforms = []
+        run_config_path = run_root / RUN_CONFIG
+        if run_config_path.is_file():
+            run_config = json.loads(run_config_path.read_text())
+            frames = run_config.get("frames", {}) if isinstance(run_config, dict) else {}
+            if isinstance(frames, dict) and isinstance(frames.get("fixed_transforms"), list):
+                fixed_transforms = frames["fixed_transforms"]
+        explicit_args = {
+            "target": target,
+            "mode": args.mode,
+            "observations_path": args.observations,
+            "hand_eye_method": args.hand_eye_method,
+            "min_inliers": args.min_observations,
+            "max_mean_translation_mm": max_translation_residual_mm,
+            "max_mean_rotation_deg": max_rotation_residual_deg,
+            "max_outlier_ratio": args.max_outlier_ratio,
+            "max_cross_translation_mm": args.max_cross_translation_mm,
+            "max_cross_rotation_deg": args.max_cross_rotation_deg,
+            "fixed_transforms": fixed_transforms,
+        }
+        if args.no_write:
+            report = build_grid_extrinsic_solver(run_root, **explicit_args)
+            report_path = None
+            profiles_path = None
+        else:
+            report_path, profiles_path, report = write_grid_extrinsic_solver_with_manifest(
+                run_root, **explicit_args
+            )
+    elif args.no_write:
         report = build_calibration_solver(run_root, **report_args)
         report_path = None
         profiles_path = None

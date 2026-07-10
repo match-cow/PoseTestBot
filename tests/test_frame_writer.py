@@ -5,6 +5,9 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
+
+import posetestbot.sensors.frame_writer as frame_writer
 
 from posetestbot.io.artifacts import (
     CAMERA_DATA_JSON,
@@ -138,3 +141,67 @@ def test_write_legacy_camera_sidecars_uses_estimator_formats(
         "K": [[100.0, 0.0, 50.0], [0.0, 101.0, 51.0], [0.0, 0.0, 1.0]],
         "resolution": [720, 1280],
     }
+
+
+def test_frame_writer_refuses_collision_and_invalid_rgbd(tmp_path: Path) -> None:
+    kwargs = {
+        "rgb_image": np.zeros((2, 3, 3), dtype=np.uint8),
+        "depth_image": np.zeros((2, 3), dtype=np.uint16),
+        "sensor_type": SensorType.REALSENSE_D435,
+        "sensor_id": "123",
+        "frame_index": 0,
+        "sensor_timestamp_ns": 1,
+        "host_received_timestamp_ns": 2,
+        "host_wall_timestamp_ns": 3_000_000,
+        "frame_stem": "000000",
+    }
+    write_legacy_rgbd_frame(tmp_path, **kwargs)
+
+    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+        write_legacy_rgbd_frame(tmp_path, **kwargs)
+
+    invalid = dict(kwargs)
+    invalid["frame_stem"] = "000001"
+    invalid["depth_image"] = np.zeros((3, 2), dtype=np.uint16)
+    with pytest.raises(ValueError, match="dimensions must match"):
+        write_legacy_rgbd_frame(tmp_path, **invalid)
+
+
+def test_frame_writer_rolls_back_committed_files_on_control_flow_exception(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def interrupt_metadata(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(frame_writer, "append_frame_metadata", interrupt_metadata)
+
+    with pytest.raises(KeyboardInterrupt):
+        write_legacy_rgbd_frame(
+            tmp_path,
+            rgb_image=np.zeros((2, 3, 3), dtype=np.uint8),
+            depth_image=np.zeros((2, 3), dtype=np.uint16),
+            sensor_type=SensorType.REALSENSE_D435,
+            sensor_id="123",
+            frame_index=0,
+            sensor_timestamp_ns=1,
+            host_received_timestamp_ns=2,
+            frame_stem="000000",
+        )
+
+    assert not list((tmp_path / RGB_DIR).iterdir())
+    assert not list((tmp_path / DEPTH_DIR).iterdir())
+    assert not (tmp_path / FRAME_METADATA_JSONL).exists()
+
+
+def test_camera_sidecars_refuse_overwrite(tmp_path: Path) -> None:
+    intrinsics = CameraIntrinsics(
+        cam_k=(100.0, 0.0, 50.0, 0.0, 101.0, 51.0, 0.0, 0.0, 1.0),
+        width=1280,
+        height=720,
+        depth_scale_to_mm=1.0,
+    )
+    write_legacy_camera_sidecars(tmp_path, intrinsics)
+
+    with pytest.raises(FileExistsError, match="camera sidecar"):
+        write_legacy_camera_sidecars(tmp_path, intrinsics)

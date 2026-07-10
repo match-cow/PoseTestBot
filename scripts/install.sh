@@ -239,13 +239,12 @@ import sys
 modules = [
     "cv2",
     "pyrealsense2",
-    "requests",
     "flask",
     "depthai",
     "tqdm",
     "pytransform3d",
-    "pandas",
     "trimesh",
+    "posetestbot.web.app",
 ]
 
 failures = []

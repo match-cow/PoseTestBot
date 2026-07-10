@@ -172,6 +172,64 @@ body {
   color: #fecaca;
 }
 
+.webcam-monitor-panel {
+  margin-top: 12px;
+  display: grid;
+  gap: 7px;
+}
+
+.webcam-monitor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.webcam-monitor-heading h2 {
+  margin: 0;
+  color: #f7fafc;
+  font-size: 0.9rem;
+}
+
+.webcam-monitor-status {
+  color: #b7c4d0;
+  font-size: 0.72rem;
+}
+
+.webcam-monitor-frame {
+  position: relative;
+  min-height: 120px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #405160;
+  border-radius: 6px;
+  background: #05090d;
+}
+
+.webcam-monitor-frame img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.webcam-monitor-frame img[hidden] {
+  display: none;
+}
+
+.webcam-monitor-frame p {
+  margin: 0;
+  padding: 10px;
+  color: #b7c4d0;
+  font-size: 0.76rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.webcam-monitor-panel .btn {
+  width: 100%;
+}
+
 .main-panel {
   min-width: 0;
   padding: 18px clamp(16px, 3vw, 34px) 44px;

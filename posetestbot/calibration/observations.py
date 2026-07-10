@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.calibration.profiles import sensor_identity_from_folder_name
 from posetestbot.calibration.targets import (
     DEFAULT_TARGET_SPEC,
@@ -518,11 +519,7 @@ def write_calibration_observations(
     report: Mapping[str, Any],
 ) -> Path:
     path = calibration_observations_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def write_calibration_observations_with_manifest(

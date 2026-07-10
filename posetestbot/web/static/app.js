@@ -9,6 +9,7 @@
     previewJobSensorKeys: {},
     pendingPreviewStartsBySensor: {},
     terminalPreviewFetches: {},
+    webcamPollTimer: null,
   };
 
   function $(selector) {
@@ -883,6 +884,67 @@
     }
   }
 
+  function renderMonitorWebcam(data) {
+    const job = data?.job || null;
+    const status = data?.preview_status || {};
+    const statusText = status.status || job?.status || "offline";
+    const image = $("#webcamMonitorImage");
+    const placeholder = $("#webcamMonitorPlaceholder");
+    const retry = $("#retryWebcamBtn");
+    $("#webcamMonitorStatus").textContent = statusText;
+
+    if (status.latest_image && job?.id) {
+      image.src =
+        "/monitoring/webcam/" + encodeURIComponent(job.id) + "/latest.jpg?t=" + Date.now();
+      image.hidden = false;
+      placeholder.hidden = true;
+    } else {
+      image.hidden = true;
+      placeholder.hidden = false;
+      placeholder.textContent =
+        status.error || (job?.status === "failed" ? job.message : null) || "Waiting for camera…";
+    }
+    retry.hidden = !(status.error || job?.status === "failed");
+  }
+
+  function stopMonitorWebcamPolling() {
+    if (!state.webcamPollTimer) return;
+    clearInterval(state.webcamPollTimer);
+    state.webcamPollTimer = null;
+  }
+
+  function startMonitorWebcamPolling() {
+    stopMonitorWebcamPolling();
+    state.webcamPollTimer = setInterval(async () => {
+      try {
+        const data = await api("/monitoring/webcam");
+        renderMonitorWebcam(data);
+        if (data.job && !ACTIVE_PREVIEW_JOB_STATUSES.includes(data.job.status)) {
+          stopMonitorWebcamPolling();
+        }
+      } catch (error) {
+        renderMonitorWebcam({preview_status: {status: "error", error: error.message}});
+        stopMonitorWebcamPolling();
+      }
+    }, 1000);
+  }
+
+  async function startMonitorWebcam() {
+    $("#retryWebcamBtn").hidden = true;
+    renderMonitorWebcam({preview_status: {status: "starting"}});
+    try {
+      const current = await api("/monitoring/webcam");
+      const data =
+        current.job && ACTIVE_PREVIEW_JOB_STATUSES.includes(current.job.status)
+          ? current
+          : await api("/monitoring/webcam", {method: "POST"});
+      renderMonitorWebcam(data);
+      startMonitorWebcamPolling();
+    } catch (error) {
+      renderMonitorWebcam({preview_status: {status: "error", error: error.message}});
+    }
+  }
+
   async function loadRuntimeStatus() {
     const data = await api("/runtime/status");
     $("#runtimeStatusText").textContent = data.all_available ? "ready" : "check";
@@ -917,6 +979,7 @@
     $("#stopIiwaBtn").addEventListener("click", () => queueRobotControl("stop_iiwa"));
     $("#robotControlIp").addEventListener("change", storeRobotControlTarget);
     $("#robotControlPort").addEventListener("change", storeRobotControlTarget);
+    $("#retryWebcamBtn").addEventListener("click", startMonitorWebcam);
     document.querySelectorAll("[data-stage]").forEach((button) => {
       button.addEventListener("click", () => queueStage(button.dataset.stage));
     });
@@ -925,6 +988,7 @@
   window.addEventListener("DOMContentLoaded", async () => {
     loadRobotControlTarget();
     bindEvents();
+    startMonitorWebcam();
     try {
       await loadOverview();
     } catch (error) {

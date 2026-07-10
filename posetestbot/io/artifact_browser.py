@@ -16,12 +16,14 @@ from posetestbot.io.artifacts import (
     ARUCO_COVERAGE_REPORT,
     BLENDERPROC_RENDER_PLAN,
     BOP_COCO_ANNOTATIONS,
+    BOP_DATASET_INFO,
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
     BOP_FRAME_MAP_JSON,
     BOP_MULTIVIEW_TARGETS,
     BOP_TARGETS_BOP19,
     CALIBRATION_CANDIDATES,
+    CALIBRATION_TARGET,
     CALIBRATION_OBSERVATIONS,
     CALIBRATION_PREFLIGHT_REPORT,
     CALIBRATION_PROFILES,
@@ -29,6 +31,7 @@ from posetestbot.io.artifacts import (
     CALIBRATION_PROFILES_SOLVED,
     CALIBRATION_SOLVER_REPORT,
     CALIBRATION_VALIDATION_REPORT,
+    CAMERA_RECTIFICATION_REPORT,
     CAPTURE_EXECUTION_LOGS_DIR,
     CAPTURE_EXECUTION_PLAN,
     CAPTURE_EXECUTION_REPORT,
@@ -39,6 +42,7 @@ from posetestbot.io.artifacts import (
     DATASET_MANIFEST,
     DEPTH_DIR,
     HARDWARE_STATUS_REPORT,
+    INTRINSIC_CALIBRATION_PROFILES,
     MODELS_DIR,
     PIPELINE_SEQUENCE_PLAN,
     REALSENSE_CAPTURE_SMOKE_REPORT,
@@ -315,6 +319,7 @@ def _summary_for_path(path: Path, root: Path) -> dict[str, Any] | None:
         CALIBRATION_CANDIDATES,
         CALIBRATION_SOLVER_REPORT,
         CALIBRATION_VALIDATION_REPORT,
+        CAMERA_RECTIFICATION_REPORT,
         REWRITE_GATE_REPORT,
         REWRITE_STATUS_REPORT,
     }:
@@ -368,6 +373,9 @@ def _known_run_artifacts(root: Path) -> Iterable[tuple[str, str, str]]:
         REALSENSE_CAPTURE_SMOKE_REPORT,
         SYNC_QUALITY_REPORT,
         ARUCO_COVERAGE_REPORT,
+        CALIBRATION_TARGET,
+        INTRINSIC_CALIBRATION_PROFILES,
+        CAMERA_RECTIFICATION_REPORT,
         CALIBRATION_PROFILES,
         CALIBRATION_PREFLIGHT_REPORT,
         CALIBRATION_OBSERVATIONS,
@@ -381,6 +389,8 @@ def _known_run_artifacts(root: Path) -> Iterable[tuple[str, str, str]]:
         REWRITE_GATE_REPORT,
         REWRITE_STATUS_REPORT,
         f"{BOP_DIR}/{BOP_EXPORT_MANIFEST}",
+        f"{BOP_DIR}/{BOP_DATASET_INFO}",
+        f"{BOP_DIR}/{BOP_FRAME_MAP_JSON}",
         f"{BOP_DIR}/{MODELS_DIR}/models_info.json",
         f"{BOP_DIR}/{BOP_TARGETS_BOP19}",
         f"{BOP_DIR}/{BOP_MULTIVIEW_TARGETS}",
@@ -419,30 +429,68 @@ def _bop_export_artifacts(root: Path) -> Iterable[tuple[str, str, str]]:
     manifest = _safe_json(root / BOP_DIR / BOP_EXPORT_MANIFEST)
     if not isinstance(manifest, Mapping):
         return []
+    artifact_base = (
+        root / BOP_DIR
+        if manifest.get("schema_version") == "bop_export_manifest.v2"
+        else root
+    )
+
+    def artifact_value(value: str) -> str:
+        path = Path(value)
+        return (
+            path.as_posix()
+            if path.is_absolute()
+            else (artifact_base / path).as_posix()
+        )
+
     entries: list[tuple[str, str, str]] = []
-    for key in ("targets_path", "multiview_targets_path", "coco_annotations_path"):
+    for key in (
+        "targets_path",
+        "multiview_targets_path",
+        "coco_annotations_path",
+        "frame_map_path",
+        "dataset_info_path",
+    ):
         value = manifest.get(key)
         if isinstance(value, str):
-            entries.append((key, "bop_export", value))
+            entries.append((key, "bop_export", artifact_value(value)))
     for export in manifest.get("exports", []):
         if not isinstance(export, Mapping):
             continue
         sensor_name = str(export.get("sensor_name") or "sensor")
         scene_folder = export.get("scene_folder")
         if isinstance(scene_folder, str):
-            entries.append((f"{sensor_name}:scene", "bop_export.scene", scene_folder))
+            entries.append(
+                (
+                    f"{sensor_name}:scene",
+                    "bop_export.scene",
+                    artifact_value(scene_folder),
+                )
+            )
         artifacts = export.get("artifacts")
         if isinstance(artifacts, Mapping):
             for key, value in artifacts.items():
                 if isinstance(value, str):
-                    entries.append((f"{sensor_name}:{key}", "bop_export.scene", value))
+                    entries.append(
+                        (
+                            f"{sensor_name}:{key}",
+                            "bop_export.scene",
+                            artifact_value(value),
+                        )
+                    )
     for model in manifest.get("object_models", []):
         if not isinstance(model, Mapping):
             continue
         object_name = str(model.get("object_name") or "object")
         bop_path = model.get("bop_path")
         if isinstance(bop_path, str):
-            entries.append((f"{object_name}:model", "bop_export.models", bop_path))
+            entries.append(
+                (
+                    f"{object_name}:model",
+                    "bop_export.models",
+                    artifact_value(bop_path),
+                )
+            )
     return entries
 
 
@@ -594,6 +642,11 @@ def _bop_scene_lookup(run_root: Path, *, split: str | None = None) -> dict[int, 
     manifest = _safe_json(run_root / BOP_DIR / BOP_EXPORT_MANIFEST)
     if not isinstance(manifest, Mapping):
         return {}
+    scene_base = (
+        run_root / BOP_DIR
+        if manifest.get("schema_version") == "bop_export_manifest.v2"
+        else run_root
+    )
     scenes: dict[int, dict[str, Any]] = {}
     for export in manifest.get("exports", []):
         if not isinstance(export, Mapping):
@@ -614,7 +667,7 @@ def _bop_scene_lookup(run_root: Path, *, split: str | None = None) -> dict[int, 
         if isinstance(scene_folder, str):
             scene_path = Path(scene_folder)
             if not scene_path.is_absolute():
-                scene_path = run_root / scene_path
+                scene_path = scene_base / scene_path
             try:
                 scene_info["relative_scene_folder"] = _relative_to(scene_path, run_root)
             except ArtifactPathError:
@@ -629,6 +682,24 @@ def _scene_info_for_folder(run_root: Path, scene_folder: Path) -> dict[str, Any]
         if scene.get("relative_scene_folder") == relative_scene_folder:
             return dict(scene)
     return None
+
+
+def _frame_map_for_scene(
+    run_root: Path, scene: Mapping[str, Any] | None
+) -> Mapping[str, Any] | None:
+    if scene is None:
+        return None
+    root_map = _safe_json(run_root / BOP_DIR / BOP_FRAME_MAP_JSON)
+    if not isinstance(root_map, Mapping):
+        return None
+    scenes = root_map.get("scenes")
+    if not isinstance(scenes, Mapping):
+        return None
+    scene_entry = scenes.get(str(scene.get("scene_id")))
+    if not isinstance(scene_entry, Mapping):
+        return None
+    frames = scene_entry.get("frames")
+    return frames if isinstance(frames, Mapping) else None
 
 
 def bop_scene_detail(
@@ -649,7 +720,10 @@ def bop_scene_detail(
     scene_camera = _safe_json(scene_folder / "scene_camera.json")
     scene_gt = _safe_json(scene_folder / "scene_gt.json")
     scene_gt_info = _safe_json(scene_folder / "scene_gt_info.json")
-    frame_map = _safe_json(scene_folder / BOP_FRAME_MAP_JSON)
+    scene_info = _scene_info_for_folder(root, scene_folder)
+    frame_map = _frame_map_for_scene(root, scene_info)
+    if frame_map is None:
+        frame_map = _safe_json(scene_folder / BOP_FRAME_MAP_JSON)
     if not isinstance(scene_camera, Mapping):
         raise ValueError(f"Missing or invalid scene_camera.json in {scene_folder}")
 
@@ -695,7 +769,7 @@ def bop_scene_detail(
             "scene_camera": (scene_folder / "scene_camera.json").is_file(),
             "scene_gt": (scene_folder / "scene_gt.json").is_file(),
             "scene_gt_info": (scene_folder / "scene_gt_info.json").is_file(),
-            "frame_map": (scene_folder / BOP_FRAME_MAP_JSON).is_file(),
+            "frame_map": frame_map is not None,
             "rgb_dir": (scene_folder / RGB_DIR).is_dir(),
             "depth_dir": (scene_folder / DEPTH_DIR).is_dir(),
             "mask_dir": (scene_folder / "mask").is_dir(),
@@ -724,7 +798,10 @@ def bop_frame_detail(
     scene_camera = _safe_json(scene_folder / "scene_camera.json")
     scene_gt = _safe_json(scene_folder / "scene_gt.json")
     scene_gt_info = _safe_json(scene_folder / "scene_gt_info.json")
-    frame_map = _safe_json(scene_folder / BOP_FRAME_MAP_JSON)
+    scene_info = _scene_info_for_folder(root, scene_folder)
+    frame_map = _frame_map_for_scene(root, scene_info)
+    if frame_map is None:
+        frame_map = _safe_json(scene_folder / BOP_FRAME_MAP_JSON)
     if not isinstance(scene_camera, Mapping):
         raise ValueError(f"Missing or invalid scene_camera.json in {scene_folder}")
     image_key = str(image_id)
@@ -734,7 +811,7 @@ def bop_frame_detail(
         "type": "bop_frame_detail",
         "scene_path": scene_folder.as_posix(),
         "relative_path": _relative_to(scene_folder, root),
-        "scene": _scene_info_for_folder(root, scene_folder),
+        "scene": scene_info,
         "image_id": image_id,
         "image_key": image_key,
         "rgb": _frame_file(root, scene_folder / RGB_DIR, image_id),

@@ -83,5 +83,51 @@ def test_unknown_downstream_stage_is_rejected(tmp_path: Path) -> None:
 def test_stage_listing_contains_acquisition_stages_only() -> None:
     stage_ids = {stage["id"] for stage in list_pipeline_stages()}
 
-    assert {"capture_plan", "sync_run", "sync_quality", "calibration_solver", "bop_export"} <= stage_ids
+    assert {
+        "capture_plan",
+        "sync_run",
+        "sync_quality",
+        "calibration_target_import",
+        "aruco_detection",
+        "intrinsic_calibration",
+        "aruco_pose",
+        "calibration_solver",
+        "camera_rectification",
+        "bop_export",
+    } <= stage_ids
     assert "metric_report_export" not in stage_ids
+
+
+def test_every_pipeline_path_parameter_declares_web_scope() -> None:
+    path_parameters = [
+        parameter
+        for stage in PIPELINE_STAGES.values()
+        for parameter in stage.parameters
+        if parameter.kind == "path"
+    ]
+
+    assert path_parameters
+    assert all(parameter.path_scope is not None for parameter in path_parameters)
+
+
+def test_compare_and_selection_options_are_repeatable_api_contracts(
+    tmp_path: Path,
+) -> None:
+    solver = build_pipeline_job(
+        stage_id="calibration_solver",
+        run_root=tmp_path / "run",
+        options={"mode": "compare"},
+    )
+    validation = build_pipeline_job(
+        stage_id="calibration_validation",
+        run_root=tmp_path / "run",
+        options={
+            "select_profile": ["realsense_1=unknown", "realsense_2=known"],
+            "promote": True,
+        },
+    )
+
+    assert ["--mode", "compare"] == solver.command[5:7]
+    assert validation.command.count("--select-profile") == 2
+    assert "realsense_1=unknown" in validation.command
+    assert "--promote" in validation.command

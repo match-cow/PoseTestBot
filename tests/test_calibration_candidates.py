@@ -15,6 +15,8 @@ from posetestbot.io.artifacts import (
     CALIBRATION_PROFILES_FROM_OBSERVATIONS,
     DATASET_MANIFEST,
 )
+from posetestbot.sensors.contracts import CameraIntrinsics
+from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
 
 
 IDENTITY_TARGET_TO_REFERENCE = {
@@ -33,6 +35,15 @@ def write_observations_fixture(
     observation_count: int = 2,
     mounting_mode: str = "static",
 ) -> Path:
+    write_legacy_camera_sidecars(
+        run_root / "processed" / "synchronized" / "realsense_123",
+        CameraIntrinsics(
+            cam_k=(600.0, 0.0, 640.0, 0.0, 600.0, 360.0, 0.0, 0.0, 1.0),
+            width=1280,
+            height=720,
+            depth_scale_to_mm=1.0,
+        ),
+    )
     observations = []
     for index in range(observation_count):
         observations.append(
@@ -113,7 +124,7 @@ def test_build_calibration_candidates_averages_static_identity(
     assert profile["status"] == "needs_validation"
     assert profile["mounting_mode"] == "static"
     assert profile["extrinsics"]["from"] == "camera"
-    assert profile["extrinsics"]["to"] == "robot_base"
+    assert profile["extrinsics"]["to"] == "template_base"
     assert profile["extrinsics"]["rotation_quaternion_wxyz"] == [
         1.0,
         0.0,

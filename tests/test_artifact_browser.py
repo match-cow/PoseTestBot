@@ -18,7 +18,9 @@ from posetestbot.io.artifact_browser import (
 )
 from posetestbot.io.artifacts import (
     BOP_DIR,
+    BOP_DATASET_INFO,
     BOP_EXPORT_MANIFEST,
+    BOP_FRAME_MAP_JSON,
     BOP_TARGETS_BOP19,
     DATASET_MANIFEST,
     DEPTH_DIR,
@@ -40,7 +42,7 @@ def write_png(path: Path, value: int = 80) -> None:
 
 
 def make_bop_scene(run_root: Path) -> Path:
-    scene = run_root / BOP_DIR / "realsense_123" / "test" / "000001"
+    scene = run_root / BOP_DIR / "test" / "000001"
     write_png(scene / RGB_DIR / "000000.png")
     write_png(scene / DEPTH_DIR / "000000.png", value=10)
     mask = np.zeros((8, 10), dtype=np.uint8)
@@ -53,25 +55,53 @@ def make_bop_scene(run_root: Path) -> Path:
     )
     write_json(scene / "scene_gt.json", {"0": [{"obj_id": 1, "cam_R_m2c": [], "cam_t_m2c": []}]})
     write_json(scene / "scene_gt_info.json", {"0": [{"bbox_obj": [3, 2, 5, 4], "px_count_visib": 20}]})
-    write_json(scene / "posetestbot_bop_frame_map.json", {"0": {"sensor_name": "realsense_123"}})
+    write_json(
+        run_root / BOP_DIR / BOP_FRAME_MAP_JSON,
+        {
+            "schema_version": "posetestbot_bop_frame_map.v2",
+            "scenes": {
+                "1": {
+                    "sensor_name": "realsense_123",
+                    "split": "test",
+                    "scene_folder": "test/000001",
+                    "frames": {"0": {"sensor_name": "realsense_123"}},
+                }
+            },
+        },
+    )
+    write_json(
+        run_root / BOP_DIR / BOP_DATASET_INFO,
+        {
+            "schema_version": "posetestbot_bop_dataset_info.v1",
+            "name": "test",
+            "bop_format": "scenewise",
+            "splits": ["test"],
+            "scene_count": 1,
+            "sensors": ["realsense_123"],
+        },
+    )
     write_json(
         run_root / BOP_DIR / BOP_EXPORT_MANIFEST,
         {
-            "schema_version": "bop_export_manifest.v1",
-            "targets_path": "bop/test_targets_bop19.json",
+            "schema_version": "bop_export_manifest.v2",
+            "format": "bop-scenewise",
+            "targets_path": "test_targets_bop19.json",
+            "frame_map_path": BOP_FRAME_MAP_JSON,
+            "dataset_info_path": BOP_DATASET_INFO,
+            "validation": {"status": "ok"},
             "exports": [
                 {
                     "sensor_name": "realsense_123",
                     "scene_id": 1,
                     "split": "test",
-                    "scene_folder": scene.relative_to(run_root).as_posix(),
+                    "scene_folder": "test/000001",
                     "artifacts": {
-                        "scene_camera": (scene / "scene_camera.json").relative_to(run_root).as_posix(),
+                        "scene_camera": "test/000001/scene_camera.json",
                     },
                 }
             ],
             "object_models": [
-                {"object_name": "cube", "obj_id": 1, "bop_path": "bop/models/obj_000001.ply"}
+                {"object_name": "cube", "obj_id": 1, "bop_path": "models/obj_000001.ply"}
             ],
         },
     )

@@ -8,10 +8,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import PIPELINE_SEQUENCE_PLAN
 from posetestbot.pipeline.stages import (
     PIPELINE_STAGES,
-    PipelineJobSpec,
     PipelineStageSpec,
     build_pipeline_job,
 )
@@ -314,11 +314,7 @@ def write_sequence_plan(
     filename: str = PIPELINE_SEQUENCE_PLAN,
 ) -> Path:
     path = Path(run_root) / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(plan.to_dict(), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, plan.to_dict())
 
 
 def execute_sequence_plan(
@@ -842,6 +838,111 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 id="bop_export",
                 stage_id="bop_export",
                 depends_on=("blenderproc_render",),
+            ),
+        ),
+    ),
+    "aruco_grid_full_calibration": PipelineSequenceSpec(
+        id="aruco_grid_full_calibration",
+        label="Full ArUco Grid Calibration",
+        description=(
+            "Import the exact printed grid, synchronize, calibrate color intrinsics, "
+            "solve both wrist extrinsic methods, and require explicit validation selection."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(
+                id="calibration_target_import",
+                stage_id="calibration_target_import",
+                options={
+                    "source": "{run_root}/aruco_grid_config.json",
+                    "aligned_to_template_base": True,
+                },
+            ),
+            PipelineSequenceStepSpec(
+                id="sync_run",
+                stage_id="sync_run",
+                depends_on=("calibration_target_import",),
+            ),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="aruco_detection",
+                stage_id="aruco_detection",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="intrinsic_calibration",
+                stage_id="intrinsic_calibration",
+                depends_on=("aruco_detection",),
+                options={"mode": "calibrate"},
+            ),
+            PipelineSequenceStepSpec(
+                id="aruco_pose",
+                stage_id="aruco_pose",
+                depends_on=("intrinsic_calibration",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_observations",
+                stage_id="calibration_observations",
+                depends_on=("aruco_pose",),
+                options={"target_spec": "{run_root}/calibration_target.json"},
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_solver",
+                stage_id="calibration_solver",
+                depends_on=("calibration_observations",),
+                options={"mode": "compare"},
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_validation",
+                stage_id="calibration_validation",
+                depends_on=("calibration_solver",),
+            ),
+        ),
+    ),
+    "calibrated_capture_to_bop_dataset_dry_run": PipelineSequenceSpec(
+        id="calibrated_capture_to_bop_dataset_dry_run",
+        label="Calibrated Capture To BOP Dataset Dry-Run",
+        description=(
+            "Synchronize a captured run, rectify RGB-D with selected intrinsics, "
+            "then prepare and export BOP using promoted calibration.v2 profiles."
+        ),
+        steps=(
+            PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
+            PipelineSequenceStepSpec(
+                id="sync_quality",
+                stage_id="sync_quality",
+                depends_on=("sync_run",),
+            ),
+            PipelineSequenceStepSpec(
+                id="calibration_preflight",
+                stage_id="calibration_preflight",
+                depends_on=("sync_quality",),
+            ),
+            PipelineSequenceStepSpec(
+                id="camera_rectification",
+                stage_id="camera_rectification",
+                depends_on=("sync_quality", "calibration_preflight"),
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_prepare",
+                stage_id="blenderproc_prepare",
+                depends_on=("camera_rectification",),
+                options={"calibration_profiles": "{run_root}/calibration_profiles.json"},
+            ),
+            PipelineSequenceStepSpec(
+                id="blenderproc_render",
+                stage_id="blenderproc_render",
+                depends_on=("blenderproc_prepare",),
+                options={"dry_run": True},
+            ),
+            PipelineSequenceStepSpec(
+                id="bop_export",
+                stage_id="bop_export",
+                depends_on=("blenderproc_render",),
+                options={"calibration_profiles": "{run_root}/calibration_profiles.json"},
             ),
         ),
     ),

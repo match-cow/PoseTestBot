@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 
 VALID_PARAMETER_KINDS = {"str", "path", "int", "float", "bool"}
+VALID_PATH_SCOPES = {"run", "input", "output", "repository"}
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class PipelineParameter:
     name: str
     flag: str
     kind: str = "str"
+    path_scope: str | None = None
     required: bool = False
     default: Any = None
     choices: tuple[str, ...] = ()
@@ -28,6 +30,14 @@ class PipelineParameter:
             raise ValueError(f"Unsupported pipeline parameter kind: {self.kind}")
         if self.multiple and self.kind == "bool":
             raise ValueError("Boolean pipeline parameters cannot be multiple")
+        if self.kind == "path":
+            if self.path_scope not in VALID_PATH_SCOPES:
+                raise ValueError(
+                    f"Path parameter {self.name!r} must declare path_scope as one of: "
+                    + ", ".join(sorted(VALID_PATH_SCOPES))
+                )
+        elif self.path_scope is not None:
+            raise ValueError("path_scope is only valid for path parameters")
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -377,7 +387,9 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         ),
         resources=("disk_io",),
         parameters=(
-            PipelineParameter(name="run_config", flag="--run-config", kind="path"),
+            PipelineParameter(
+                name="run_config", flag="--run-config", kind="path", path_scope="run"
+            ),
             PipelineParameter(
                 name="max_frames",
                 flag="--max-frames",
@@ -713,7 +725,9 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         ),
         resources=("disk_io",),
         parameters=(
-            PipelineParameter(name="observations", flag="--observations", kind="path"),
+            PipelineParameter(
+                name="observations", flag="--observations", kind="path", path_scope="run"
+            ),
             PipelineParameter(
                 name="min_observations",
                 flag="--min-observations",
@@ -724,6 +738,7 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="target_to_reference",
                 flag="--target-to-reference",
                 kind="path",
+                path_scope="input",
             ),
             PipelineParameter(
                 name="max_translation_residual_mm",
@@ -755,7 +770,20 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         ),
         resources=("disk_io",),
         parameters=(
-            PipelineParameter(name="observations", flag="--observations", kind="path"),
+            PipelineParameter(
+                name="mode",
+                flag="--mode",
+                choices=("hand_eye_unknown_target", "known_target", "compare"),
+            ),
+            PipelineParameter(
+                name="calibration_target",
+                flag="--calibration-target",
+                kind="path",
+                path_scope="run",
+            ),
+            PipelineParameter(
+                name="observations", flag="--observations", kind="path", path_scope="run"
+            ),
             PipelineParameter(
                 name="min_observations",
                 flag="--min-observations",
@@ -766,6 +794,7 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="target_to_reference",
                 flag="--target-to-reference",
                 kind="path",
+                path_scope="input",
             ),
             PipelineParameter(
                 name="hand_eye_method",
@@ -800,6 +829,24 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 kind="bool",
                 default=False,
             ),
+            PipelineParameter(
+                name="max_outlier_ratio",
+                flag="--max-outlier-ratio",
+                kind="float",
+                default=0.25,
+            ),
+            PipelineParameter(
+                name="max_cross_translation_mm",
+                flag="--max-cross-translation-mm",
+                kind="float",
+                default=10.0,
+            ),
+            PipelineParameter(
+                name="max_cross_rotation_deg",
+                flag="--max-cross-rotation-deg",
+                kind="float",
+                default=5.0,
+            ),
             PipelineParameter(name="json", flag="--json", kind="bool", default=False),
         ),
     ),
@@ -813,8 +860,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         ),
         resources=("disk_io",),
         parameters=(
-            PipelineParameter(name="candidates", flag="--candidates", kind="path"),
-            PipelineParameter(name="profiles", flag="--profiles", kind="path"),
+            PipelineParameter(
+                name="candidates", flag="--candidates", kind="path", path_scope="run"
+            ),
+            PipelineParameter(
+                name="profiles", flag="--profiles", kind="path", path_scope="run"
+            ),
             PipelineParameter(
                 name="min_inliers",
                 flag="--min-inliers",
@@ -849,8 +900,15 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="output_profiles",
                 flag="--output-profiles",
                 kind="path",
+                path_scope="output",
             ),
             PipelineParameter(name="operator", flag="--operator"),
+            PipelineParameter(
+                name="select_profile",
+                flag="--select-profile",
+                multiple=True,
+                help="Repeatable SENSOR=PROFILE_ID promotion selection.",
+            ),
             PipelineParameter(name="json", flag="--json", kind="bool", default=False),
         ),
     ),
@@ -864,7 +922,9 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         ),
         resources=("robot_command", "disk_io"),
         parameters=(
-            PipelineParameter(name="run_config", flag="--run-config", kind="path"),
+            PipelineParameter(
+                name="run_config", flag="--run-config", kind="path", path_scope="run"
+            ),
             PipelineParameter(
                 name="duration_s",
                 flag="--duration",
@@ -921,6 +981,7 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="output_root",
                 flag="--output-root",
                 kind="path",
+                path_scope="output",
                 help="Derived sync output root.",
             ),
             PipelineParameter(
@@ -990,8 +1051,44 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         label="ArUco Pose Estimation",
         script="scripts/run_aruco_stage.py",
         description="Run ArUco pose estimation on synchronized sensor folders.",
-        resources=("cpu",),
+        resources=("cpu", "disk_io"),
         parameters=(
+            PipelineParameter(
+                name="calibration_target",
+                flag="--calibration-target",
+                kind="path",
+                path_scope="run",
+            ),
+            PipelineParameter(
+                name="intrinsics_mode",
+                flag="--intrinsics-mode",
+                choices=("factory", "calibrate"),
+                default="factory",
+            ),
+            PipelineParameter(
+                name="min_accepted_views",
+                flag="--min-accepted-views",
+                kind="int",
+                default=15,
+            ),
+            PipelineParameter(
+                name="min_coverage_cells",
+                flag="--min-coverage-cells",
+                kind="int",
+                default=6,
+            ),
+            PipelineParameter(
+                name="max_view_error_px",
+                flag="--max-view-error-px",
+                kind="float",
+                default=3.0,
+            ),
+            PipelineParameter(
+                name="max_rms_px",
+                flag="--max-rms-px",
+                kind="float",
+                default=1.5,
+            ),
             PipelineParameter(
                 name="save_images",
                 flag="--save-images",
@@ -1012,6 +1109,92 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 kind="int",
                 help="OpenCV wait time in ms when display windows are enabled.",
             ),
+        ),
+    ),
+    "calibration_target_import": PipelineStageSpec(
+        id="calibration_target_import",
+        label="Import ArUco Grid Target",
+        script="scripts/run_calibration_target_import.py",
+        description="Validate and import an ArUcoGridGen 1.0 JSON export.",
+        resources=("disk_io",),
+        parameters=(
+            PipelineParameter(
+                name="source",
+                flag="--source",
+                kind="path",
+                path_scope="input",
+                required=True,
+            ),
+            PipelineParameter(
+                name="aligned_to_template_base",
+                flag="--aligned-to-template-base",
+                kind="bool",
+                default=False,
+            ),
+        ),
+    ),
+    "aruco_detection": PipelineStageSpec(
+        id="aruco_detection",
+        label="ArUco Grid Detection",
+        script="scripts/run_aruco_detection_stage.py",
+        description="Detect imported grid markers once in synchronized native RGB.",
+        resources=("cpu", "disk_io"),
+        parameters=(
+            PipelineParameter(
+                name="calibration_target",
+                flag="--calibration-target",
+                kind="path",
+                path_scope="run",
+            ),
+            PipelineParameter(
+                name="input_root",
+                flag="--input-root",
+                kind="path",
+                path_scope="run",
+            ),
+            PipelineParameter(name="save_images", flag="--save-images", kind="bool", default=False),
+        ),
+    ),
+    "intrinsic_calibration": PipelineStageSpec(
+        id="intrinsic_calibration",
+        label="Color Intrinsic Calibration",
+        script="scripts/run_intrinsic_calibration_stage.py",
+        description="Wrap factory color intrinsics or calibrate from stored grid detections.",
+        resources=("cpu", "disk_io"),
+        parameters=(
+            PipelineParameter(name="mode", flag="--mode", choices=("factory", "calibrate"), default="factory"),
+            PipelineParameter(name="calibration_target", flag="--calibration-target", kind="path", path_scope="run"),
+            PipelineParameter(name="input_root", flag="--input-root", kind="path", path_scope="run"),
+            PipelineParameter(name="min_accepted_views", flag="--min-accepted-views", kind="int", default=15),
+            PipelineParameter(name="min_coverage_cells", flag="--min-coverage-cells", kind="int", default=6),
+            PipelineParameter(name="max_view_error_px", flag="--max-view-error-px", kind="float", default=3.0),
+            PipelineParameter(name="max_rms_px", flag="--max-rms-px", kind="float", default=1.5),
+        ),
+    ),
+    "aruco_pose": PipelineStageSpec(
+        id="aruco_pose",
+        label="ArUco Grid Pose Solve",
+        script="scripts/run_aruco_pose_stage.py",
+        description="Solve grid-to-camera poses from detections and native intrinsics.",
+        resources=("cpu", "disk_io"),
+        parameters=(
+            PipelineParameter(name="calibration_target", flag="--calibration-target", kind="path", path_scope="run"),
+            PipelineParameter(name="intrinsic_profiles", flag="--intrinsic-profiles", kind="path", path_scope="run"),
+            PipelineParameter(name="input_root", flag="--input-root", kind="path", path_scope="run"),
+        ),
+    ),
+    "camera_rectification": PipelineStageSpec(
+        id="camera_rectification",
+        label="Camera Rectification",
+        script="scripts/run_camera_rectification.py",
+        description="Transactionally rectify synchronized RGB and aligned depth.",
+        resources=("cpu", "disk_io"),
+        parameters=(
+            PipelineParameter(name="intrinsic_profiles", flag="--intrinsic-profiles", kind="path", path_scope="run"),
+            PipelineParameter(name="input_root", flag="--input-root", kind="path", path_scope="run"),
+            PipelineParameter(name="output_root", flag="--output-root", kind="path", path_scope="output"),
+            PipelineParameter(name="overwrite", flag="--overwrite", kind="bool", default=False),
+            PipelineParameter(name="json", flag="--json", kind="bool", default=False),
         ),
     ),
     "aruco_coverage": PipelineStageSpec(
@@ -1040,6 +1223,7 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="aruco_pose_file",
                 flag="--aruco-pose-file",
                 kind="path",
+                path_scope="run",
                 multiple=True,
             ),
             PipelineParameter(name="json", flag="--json", kind="bool", default=False),
@@ -1052,22 +1236,27 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         description="Prepare BlenderProc inputs from synchronized sensor folders.",
         resources=("cpu", "disk_io"),
         parameters=(
-            PipelineParameter(name="input_folder", flag="--input-folder", kind="path"),
+            PipelineParameter(
+                name="input_folder", flag="--input-folder", kind="path", path_scope="run"
+            ),
             PipelineParameter(
                 name="object_folder",
                 flag="--object-folder",
                 kind="path",
+                path_scope="input",
                 default="object_models",
             ),
             PipelineParameter(
                 name="camera_transformations",
                 flag="--camera-transformations",
                 kind="path",
+                path_scope="input",
             ),
             PipelineParameter(
                 name="calibration_profiles",
                 flag="--calibration-profiles",
                 kind="path",
+                path_scope="input",
             ),
             PipelineParameter(name="subdir", flag="--subdir"),
         ),
@@ -1082,11 +1271,14 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         ),
         resources=("render", "disk_io"),
         parameters=(
-            PipelineParameter(name="input_folder", flag="--input-folder", kind="path"),
+            PipelineParameter(
+                name="input_folder", flag="--input-folder", kind="path", path_scope="run"
+            ),
             PipelineParameter(
                 name="render_script",
                 flag="--render-script",
                 kind="path",
+                path_scope="repository",
             ),
             PipelineParameter(name="subdir", flag="--subdir"),
             PipelineParameter(name="blenderproc", flag="--blenderproc"),
@@ -1106,13 +1298,18 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         description="Export synchronized sensor folders into BOP scene folders.",
         resources=("disk_io",),
         parameters=(
-            PipelineParameter(name="input_folder", flag="--input-folder", kind="path"),
-            PipelineParameter(name="output_folder", flag="--output-folder", kind="path"),
+            PipelineParameter(
+                name="input_folder", flag="--input-folder", kind="path", path_scope="run"
+            ),
+            PipelineParameter(
+                name="output_folder", flag="--output-folder", kind="path", path_scope="output"
+            ),
             PipelineParameter(name="split", flag="--split"),
             PipelineParameter(
                 name="object_folder",
                 flag="--object-folder",
                 kind="path",
+                path_scope="input",
                 default="object_models",
             ),
             PipelineParameter(
@@ -1127,6 +1324,7 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="calibration_profiles",
                 flag="--calibration-profiles",
                 kind="path",
+                path_scope="input",
             ),
             PipelineParameter(
                 name="write_multiview_targets",

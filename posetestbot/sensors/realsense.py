@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 
@@ -216,6 +217,7 @@ def capture_realsense_rgbd(
     preview: bool = False,
     record: bool = True,
     inverted: bool = False,
+    stop_requested: Callable[[], bool] | None = None,
     rs_module: Any | None = None,
     cv2_module: Any | None = None,
 ) -> dict[str, Any]:
@@ -282,8 +284,13 @@ def capture_realsense_rgbd(
         ensure_legacy_rgbd_folders(output)
 
     try:
-        while max_frames <= 0 or captured_frames < max_frames:
+        while (
+            (max_frames <= 0 or captured_frames < max_frames)
+            and not (stop_requested and stop_requested())
+        ):
             frames = pipeline.wait_for_frames()
+            if stop_requested and stop_requested():
+                break
             aligned_frames = align.process(frames)
             aligned_depth_frame = aligned_frames.get_depth_frame()
             color_frame = aligned_frames.get_color_frame()

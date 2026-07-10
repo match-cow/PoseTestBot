@@ -7,7 +7,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
-from posetestbot.sensors.snapshots import snapshot_specs_from_status
 
 
 DEFAULT_SENSOR_PREVIEW_ROOT = Path("working_data") / "sensor_previews"

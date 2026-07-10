@@ -252,6 +252,26 @@ def test_capture_realsense_rgbd_preview_is_optional(tmp_path) -> None:
     assert preview.destroy_calls == 1
 
 
+def test_capture_realsense_rgbd_honors_graceful_stop_between_frames(tmp_path) -> None:
+    fake_rs = FakeRS("123")
+
+    summary = capture_realsense_rgbd(
+        tmp_path,
+        device_id="123",
+        fps=6,
+        max_frames=0,
+        preview=False,
+        stop_requested=lambda: fake_rs.pipeline_instance.index >= 2,
+        rs_module=fake_rs,
+    )
+
+    assert summary["frame_count"] == 1
+    assert fake_rs.pipeline_instance.stopped is True
+    assert len(list((tmp_path / RGB_DIR).glob("*.png"))) == 1
+    assert len(list((tmp_path / DEPTH_DIR).glob("*.png"))) == 1
+    assert len((tmp_path / FRAME_METADATA_JSONL).read_text().splitlines()) == 1
+
+
 def test_capture_realsense_rgbd_inverted_rotates_frames_and_intrinsics(tmp_path) -> None:
     summary = capture_realsense_rgbd(
         tmp_path,
@@ -312,6 +332,14 @@ def test_discover_realsense_d435_reads_mocked_sdk_devices(monkeypatch) -> None:
         context=lambda: SimpleNamespace(query_devices=lambda: [FakeDiscoveryDevice()]),
     )
     monkeypatch.setitem(sys.modules, "pyrealsense2", fake_rs)
+    monkeypatch.setattr(
+        "posetestbot.sensors.discovery._video_node_metadata_by_serial",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "posetestbot.sensors.discovery._discover_realsense_from_lsusb",
+        lambda: [],
+    )
 
     devices = discover_realsense_d435()
 

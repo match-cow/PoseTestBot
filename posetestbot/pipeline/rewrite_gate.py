@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
@@ -354,31 +355,57 @@ def _bop_export_readiness_checks(
     require_targets: bool = True,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-
-    bop_manifest_path = root / BOP_DIR / BOP_EXPORT_MANIFEST
+    bop_root = root / BOP_DIR
+    bop_manifest_path = bop_root / BOP_EXPORT_MANIFEST
     check, bop_export = _json_file_check("bop_export", bop_manifest_path)
     exports: list[Mapping[str, Any]] = []
+    scene_images: dict[int, set[int]] = {}
+    scene_objects: dict[tuple[int, int], set[int]] = {}
+    scene_sensors: dict[int, str] = {}
+    seen_scene_ids: set[int] = set()
     if bop_export is not None:
         raw_exports = bop_export.get("exports")
         exports = [
             export for export in raw_exports if isinstance(export, Mapping)
         ] if isinstance(raw_exports, list) else []
-        ok = len(exports) > 0
+        validation = bop_export.get("validation")
+        validation_ok = (
+            isinstance(validation, Mapping) and validation.get("status") == "ok"
+        )
+        ok = (
+            bop_export.get("schema_version") == "bop_export_manifest.v2"
+            and bop_export.get("format") == "bop-scenewise"
+            and len(exports) > 0
+            and validation_ok
+        )
         check = _check(
             name="bop_export",
             path=bop_manifest_path,
             ok=ok,
             message=(
-                "bop_export_manifest.json contains exported scene entries."
+                "bop_export_manifest.json is a validated BOP-scenewise v2 export."
                 if ok
-                else "bop_export_manifest.json must contain at least one export."
+                else (
+                    "bop_export_manifest.json must be v2, BOP-scenewise, contain "
+                    "scenes, and record successful validation."
+                )
             ),
-            details={"export_count": len(exports)},
+            details={
+                "schema_version": bop_export.get("schema_version"),
+                "format": bop_export.get("format"),
+                "export_count": len(exports),
+                "validation_ok": validation_ok,
+            },
         )
     checks.append(check)
 
     for index, export in enumerate(exports):
-        scene_folder = _artifact_path(root, export.get("scene_folder"))
+        scene_value = export.get("scene_folder")
+        scene_folder = (
+            (bop_root / str(scene_value)).resolve()
+            if isinstance(scene_value, str) and scene_value
+            else None
+        )
         scene_label = str(export.get("sensor_name") or f"scene_{index}")
         if scene_folder is None:
             checks.append(
@@ -391,40 +418,164 @@ def _bop_export_readiness_checks(
                 )
             )
             continue
+        try:
+            scene_folder.relative_to(bop_root.resolve())
+        except ValueError:
+            checks.append(
+                _check(
+                    name=f"bop_scene:{scene_label}",
+                    path=bop_root,
+                    ok=False,
+                    message="BOP export scene_folder escapes the BOP dataset root.",
+                    details={"export_index": index, "scene_folder": scene_value},
+                )
+            )
+            continue
         rgb_count = _png_count(scene_folder / RGB_DIR)
         depth_count = _png_count(scene_folder / DEPTH_DIR)
+        rgb_names = {path.name for path in (scene_folder / RGB_DIR).glob("*.png")}
+        depth_names = {path.name for path in (scene_folder / DEPTH_DIR).glob("*.png")}
+        scene_camera, camera_error = _load_json_object(scene_folder / "scene_camera.json")
+        scene_gt, gt_error = _load_json_object(scene_folder / "scene_gt.json")
+        scene_gt_info, info_error = _load_json_object(scene_folder / "scene_gt_info.json")
+        expected_keys = {str(int(Path(name).stem)) for name in rgb_names}
+        json_keys_ok = all(
+            data is not None and set(data) == expected_keys
+            for data in (scene_camera, scene_gt, scene_gt_info)
+        )
         ok = (
             scene_folder.is_dir()
-            and (scene_folder / "scene_camera.json").is_file()
-            and (scene_folder / "scene_gt.json").is_file()
             and rgb_count > 0
-            and depth_count > 0
-            and rgb_count == depth_count
+            and rgb_names == depth_names
+            and json_keys_ok
         )
+        try:
+            scene_id = int(export.get("scene_id"))
+        except (TypeError, ValueError):
+            scene_id = -1
+            ok = False
+        split = export.get("split")
+        expected_scene_folder = (
+            bop_root / str(split) / f"{scene_id:06d}"
+            if isinstance(split, str) and split
+            else None
+        )
+        if (
+            scene_id < 0
+            or scene_id in seen_scene_ids
+            or expected_scene_folder is None
+            or scene_folder != expected_scene_folder.resolve()
+        ):
+            ok = False
+        seen_scene_ids.add(scene_id)
+        image_ids = {int(key) for key in expected_keys}
+        scene_images[scene_id] = image_ids
+        scene_sensors[scene_id] = scene_label
+        if scene_gt is not None:
+            for image_id, annotations in scene_gt.items():
+                object_ids = set()
+                if isinstance(annotations, list):
+                    for annotation in annotations:
+                        if not isinstance(annotation, Mapping):
+                            ok = False
+                            continue
+                        try:
+                            object_ids.add(int(annotation["obj_id"]))
+                        except (KeyError, TypeError, ValueError):
+                            ok = False
+                else:
+                    ok = False
+                scene_objects[(scene_id, int(image_id))] = object_ids
         checks.append(
             _check(
                 name=f"bop_scene:{scene_label}",
                 path=scene_folder,
                 ok=ok,
                 message=(
-                    f"{scene_label} has scene camera/GT files and RGB-D frames."
+                    f"{scene_label} has aligned RGB-D and scene metadata keys."
                     if ok
                     else (
-                        f"{scene_label} must include scene_camera.json, "
-                        "scene_gt.json, and matching rgb/depth PNG counts."
+                        f"{scene_label} must include matching RGB/depth names and "
+                        "camera/GT/GT-info keys for every image."
                     )
                 ),
                 details={
                     "export_index": index,
                     "rgb_count": rgb_count,
                     "depth_count": depth_count,
-                    "has_scene_camera": (scene_folder / "scene_camera.json").is_file(),
-                    "has_scene_gt": (scene_folder / "scene_gt.json").is_file(),
+                    "camera_error": camera_error,
+                    "gt_error": gt_error,
+                    "gt_info_error": info_error,
+                    "json_keys_ok": json_keys_ok,
+                    "standard_scene_path": (
+                        expected_scene_folder.as_posix()
+                        if expected_scene_folder is not None
+                        else None
+                    ),
                 },
             )
         )
 
-    targets_path = root / BOP_DIR / BOP_TARGETS_BOP19
+    dataset_info_path = bop_root / "dataset_info.json"
+    dataset_info, dataset_info_error = _load_json_object(dataset_info_path)
+    dataset_info_ok = (
+        dataset_info is not None
+        and dataset_info.get("schema_version") == "posetestbot_bop_dataset_info.v1"
+        and dataset_info.get("bop_format") == "scenewise"
+        and dataset_info.get("scene_count") == len(scene_images)
+        and set(dataset_info.get("sensors", [])) == set(scene_sensors.values())
+    )
+    checks.append(
+        _check(
+            name="bop_dataset_info",
+            path=dataset_info_path,
+            ok=dataset_info_ok,
+            message=(
+                "dataset_info.json matches the exported BOP scenes."
+                if dataset_info_ok
+                else f"dataset_info.json is missing or inconsistent: {dataset_info_error}."
+            ),
+        )
+    )
+
+    frame_map_path = bop_root / "posetestbot_bop_frame_map.json"
+    frame_map, frame_map_error = _load_json_object(frame_map_path)
+    mapped_scenes = frame_map.get("scenes") if frame_map is not None else None
+    frame_map_ok = (
+        frame_map is not None
+        and frame_map.get("schema_version") == "posetestbot_bop_frame_map.v2"
+        and isinstance(mapped_scenes, Mapping)
+        and set(mapped_scenes) == {str(scene_id) for scene_id in scene_images}
+    )
+    if frame_map_ok and isinstance(mapped_scenes, Mapping):
+        for scene_id, image_ids in scene_images.items():
+            entry = mapped_scenes.get(str(scene_id))
+            frames = entry.get("frames") if isinstance(entry, Mapping) else None
+            if (
+                not isinstance(entry, Mapping)
+                or entry.get("sensor_name") != scene_sensors[scene_id]
+                or not isinstance(frames, Mapping)
+                or set(frames) != {str(image_id) for image_id in image_ids}
+            ):
+                frame_map_ok = False
+                break
+    checks.append(
+        _check(
+            name="bop_posetestbot_bop_frame_map",
+            path=frame_map_path,
+            ok=frame_map_ok,
+            message=(
+                "posetestbot_bop_frame_map.json covers every exported scene and image."
+                if frame_map_ok
+                else (
+                    "posetestbot_bop_frame_map.json is missing or inconsistent: "
+                    f"{frame_map_error}."
+                )
+            ),
+        )
+    )
+
+    targets_path = bop_root / BOP_TARGETS_BOP19
     check, targets = _json_file_check("bop_targets", targets_path)
     if targets is not None:
         check = _check(
@@ -447,8 +598,25 @@ def _bop_export_readiness_checks(
             )
         else:
             target_count = len(target_rows) if isinstance(target_rows, list) else 0
-            ok = isinstance(target_rows, list) and (
-                target_count > 0 or not require_targets
+            references_ok = isinstance(target_rows, list)
+            if isinstance(target_rows, list):
+                for target in target_rows:
+                    if not isinstance(target, Mapping):
+                        references_ok = False
+                        continue
+                    try:
+                        scene_id = int(target["scene_id"])
+                        image_id = int(target["im_id"])
+                        obj_id = int(target["obj_id"])
+                    except (KeyError, TypeError, ValueError):
+                        references_ok = False
+                        continue
+                    if image_id not in scene_images.get(scene_id, set()) or obj_id not in scene_objects.get((scene_id, image_id), set()):
+                        references_ok = False
+            ok = (
+                isinstance(target_rows, list)
+                and references_ok
+                and (target_count > 0 or not require_targets)
             )
             check = _check(
                 name="bop_targets",
@@ -461,15 +629,24 @@ def _bop_export_readiness_checks(
                     if ok
                     else "test_targets_bop19.json must contain at least one target row."
                 ),
-                details={"target_count": target_count},
+                details={
+                    "target_count": target_count,
+                    "references_ok": references_ok,
+                },
             )
     checks.append(check)
 
-    models_info_path = root / BOP_DIR / MODELS_DIR / "models_info.json"
+    models_info_path = bop_root / MODELS_DIR / "models_info.json"
     check, models_info = _json_file_check("bop_models_info", models_info_path)
     if models_info is not None:
         model_count = len(models_info)
-        ok = model_count > 0
+        geometry_ok = all(
+            isinstance(value, Mapping)
+            and isinstance(value.get("diameter"), (int, float))
+            and float(value["diameter"]) > 0
+            for value in models_info.values()
+        )
+        ok = model_count > 0 and geometry_ok
         check = _check(
             name="bop_models_info",
             path=models_info_path,
@@ -479,9 +656,35 @@ def _bop_export_readiness_checks(
                 if ok
                 else "models_info.json must contain at least one exported model."
             ),
-            details={"model_count": model_count},
+            details={"model_count": model_count, "geometry_ok": geometry_ok},
         )
     checks.append(check)
+
+    if require_targets and bop_export is not None:
+        profile_statuses = {
+            str(profile.get("profile_id")): profile.get("status")
+            for profile in bop_export.get("calibration_profiles", [])
+            if isinstance(profile, Mapping)
+        }
+        scene_profile_ids = [export.get("calibration_profile_id") for export in exports]
+        calibration_ok = bool(scene_profile_ids) and all(
+            isinstance(profile_id, str)
+            and profile_statuses.get(profile_id) == "valid"
+            for profile_id in scene_profile_ids
+        )
+        checks.append(
+            _check(
+                name="bop_calibration_provenance",
+                path=bop_manifest_path,
+                ok=calibration_ok,
+                message=(
+                    "Every BOP scene references a valid calibration profile."
+                    if calibration_ok
+                    else "BOP readiness requires valid calibration provenance for every scene."
+                ),
+                details={"scene_profile_ids": scene_profile_ids},
+            )
+        )
 
     return checks
 
@@ -890,6 +1093,7 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
         root / CALIBRATION_VALIDATION_REPORT,
     )
     promoted_profile_count = 0
+    promoted_profile_ids: set[str] = set()
     if validation is not None:
         overall_status = validation.get("overall_status")
         promotion = validation.get("promotion")
@@ -912,6 +1116,16 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
             if isinstance(promotion, dict)
             else 0
         )
+        raw_promoted_profile_ids = (
+            promotion.get("promoted_profile_ids")
+            if isinstance(promotion, dict)
+            else None
+        )
+        if isinstance(raw_promoted_profile_ids, list) and all(
+            isinstance(profile_id, str) and profile_id
+            for profile_id in raw_promoted_profile_ids
+        ):
+            promoted_profile_ids = set(raw_promoted_profile_ids)
         promotion_path = (
             str(promotion.get("path"))
             if isinstance(promotion, dict) and promotion.get("path")
@@ -923,7 +1137,8 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
             and promotion_promoted
             and profile_count > 0
             and promotable_profile_count == profile_count
-            and promoted_profile_count == profile_count
+            and len(promoted_profile_ids) == profile_count
+            and promoted_profile_count >= profile_count
             and promotion_path is not None
         )
         check = _check(
@@ -945,6 +1160,7 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
                 "promotion_requested": promotion_requested,
                 "promotion_promoted": promotion_promoted,
                 "promoted_profile_count": promoted_profile_count,
+                "promoted_profile_ids": sorted(promoted_profile_ids),
                 "promotion_path": promotion_path,
             },
         )
@@ -986,11 +1202,22 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
             and profile["residual_rotation_deg"] is not None
             for profile in profile_summaries
         )
-        count_matches_validation = (
-            promoted_profile_count == 0
-            or len(profile_summaries) == promoted_profile_count
+        collection_profile_ids = {
+            profile["profile_id"]
+            for profile in profile_summaries
+            if isinstance(profile["profile_id"], str)
+        }
+        promoted_profiles_present = bool(promoted_profile_ids) and (
+            promoted_profile_ids <= collection_profile_ids
         )
-        ok = all_profiles_valid and count_matches_validation
+        collection_count_matches_promotion = (
+            promoted_profile_count == len(profile_summaries)
+        )
+        ok = (
+            all_profiles_valid
+            and promoted_profiles_present
+            and collection_count_matches_promotion
+        )
         check = _check(
             name="calibration_profiles",
             path=root / CALIBRATION_PROFILES,
@@ -1006,7 +1233,8 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
             details={
                 "profile_count": len(profile_summaries),
                 "promoted_profile_count": promoted_profile_count,
-                "count_matches_validation": count_matches_validation,
+                "promoted_profiles_present": promoted_profiles_present,
+                "collection_count_matches_promotion": collection_count_matches_promotion,
                 "profiles": profile_summaries,
             },
         )
@@ -1047,10 +1275,7 @@ def write_gate_report(run_root: str | Path, *, gate_id: str) -> tuple[Path, dict
     root = Path(run_root)
     report = build_gate_report(root, gate_id=gate_id)
     path = root / REWRITE_GATE_REPORT
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(report, f, indent=2, sort_keys=True)
-        f.write("\n")
+    atomic_write_json(path, report)
     return path, report
 
 
@@ -1664,8 +1889,5 @@ def write_rewrite_status_report(
         gate_run_roots=gate_run_roots,
     )
     path = root / REWRITE_STATUS_REPORT
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(report, f, indent=2, sort_keys=True)
-        f.write("\n")
+    atomic_write_json(path, report)
     return path, report

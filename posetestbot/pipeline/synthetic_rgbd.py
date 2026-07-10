@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     FRAME_METADATA_JSONL,
     RAW_ROBOT_EE_POSES,
@@ -189,9 +190,7 @@ def write_synthetic_rgbd_fixture(
         "frame_metadata_artifact": metadata_path.relative_to(root).as_posix(),
     }
     report_path = root / SYNTHETIC_RGBD_REPORT
-    with open(report_path, "w") as f:
-        json.dump(report, f, indent=2, sort_keys=True)
-        f.write("\n")
+    atomic_write_json(report_path, report)
 
     manifest = load_or_create_run_manifest(root)
     sensors = [

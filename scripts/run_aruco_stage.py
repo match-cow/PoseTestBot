@@ -6,10 +6,30 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from aruco_pose_estimation import process_sensor_folder
-
+from posetestbot.aruco.grid import (
+    detect_sensor_folder,
+    draw_detection_images,
+    estimate_sensor_poses,
+)
+from posetestbot.calibration.intrinsics import (
+    DEFAULT_MAX_RMS_PX,
+    DEFAULT_MAX_VIEW_ERROR_PX,
+    DEFAULT_MIN_ACCEPTED_VIEWS,
+    DEFAULT_MIN_COVERAGE_CELLS,
+    calibrate_intrinsic_profile,
+    factory_intrinsic_profile,
+    load_intrinsic_profile_collection,
+    write_intrinsic_profile_collection,
+)
+from posetestbot.calibration.targets import (
+    DEFAULT_TARGET_SPEC,
+    load_calibration_target_spec,
+    normalize_calibration_target_spec,
+)
 from posetestbot.io.artifacts import (
+    ARUCO_DETECTIONS,
     ARUCO_POSE_ESTIMATION,
+    INTRINSIC_CALIBRATION_PROFILES,
     MATCH_ROBOT_EE_POSES,
     PROCESSED_DIR,
     RGB_DIR,
@@ -29,6 +49,29 @@ def parse_args() -> argparse.Namespace:
             "synchronized sensors in a run."
         )
     )
+    parser.add_argument(
+        "--calibration-target",
+        help=(
+            "Imported calibration_target.v1 JSON. Required for intrinsic "
+            "calibration; omitted only for the legacy factory-intrinsics wrapper."
+        ),
+    )
+    parser.add_argument(
+        "--intrinsics-mode",
+        choices=("factory", "calibrate"),
+        default="factory",
+        help="Wrap SDK color intrinsics or calibrate them from GridBoard views.",
+    )
+    parser.add_argument(
+        "--min-accepted-views", type=int, default=DEFAULT_MIN_ACCEPTED_VIEWS
+    )
+    parser.add_argument(
+        "--min-coverage-cells", type=int, default=DEFAULT_MIN_COVERAGE_CELLS
+    )
+    parser.add_argument(
+        "--max-view-error-px", type=float, default=DEFAULT_MAX_VIEW_ERROR_PX
+    )
+    parser.add_argument("--max-rms-px", type=float, default=DEFAULT_MAX_RMS_PX)
     parser.add_argument(
         "target",
         help=(
@@ -96,6 +139,12 @@ def run_aruco_stage(
     save_images: bool,
     quiet: bool,
     wait_time: int,
+    target: dict | None = None,
+    intrinsics_mode: str = "factory",
+    min_accepted_views: int = DEFAULT_MIN_ACCEPTED_VIEWS,
+    min_coverage_cells: int = DEFAULT_MIN_COVERAGE_CELLS,
+    max_view_error_px: float = DEFAULT_MAX_VIEW_ERROR_PX,
+    max_rms_px: float = DEFAULT_MAX_RMS_PX,
 ) -> Path:
     manifest = load_or_create_run_manifest(run_root)
     stage_name = f"aruco:{sensor_folder.name}"
@@ -103,25 +152,65 @@ def run_aruco_stage(
     write_run_manifest(manifest, run_root)
 
     try:
-        import cv2 as cv
-
-        aruco_dict = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_5X5_50)
-        board = cv.aruco.GridBoard((4, 3), 50, 65, aruco_dict)
-        process_sensor_folder(
-            str(sensor_folder),
-            aruco_dict,
-            board,
-            save_images,
-            quiet,
-            wait_time,
+        target = normalize_calibration_target_spec(target or DEFAULT_TARGET_SPEC)
+        detections = detect_sensor_folder(sensor_folder, target)
+        if intrinsics_mode == "calibrate":
+            if not target.get("generator_source"):
+                raise ValueError(
+                    "--intrinsics-mode calibrate requires an imported ArUcoGridGen calibration target"
+                )
+            intrinsic_profile = calibrate_intrinsic_profile(
+                sensor_folder,
+                detections,
+                target,
+                min_accepted_views=min_accepted_views,
+                min_coverage_cells=min_coverage_cells,
+                max_view_error_px=max_view_error_px,
+                max_rms_px=max_rms_px,
+            )
+        else:
+            intrinsic_profile = factory_intrinsic_profile(sensor_folder)
+        intrinsic_path = run_root / INTRINSIC_CALIBRATION_PROFILES
+        existing = (
+            load_intrinsic_profile_collection(intrinsic_path)
+            if intrinsic_path.is_file()
+            else []
         )
+        identity = (
+            intrinsic_profile["sensor_id"],
+            tuple(intrinsic_profile["resolution"]),
+            intrinsic_profile["orientation"],
+        )
+        retained = [
+            profile
+            for profile in existing
+            if (
+                profile["sensor_id"],
+                tuple(profile["resolution"]),
+                profile["orientation"],
+            )
+            != identity
+        ]
+        write_intrinsic_profile_collection([*retained, intrinsic_profile], intrinsic_path)
+        estimate_sensor_poses(sensor_folder, detections, target, intrinsic_profile)
+        if save_images or not quiet:
+            draw_detection_images(
+                sensor_folder,
+                detections,
+                show=not quiet,
+                wait_time=wait_time,
+            )
     except Exception as exc:
         upsert_stage(manifest, name=stage_name, status="failed", message=str(exc))
         write_run_manifest(manifest, run_root)
         raise
 
     output_path = sensor_folder / ARUCO_POSE_ESTIMATION
-    artifacts = {ARUCO_POSE_ESTIMATION: output_path}
+    artifacts = {
+        ARUCO_DETECTIONS: sensor_folder / ARUCO_DETECTIONS,
+        ARUCO_POSE_ESTIMATION: output_path,
+        INTRINSIC_CALIBRATION_PROFILES: run_root / INTRINSIC_CALIBRATION_PROFILES,
+    }
     if save_images:
         artifacts["aruco_images"] = sensor_folder / "aruco"
 
@@ -142,6 +231,11 @@ def main() -> None:
     sensor_folders = target_sensor_folders(target)
     run_root = Path(args.run_root) if args.run_root else infer_run_root(sensor_folders[0])
     quiet = not args.show
+    target = (
+        load_calibration_target_spec(args.calibration_target)
+        if args.calibration_target
+        else normalize_calibration_target_spec(DEFAULT_TARGET_SPEC)
+    )
 
     outputs = [
         run_aruco_stage(
@@ -150,6 +244,12 @@ def main() -> None:
             save_images=args.save_images,
             quiet=quiet,
             wait_time=args.wait_time,
+            target=target,
+            intrinsics_mode=args.intrinsics_mode,
+            min_accepted_views=args.min_accepted_views,
+            min_coverage_cells=args.min_coverage_cells,
+            max_view_error_px=args.max_view_error_px,
+            max_rms_px=args.max_rms_px,
         )
         for sensor_folder in sensor_folders
     ]
@@ -159,4 +259,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

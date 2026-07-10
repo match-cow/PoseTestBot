@@ -10,6 +10,7 @@ from pathlib import Path
 from posetestbot.pipeline.run_config import (
     create_run_config,
     default_lab_sensors,
+    fixed_transform_from_mapping,
     sensor_config_from_token,
     sequence_plan_from_run_config,
     write_run_config_with_manifest,
@@ -27,6 +28,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("run_root", help="Run folder that will own run_config.json.")
     parser.add_argument("--run-name", default=None, help="Human-readable run name.")
+    parser.add_argument(
+        "--fixed-transform-json",
+        action="append",
+        default=[],
+        help=(
+            "Typed fixed frame edge as JSON with from, to, "
+            "rotation_quaternion_wxyz, and translation_mm. May be repeated."
+        ),
+    )
     parser.add_argument(
         "--robot-mode",
         choices=("fake", "real"),
@@ -142,6 +152,10 @@ def main() -> None:
         sequence_id=args.sequence,
         sequence_options=sequence_options,
         plan_only=not args.execute_sequence,
+        fixed_transforms=tuple(
+            fixed_transform_from_mapping(json.loads(value))
+            for value in args.fixed_transform_json
+        ),
     )
     path = write_run_config_with_manifest(run_root, config)
 

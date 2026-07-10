@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.config import DEFAULT_ROBOT_PORT, DEFAULT_RECEIVER_PORT
 from posetestbot.io.artifacts import CAPTURE_PLAN
 from posetestbot.io.manifest import (
@@ -341,11 +342,7 @@ def load_capture_plan(run_root: str | Path) -> dict[str, Any]:
 
 def write_capture_plan(run_root: str | Path, plan: CapturePlan) -> Path:
     path = capture_plan_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(plan.to_dict(), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, plan.to_dict())
 
 
 def write_capture_plan_with_manifest(

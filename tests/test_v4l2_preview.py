@@ -5,7 +5,9 @@ from posetestbot.sensors.v4l2_preview import (
     V4L2NodeCandidate,
     parse_v4l2_pixel_formats,
     select_best_rgb_node,
+    select_usb_rgb_node,
 )
+from posetestbot.sensors import v4l2_preview
 
 
 def test_parse_v4l2_pixel_formats_accepts_bracketed_and_pixel_format_forms() -> None:
@@ -54,3 +56,20 @@ def test_build_preview_command_targets_rgb_preview_worker(tmp_path) -> None:
         "scripts/stream_sensor_rgb_preview.py",
     ]
     assert "--sensor-json" in command
+
+
+def test_select_usb_rgb_node_uses_usb_matched_candidates(monkeypatch) -> None:
+    candidates = [
+        V4L2NodeCandidate("/dev/video18", interface="00", capabilities=":capture:"),
+        V4L2NodeCandidate("/dev/video19", interface="00", capabilities=":metadata:"),
+    ]
+    monkeypatch.setattr(v4l2_preview, "candidates_for_usb_id", lambda *_args: candidates)
+
+    selection = select_usb_rgb_node(
+        "0c45",
+        "2283",
+        format_reader=lambda path: ("MJPG",) if path == "/dev/video18" else (),
+    )
+
+    assert selection.path == "/dev/video18"
+    assert selection.formats == ("MJPG",)

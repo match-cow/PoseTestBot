@@ -8,16 +8,19 @@ import signal
 import shlex
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
 
 from posetestbot.io.manifest import utc_now_iso
+from posetestbot.io.atomic import atomic_write_json
 
 
 QUEUED = "queued"
 RUNNING = "running"
+CANCELING = "canceling"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
 CANCELED = "canceled"
@@ -72,22 +75,22 @@ class LocalJobRunner:
             raise ValueError("Job command must not be empty")
 
         requested_resources = sorted(set(resources or []))
-        job_id = uuid.uuid4().hex[:12]
-        job_dir = self.job_root / job_id
-        job_dir.mkdir(parents=True, exist_ok=False)
-        job = JobRecord(
-            id=job_id,
-            name=name,
-            command=list(command),
-            cwd=Path(cwd).as_posix() if cwd is not None else None,
-            status=QUEUED,
-            created_at=utc_now_iso(),
-            log_path=(job_dir / "log.txt").as_posix(),
-            resources=requested_resources,
-            parameters=dict(parameters or {}),
-        )
         with self._lock:
             self._check_resources_available(requested_resources)
+            job_id = uuid.uuid4().hex[:12]
+            job_dir = self.job_root / job_id
+            job_dir.mkdir(parents=True, exist_ok=False)
+            job = JobRecord(
+                id=job_id,
+                name=name,
+                command=list(command),
+                cwd=Path(cwd).as_posix() if cwd is not None else None,
+                status=QUEUED,
+                created_at=utc_now_iso(),
+                log_path=(job_dir / "log.txt").as_posix(),
+                resources=requested_resources,
+                parameters=dict(parameters or {}),
+            )
             self._jobs[job_id] = job
             self._persist_job(job)
 
@@ -139,15 +142,44 @@ class LocalJobRunner:
             if job.status in TERMINAL_STATUSES:
                 return JobRecord(**job.to_dict())
             process = self._processes.get(job_id)
-            job.status = CANCELED
+            job.status = CANCELED if job.status == QUEUED else CANCELING
             job.message = "Cancellation requested."
-            job.ended_at = utc_now_iso()
+            if job.status == CANCELED:
+                job.ended_at = utc_now_iso()
             self._append_tail(job, "Cancellation requested.")
             self._persist_job(job)
 
         if process is not None and process.poll() is None:
             self._terminate_process_group(process)
+            with self._lock:
+                job = self._jobs[job_id]
+                if job.status == CANCELING and process.poll() is not None:
+                    job.status = CANCELED
+                    job.ended_at = utc_now_iso()
+                    job.returncode = process.returncode
+                    job.message = "Canceled."
+                    self._persist_job(job)
         return self.get(job_id)
+
+    def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Cancel active jobs and wait briefly for runner threads to finish."""
+
+        with self._lock:
+            active_ids = [
+                job.id
+                for job in self._jobs.values()
+                if job.status not in TERMINAL_STATUSES
+            ]
+        for job_id in active_ids:
+            self.cancel(job_id)
+
+        deadline = time.monotonic() + max(timeout, 0.0)
+        for job_id in active_ids:
+            with self._lock:
+                thread = self._threads.get(job_id)
+            if thread is None:
+                continue
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def log_text(self, job_id: str) -> str:
         job = self.get(job_id)
@@ -159,7 +191,11 @@ class LocalJobRunner:
     def _run_job(self, job_id: str, env: dict[str, str]) -> None:
         with self._lock:
             job = self._jobs[job_id]
-            if job.status == CANCELED:
+            if job.status in {CANCELED, CANCELING}:
+                if job.status == CANCELING:
+                    job.status = CANCELED
+                    job.ended_at = utc_now_iso()
+                    self._persist_job(job)
                 return
             job.status = RUNNING
             job.started_at = utc_now_iso()
@@ -190,7 +226,10 @@ class LocalJobRunner:
 
             with self._lock:
                 self._processes[job_id] = process
-                should_terminate = self._jobs[job_id].status == CANCELED
+                should_terminate = self._jobs[job_id].status in {
+                    CANCELED,
+                    CANCELING,
+                }
 
             if should_terminate:
                 self._terminate_process_group(process)
@@ -208,8 +247,9 @@ class LocalJobRunner:
                 job = self._jobs[job_id]
                 job.returncode = returncode
                 job.ended_at = utc_now_iso()
-                if job.status == CANCELED:
-                    job.message = job.message or "Canceled."
+                if job.status in {CANCELED, CANCELING}:
+                    job.status = CANCELED
+                    job.message = "Canceled."
                 elif returncode == 0:
                     job.status = SUCCEEDED
                     job.message = "Command completed successfully."
@@ -219,6 +259,7 @@ class LocalJobRunner:
                 self._append_tail(job, job.message)
                 self._persist_job(job)
                 self._processes.pop(job_id, None)
+                self._threads.pop(job_id, None)
 
     def _append_tail(self, job: JobRecord, line: str) -> None:
         job.tail.append(line)
@@ -236,17 +277,30 @@ class LocalJobRunner:
 
     def _check_resources_available(self, resources: list[str]) -> None:
         holders = self._resource_holders()
-        conflicts = {
-            resource: holders[resource]
-            for resource in resources
-            if resource in holders
-        }
+        conflicts: dict[str, str] = {}
+        for requested in resources:
+            for held, job_id in holders.items():
+                if self._resources_conflict(requested, held):
+                    label = (
+                        requested
+                        if requested == held
+                        else f"{requested} conflicts with {held}"
+                    )
+                    conflicts[label] = job_id
         if conflicts:
             details = ", ".join(
                 f"{resource} held by job {job_id}"
                 for resource, job_id in sorted(conflicts.items())
             )
             raise ResourceBusyError(f"Requested resources are busy: {details}")
+
+    @staticmethod
+    def _resources_conflict(left: str, right: str) -> bool:
+        return (
+            left == right
+            or left.startswith(f"{right}:")
+            or right.startswith(f"{left}:")
+        )
 
     def _terminate_process_group(
         self, process: subprocess.Popen, *, timeout_s: float = 2.0
@@ -308,9 +362,7 @@ class LocalJobRunner:
 
     def _persist_job(self, job: JobRecord) -> None:
         path = Path(job.log_path).parent / "job.json"
-        with open(path, "w") as f:
-            json.dump(job.to_dict(), f, indent=2, sort_keys=True)
-            f.write("\n")
+        atomic_write_json(path, job.to_dict())
 
     @staticmethod
     def _format_command(command: list[str]) -> str:

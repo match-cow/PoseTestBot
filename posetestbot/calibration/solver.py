@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -14,6 +13,7 @@ import numpy as np
 from pytransform3d import transformations as pt
 from pytransform3d.transform_manager import TransformManager
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.calibration.candidates import (
     DEFAULT_MAX_ROTATION_RESIDUAL_DEG,
     DEFAULT_MAX_TRANSLATION_RESIDUAL_MM,
@@ -35,6 +35,7 @@ from posetestbot.calibration.candidates import (
 )
 from posetestbot.calibration.observations import SCHEMA_VERSION as OBSERVATION_SCHEMA
 from posetestbot.calibration.profiles import (
+    SCHEMA_VERSION as PROFILE_SCHEMA_VERSION,
     CalibrationProfile,
     CalibrationQuality,
     CalibrationStatus,
@@ -43,6 +44,7 @@ from posetestbot.calibration.profiles import (
     TransformFrame,
     profile_from_dict,
     profile_to_dict,
+    rectified_intrinsics_from_native,
     write_profile_collection,
 )
 from posetestbot.io.artifacts import (
@@ -127,14 +129,16 @@ def _profile_from_solution(
     sensor_name = str(sensor["sensor_name"])
     sensor_type = SensorType(str(sensor["sensor_type"]))
     device_id = str(sensor.get("device_id") or sensor_name)
+    intrinsics = _intrinsics_from_sensor_folder(sensor_folder)
     profile = CalibrationProfile(
-        schema_version="calibration.v1",
+        schema_version=PROFILE_SCHEMA_VERSION,
         profile_id=_safe_profile_id(sensor_name, mounting_mode),
         sensor_id=device_id,
         sensor_type=sensor_type,
         mounting_mode=mounting_mode,
         rig_position="wrist" if mounting_mode == MountingMode.EYE_IN_HAND else "static",
-        intrinsics=_intrinsics_from_sensor_folder(sensor_folder),
+        intrinsics=intrinsics,
+        rectified_intrinsics=rectified_intrinsics_from_native(intrinsics),
         extrinsics=RigidTransform(
             from_frame=TransformFrame.CAMERA,
             to_frame=to_frame,
@@ -959,10 +963,7 @@ def write_calibration_solver(
 ) -> tuple[Path, Path]:
     root = Path(run_root)
     report_path = calibration_solver_report_path(root)
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(report_path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
+    atomic_write_json(report_path, dict(report))
 
     profiles = [profile_from_dict(profile) for profile in report.get("profiles", [])]
     profiles_path = calibration_profiles_solved_path(root)

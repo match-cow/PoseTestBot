@@ -1,0 +1,276 @@
+"""Filesystem and scalar validation for the trusted-LAN web API."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, Mapping
+
+from flask import Flask, jsonify, request
+from werkzeug.datastructures import ImmutableMultiDict
+
+from posetestbot.pipeline.sequences import get_pipeline_sequence
+from posetestbot.pipeline.stages import get_pipeline_stage
+from posetestbot.web.paths import APP_ROOT
+
+DEFAULT_RUN_ROOT = APP_ROOT / "working_data"
+DEFAULT_INPUT_ROOTS = (APP_ROOT / "object_models", APP_ROOT / "scripts" / "default_data")
+TRUE_STRINGS = {"1", "true", "yes", "on"}
+FALSE_STRINGS = {"0", "false", "no", "off"}
+BOOLEAN_FIELDS = {
+    "allow_cameras",
+    "allow_failed_preflight",
+    "allow_missing_preflight",
+    "allow_real_robot",
+    "allow_stale_preflight",
+    "compare_hand_eye_methods",
+    "download",
+    "from_detected_sensors",
+    "include_runtimes",
+    "include_sensors",
+    "include_terminal",
+    "no_gt",
+    "no_masks",
+    "no_nearest_pose_threshold",
+    "no_residual_thresholds",
+    "no_runtimes",
+    "no_sensors",
+    "plan_only",
+    "promote",
+    "require_valid",
+}
+RUN_PATH_FIELDS = {"candidates", "observations", "profiles", "run_config"}
+OUTPUT_PATH_FIELDS = {"output_profiles"}
+INPUT_PATH_FIELDS = {
+    "calibration_profiles",
+    "object_folder",
+    "target",
+    "target_spec",
+    "target_to_reference",
+    "target_to_reference_path",
+}
+
+
+def parse_strict_bool(value: Any, *, name: str, default: bool | None = None) -> bool:
+    if value is None and default is not None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in TRUE_STRINGS:
+            return True
+        if normalized in FALSE_STRINGS:
+            return False
+    raise ValueError(
+        f"{name} must be a JSON boolean or one of: "
+        "true, false, 1, 0, yes, no, on, off"
+    )
+
+
+def _configured_roots(variable: str, defaults: tuple[Path, ...]) -> tuple[Path, ...]:
+    roots = [path.resolve() for path in defaults]
+    raw = os.environ.get(variable, "")
+    for entry in raw.split(os.pathsep):
+        if not entry.strip():
+            continue
+        path = Path(entry).expanduser()
+        if not path.is_absolute():
+            path = APP_ROOT / path
+        resolved = path.resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def web_run_roots() -> tuple[Path, ...]:
+    return _configured_roots("POSETESTBOT_WEB_RUN_ROOTS", (DEFAULT_RUN_ROOT,))
+
+
+def web_input_roots() -> tuple[Path, ...]:
+    return _configured_roots("POSETESTBOT_WEB_INPUT_ROOTS", DEFAULT_INPUT_ROOTS)
+
+
+def _is_below(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _require_below(path: Path, roots: tuple[Path, ...], *, label: str) -> Path:
+    resolved = path.expanduser().resolve()
+    if not any(_is_below(resolved, root) for root in roots):
+        allowed = ", ".join(root.as_posix() for root in roots)
+        raise ValueError(f"{label} must remain below an allowed root: {allowed}")
+    return resolved
+
+
+def resolve_web_run_root(value: Any) -> Path:
+    if not isinstance(value, str | Path) or not str(value).strip():
+        raise ValueError("run_root must be a non-empty path")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        if path.parts and path.parts[0] == DEFAULT_RUN_ROOT.name:
+            path = APP_ROOT / path
+        else:
+            path = DEFAULT_RUN_ROOT / path
+    return _require_below(path, web_run_roots(), label="run_root")
+
+
+def resolve_web_scoped_path(
+    value: Any,
+    *,
+    scope: str,
+    run_root: Path,
+    label: str,
+) -> Path:
+    if not isinstance(value, str | Path) or not str(value).strip():
+        raise ValueError(f"{label} must be a non-empty path")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        if scope == "repository":
+            path = APP_ROOT / path
+        elif scope == "input" and (APP_ROOT / path).exists():
+            path = APP_ROOT / path
+        else:
+            path = run_root / path
+    if scope in {"run", "output"}:
+        roots = (run_root.resolve(),)
+    elif scope == "input":
+        roots = (run_root.resolve(), *web_input_roots())
+    elif scope == "repository":
+        roots = (APP_ROOT.resolve(),)
+    else:
+        raise ValueError(f"Unknown web path scope: {scope}")
+    return _require_below(path, roots, label=label)
+
+
+def _normalize_stage_options(
+    stage_id: str,
+    options: Mapping[str, Any],
+    *,
+    run_root: Path,
+) -> dict[str, Any]:
+    stage = get_pipeline_stage(stage_id)
+    normalized = dict(options)
+    for parameter in stage.parameters:
+        if parameter.kind != "path" or parameter.name not in normalized:
+            continue
+        values = normalized[parameter.name]
+        raw_values = values if parameter.multiple else [values]
+        if not isinstance(raw_values, list | tuple):
+            raise ValueError(f"Pipeline option {parameter.name!r} must be a list")
+        resolved = [
+            resolve_web_scoped_path(
+                value,
+                scope=parameter.path_scope or "run",
+                run_root=run_root,
+                label=f"Pipeline option {parameter.name!r}",
+            ).as_posix()
+            for value in raw_values
+        ]
+        normalized[parameter.name] = resolved if parameter.multiple else resolved[0]
+    return normalized
+
+
+def _normalize_pipeline_payload(data: dict[str, Any], run_root: Path) -> None:
+    options = data.get("options")
+    if options is None:
+        return
+    if not isinstance(options, Mapping):
+        raise ValueError("options must be an object")
+    if request.path == "/pipeline/run" and isinstance(data.get("stage"), str):
+        data["options"] = _normalize_stage_options(
+            data["stage"], options, run_root=run_root
+        )
+    elif request.path == "/pipeline/run-sequence" and isinstance(
+        data.get("sequence"), str
+    ):
+        sequence = get_pipeline_sequence(data["sequence"])
+        step_stages = {step.id: step.stage_id for step in sequence.steps}
+        stage_ids = {step.stage_id for step in sequence.steps}
+        normalized_groups = {}
+        for group, values in options.items():
+            if not isinstance(values, Mapping):
+                raise ValueError(f"Pipeline sequence options for {group!r} must be an object")
+            stage_id = step_stages.get(str(group), str(group))
+            if stage_id not in stage_ids:
+                normalized_groups[str(group)] = dict(values)
+                continue
+            normalized_groups[str(group)] = _normalize_stage_options(
+                stage_id, values, run_root=run_root
+            )
+        data["options"] = normalized_groups
+
+
+def _normalize_json_payload(data: dict[str, Any]) -> None:
+    for key in BOOLEAN_FIELDS & data.keys():
+        data[key] = parse_strict_bool(data[key], name=key)
+    raw_run_root = data.get("run_root")
+    if raw_run_root is None:
+        return
+    run_root = resolve_web_run_root(raw_run_root)
+    data["run_root"] = run_root.as_posix()
+    for key in RUN_PATH_FIELDS & data.keys():
+        if data[key] not in {None, ""}:
+            data[key] = resolve_web_scoped_path(
+                data[key], scope="run", run_root=run_root, label=key
+            ).as_posix()
+    for key in OUTPUT_PATH_FIELDS & data.keys():
+        if data[key] not in {None, ""}:
+            data[key] = resolve_web_scoped_path(
+                data[key], scope="output", run_root=run_root, label=key
+            ).as_posix()
+    for key in INPUT_PATH_FIELDS & data.keys():
+        if isinstance(data[key], str) and data[key]:
+            data[key] = resolve_web_scoped_path(
+                data[key], scope="input", run_root=run_root, label=key
+            ).as_posix()
+    _normalize_pipeline_payload(data, run_root)
+
+
+def _normalize_query_arguments() -> None:
+    pairs = list(request.args.items(multi=True))
+    if not pairs:
+        return
+    run_root: Path | None = None
+    normalized_pairs: list[tuple[str, str]] = []
+    for key, value in pairs:
+        if key == "run_root":
+            run_root = resolve_web_run_root(value)
+            value = run_root.as_posix()
+        elif key in BOOLEAN_FIELDS:
+            value = "true" if parse_strict_bool(value, name=key) else "false"
+        normalized_pairs.append((key, value))
+    if run_root is not None:
+        rewritten = []
+        for key, value in normalized_pairs:
+            scope = None
+            if key in RUN_PATH_FIELDS:
+                scope = "run"
+            elif key in OUTPUT_PATH_FIELDS:
+                scope = "output"
+            elif key in INPUT_PATH_FIELDS:
+                scope = "input"
+            if scope is not None and value:
+                value = resolve_web_scoped_path(
+                    value, scope=scope, run_root=run_root, label=key
+                ).as_posix()
+            rewritten.append((key, value))
+        normalized_pairs = rewritten
+    request.args = ImmutableMultiDict(normalized_pairs)
+
+
+def install_request_security(app: Flask) -> None:
+    @app.before_request
+    def validate_request_boundaries():
+        try:
+            _normalize_query_arguments()
+            data = request.get_json(silent=True)
+            if isinstance(data, dict):
+                _normalize_json_payload(data)
+        except (TypeError, ValueError) as exc:
+            return jsonify({"output": str(exc)}), 400
+        return None

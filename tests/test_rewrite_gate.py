@@ -42,35 +42,79 @@ def populate_bop_export(
     *,
     with_targets: bool = True,
 ) -> None:
-    scene = run_root / BOP_DIR / "realsense_123" / "test" / "000001"
+    scene = run_root / BOP_DIR / "test" / "000001"
     (scene / RGB_DIR).mkdir(parents=True)
     (scene / DEPTH_DIR).mkdir()
     (scene / RGB_DIR / "000000.png").write_bytes(b"rgb")
     (scene / DEPTH_DIR / "000000.png").write_bytes(b"depth")
     write_json(scene / "scene_camera.json", {"0": {"cam_K": [1, 0, 0, 0, 1, 0, 0, 0, 1]}})
-    write_json(scene / "scene_gt.json", {"0": []})
+    write_json(
+        scene / "scene_gt.json",
+        {
+            "0": [
+                {
+                    "obj_id": 1,
+                    "cam_R_m2c": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                    "cam_t_m2c": [0, 0, 100],
+                }
+            ]
+        },
+    )
+    write_json(scene / "scene_gt_info.json", {"0": [{}]})
+    write_json(
+        run_root / BOP_DIR / "dataset_info.json",
+        {
+            "schema_version": "posetestbot_bop_dataset_info.v1",
+            "name": "fixture",
+            "bop_format": "scenewise",
+            "scene_count": 1,
+            "sensors": ["realsense_123"],
+        },
+    )
+    write_json(
+        run_root / BOP_DIR / "posetestbot_bop_frame_map.json",
+        {
+            "schema_version": "posetestbot_bop_frame_map.v2",
+            "scenes": {
+                "1": {
+                    "sensor_name": "realsense_123",
+                    "frames": {"0": {"source_frame_id": "000000.png"}},
+                }
+            },
+        },
+    )
     write_json(
         run_root / BOP_DIR / BOP_EXPORT_MANIFEST,
         {
-            "schema_version": "bop_export_manifest.v1",
+            "schema_version": "bop_export_manifest.v2",
+            "format": "bop-scenewise",
+            "validation": {"status": "ok"},
             "exports": [
                 {
                     "sensor_name": "realsense_123",
                     "scene_id": 1,
                     "split": "test",
-                    "scene_folder": scene.relative_to(run_root).as_posix(),
+                    "scene_folder": "test/000001",
+                    "calibration_profile_id": "profile-1",
                 }
+            ],
+            "calibration_profiles": [
+                {"profile_id": "profile-1", "status": "valid"}
             ],
             "object_models": [
                 {
                     "object_name": "cube",
                     "obj_id": 1,
-                    "bop_path": "bop/models/obj_000001.ply",
+                    "bop_path": "models/obj_000001.ply",
                 }
             ],
         },
     )
-    write_json(run_root / BOP_DIR / "models" / "models_info.json", {"1": {"diameter": 1}})
+    write_json(
+        run_root / BOP_DIR / "models" / "models_info.json",
+        {"1": {"diameter": 1}},
+    )
+    (run_root / BOP_DIR / "models" / "obj_000001.ply").write_text("ply\n")
     if with_targets:
         write_json(
             run_root / BOP_DIR / BOP_TARGETS_BOP19,
@@ -103,7 +147,7 @@ def populate_fake_acquisition_to_bop(run_root: Path) -> None:
     )
     write_json(
         run_root / SYNC_QUALITY_REPORT,
-        {"schema_version": "sync_quality_report.v1", "overall_status": "ok"},
+        {"schema_version": "sync_quality_report.v2", "overall_status": "ok"},
     )
     populate_bop_export(run_root)
 
@@ -163,6 +207,7 @@ def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> No
                 "requested": True,
                 "promoted": True,
                 "profile_count": 1,
+                "promoted_profile_ids": ["profile-1"],
                 "path": "calibration_profiles.json",
             },
         },
@@ -190,6 +235,50 @@ def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> No
     report = build_calibration_validation_gate_report(run_root)
 
     assert report["gate_id"] == CALIBRATION_VALIDATION_GATE_ID
+    assert report["overall_status"] == "ready"
+
+
+def test_calibration_validation_gate_allows_preserved_valid_profiles(tmp_path: Path) -> None:
+    run_root = tmp_path / "calibration-merged-run"
+    write_json(
+        run_root / CALIBRATION_VALIDATION_REPORT,
+        {
+            "schema_version": "calibration_validation_report.v1",
+            "overall_status": "ok",
+            "profile_count": 1,
+            "promotable_profile_count": 1,
+            "promotion": {
+                "requested": True,
+                "promoted": True,
+                "profile_count": 2,
+                "promoted_profile_ids": ["profile-new"],
+                "preserved_profile_ids": ["profile-existing"],
+                "path": "calibration_profiles.json",
+            },
+        },
+    )
+    profiles = []
+    for profile_id in ("profile-existing", "profile-new"):
+        profiles.append(
+            {
+                "profile_id": profile_id,
+                "sensor_id": profile_id,
+                "sensor_type": "realsense_d435",
+                "status": "valid",
+                "quality": {
+                    "num_inliers": 8,
+                    "residual_translation_mm": 1.0,
+                    "residual_rotation_deg": 0.5,
+                },
+            }
+        )
+    write_json(
+        run_root / CALIBRATION_PROFILES,
+        {"schema_version": "calibration_profiles.v1", "profiles": profiles},
+    )
+
+    report = build_calibration_validation_gate_report(run_root)
+
     assert report["overall_status"] == "ready"
 
 

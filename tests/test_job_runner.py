@@ -9,6 +9,7 @@ import pytest
 
 from posetestbot.jobs.runner import (
     CANCELED,
+    CANCELING,
     FAILED,
     QUEUED,
     SUCCEEDED,
@@ -62,7 +63,7 @@ def test_local_job_runner_can_cancel_running_command(tmp_path: Path) -> None:
     canceled = runner.cancel(job.id)
     finished = runner.wait(job.id, timeout=5)
 
-    assert canceled.status == CANCELED
+    assert canceled.status in {CANCELING, CANCELED}
     assert finished.status == CANCELED
 
 
@@ -152,3 +153,61 @@ def test_local_job_runner_rejects_busy_resources(tmp_path: Path) -> None:
         assert runner.resource_holders()["robot"] == job.id
     finally:
         runner.cancel(job.id)
+
+
+def test_local_job_runner_applies_hierarchical_resource_conflicts(
+    tmp_path: Path,
+) -> None:
+    runner = LocalJobRunner(tmp_path / "jobs")
+    preview = runner.submit(
+        name="preview",
+        command=[sys.executable, "-c", "import time; time.sleep(10)"],
+        resources=["camera:realsense_d435:123"],
+    )
+    try:
+        with pytest.raises(ResourceBusyError, match="camera conflicts with"):
+            runner.submit(
+                name="capture",
+                command=[sys.executable, "-c", "print('blocked')"],
+                resources=["camera"],
+            )
+        other = runner.submit(
+            name="other-preview",
+            command=[sys.executable, "-c", "print('allowed')"],
+            resources=["camera:realsense_d435:456"],
+        )
+        assert runner.wait(other.id, timeout=5).status == SUCCEEDED
+    finally:
+        runner.cancel(preview.id)
+        runner.wait(preview.id, timeout=5)
+
+
+def test_canceling_job_retains_resource_until_process_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = LocalJobRunner(tmp_path / "jobs")
+    job = runner.submit(
+        name="sleep",
+        command=[sys.executable, "-c", "import time; time.sleep(10)"],
+        resources=["camera"],
+    )
+    deadline = time.time() + 5
+    while job.id not in runner._processes and time.time() < deadline:
+        time.sleep(0.01)
+    process = runner._processes[job.id]
+    terminate = runner._terminate_process_group
+    monkeypatch.setattr(runner, "_terminate_process_group", lambda _process: None)
+
+    canceled = runner.cancel(job.id)
+
+    assert canceled.status == CANCELING
+    assert runner.resource_holders()["camera"] == job.id
+    with pytest.raises(ResourceBusyError):
+        runner.submit(
+            name="blocked",
+            command=[sys.executable, "-c", "pass"],
+            resources=["camera:realsense_d435:123"],
+        )
+
+    terminate(process)
+    assert runner.wait(job.id, timeout=5).status == CANCELED

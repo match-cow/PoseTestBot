@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from posetestbot.io.artifacts import (
     CAPTURE_EXECUTION_LOGS_DIR,
@@ -55,6 +59,12 @@ class FakePersistentProcess:
 
     def wait(self, timeout=None):
         raise subprocess.TimeoutExpired(self.command, timeout)
+
+
+class FakeSignalProcess(FakePersistentProcess):
+    def wait(self, timeout=None):
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("SIGTERM handler should interrupt receiver wait")
 
 
 def fake_sensor_status() -> dict:
@@ -201,26 +211,21 @@ def test_capture_execution_runs_pose_only_fake_plan_with_logs(
     receiver_commands: list[list[str]] = []
 
     def fake_popen(command, **kwargs):
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_commands.append(list(command))
+            (run_root / RAW_ROBOT_EE_POSES).write_text(
+                json.dumps(
+                    {
+                        "0": {"motion": "circ_far", "pose": {"X": 1}},
+                        "1": {"motion": "zoom", "pose": {"X": 2}},
+                    }
+                )
+            )
+            return FakeBackgroundProcess(list(command), kwargs["stdout"])
         background_commands.append(list(command))
         return FakeBackgroundProcess(list(command), kwargs["stdout"])
 
-    def fake_run(command, **kwargs):
-        receiver_commands.append(list(command))
-        stdout = kwargs["stdout"]
-        stdout.write("pose receiver started\n")
-        (run_root / RAW_ROBOT_EE_POSES).write_text(
-            json.dumps(
-                {
-                    "0": {"motion": "circ_far", "pose": {"X": 1}},
-                    "1": {"motion": "zoom", "pose": {"X": 2}},
-                }
-            )
-        )
-        stdout.write("pose receiver finished\n")
-        return subprocess.CompletedProcess(command, 0)
-
     monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
-    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.run", fake_run)
     monkeypatch.setattr("posetestbot.pipeline.capture_execution.time.sleep", lambda _: None)
 
     report_path, report = run_capture_execution(
@@ -263,7 +268,7 @@ def test_capture_execution_runs_pose_only_fake_plan_with_logs(
     assert report["processes"][0]["started_at"]
     assert report["processes"][0]["ended_at"]
     assert report["processes"][0]["elapsed_s"] >= 0
-    assert report["processes"][1]["pid"] is None
+    assert report["processes"][1]["pid"] == 12345
     assert report["processes"][1]["started_at"]
     assert report["processes"][1]["ended_at"]
     assert report["processes"][1]["elapsed_s"] >= 0
@@ -309,20 +314,16 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
     terminated_commands: list[list[str]] = []
 
     def fake_popen(command, **kwargs):
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_commands.append(list(command))
+            (run_root / RAW_ROBOT_EE_POSES).write_text(
+                json.dumps({"0": {"motion": "circ_far", "pose": {"X": 1}}})
+            )
+            return FakeBackgroundProcess(list(command), kwargs["stdout"])
         background_commands.append(list(command))
         if any(item.endswith("capture_realsense_720p.py") for item in command):
             return FakePersistentProcess(list(command), kwargs["stdout"])
         return FakeBackgroundProcess(list(command), kwargs["stdout"])
-
-    def fake_run(command, **kwargs):
-        receiver_commands.append(list(command))
-        stdout = kwargs["stdout"]
-        stdout.write("pose receiver started\n")
-        (run_root / RAW_ROBOT_EE_POSES).write_text(
-            json.dumps({"0": {"motion": "circ_far", "pose": {"X": 1}}})
-        )
-        stdout.write("pose receiver finished\n")
-        return subprocess.CompletedProcess(command, 0)
 
     def fake_terminate(process, *, timeout_s):
         terminated_commands.append(list(process.command))
@@ -330,7 +331,6 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
         process.log_file.write("fake supervisor stopped process\n")
 
     monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
-    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.run", fake_run)
     monkeypatch.setattr("posetestbot.pipeline.capture_execution.time.sleep", lambda _: None)
     monkeypatch.setattr(
         "posetestbot.pipeline.capture_execution._terminate_process_group",
@@ -381,3 +381,47 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
         "python",
         "scripts/pose_receiver_udp_json.py",
     ]
+
+
+def test_capture_execution_sigterm_cancels_every_spawned_process(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = tmp_path / "run-canceled"
+    write_run_config(run_root, create_run_config(run_root=run_root))
+    spawned: list[FakePersistentProcess] = []
+    terminated: list[FakePersistentProcess] = []
+
+    def fake_popen(command, **kwargs):
+        process: FakePersistentProcess
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            process = FakeSignalProcess(list(command), kwargs["stdout"])
+        else:
+            process = FakePersistentProcess(list(command), kwargs["stdout"])
+        spawned.append(process)
+        return process
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -signal.SIGTERM
+        terminated.append(process)
+
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="canceled by SIGTERM"):
+        run_capture_execution(run_root, timeout_s=5)
+
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    assert report["status"] == "canceled"
+    assert "SIGTERM" in report["message"]
+    assert len(spawned) == 2
+    assert terminated == spawned
+    assert all(process["status"] == "terminated" for process in report["processes"])
+    persisted = json.loads((run_root / CAPTURE_EXECUTION_STATUS).read_text())
+    assert persisted["status"] == "canceled"
+    assert persisted["active_process_count"] == 0

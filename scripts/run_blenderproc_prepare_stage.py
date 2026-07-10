@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
+from posetestbot.blenderproc.preparation import (
+    load_camera_transformations,
+    prepare_sensor_folders,
+    write_camera_transformations,
+)
 from posetestbot.calibration.profiles import (
     blenderproc_camera_transform_map_from_profiles,
     load_profile_collection,
-    write_legacy_camera_ee_transform_map,
 )
 from posetestbot.io.artifacts import (
     CALIBRATION_DIR,
@@ -24,9 +27,6 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
-
-import blenderproc_prepare_multi
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
         "--calibration-profiles",
         default=None,
         help=(
-            "calibration.v1 profile collection. When supplied, matching "
+            "calibration.v2 profile collection. When supplied, matching "
             "eye-in-hand or static profiles are resolved for synchronized sensor "
             "folders and converted to the camera transform map consumed by the "
             "current prep script."
@@ -75,18 +75,10 @@ def parse_args() -> argparse.Namespace:
 def synchronized_input_folder(run_root: Path, explicit_input_folder: str | None) -> Path:
     if explicit_input_folder:
         return Path(explicit_input_folder)
+    rectified = run_root / PROCESSED_DIR / "rectified"
+    if rectified.is_dir():
+        return rectified
     return run_root / PROCESSED_DIR / SYNCHRONIZED_DIR
-
-
-def blenderproc_artifacts(input_folder: Path, subdir: str) -> dict[str, Path]:
-    artifacts = {}
-    for sensor_folder in sorted(input_folder.iterdir()):
-        if not sensor_folder.is_dir():
-            continue
-        blenderproc_folder = sensor_folder / subdir
-        if blenderproc_folder.exists():
-            artifacts[f"{sensor_folder.name}:{subdir}"] = blenderproc_folder
-    return artifacts
 
 
 def synchronized_sensor_names(input_folder: Path) -> list[str]:
@@ -101,16 +93,12 @@ def derived_camera_transform_path(run_root: Path) -> Path:
 
 def camera_transformations_from_calibration_profiles(
     *,
-    run_root: Path,
     input_folder: Path,
     calibration_profiles_path: Path,
-) -> Path:
+) -> dict[str, dict[str, object]]:
     profiles = load_profile_collection(calibration_profiles_path)
-    transform_map = blenderproc_camera_transform_map_from_profiles(
+    return blenderproc_camera_transform_map_from_profiles(
         profiles, synchronized_sensor_names(input_folder)
-    )
-    return write_legacy_camera_ee_transform_map(
-        transform_map, derived_camera_transform_path(run_root)
     )
 
 
@@ -118,21 +106,16 @@ def run_prepare(
     *,
     input_folder: Path,
     object_folder: Path,
-    camera_transformations: Path,
+    camera_transformations: dict[str, object],
     subdir: str,
-) -> None:
-    original_argv = sys.argv[:]
-    try:
-        sys.argv = [
-            "blenderproc_prepare_multi.py",
-            str(input_folder),
-            str(object_folder),
-            str(camera_transformations),
-            subdir,
-        ]
-        blenderproc_prepare_multi.main()
-    finally:
-        sys.argv = original_argv
+) -> dict[str, Path]:
+    prepared = prepare_sensor_folders(
+        input_folder=input_folder,
+        object_folder=object_folder,
+        camera_transformations=camera_transformations,
+        subdir=subdir,
+    )
+    return {f"{item.sensor_name}:{subdir}": item.output_folder for item in prepared}
 
 
 def main() -> None:
@@ -140,7 +123,7 @@ def main() -> None:
     run_root = Path(args.run_root)
     input_folder = synchronized_input_folder(run_root, args.input_folder)
     object_folder = Path(args.object_folder)
-    camera_transformations = Path(args.camera_transformations)
+    camera_transformations_path = Path(args.camera_transformations)
     calibration_profiles = Path(args.calibration_profiles) if args.calibration_profiles else None
 
     manifest = load_or_create_run_manifest(run_root)
@@ -151,19 +134,26 @@ def main() -> None:
         stage_artifacts: dict[str, Path] = {}
         if calibration_profiles is not None:
             camera_transformations = camera_transformations_from_calibration_profiles(
-                run_root=run_root,
                 input_folder=input_folder,
                 calibration_profiles_path=calibration_profiles,
             )
             stage_artifacts[CALIBRATION_PROFILES] = calibration_profiles
-            stage_artifacts[DERIVED_CAMERA_EE_TRANSFORM] = camera_transformations
+        else:
+            camera_transformations = dict(
+                load_camera_transformations(camera_transformations_path)
+            )
 
-        run_prepare(
+        prepared_artifacts = run_prepare(
             input_folder=input_folder,
             object_folder=object_folder,
             camera_transformations=camera_transformations,
             subdir=args.subdir,
         )
+        if calibration_profiles is not None:
+            transform_path = write_camera_transformations(
+                derived_camera_transform_path(run_root), camera_transformations
+            )
+            stage_artifacts[DERIVED_CAMERA_EE_TRANSFORM] = transform_path
     except Exception as exc:
         upsert_stage(
             manifest,
@@ -174,7 +164,7 @@ def main() -> None:
         write_run_manifest(manifest, run_root)
         raise
 
-    artifacts = {**stage_artifacts, **blenderproc_artifacts(input_folder, args.subdir)}
+    artifacts = {**stage_artifacts, **prepared_artifacts}
     upsert_stage(
         manifest,
         name="blenderproc_prepare",

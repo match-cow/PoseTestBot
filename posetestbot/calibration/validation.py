@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.calibration.candidates import SCHEMA_VERSION as CANDIDATE_SCHEMA
 from posetestbot.calibration.profiles import (
     CalibrationProfile,
     CalibrationStatus,
     load_profile_collection,
     profile_from_dict,
-    profile_to_dict,
     write_profile_collection,
 )
 from posetestbot.io.artifacts import (
@@ -34,6 +34,7 @@ from posetestbot.io.manifest import (
 
 SCHEMA_VERSION = "calibration_validation.v1"
 SOLVER_SCHEMA_VERSION = "calibration_solver.v1"
+GRID_SOLVER_SCHEMA_VERSION = "calibration_solver.v2"
 DEFAULT_MIN_INLIERS = 6
 DEFAULT_MAX_MEAN_TRANSLATION_RESIDUAL_MM = 10.0
 DEFAULT_MAX_MEAN_ROTATION_RESIDUAL_DEG = 5.0
@@ -256,6 +257,7 @@ def build_calibration_validation(
     ),
     max_mean_rotation_residual_deg: float | None = DEFAULT_MAX_MEAN_ROTATION_RESIDUAL_DEG,
     max_outlier_ratio: float | None = DEFAULT_MAX_OUTLIER_RATIO,
+    select_profiles: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if min_inliers < 1:
         raise ValueError("min_inliers must be at least 1")
@@ -274,17 +276,26 @@ def build_calibration_validation(
         raise ValueError("max_outlier_ratio must be between 0 and 1")
 
     root = Path(run_root)
-    candidate_path = _resolve_path(root, candidates_path, CALIBRATION_CANDIDATES)
+    if candidates_path is None and not (root / CALIBRATION_CANDIDATES).is_file() and (
+        root / CALIBRATION_SOLVER_REPORT
+    ).is_file():
+        candidate_path = root / CALIBRATION_SOLVER_REPORT
+    else:
+        candidate_path = _resolve_path(root, candidates_path, CALIBRATION_CANDIDATES)
     candidate_report = _read_json(candidate_path)
     report_schema = candidate_report.get("schema_version")
-    if report_schema not in {CANDIDATE_SCHEMA, SOLVER_SCHEMA_VERSION}:
+    if report_schema not in {
+        CANDIDATE_SCHEMA,
+        SOLVER_SCHEMA_VERSION,
+        GRID_SOLVER_SCHEMA_VERSION,
+    }:
         raise ValueError(
             "Unsupported calibration candidate/solver schema: "
             f"{report_schema!r}"
         )
     default_profiles = (
         CALIBRATION_PROFILES_SOLVED
-        if report_schema == SOLVER_SCHEMA_VERSION
+        if report_schema in {SOLVER_SCHEMA_VERSION, GRID_SOLVER_SCHEMA_VERSION}
         else CALIBRATION_PROFILES_FROM_OBSERVATIONS
     )
     profile_path = _resolve_path(root, profiles_path, default_profiles)
@@ -318,8 +329,76 @@ def build_calibration_validation(
             )
         )
 
+    requested_selections = {str(key): str(item) for key, item in (select_profiles or {}).items()}
+    grouped: dict[tuple[str, str, str, str], list[CalibrationProfile]] = {}
+    for profile in profiles:
+        grouped.setdefault(
+            (
+                profile.sensor_type.value,
+                profile.sensor_id,
+                profile.mounting_mode.value,
+                profile.rig_position,
+            ),
+            [],
+        ).append(profile)
+    selected_ids: set[str] = set()
+    consumed_selection_keys: set[str] = set()
+    for slot, slot_profiles in grouped.items():
+        sensor_name = str(slot_profiles[0].metadata.get("sensor_name") or slot[1])
+        selection_key = sensor_name if sensor_name in requested_selections else slot[1]
+        selected_id = requested_selections.get(selection_key)
+        if selected_id is not None:
+            consumed_selection_keys.add(selection_key)
+            available = {profile.profile_id for profile in slot_profiles}
+            if selected_id not in available:
+                checks.append(
+                    _check(
+                        f"profile_selection:{sensor_name}",
+                        "error",
+                        f"Selected profile {selected_id!r} is not a candidate for {sensor_name}.",
+                        details={"available_profile_ids": sorted(available)},
+                    )
+                )
+            else:
+                selected_ids.add(selected_id)
+                checks.append(
+                    _check(
+                        f"profile_selection:{sensor_name}",
+                        "ok",
+                        f"Selected profile {selected_id} for {sensor_name}.",
+                    )
+                )
+        elif len(slot_profiles) == 1:
+            selected_ids.add(slot_profiles[0].profile_id)
+        else:
+            checks.append(
+                _check(
+                    f"profile_selection:{sensor_name}",
+                    "error",
+                    (
+                        f"{sensor_name} has {len(slot_profiles)} calibration candidates; "
+                        "an explicit per-sensor selection is required."
+                    ),
+                    details={
+                        "available_profile_ids": sorted(
+                            profile.profile_id for profile in slot_profiles
+                        )
+                    },
+                )
+            )
+    unknown_selection_keys = sorted(set(requested_selections) - consumed_selection_keys)
+    if unknown_selection_keys:
+        checks.append(
+            _check(
+                "profile_selection_keys",
+                "error",
+                "Selection mapping contains unknown sensors: " + ", ".join(unknown_selection_keys),
+            )
+        )
+
     profile_summaries: list[dict[str, Any]] = []
     for profile in profiles:
+        selected = profile.profile_id in selected_ids
         profile_checks = _profile_validation_checks(
             profile,
             min_inliers=min_inliers,
@@ -327,7 +406,8 @@ def build_calibration_validation(
             max_mean_rotation_residual_deg=max_mean_rotation_residual_deg,
             max_outlier_ratio=max_outlier_ratio,
         )
-        checks.extend(profile_checks)
+        if selected:
+            checks.extend(profile_checks)
         profile_status = _overall_status(profile_checks)
         profile_summaries.append(
             {
@@ -337,7 +417,8 @@ def build_calibration_validation(
                 "mounting_mode": profile.mounting_mode.value,
                 "source_status": profile.status.value,
                 "validation_status": profile_status,
-                "promotable": profile_status == "ok",
+                "selected": selected,
+                "promotable": profile_status == "ok" and selected,
                 "num_observations": profile.quality.num_observations,
                 "num_inliers": profile.quality.num_inliers,
                 "outlier_count": int(profile.metadata.get("outlier_count", 0) or 0),
@@ -369,6 +450,12 @@ def build_calibration_validation(
             "max_mean_rotation_residual_deg": max_mean_rotation_residual_deg,
             "max_outlier_ratio": max_outlier_ratio,
         },
+        "selection": {
+            "requested": requested_selections,
+            "selected_profile_ids": sorted(selected_ids),
+            "explicit_selection_required": any(len(items) > 1 for items in grouped.values()),
+        },
+        "cross_method_comparisons": candidate_report.get("comparisons", []),
         "promotion": {"requested": False, "promoted": False, "path": None},
         "checks": checks,
         "profiles": profile_summaries,
@@ -384,11 +471,14 @@ def _promoted_profiles(
     report: Mapping[str, Any],
     *,
     operator: str | None,
+    selected_profile_ids: set[str] | None = None,
 ) -> list[CalibrationProfile]:
     generated_at = str(report["generated_at"])
     validation_report_path = str(report["candidate_report_path"])
     promoted = []
     for profile in profiles:
+        if selected_profile_ids is not None and profile.profile_id not in selected_profile_ids:
+            continue
         metadata = dict(profile.metadata)
         metadata.update(
             {
@@ -410,16 +500,40 @@ def _promoted_profiles(
     return promoted
 
 
+def _profile_slot(profile: CalibrationProfile) -> tuple[str, str, str, str]:
+    return (
+        profile.sensor_type.value,
+        profile.sensor_id,
+        profile.mounting_mode.value,
+        profile.rig_position,
+    )
+
+
+def _merge_promoted_profiles(
+    existing: list[CalibrationProfile], promoted: list[CalibrationProfile]
+) -> tuple[list[CalibrationProfile], list[str], list[str]]:
+    promoted_ids = {profile.profile_id for profile in promoted}
+    promoted_slots = {_profile_slot(profile) for profile in promoted}
+    replaced = [
+        profile.profile_id
+        for profile in existing
+        if profile.profile_id in promoted_ids or _profile_slot(profile) in promoted_slots
+    ]
+    preserved = [
+        profile
+        for profile in existing
+        if profile.profile_id not in promoted_ids
+        and _profile_slot(profile) not in promoted_slots
+    ]
+    return [*preserved, *promoted], replaced, [profile.profile_id for profile in preserved]
+
+
 def write_calibration_validation_report(
     run_root: str | Path,
     report: Mapping[str, Any],
 ) -> Path:
     path = calibration_validation_report_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def write_calibration_validation_with_manifest(
@@ -436,6 +550,7 @@ def write_calibration_validation_with_manifest(
     promote: bool = False,
     output_profiles_path: str | Path | None = None,
     operator: str | None = None,
+    select_profiles: Mapping[str, str] | None = None,
 ) -> tuple[Path, Path | None, dict[str, Any]]:
     run_root_path = Path(run_root)
     manifest = load_or_create_run_manifest(run_root_path)
@@ -450,13 +565,14 @@ def write_calibration_validation_with_manifest(
             max_mean_translation_residual_mm=max_mean_translation_residual_mm,
             max_mean_rotation_residual_deg=max_mean_rotation_residual_deg,
             max_outlier_ratio=max_outlier_ratio,
+            select_profiles=select_profiles,
         )
         candidate_path = Path(report["candidate_report_path"])
         candidate_report = _read_json(candidate_path)
         report_schema = candidate_report.get("schema_version")
         default_profiles = (
             CALIBRATION_PROFILES_SOLVED
-            if report_schema == SOLVER_SCHEMA_VERSION
+            if report_schema in {SOLVER_SCHEMA_VERSION, GRID_SOLVER_SCHEMA_VERSION}
             else CALIBRATION_PROFILES_FROM_OBSERVATIONS
         )
         profile_path = _resolve_path(
@@ -476,13 +592,25 @@ def write_calibration_validation_with_manifest(
                 profiles,
                 report,
                 operator=operator,
+                selected_profile_ids=set(report["selection"]["selected_profile_ids"]),
             )
-            promoted_path = write_profile_collection(promoted_profiles, output_path)
+            existing_profiles = (
+                load_profile_collection(output_path) if output_path.is_file() else []
+            )
+            merged_profiles, replaced_ids, preserved_ids = _merge_promoted_profiles(
+                existing_profiles, promoted_profiles
+            )
+            promoted_path = write_profile_collection(merged_profiles, output_path)
             report["promotion"] = {
                 "requested": True,
                 "promoted": True,
                 "path": promoted_path.as_posix(),
-                "profile_count": len(promoted_profiles),
+                "profile_count": len(merged_profiles),
+                "promoted_profile_ids": [
+                    profile.profile_id for profile in promoted_profiles
+                ],
+                "replaced_profile_ids": replaced_ids,
+                "preserved_profile_ids": preserved_ids,
             }
         elif promote:
             report["promotion"] = {

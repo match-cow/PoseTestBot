@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import math
+import re
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -12,10 +15,16 @@ import cv2
 import numpy as np
 import trimesh
 
-from posetestbot.calibration.profiles import CalibrationProfile, profile_to_dict
+from posetestbot.calibration.profiles import (
+    CalibrationProfile,
+    CalibrationStatus,
+    profile_to_dict,
+)
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     BOP_COCO_ANNOTATIONS,
     BOP_DIR,
+    BOP_DATASET_INFO,
     BOP_EXPORT_MANIFEST,
     BOP_FRAME_MAP_JSON,
     BOP_MULTIVIEW_TARGETS,
@@ -28,7 +37,10 @@ from posetestbot.io.artifacts import (
     RGB_DIR,
 )
 
-SCHEMA_VERSION = "bop_export_manifest.v1"
+SCHEMA_VERSION = "bop_export_manifest.v2"
+FRAME_MAP_SCHEMA_VERSION = "posetestbot_bop_frame_map.v2"
+DATASET_INFO_SCHEMA_VERSION = "posetestbot_bop_dataset_info.v1"
+SAFE_OBJECT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,7 @@ class BopSceneExport:
     artifacts: dict[str, str]
     calibration_profile_id: str | None = None
     targets: list[dict] | None = None
+    frame_map: dict[str, dict[str, str | int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -78,25 +91,26 @@ def _frame_pairs(sensor_folder: Path) -> list[tuple[Path, Path]]:
     if not depth_folder.is_dir():
         raise FileNotFoundError(f"Missing depth folder: {depth_folder}")
 
+    rgb_by_name = {path.name: path for path in rgb_folder.glob("*.png")}
     depth_by_name = {path.name: path for path in depth_folder.glob("*.png")}
-    pairs = [
-        (rgb_path, depth_by_name[rgb_path.name])
-        for rgb_path in sorted(rgb_folder.glob("*.png"))
-        if rgb_path.name in depth_by_name
-    ]
-    if not pairs:
+    if not rgb_by_name or not depth_by_name:
         raise FileNotFoundError(
             f"No matching RGB/depth PNG frame pairs in {sensor_folder}"
         )
-    return pairs
+    if set(rgb_by_name) != set(depth_by_name):
+        missing_depth = sorted(set(rgb_by_name) - set(depth_by_name))
+        missing_rgb = sorted(set(depth_by_name) - set(rgb_by_name))
+        raise ValueError(
+            "RGB/depth frame names do not match; "
+            f"missing_depth={missing_depth}, missing_rgb={missing_rgb}"
+        )
+    return [
+        (rgb_by_name[name], depth_by_name[name]) for name in sorted(rgb_by_name)
+    ]
 
 
 def _write_json(path: Path, value: object) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(value, f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, value)
 
 
 def object_registry_from_folder(object_folder: str | Path) -> dict[str, int]:
@@ -107,8 +121,19 @@ def object_registry_from_folder(object_folder: str | Path) -> dict[str, int]:
     value = _load_json_if_present(objects_json)
     if not isinstance(value, dict):
         raise ValueError(f"Object registry must be a JSON object: {objects_json}")
+    invalid_names = [
+        str(name)
+        for name in value
+        if not SAFE_OBJECT_NAME.fullmatch(str(name))
+        or str(name) in {".", ".."}
+    ]
+    if invalid_names:
+        raise ValueError(
+            "Object names must be safe filename components: "
+            + ", ".join(sorted(invalid_names))
+        )
     return {
-        object_name: index
+        str(object_name): index
         for index, object_name in enumerate(sorted(value), start=1)
     }
 
@@ -132,7 +157,7 @@ def mesh_vertices(path: Path) -> np.ndarray:
     return vertices
 
 
-def exact_vertex_diameter(vertices: np.ndarray, *, chunk_size: int = 2048) -> float:
+def exact_vertex_diameter(vertices: np.ndarray, *, chunk_size: int = 512) -> float:
     max_distance_sq = 0.0
     for start in range(0, len(vertices), chunk_size):
         chunk = vertices[start : start + chunk_size]
@@ -141,36 +166,54 @@ def exact_vertex_diameter(vertices: np.ndarray, *, chunk_size: int = 2048) -> fl
     return float(np.sqrt(max_distance_sq))
 
 
-def model_geometry_info(path: Path) -> dict[str, object]:
-    try:
-        vertices = mesh_vertices(path)
-    except Exception as exc:
-        return {
-            "posetestbot_geometry": {
-                "diameter_method": "unavailable",
-                "error": f"{type(exc).__name__}: {exc}",
+def model_geometry_info(
+    path: Path, cached: Mapping[str, object] | None = None
+) -> dict[str, object]:
+    source_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    if cached is not None:
+        geometry = cached.get("posetestbot_geometry")
+        if (
+            isinstance(geometry, Mapping)
+            and geometry.get("source_sha256") == source_sha256
+            and geometry.get("diameter_method")
+            == "exact_convex_hull_vertex_pairwise"
+        ):
+            required = {
+                "diameter",
+                "min_x",
+                "min_y",
+                "min_z",
+                "size_x",
+                "size_y",
+                "size_z",
             }
-        }
-
+            if required <= set(cached):
+                return {
+                    key: cached[key]
+                    for key in (*sorted(required), "posetestbot_geometry")
+                }
+    vertices = mesh_vertices(path)
     vertex_count = int(len(vertices))
     if vertex_count == 0:
-        return {
-            "posetestbot_geometry": {
-                "diameter_method": "unavailable",
-                "vertex_count": 0,
-            }
-        }
+        raise ValueError(f"Object model contains no vertices: {path}")
 
     mins = vertices.min(axis=0)
     maxs = vertices.max(axis=0)
     size = maxs - mins
-    if vertex_count <= 5000:
-        diameter = exact_vertex_diameter(vertices)
-        diameter_method = "exact_vertex_pairwise"
-    else:
-        diameter = float(np.linalg.norm(size))
-        diameter_method = "aabb_diagonal"
-
+    if not np.all(np.isfinite(vertices)):
+        raise ValueError(f"Object model contains non-finite vertices: {path}")
+    hull_vertices = vertices
+    if vertex_count > 4:
+        try:
+            hull_vertices = np.asarray(
+                trimesh.Trimesh(vertices=vertices, process=False).convex_hull.vertices,
+                dtype=float,
+            )
+        except Exception as exc:
+            raise ValueError(f"Unable to compute convex hull for {path}: {exc}") from exc
+    diameter = exact_vertex_diameter(hull_vertices)
+    if not math.isfinite(diameter) or diameter <= 0:
+        raise ValueError(f"Object model diameter must be finite and positive: {path}")
     return {
         "diameter": diameter,
         "min_x": float(mins[0]),
@@ -180,14 +223,19 @@ def model_geometry_info(path: Path) -> dict[str, object]:
         "size_y": float(size[1]),
         "size_z": float(size[2]),
         "posetestbot_geometry": {
-            "diameter_method": diameter_method,
+            "diameter_method": "exact_convex_hull_vertex_pairwise",
             "vertex_count": vertex_count,
+            "convex_hull_vertex_count": int(len(hull_vertices)),
+            "source_sha256": source_sha256,
         },
     }
 
 
 def copy_bop_models(
-    output_root: str | Path, object_folder: str | Path
+    output_root: str | Path,
+    object_folder: str | Path,
+    *,
+    geometry_cache: Mapping[str, object] | None = None,
 ) -> list[BopObjectModel]:
     output_root = Path(output_root)
     object_folder = Path(object_folder)
@@ -199,21 +247,32 @@ def copy_bop_models(
     models: list[BopObjectModel] = []
     for object_name, obj_id in object_name_to_id.items():
         source_path = object_folder / f"{object_name}.ply"
+        try:
+            source_path.resolve().relative_to(object_folder.resolve())
+        except ValueError as exc:
+            raise ValueError(f"Object model escapes registry folder: {source_path}") from exc
         if not source_path.is_file():
             raise FileNotFoundError(f"Missing object model: {source_path}")
         destination = models_folder / f"obj_{obj_id:06d}.ply"
         shutil.copy2(source_path, destination)
+        cached = geometry_cache.get(str(obj_id)) if geometry_cache else None
+        cached_geometry = (
+            cached
+            if isinstance(cached, Mapping)
+            and cached.get("source_name") == object_name
+            else None
+        )
         models_info[str(obj_id)] = {
             "source_name": object_name,
             "source_path": source_path.as_posix(),
-            **model_geometry_info(source_path),
+            **model_geometry_info(source_path, cached_geometry),
         }
         models.append(
             BopObjectModel(
                 object_name=object_name,
                 obj_id=obj_id,
                 source_path=source_path.as_posix(),
-                bop_path=destination.as_posix(),
+                bop_path=destination.relative_to(output_root).as_posix(),
             )
         )
 
@@ -254,12 +313,12 @@ def normalize_scene_gt_object_ids(
         return dict(scene_gt)
 
     normalized: dict[str, object] = {}
-    for image_id, annotations in scene_gt.items():
-        if not isinstance(annotations, list):
-            normalized[image_id] = annotations
+    for image_id, image_annotations in scene_gt.items():
+        if not isinstance(image_annotations, list):
+            normalized[image_id] = image_annotations
             continue
         normalized_annotations = []
-        for annotation in annotations:
+        for annotation in image_annotations:
             if not isinstance(annotation, dict):
                 normalized_annotations.append(annotation)
                 continue
@@ -277,11 +336,13 @@ def targets_from_scene_gt(
     scene_gt: Mapping[str, object], *, scene_id: int
 ) -> list[dict[str, int]]:
     targets: list[dict[str, int]] = []
-    for image_id, annotations in sorted(scene_gt.items(), key=lambda item: int(item[0])):
-        if not isinstance(annotations, list):
+    for image_id, image_annotations in sorted(
+        scene_gt.items(), key=lambda item: int(item[0])
+    ):
+        if not isinstance(image_annotations, list):
             continue
         counts: dict[int, int] = {}
-        for annotation in annotations:
+        for annotation in image_annotations:
             if not isinstance(annotation, dict):
                 continue
             obj_id = annotation.get("obj_id")
@@ -317,6 +378,24 @@ def mask_pixels(path: Path) -> np.ndarray | None:
     return np.asarray(image) > 0
 
 
+def _read_rgbd_pair(rgb_path: Path, depth_path: Path) -> tuple[np.ndarray, np.ndarray]:
+    rgb = cv2.imread(rgb_path.as_posix(), cv2.IMREAD_UNCHANGED)
+    depth = cv2.imread(depth_path.as_posix(), cv2.IMREAD_UNCHANGED)
+    if rgb is None:
+        raise ValueError(f"RGB PNG is unreadable: {rgb_path}")
+    if depth is None:
+        raise ValueError(f"Depth PNG is unreadable: {depth_path}")
+    if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] not in {3, 4}:
+        raise ValueError(f"RGB image must be uint8 with 3 or 4 channels: {rgb_path}")
+    if depth.dtype != np.uint16 or depth.ndim != 2:
+        raise ValueError(f"Depth image must be single-channel uint16: {depth_path}")
+    if rgb.shape[:2] != depth.shape:
+        raise ValueError(
+            f"RGB/depth dimensions do not match: {rgb_path}, {depth_path}"
+        )
+    return rgb, depth
+
+
 def bbox_from_mask(mask: np.ndarray | None) -> list[int]:
     if mask is None or not np.any(mask):
         return [0, 0, 0, 0]
@@ -329,19 +408,27 @@ def bbox_from_mask(mask: np.ndarray | None) -> list[int]:
 
 
 def scene_gt_info_from_masks(
-    scene_gt: Mapping[str, object], sensor_folder: Path
+    scene_gt: Mapping[str, object],
+    sensor_folder: Path,
+    frame_pairs: list[tuple[Path, Path]],
 ) -> dict[str, object]:
     mask_folder = sensor_folder / MASKS_DIR
     mask_visib_folder = blenderproc_output_folder(sensor_folder) / "mask_visib"
     scene_gt_info: dict[str, object] = {}
 
-    for image_id, annotations in sorted(scene_gt.items(), key=lambda item: int(item[0])):
-        if not isinstance(annotations, list):
+    for image_id, image_annotations in sorted(
+        scene_gt.items(), key=lambda item: int(item[0])
+    ):
+        if not isinstance(image_annotations, list):
             scene_gt_info[image_id] = []
             continue
 
         image_infos = []
-        for annotation_index, _annotation in enumerate(annotations):
+        image_index = int(image_id)
+        if image_index < 0 or image_index >= len(frame_pairs):
+            raise ValueError(f"scene_gt image ID is outside exported frames: {image_id}")
+        _rgb, depth_image = _read_rgbd_pair(*frame_pairs[image_index])
+        for annotation_index, _annotation in enumerate(image_annotations):
             filename = mask_filename(int(image_id), annotation_index)
             object_mask = mask_pixels(mask_folder / filename)
             visible_mask = mask_pixels(mask_visib_folder / filename)
@@ -351,17 +438,27 @@ def scene_gt_info_from_masks(
                 visible_mask = object_mask
 
             if object_mask is None:
-                image_infos.append({})
-                continue
+                raise FileNotFoundError(
+                    f"Missing object mask for GT annotation: {mask_folder / filename}"
+                )
+            if object_mask.shape != depth_image.shape:
+                raise ValueError(
+                    f"Object mask dimensions do not match depth image: {filename}"
+                )
+            if visible_mask is not None and visible_mask.shape != depth_image.shape:
+                raise ValueError(
+                    f"Visible mask dimensions do not match depth image: {filename}"
+                )
 
             px_count_all = int(np.count_nonzero(object_mask))
             px_count_visib = int(np.count_nonzero(visible_mask))
+            px_count_valid = int(np.count_nonzero(object_mask & (depth_image > 0)))
             image_infos.append(
                 {
                     "bbox_obj": bbox_from_mask(object_mask),
                     "bbox_visib": bbox_from_mask(visible_mask),
                     "px_count_all": px_count_all,
-                    "px_count_valid": px_count_visib,
+                    "px_count_valid": px_count_valid,
                     "px_count_visib": px_count_visib,
                     "visib_fract": (
                         float(px_count_visib / px_count_all)
@@ -375,6 +472,46 @@ def scene_gt_info_from_masks(
     return scene_gt_info
 
 
+def validate_scene_gt(
+    scene_gt: Mapping[str, object],
+    *,
+    frame_count: int,
+    object_name_to_id: Mapping[str, int] | None,
+) -> None:
+    expected_keys = {str(index) for index in range(frame_count)}
+    actual_keys = {str(key) for key in scene_gt}
+    if actual_keys != expected_keys:
+        raise ValueError(
+            "scene_gt image IDs must exactly match exported frames; "
+            f"expected={sorted(expected_keys)}, actual={sorted(actual_keys)}"
+        )
+    known_ids = set(object_name_to_id.values()) if object_name_to_id else None
+    for image_id, image_annotations in scene_gt.items():
+        if not isinstance(image_annotations, list):
+            raise ValueError(f"scene_gt[{image_id!r}] must be a list")
+        for annotation_index, annotation in enumerate(image_annotations):
+            if not isinstance(annotation, Mapping):
+                raise ValueError(
+                    f"scene_gt[{image_id!r}][{annotation_index}] must be an object"
+                )
+            try:
+                obj_id = int(annotation["obj_id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid obj_id in scene_gt[{image_id!r}][{annotation_index}]"
+                ) from exc
+            if obj_id <= 0 or (known_ids is not None and obj_id not in known_ids):
+                raise ValueError(f"Unknown BOP obj_id {obj_id} in scene_gt")
+            for key, length in (("cam_R_m2c", 9), ("cam_t_m2c", 3)):
+                values = annotation.get(key)
+                if not isinstance(values, list) or len(values) != length:
+                    raise ValueError(
+                        f"scene_gt annotation {key} must contain {length} values"
+                    )
+                if not all(math.isfinite(float(value)) for value in values):
+                    raise ValueError(f"scene_gt annotation {key} must be finite")
+
+
 def copy_optional_tree(source: Path, destination: Path) -> Path | None:
     if not source.is_dir():
         return None
@@ -384,9 +521,17 @@ def copy_optional_tree(source: Path, destination: Path) -> Path | None:
     return destination
 
 
-def camera_matrix_from_profile(profile: CalibrationProfile | None) -> list[float] | None:
+def camera_matrix_from_profile(
+    profile: CalibrationProfile | None, *, projection: str = "native"
+) -> list[float] | None:
     if profile is None:
         return None
+    if projection == "rectified":
+        if profile.rectified_intrinsics is None:
+            raise ValueError(
+                f"Calibration profile {profile.profile_id} has no rectified intrinsics"
+            )
+        return list(profile.rectified_intrinsics.cam_k)
     return list(profile.intrinsics.cam_k)
 
 
@@ -396,7 +541,9 @@ def depth_scale_from_profile(profile: CalibrationProfile | None) -> float | None
     return float(profile.intrinsics.depth_scale_to_mm)
 
 
-def scene_camera_calibration_metadata(profile: CalibrationProfile | None) -> dict:
+def scene_camera_calibration_metadata(
+    profile: CalibrationProfile | None, *, projection: str = "native"
+) -> dict:
     if profile is None:
         return {}
     return {
@@ -406,6 +553,13 @@ def scene_camera_calibration_metadata(profile: CalibrationProfile | None) -> dic
         "mounting_mode": profile.mounting_mode.value,
         "rig_position": profile.rig_position,
         "status": profile.status.value,
+        "schema_version": profile.schema_version,
+        "projection": projection,
+        "projection_provenance": {
+            "native_distortion_model": "brown_conrady",
+            "rectification": "alpha0" if projection == "rectified" else None,
+            "output_resolution_unchanged": projection == "rectified",
+        },
         "sync_delta_ms": profile.sync_delta_ms,
         "extrinsics": {
             "from": profile.extrinsics.from_frame.value,
@@ -431,7 +585,17 @@ def export_sensor_scene_to_bop(
     sensor_folder = Path(sensor_folder)
     output_root = Path(output_root)
     sensor_name = sensor_folder.name
-    scene_folder = output_root / sensor_name / split / f"{scene_id:06d}"
+    if not re.fullmatch(r"(?:train|val|test)(?:_[A-Za-z0-9.-]+)?", split):
+        raise ValueError(f"Invalid BOP split name: {split!r}")
+    if scene_id < 0:
+        raise ValueError("BOP scene_id must be greater than or equal to 0")
+    if calibration_profile is not None:
+        calibration_profile.validate()
+        if calibration_profile.status != CalibrationStatus.VALID:
+            raise ValueError(
+                f"Calibration profile {calibration_profile.profile_id} is not valid"
+            )
+    scene_folder = output_root / split / f"{scene_id:06d}"
     if scene_folder.exists():
         if not overwrite:
             raise FileExistsError(
@@ -444,13 +608,28 @@ def export_sensor_scene_to_bop(
     rgb_dest.mkdir(parents=True)
     depth_dest.mkdir(parents=True)
 
-    cam_k = camera_matrix_from_profile(calibration_profile) or read_camera_matrix(
+    projection = (
+        "rectified"
+        if (sensor_folder / "rectification_provenance.json").is_file()
+        else "native"
+    )
+    cam_k = camera_matrix_from_profile(
+        calibration_profile, projection=projection
+    ) or read_camera_matrix(
         sensor_folder / CAM_K
     )
     depth_scale = depth_scale_from_profile(calibration_profile)
     if depth_scale is None:
         depth_scale = read_depth_scale(sensor_folder / DEPTH_SCALE)
-    calibration_metadata = scene_camera_calibration_metadata(calibration_profile)
+    if len(cam_k) != 9 or not all(math.isfinite(float(value)) for value in cam_k):
+        raise ValueError("BOP camera matrix must contain 9 finite values")
+    if float(cam_k[0]) <= 0 or float(cam_k[4]) <= 0:
+        raise ValueError("BOP camera focal lengths must be positive")
+    if not math.isfinite(float(depth_scale)) or float(depth_scale) <= 0:
+        raise ValueError("BOP depth scale must be finite and positive")
+    calibration_metadata = scene_camera_calibration_metadata(
+        calibration_profile, projection=projection
+    )
     frame_map: dict[str, dict[str, str | int]] = {}
     scene_camera: dict[str, dict[str, object]] = {}
     scene_gt: dict[str, object] = {}
@@ -458,6 +637,7 @@ def export_sensor_scene_to_bop(
 
     frame_pairs = _frame_pairs(sensor_folder)
     for image_id, (rgb_source, depth_source) in enumerate(frame_pairs):
+        _read_rgbd_pair(rgb_source, depth_source)
         image_name = f"{image_id:06d}.png"
         shutil.copy2(rgb_source, rgb_dest / image_name)
         shutil.copy2(depth_source, depth_dest / image_name)
@@ -469,6 +649,8 @@ def export_sensor_scene_to_bop(
         if calibration_metadata:
             scene_camera[image_id_key]["posetestbot_calibration"] = calibration_metadata
         frame_map[image_id_key] = {
+            "sensor_name": sensor_name,
+            "scene_id": scene_id,
             "source_rgb": rgb_source.relative_to(sensor_folder).as_posix(),
             "source_depth": depth_source.relative_to(sensor_folder).as_posix(),
             "bop_rgb": f"{RGB_DIR}/{image_name}",
@@ -479,13 +661,15 @@ def export_sensor_scene_to_bop(
         str(image_id): [] for image_id in range(len(frame_pairs))
     }
     scene_gt = normalize_scene_gt_object_ids(scene_gt, object_name_to_id)
-    imported_scene_gt_info = load_blenderproc_scene_json(
-        sensor_folder, "scene_gt_info.json"
+    validate_scene_gt(
+        scene_gt,
+        frame_count=len(frame_pairs),
+        object_name_to_id=object_name_to_id,
     )
-    scene_gt_info = (
-        imported_scene_gt_info
-        if imported_scene_gt_info is not None
-        else scene_gt_info_from_masks(scene_gt, sensor_folder)
+    scene_gt_info = scene_gt_info_from_masks(
+        scene_gt,
+        sensor_folder,
+        frame_pairs,
     )
     targets = targets_from_scene_gt(scene_gt, scene_id=scene_id)
 
@@ -493,7 +677,6 @@ def export_sensor_scene_to_bop(
         "scene_camera": _write_json(scene_folder / "scene_camera.json", scene_camera),
         "scene_gt": _write_json(scene_folder / "scene_gt.json", scene_gt),
         "scene_gt_info": _write_json(scene_folder / "scene_gt_info.json", scene_gt_info),
-        "frame_map": _write_json(scene_folder / BOP_FRAME_MAP_JSON, frame_map),
     }
     mask_folder = copy_optional_tree(sensor_folder / MASKS_DIR, scene_folder / "mask")
     if mask_folder is not None:
@@ -510,14 +693,18 @@ def export_sensor_scene_to_bop(
         sensor_name=sensor_name,
         scene_id=scene_id,
         split=split,
-        scene_folder=scene_folder.as_posix(),
+        scene_folder=scene_folder.relative_to(output_root).as_posix(),
         rgb_count=len(frame_pairs),
         depth_count=len(frame_pairs),
-        artifacts={key: path.as_posix() for key, path in artifacts.items()},
+        artifacts={
+            key: path.relative_to(output_root).as_posix()
+            for key, path in artifacts.items()
+        },
         calibration_profile_id=(
             calibration_profile.profile_id if calibration_profile is not None else None
         ),
         targets=targets,
+        frame_map=frame_map,
     )
 
 
@@ -630,6 +817,130 @@ def write_bop_multiview_targets(
     )
 
 
+def write_bop_frame_map(
+    output_root: str | Path, exports: list[BopSceneExport]
+) -> Path:
+    output_root = Path(output_root)
+    scenes = {
+        str(export.scene_id): {
+            "sensor_name": export.sensor_name,
+            "split": export.split,
+            "scene_folder": export.scene_folder,
+            "frames": export.frame_map,
+        }
+        for export in sorted(exports, key=lambda item: item.scene_id)
+    }
+    return _write_json(
+        output_root / BOP_FRAME_MAP_JSON,
+        {"schema_version": FRAME_MAP_SCHEMA_VERSION, "scenes": scenes},
+    )
+
+
+def write_bop_dataset_info(
+    output_root: str | Path,
+    exports: list[BopSceneExport],
+    *,
+    dataset_name: str,
+    generated_at: str,
+) -> Path:
+    output_root = Path(output_root)
+    splits = sorted({export.split for export in exports})
+    return _write_json(
+        output_root / BOP_DATASET_INFO,
+        {
+            "schema_version": DATASET_INFO_SCHEMA_VERSION,
+            "name": dataset_name,
+            "description": "BOP-scenewise dataset exported by PoseTestBot",
+            "bop_format": "scenewise",
+            "splits": splits,
+            "scene_count": len(exports),
+            "sensors": sorted({export.sensor_name for export in exports}),
+            "generated_at": generated_at,
+        },
+    )
+
+
+def validate_bop_dataset(
+    output_root: str | Path,
+    exports: list[BopSceneExport],
+    *,
+    object_models: list[BopObjectModel] | None = None,
+    targets_path: str | Path | None = None,
+) -> dict[str, object]:
+    output_root = Path(output_root)
+    scene_ids: set[int] = set()
+    scene_image_ids: dict[int, set[int]] = {}
+    scene_object_ids: dict[tuple[int, int], set[int]] = {}
+    for export in exports:
+        if export.scene_id in scene_ids:
+            raise ValueError(f"Duplicate BOP scene ID: {export.scene_id}")
+        scene_ids.add(export.scene_id)
+        scene_folder = output_root / export.scene_folder
+        rgb_names = {path.name for path in (scene_folder / RGB_DIR).glob("*.png")}
+        depth_names = {path.name for path in (scene_folder / DEPTH_DIR).glob("*.png")}
+        if rgb_names != depth_names or len(rgb_names) != export.rgb_count:
+            raise ValueError(f"BOP scene frame sets are inconsistent: {scene_folder}")
+        image_ids = {int(Path(name).stem) for name in rgb_names}
+        scene_image_ids[export.scene_id] = image_ids
+        scene_camera = _load_json_if_present(scene_folder / "scene_camera.json")
+        scene_gt = _load_json_if_present(scene_folder / "scene_gt.json")
+        scene_gt_info = _load_json_if_present(scene_folder / "scene_gt_info.json")
+        expected_keys = {str(image_id) for image_id in image_ids}
+        for name, value in (
+            ("scene_camera", scene_camera),
+            ("scene_gt", scene_gt),
+            ("scene_gt_info", scene_gt_info),
+        ):
+            if not isinstance(value, Mapping) or set(value) != expected_keys:
+                raise ValueError(f"{name} keys do not match scene images: {scene_folder}")
+        assert isinstance(scene_gt, Mapping)
+        for image_id, image_annotations in scene_gt.items():
+            object_ids = {
+                int(annotation["obj_id"])
+                for annotation in image_annotations
+                if isinstance(annotation, Mapping) and "obj_id" in annotation
+            }
+            scene_object_ids[(export.scene_id, int(image_id))] = object_ids
+
+    model_ids = {model.obj_id for model in object_models or []}
+    if object_models:
+        models_info = _load_json_if_present(output_root / MODELS_DIR / "models_info.json")
+        if not isinstance(models_info, Mapping) or {
+            int(key) for key in models_info
+        } != model_ids:
+            raise ValueError("models_info.json does not match exported object models")
+        for model in object_models:
+            if not (output_root / model.bop_path).is_file():
+                raise FileNotFoundError(f"Missing BOP object model: {model.bop_path}")
+
+    target_count = 0
+    if targets_path is not None:
+        targets = _load_json_if_present(Path(targets_path))
+        if not isinstance(targets, list):
+            raise ValueError("BOP targets must be a JSON list")
+        target_count = len(targets)
+        for target in targets:
+            if not isinstance(target, Mapping):
+                raise ValueError("Each BOP target must be a JSON object")
+            scene_id = int(target["scene_id"])
+            image_id = int(target["im_id"])
+            obj_id = int(target["obj_id"])
+            if image_id not in scene_image_ids.get(scene_id, set()):
+                raise ValueError(f"BOP target references missing scene/image: {target}")
+            if obj_id not in scene_object_ids.get((scene_id, image_id), set()):
+                raise ValueError(f"BOP target references missing object instance: {target}")
+            if model_ids and obj_id not in model_ids:
+                raise ValueError(f"BOP target references missing model: {target}")
+
+    return {
+        "status": "ok",
+        "scene_count": len(exports),
+        "frame_count": sum(export.rgb_count for export in exports),
+        "model_count": len(object_models or []),
+        "target_count": target_count,
+    }
+
+
 def _image_size(path: Path) -> tuple[int, int] | None:
     image = cv2.imread(path.as_posix(), cv2.IMREAD_UNCHANGED)
     if image is None:
@@ -712,7 +1023,7 @@ def coco_annotations_from_exports(
         (export for export in exports if export.split == split),
         key=lambda export: (export.scene_id, export.sensor_name),
     ):
-        scene_folder = Path(export.scene_folder)
+        scene_folder = output_root / export.scene_folder
         scene_gt = _load_json_if_present(scene_folder / "scene_gt.json")
         scene_gt_info = _load_json_if_present(scene_folder / "scene_gt_info.json")
         if not isinstance(scene_gt, Mapping):
@@ -868,15 +1179,35 @@ def write_bop_export_manifest(
     targets_path: str | Path | None = None,
     multiview_targets_path: str | Path | None = None,
     coco_annotations_path: str | Path | None = None,
+    frame_map_path: str | Path | None = None,
+    dataset_info_path: str | Path | None = None,
+    validation: Mapping[str, object] | None = None,
 ) -> Path:
     output_root = Path(output_root)
     manifest_path = output_root / BOP_EXPORT_MANIFEST
+
+    def artifact_path(value: str | Path | None) -> str | None:
+        if value is None:
+            return None
+        path = Path(value)
+        try:
+            return path.relative_to(output_root).as_posix()
+        except ValueError:
+            return path.as_posix()
+
+    export_entries = []
+    for export in exports:
+        data = asdict(export)
+        data.pop("frame_map", None)
+        export_entries.append(data)
     _write_json(
         manifest_path,
         {
             "schema_version": SCHEMA_VERSION,
-            "layout": BOP_DIR,
-            "exports": [asdict(export) for export in exports],
+            "format": "bop-scenewise",
+            "layout": "<split>/<scene_id>",
+            "dataset_root": ".",
+            "exports": export_entries,
             "calibration_profiles_path": (
                 Path(calibration_profiles_path).as_posix()
                 if calibration_profiles_path is not None
@@ -886,19 +1217,12 @@ def write_bop_export_manifest(
                 profile_to_dict(profile) for profile in calibration_profiles or []
             ],
             "object_models": [asdict(model) for model in object_models or []],
-            "targets_path": (
-                Path(targets_path).as_posix() if targets_path is not None else None
-            ),
-            "multiview_targets_path": (
-                Path(multiview_targets_path).as_posix()
-                if multiview_targets_path is not None
-                else None
-            ),
-            "coco_annotations_path": (
-                Path(coco_annotations_path).as_posix()
-                if coco_annotations_path is not None
-                else None
-            ),
+            "targets_path": artifact_path(targets_path),
+            "multiview_targets_path": artifact_path(multiview_targets_path),
+            "coco_annotations_path": artifact_path(coco_annotations_path),
+            "frame_map_path": artifact_path(frame_map_path),
+            "dataset_info_path": artifact_path(dataset_info_path),
+            "validation": dict(validation or {}),
         },
     )
     return manifest_path

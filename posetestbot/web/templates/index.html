@@ -62,6 +62,22 @@
         </div>
         <p id="robotControlStatus" class="robot-control-status">Ready</p>
       </section>
+      <section class="webcam-monitor-panel" aria-label="UGREEN monitoring camera">
+        <div class="webcam-monitor-heading">
+          <h2>Room Monitor</h2>
+          <span id="webcamMonitorStatus" class="webcam-monitor-status">Starting</span>
+        </div>
+        <div class="webcam-monitor-frame">
+          <img id="webcamMonitorImage" alt="Live view from UGREEN monitoring camera" hidden>
+          <p id="webcamMonitorPlaceholder">Waiting for camera…</p>
+        </div>
+        <button
+          class="btn btn-sm btn-outline-light"
+          id="retryWebcamBtn"
+          type="button"
+          hidden
+        >Retry camera</button>
+      </section>
     </aside>
 
     <main class="main-panel">

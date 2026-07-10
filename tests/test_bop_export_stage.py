@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ import numpy as np
 from posetestbot.calibration.profiles import (
     SCHEMA_VERSION,
     CalibrationProfile,
+    CalibrationQuality,
     CalibrationStatus,
     RigidTransform,
     TransformFrame,
@@ -42,13 +44,49 @@ def create_synchronized_sensor_fixture(tmp_path: Path) -> Path:
     depth_folder = sensor_folder / DEPTH_DIR
     rgb_folder.mkdir(parents=True)
     depth_folder.mkdir()
-    (rgb_folder / "000010.png").write_bytes(b"rgb-10")
-    (depth_folder / "000010.png").write_bytes(b"depth-10")
-    (rgb_folder / "000020.png").write_bytes(b"rgb-20")
-    (depth_folder / "000020.png").write_bytes(b"depth-20")
+    rgb_first = np.zeros((5, 6, 3), dtype=np.uint8)
+    rgb_first[:, :, 1] = 10
+    rgb_second = np.zeros((5, 6, 3), dtype=np.uint8)
+    rgb_second[:, :, 1] = 20
+    depth_first = np.ones((5, 6), dtype=np.uint16)
+    depth_second = np.ones((5, 6), dtype=np.uint16) * 2
+    assert cv2.imwrite((rgb_folder / "000010.png").as_posix(), rgb_first)
+    assert cv2.imwrite((depth_folder / "000010.png").as_posix(), depth_first)
+    assert cv2.imwrite((rgb_folder / "000020.png").as_posix(), rgb_second)
+    assert cv2.imwrite((depth_folder / "000020.png").as_posix(), depth_second)
     (sensor_folder / CAM_K).write_text("1 0 2\n0 3 4\n0 0 1\n")
     (sensor_folder / DEPTH_SCALE).write_text("0.001\n")
     return run_root
+
+
+def write_simple_ply(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "ply",
+                "format ascii 1.0",
+                "element vertex 2",
+                "property float x",
+                "property float y",
+                "property float z",
+                "element face 0",
+                "property list uchar int vertex_indices",
+                "end_header",
+                "0 0 0",
+                "1 0 0",
+                "",
+            ]
+        )
+    )
+
+
+def write_annotation_mask(sensor_folder: Path, *, image_id: int = 0) -> None:
+    masks_folder = sensor_folder / MASKS_DIR
+    masks_folder.mkdir(exist_ok=True)
+    mask = np.ones((5, 6), dtype=np.uint8) * 255
+    assert cv2.imwrite(
+        (masks_folder / f"{image_id:06d}_000000.png").as_posix(), mask
+    )
 
 
 def test_bop_export_stage_writes_scene_and_manifest(tmp_path: Path) -> None:
@@ -60,6 +98,7 @@ def test_bop_export_stage_writes_scene_and_manifest(tmp_path: Path) -> None:
             sys.executable,
             str(repo_root / "scripts" / "run_bop_export_stage.py"),
             str(run_root),
+            "--no-model-export",
         ],
         cwd=repo_root,
         check=True,
@@ -69,9 +108,14 @@ def test_bop_export_stage_writes_scene_and_manifest(tmp_path: Path) -> None:
 
     assert "Exported 1 synchronized sensor folder" in result.stdout
 
-    scene_folder = run_root / BOP_DIR / "realsense_123" / "test" / "000001"
-    assert (scene_folder / RGB_DIR / "000000.png").read_bytes() == b"rgb-10"
-    assert (scene_folder / DEPTH_DIR / "000001.png").read_bytes() == b"depth-20"
+    scene_folder = run_root / BOP_DIR / "test" / "000001"
+    assert cv2.imread(
+        (scene_folder / RGB_DIR / "000000.png").as_posix(), cv2.IMREAD_UNCHANGED
+    )[0, 0, 1] == 10
+    assert cv2.imread(
+        (scene_folder / DEPTH_DIR / "000001.png").as_posix(),
+        cv2.IMREAD_UNCHANGED,
+    )[0, 0] == 2
 
     scene_camera = json.loads((scene_folder / "scene_camera.json").read_text())
     assert scene_camera["0"]["cam_K"] == [1, 0, 2, 0, 3, 4, 0, 0, 1]
@@ -82,22 +126,25 @@ def test_bop_export_stage_writes_scene_and_manifest(tmp_path: Path) -> None:
     assert scene_gt == {"0": [], "1": []}
     assert scene_gt_info == {"0": [], "1": []}
 
-    frame_map = json.loads((scene_folder / BOP_FRAME_MAP_JSON).read_text())
-    assert frame_map["0"]["source_rgb"] == "rgb/000010.png"
-    assert frame_map["1"]["bop_depth"] == "depth/000001.png"
+    frame_map = json.loads((run_root / BOP_DIR / BOP_FRAME_MAP_JSON).read_text())
+    frames = frame_map["scenes"]["1"]["frames"]
+    assert frames["0"]["source_rgb"] == "rgb/000010.png"
+    assert frames["1"]["bop_depth"] == "depth/000001.png"
 
     bop_manifest = json.loads(
         (run_root / BOP_DIR / BOP_EXPORT_MANIFEST).read_text()
     )
-    assert bop_manifest["schema_version"] == "bop_export_manifest.v1"
+    assert bop_manifest["schema_version"] == "bop_export_manifest.v2"
+    assert bop_manifest["format"] == "bop-scenewise"
     assert bop_manifest["exports"][0]["rgb_count"] == 2
+    assert bop_manifest["validation"]["status"] == "ok"
 
     run_manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(stage for stage in run_manifest["stages"] if stage["name"] == "bop_export")
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][BOP_EXPORT_MANIFEST] == "bop/bop_export_manifest.json"
     assert stage["artifacts"]["realsense_123:bop_scene"] == (
-        "bop/realsense_123/test/000001"
+        "bop/test/000001"
     )
 
 
@@ -128,6 +175,7 @@ def test_bop_export_stage_records_calibration_profile_metadata(
                     translation_mm=(100.0, 200.0, 300.0),
                 ),
                 status=CalibrationStatus.VALID,
+                quality=CalibrationQuality(num_observations=1, num_inliers=1),
                 sync_delta_ms=12.5,
             )
         ],
@@ -142,6 +190,7 @@ def test_bop_export_stage_records_calibration_profile_metadata(
             str(run_root),
             "--calibration-profiles",
             str(calibration_profiles),
+            "--no-model-export",
         ],
         cwd=repo_root,
         check=True,
@@ -149,7 +198,7 @@ def test_bop_export_stage_records_calibration_profile_metadata(
         capture_output=True,
     )
 
-    scene_folder = run_root / BOP_DIR / "realsense_123" / "test" / "000001"
+    scene_folder = run_root / BOP_DIR / "test" / "000001"
     scene_camera = json.loads((scene_folder / "scene_camera.json").read_text())
     assert scene_camera["0"]["cam_K"] == [9.0, 0.0, 8.0, 0.0, 7.0, 6.0, 0.0, 0.0, 1.0]
     assert scene_camera["0"]["depth_scale"] == 2.5
@@ -158,7 +207,7 @@ def test_bop_export_stage_records_calibration_profile_metadata(
         "realsense_d435_123_static_front_left_v2026_01"
     )
     assert calibration["mounting_mode"] == "static"
-    assert calibration["extrinsics"]["to"] == "robot_base"
+    assert calibration["extrinsics"]["to"] == "template_base"
     assert calibration["sync_delta_ms"] == 12.5
 
     bop_manifest = json.loads(
@@ -175,6 +224,78 @@ def test_bop_export_stage_records_calibration_profile_metadata(
     run_manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(stage for stage in run_manifest["stages"] if stage["name"] == "bop_export")
     assert stage["artifacts"][CALIBRATION_PROFILES] == CALIBRATION_PROFILES
+
+
+def test_bop_export_prefers_rectified_tree_and_records_projection_provenance(
+    tmp_path: Path,
+) -> None:
+    run_root = create_synchronized_sensor_fixture(tmp_path)
+    synchronized = run_root / "processed" / "synchronized" / "realsense_123"
+    rectified = run_root / "processed" / "rectified" / "realsense_123"
+    shutil.copytree(synchronized, rectified)
+    (rectified / "rectification_provenance.json").write_text(
+        json.dumps({"projection": "rectified_alpha0"})
+    )
+    profiles_path = run_root / CALIBRATION_PROFILES
+    write_profile_collection(
+        [
+            CalibrationProfile(
+                schema_version=SCHEMA_VERSION,
+                profile_id="rectified_profile",
+                sensor_id="123",
+                sensor_type=SensorType.REALSENSE_D435,
+                mounting_mode=MountingMode.STATIC,
+                rig_position="static",
+                intrinsics=CameraIntrinsics(
+                    cam_k=(1.0, 0.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 1.0),
+                    width=6,
+                    height=5,
+                    distortion=(0.1, 0.0, 0.0, 0.0, 0.0),
+                    depth_scale_to_mm=0.001,
+                ),
+                rectified_intrinsics=CameraIntrinsics(
+                    cam_k=(2.0, 0.0, 2.5, 0.0, 4.0, 2.0, 0.0, 0.0, 1.0),
+                    width=6,
+                    height=5,
+                    distortion=(0.0,) * 5,
+                    depth_scale_to_mm=0.001,
+                ),
+                extrinsics=RigidTransform(
+                    from_frame=TransformFrame.CAMERA,
+                    to_frame=TransformFrame.TEMPLATE_BASE,
+                    rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+                    translation_mm=(0.0, 0.0, 0.0),
+                ),
+                status=CalibrationStatus.VALID,
+                quality=CalibrationQuality(num_observations=6, num_inliers=6),
+            )
+        ],
+        profiles_path,
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "run_bop_export_stage.py"),
+            str(run_root),
+            "--calibration-profiles",
+            str(profiles_path),
+            "--no-model-export",
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    scene_camera = json.loads(
+        (run_root / BOP_DIR / "test" / "000001" / "scene_camera.json").read_text()
+    )
+    assert scene_camera["0"]["cam_K"] == [2.0, 0.0, 2.5, 0.0, 4.0, 2.0, 0.0, 0.0, 1.0]
+    metadata = scene_camera["0"]["posetestbot_calibration"]
+    assert metadata["projection"] == "rectified"
+    assert metadata["projection_provenance"]["rectification"] == "alpha0"
 
 
 def test_bop_export_stage_imports_blenderproc_gt_and_masks(tmp_path: Path) -> None:
@@ -212,7 +333,9 @@ def test_bop_export_stage_imports_blenderproc_gt_and_masks(tmp_path: Path) -> No
     )
     masks_folder = sensor_folder / MASKS_DIR
     masks_folder.mkdir()
-    (masks_folder / "000000_000000.png").write_bytes(b"mask-0")
+    mask = np.zeros((5, 6), dtype=np.uint8)
+    mask[1:4, 2:5] = 255
+    assert cv2.imwrite((masks_folder / "000000_000000.png").as_posix(), mask)
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(
@@ -220,6 +343,7 @@ def test_bop_export_stage_imports_blenderproc_gt_and_masks(tmp_path: Path) -> No
             sys.executable,
             str(repo_root / "scripts" / "run_bop_export_stage.py"),
             str(run_root),
+            "--no-model-export",
         ],
         cwd=repo_root,
         check=True,
@@ -227,13 +351,13 @@ def test_bop_export_stage_imports_blenderproc_gt_and_masks(tmp_path: Path) -> No
         capture_output=True,
     )
 
-    scene_folder = run_root / BOP_DIR / "realsense_123" / "test" / "000001"
+    scene_folder = run_root / BOP_DIR / "test" / "000001"
     scene_gt = json.loads((scene_folder / "scene_gt.json").read_text())
     scene_gt_info = json.loads((scene_folder / "scene_gt_info.json").read_text())
     assert scene_gt["0"][0]["obj_id"] == 1
     assert scene_gt["0"][0]["cam_t_m2c"] == [10, 20, 30]
-    assert scene_gt_info["0"][0]["bbox_obj"] == [1, 2, 3, 4]
-    assert (scene_folder / "mask" / "000000_000000.png").read_bytes() == b"mask-0"
+    assert scene_gt_info["0"][0]["bbox_obj"] == [2, 1, 3, 3]
+    assert (scene_folder / "mask" / "000000_000000.png").is_file()
 
     bop_manifest = json.loads(
         (run_root / BOP_DIR / BOP_EXPORT_MANIFEST).read_text()
@@ -268,6 +392,15 @@ def test_bop_export_stage_derives_scene_gt_info_from_masks(tmp_path: Path) -> No
     mask = np.zeros((5, 6), dtype=np.uint8)
     mask[1:4, 2:5] = 255
     assert cv2.imwrite((masks_folder / "000000_000000.png").as_posix(), mask)
+    depth = cv2.imread(
+        (sensor_folder / DEPTH_DIR / "000010.png").as_posix(),
+        cv2.IMREAD_UNCHANGED,
+    )
+    depth[1:4, 2:5] = 0
+    depth[1, 2] = 1
+    assert cv2.imwrite(
+        (sensor_folder / DEPTH_DIR / "000010.png").as_posix(), depth
+    )
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(
@@ -283,12 +416,12 @@ def test_bop_export_stage_derives_scene_gt_info_from_masks(tmp_path: Path) -> No
         capture_output=True,
     )
 
-    scene_folder = run_root / BOP_DIR / "realsense_123" / "test" / "000001"
+    scene_folder = run_root / BOP_DIR / "test" / "000001"
     scene_gt_info = json.loads((scene_folder / "scene_gt_info.json").read_text())
     assert scene_gt_info["0"][0]["bbox_obj"] == [2, 1, 3, 3]
     assert scene_gt_info["0"][0]["bbox_visib"] == [2, 1, 3, 3]
     assert scene_gt_info["0"][0]["px_count_all"] == 9
-    assert scene_gt_info["0"][0]["px_count_valid"] == 9
+    assert scene_gt_info["0"][0]["px_count_valid"] == 1
     assert scene_gt_info["0"][0]["px_count_visib"] == 9
     assert scene_gt_info["0"][0]["visib_fract"] == 1.0
     assert scene_gt_info["1"] == []
@@ -314,13 +447,14 @@ def test_bop_export_stage_writes_models_and_targets(tmp_path: Path) -> None:
             }
         )
     )
+    write_annotation_mask(sensor_folder)
     object_folder = tmp_path / "objects"
     object_folder.mkdir()
     (object_folder / "objects.json").write_text(
         json.dumps({"cube": [], "sphere": []})
     )
-    (object_folder / "cube.ply").write_text("ply\nformat ascii 1.0\nend_header\n")
-    (object_folder / "sphere.ply").write_text("ply\nformat ascii 1.0\nend_header\n")
+    write_simple_ply(object_folder / "cube.ply")
+    write_simple_ply(object_folder / "sphere.ply")
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(
@@ -337,7 +471,7 @@ def test_bop_export_stage_writes_models_and_targets(tmp_path: Path) -> None:
         capture_output=True,
     )
 
-    scene_folder = run_root / BOP_DIR / "realsense_123" / "test" / "000001"
+    scene_folder = run_root / BOP_DIR / "test" / "000001"
     scene_gt = json.loads((scene_folder / "scene_gt.json").read_text())
     assert scene_gt["0"][0]["obj_id"] == 1
     assert scene_gt["0"][0]["posetestbot_object_name"] == "cube"
@@ -373,30 +507,38 @@ def test_bop_export_stage_writes_multiview_targets(tmp_path: Path) -> None:
     second_sensor = run_root / "processed" / "synchronized" / "zed_2i_42"
     (second_sensor / RGB_DIR).mkdir(parents=True)
     (second_sensor / DEPTH_DIR).mkdir()
-    (second_sensor / RGB_DIR / "000010.png").write_bytes(b"zed-rgb-10")
-    (second_sensor / DEPTH_DIR / "000010.png").write_bytes(b"zed-depth-10")
+    assert cv2.imwrite(
+        (second_sensor / RGB_DIR / "000010.png").as_posix(),
+        np.zeros((5, 6, 3), dtype=np.uint8),
+    )
+    assert cv2.imwrite(
+        (second_sensor / DEPTH_DIR / "000010.png").as_posix(),
+        np.ones((5, 6), dtype=np.uint16),
+    )
     (second_sensor / CAM_K).write_text("1 0 2\n0 3 4\n0 0 1\n")
     (second_sensor / DEPTH_SCALE).write_text("0.001\n")
     for sensor_folder in (first_sensor, second_sensor):
         blenderproc_output = sensor_folder / "blenderproc" / "output"
         blenderproc_output.mkdir(parents=True)
-        blenderproc_output.joinpath("scene_gt.json").write_text(
-            json.dumps(
+        scene_gt = {
+            "0": [
                 {
-                    "0": [
-                        {
-                            "obj_id": "cube",
-                            "cam_R_m2c": [1, 0, 0, 0, 1, 0, 0, 0, 1],
-                            "cam_t_m2c": [10, 20, 30],
-                        }
-                    ]
+                    "obj_id": "cube",
+                    "cam_R_m2c": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                    "cam_t_m2c": [10, 20, 30],
                 }
-            )
+            ]
+        }
+        if sensor_folder == first_sensor:
+            scene_gt["1"] = []
+        blenderproc_output.joinpath("scene_gt.json").write_text(
+            json.dumps(scene_gt)
         )
+        write_annotation_mask(sensor_folder)
     object_folder = tmp_path / "objects"
     object_folder.mkdir()
     (object_folder / "objects.json").write_text(json.dumps({"cube": []}))
-    (object_folder / "cube.ply").write_text("ply\nformat ascii 1.0\nend_header\n")
+    write_simple_ply(object_folder / "cube.ply")
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(
@@ -447,6 +589,10 @@ def test_bop_export_stage_writes_coco_annotations(tmp_path: Path) -> None:
         (sensor_folder / RGB_DIR / "000010.png").as_posix(),
         np.zeros((3, 4, 3), dtype=np.uint8),
     )
+    cv2.imwrite(
+        (sensor_folder / DEPTH_DIR / "000010.png").as_posix(),
+        np.ones((3, 4), dtype=np.uint16),
+    )
     masks_folder = sensor_folder / MASKS_DIR
     masks_folder.mkdir()
     mask = np.zeros((3, 4), dtype=np.uint8)
@@ -471,7 +617,7 @@ def test_bop_export_stage_writes_coco_annotations(tmp_path: Path) -> None:
     object_folder = tmp_path / "objects"
     object_folder.mkdir()
     (object_folder / "objects.json").write_text(json.dumps({"cube": []}))
-    (object_folder / "cube.ply").write_text("ply\nformat ascii 1.0\nend_header\n")
+    write_simple_ply(object_folder / "cube.ply")
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(
@@ -498,7 +644,7 @@ def test_bop_export_stage_writes_coco_annotations(tmp_path: Path) -> None:
         "annotation_count": 1,
     }
     assert coco["images"][0]["file_name"] == (
-        "realsense_123/test/000001/rgb/000000.png"
+        "test/000001/rgb/000000.png"
     )
     assert coco["images"][0]["width"] == 4
     assert coco["images"][0]["height"] == 3
@@ -514,7 +660,7 @@ def test_bop_export_stage_writes_coco_annotations(tmp_path: Path) -> None:
     assert annotation["posetestbot"]["scene_id"] == 1
     assert annotation["posetestbot"]["im_id"] == 0
     assert annotation["posetestbot"]["mask_path"] == (
-        "realsense_123/test/000001/mask/000000_000000.png"
+        "test/000001/mask/000000_000000.png"
     )
 
     bop_manifest = json.loads(
@@ -581,5 +727,83 @@ def test_bop_export_stage_writes_model_geometry_metadata(tmp_path: Path) -> None
     assert models_info["1"]["posetestbot_geometry"]["vertex_count"] == 2
     assert (
         models_info["1"]["posetestbot_geometry"]["diameter_method"]
-        == "exact_vertex_pairwise"
+        == "exact_convex_hull_vertex_pairwise"
     )
+
+
+def test_bop_overwrite_failure_preserves_previous_dataset(tmp_path: Path) -> None:
+    run_root = create_synchronized_sensor_fixture(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    command = [
+        sys.executable,
+        str(repo_root / "scripts" / "run_bop_export_stage.py"),
+        str(run_root),
+        "--no-model-export",
+    ]
+    subprocess.run(command, cwd=repo_root, check=True, capture_output=True, text=True)
+    manifest_path = run_root / BOP_DIR / BOP_EXPORT_MANIFEST
+    previous_manifest = manifest_path.read_bytes()
+
+    sensor_folder = run_root / "processed" / "synchronized" / "realsense_123"
+    (sensor_folder / DEPTH_DIR / "000020.png").unlink()
+    failed = subprocess.run(
+        [*command, "--overwrite"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert failed.returncode != 0
+    assert manifest_path.read_bytes() == previous_manifest
+    assert (run_root / BOP_DIR / "test" / "000001" / RGB_DIR / "000001.png").is_file()
+    assert not list(run_root.glob(".bop.*.tmp"))
+
+
+def test_bop_export_rejects_unvalidated_calibration_profile(
+    tmp_path: Path,
+) -> None:
+    run_root = create_synchronized_sensor_fixture(tmp_path)
+    profiles_path = run_root / CALIBRATION_PROFILES
+    profile = CalibrationProfile(
+        schema_version=SCHEMA_VERSION,
+        profile_id="realsense_candidate",
+        sensor_id="123",
+        sensor_type=SensorType.REALSENSE_D435,
+        mounting_mode=MountingMode.STATIC,
+        rig_position="front",
+        intrinsics=CameraIntrinsics(
+            cam_k=(9.0, 0.0, 8.0, 0.0, 7.0, 6.0, 0.0, 0.0, 1.0),
+            width=80,
+            height=60,
+            depth_scale_to_mm=1.0,
+        ),
+        extrinsics=RigidTransform(
+            from_frame=TransformFrame.CAMERA,
+            to_frame=TransformFrame.ROBOT_BASE,
+            rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+            translation_mm=(0.0, 0.0, 0.0),
+        ),
+        status=CalibrationStatus.NEEDS_VALIDATION,
+        quality=CalibrationQuality(num_observations=4, num_inliers=4),
+    )
+    write_profile_collection([profile], profiles_path)
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "run_bop_export_stage.py"),
+            str(run_root),
+            "--no-model-export",
+            "--calibration-profiles",
+            str(profiles_path),
+        ],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert not (run_root / BOP_DIR).exists()

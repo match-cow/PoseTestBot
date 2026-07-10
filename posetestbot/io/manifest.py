@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from posetestbot.config import RobotProfile
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     DATASET_MANIFEST,
     DEPTH_DIR,
@@ -201,11 +202,7 @@ def write_run_manifest(manifest: Mapping[str, Any], run_root: str | Path) -> Pat
     manifest_data = _jsonable(dict(manifest))
     manifest_data["updated_at"] = utc_now_iso()
 
-    with open(path, "w") as f:
-        json.dump(manifest_data, f, indent=2, sort_keys=True)
-        f.write("\n")
-
-    return path
+    return atomic_write_json(path, manifest_data)
 
 
 def set_manifest_sensors(
@@ -279,4 +276,3 @@ def record_raw_robot_pose_artifact(
         artifacts={RAW_ROBOT_EE_POSES: artifact_path},
         run_root=run_root,
     )
-

@@ -1,4 +1,4 @@
-<img src="assets/cow200.png" alt="PoseTestBot cow logo" width="96" align="right">
+<img src="posetestbot/web/static/cow200.png" alt="PoseTestBot cow logo" width="96" align="right">
 
 # PoseTestBot
 
@@ -19,10 +19,9 @@ project.
 - RealSense, OAK-D Pro, and ZED 2i sensor registry/status/capture contracts.
 - Non-destructive synchronization under `processed/synchronized/`.
 - Sync quality reporting.
-- Calibration target detection support via ArUco/ChArUco/checkerboard-style
-  outputs.
-- Calibration observation extraction, candidate generation, solving,
-  validation, and explicit promotion.
+- Imported ArUcoGridGen target validation, split marker detection/pose solving,
+  optional RealSense color intrinsic calibration, explicit hand-eye/known-grid
+  extrinsic solving, selection-gated promotion, and derived RGB-D rectification.
 - BlenderProc preparation/render planning for optional GT and masks.
 - BOP dataset export, model metadata, targets, frame maps, and optional
   multiview/COCO sidecars.
@@ -99,6 +98,17 @@ Defaults:
 - `sync_to_bop_dry_run` as the saved sequence,
 - `plan_only=true`.
 
+New run configs also make the robot stream frames explicit:
+`robot_flange -> template_base` with `kuka_abc_radians`; optional fixed edges
+can describe flange-to-TCP or template-base-to-physical-base transforms. Older
+configs remain readable and receive a `legacy_frames_inferred` warning.
+For example, a measured flange-to-TCP edge can be recorded at creation time:
+
+```bash
+uv run python scripts/create_run_config.py working_data/example_run \
+  --fixed-transform-json '{"from":"robot_flange","to":"tcp","rotation_quaternion_wxyz":[1,0,0,0],"translation_mm":[0,0,125]}'
+```
+
 Use real robot mode only intentionally:
 
 ```bash
@@ -157,30 +167,54 @@ Derived sync folders are written below:
 processed/synchronized/<sensor>/
 ```
 
+Synchronization is transactional and emits `sync_report.v2` per sensor plus
+`sync_quality_report.v2` at run level. Synchronized metadata names the derived
+frame paths, retains source-frame provenance, and records any timestamp-source
+fallback. Raw frames and raw robot poses are never overwritten; start a new run
+root when capture preflight reports existing raw data.
+
 ## Calibration
 
-Generate target detections and calibration inputs:
+Real grid calibration starts from the exact ArUcoGridGen 1.0 JSON downloaded
+for the physically printed, 100%-scale board:
 
 ```bash
-uv run python scripts/run_aruco_stage.py working_data/example_run
-uv run python scripts/run_aruco_coverage_stage.py working_data/example_run
-uv run python scripts/run_calibration_observations.py working_data/example_run
+uv run python scripts/run_calibration_target_import.py working_data/example_run \
+  --source working_data/example_run/aruco_grid_config.json \
+  --aligned-to-template-base
+uv run python scripts/run_aruco_detection_stage.py working_data/example_run
+uv run python scripts/run_intrinsic_calibration_stage.py working_data/example_run \
+  --mode calibrate
+uv run python scripts/run_aruco_pose_stage.py working_data/example_run
+uv run python scripts/run_calibration_observations.py working_data/example_run \
+  --target-spec calibration_target.json
 ```
 
-Create candidate/solved profiles and validate them:
+Solve unknown-target and aligned-known-target wrist methods side by side. Static
+cameras support only the known-target method:
 
 ```bash
-uv run python scripts/run_calibration_candidates.py working_data/example_run
 uv run python scripts/run_calibration_solver.py working_data/example_run \
-  --holdout-fraction 0.2 --compare-hand-eye-methods
-uv run python scripts/run_calibration_validation.py working_data/example_run
+  --mode compare
+uv run python scripts/run_calibration_validation.py working_data/example_run \
+  --select-profile realsense_123=PROFILE_ID
 ```
 
-Promotion to `calibration_profiles.json` is explicit:
+When comparison emits two wrist candidates, one repeatable
+`--select-profile SENSOR=PROFILE_ID` choice per sensor is mandatory. Promotion
+to `calibration_profiles.json` is explicit and writes `calibration.v2` profiles
+with native/alpha=0 rectified projections and frame/provenance metadata:
 
 ```bash
-uv run python scripts/run_calibration_validation.py working_data/example_run --promote
+uv run python scripts/run_calibration_validation.py working_data/example_run \
+  --select-profile realsense_123=PROFILE_ID --promote
+uv run python scripts/run_camera_rectification.py working_data/example_run
 ```
+
+Rectification writes only below `processed/rectified/<sensor>/`, using linear
+RGB and nearest-neighbor aligned-depth remapping. BlenderProc preparation and
+BOP export prefer that tree when present. `run_aruco_stage.py` remains the
+factory-intrinsics compatibility wrapper.
 
 ## BOP Dataset Export
 
@@ -198,6 +232,24 @@ Export BOP dataset structure:
 uv run python scripts/run_bop_export_stage.py working_data/example_run \
   --calibration-profiles working_data/example_run/calibration_profiles.json \
   --object-folder object_models
+```
+
+The transactional export emits `bop_export_manifest.v2` and uses standard
+BOP-scenewise paths:
+
+```text
+bop/
+├── dataset_info.json
+├── posetestbot_bop_frame_map.json
+├── models/
+└── <split>/<scene_id>/
+    ├── rgb/
+    ├── depth/
+    ├── scene_camera.json
+    ├── scene_gt.json
+    ├── scene_gt_info.json
+    ├── mask/          # optional
+    └── mask_visib/    # optional
 ```
 
 The export preserves:
@@ -224,6 +276,8 @@ Useful presets:
 - `sync_aruco_calibration_candidates`
 - `sync_aruco_calibration_solver`
 - `sync_aruco_calibration_validation`
+- `aruco_grid_full_calibration`
+- `calibrated_capture_to_bop_dataset_dry_run`
 - `sync_to_bop_dry_run`
 - `sync_to_bop_calibrated_dry_run`
 - `capture_to_bop_dataset_dry_run`
@@ -241,8 +295,21 @@ curl http://127.0.0.1:5000/pipeline/sequences
 Start the transition Flask app:
 
 ```bash
+uv run posetestbot-web
+# source-checkout compatibility entrypoint:
 uv run python web_interface.py
 ```
+
+The web server intentionally defaults to unauthenticated `0.0.0.0` for the
+trusted lab LAN and still exposes deliberate real-robot controls. Do not expose
+it to an untrusted network. Web run paths are confined to `working_data` by
+default; add path-list entries with `POSETESTBOT_WEB_RUN_ROOTS`. Read-only
+external inputs default to `object_models` and `scripts/default_data`; extend
+them with `POSETESTBOT_WEB_INPUT_ROOTS`. Symlink escapes and output paths outside
+the selected run are rejected. Installed deployments may set
+`POSETESTBOT_APP_ROOT`; otherwise a source checkout is detected automatically
+and an installed command uses its current working directory. CLI tools continue
+to accept explicit paths.
 
 Important endpoints:
 
@@ -283,12 +350,27 @@ Run all gate status summaries:
 uv run python scripts/run_rewrite_status.py working_data/example_run --write
 ```
 
+## Removed Legacy Entry Points
+
+The destructive multi-camera sync/capture wrappers, `realsense_multi.py`, the
+shell BlenderProc wrapper/preparation script, ROI generators, and superseded
+transform scripts were removed. Use the supported replacements:
+
+- capture: `run_capture_plan_stage.py`, `run_capture_plan_preflight.py`, and
+  `run_capture_execution_stage.py`;
+- sync: `sync_run_non_destructive.py` followed by `run_sync_quality.py`;
+- BlenderProc: `run_blenderproc_prepare_stage.py` and
+  `run_blenderproc_render_stage.py`;
+- calibration transforms: the calibration observation, solver, validation, and
+  explicit promotion stages.
+
 ## Validation
 
 Recommended local validation:
 
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
+UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 git diff --check
 uv run python scripts/run_rewrite_fake_e2e_smoke.py /tmp/posetestbot_fake_bop_smoke --overwrite
 uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke \

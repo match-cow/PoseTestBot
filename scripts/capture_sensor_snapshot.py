@@ -14,7 +14,8 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
-from posetestbot.io.artifacts import DEPTH_DIR, FRAME_METADATA_JSONL, RGB_DIR
+from posetestbot.io.atomic import atomic_write_json
+from posetestbot.io.artifacts import FRAME_METADATA_JSONL
 from posetestbot.io.manifest import utc_now_iso
 from posetestbot.pipeline.run_config import normalize_inverted, normalize_sensor_type
 from posetestbot.sensors.registry import build_sensor_capture_command
@@ -269,9 +270,7 @@ def main() -> int:
             exit_code = 1
 
     manifest["status"] = "succeeded" if exit_code == 0 else "failed"
-    with open(snapshot_root / MANIFEST_NAME, "w") as f:
-        json.dump(manifest, f, indent=2, sort_keys=True)
-        f.write("\n")
+    atomic_write_json(snapshot_root / MANIFEST_NAME, manifest)
     print(f"Wrote {snapshot_root / MANIFEST_NAME}")
     return exit_code
 

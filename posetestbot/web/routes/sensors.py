@@ -33,7 +33,7 @@ from posetestbot.web.legacy import APP_ROOT, job_runner
 
 
 sensors_bp = Blueprint("sensors", __name__)
-ACTIVE_JOB_STATUSES = {"queued", "running"}
+ACTIVE_JOB_STATUSES = {"queued", "running", "canceling"}
 
 
 def _json_payload() -> dict[str, Any]:
@@ -97,6 +97,10 @@ def _requested_sensor_specs(data: Mapping[str, Any]) -> tuple[list[dict[str, Any
 
 def _sensor_key(spec: Mapping[str, Any]) -> str:
     return f"{spec.get('sensor_type')}:{spec.get('device_id')}"
+
+
+def _camera_resource(spec: Mapping[str, Any]) -> str:
+    return f"camera:{_sensor_key(spec)}"
 
 
 def _active_preview_jobs_by_key() -> dict[str, Any]:
@@ -177,7 +181,7 @@ def post_sensor_snapshots():
             name="sensor-snapshot",
             command=command,
             cwd=APP_ROOT,
-            resources=["camera"],
+            resources=[*sorted({_camera_resource(spec) for spec in specs}), "disk_io"],
             parameters={
                 "snapshot_root": snapshot_root.as_posix(),
                 "sensor_keys": [
@@ -242,7 +246,7 @@ def post_sensor_previews():
                 name=f"sensor-preview:{key}",
                 command=command,
                 cwd=APP_ROOT,
-                resources=[f"camera-preview:{key}"],
+                resources=[_camera_resource(spec)],
                 parameters={
                     "preview_root": preview_root.as_posix(),
                     "sensor_key": key,

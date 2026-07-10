@@ -1,18 +1,16 @@
 [project]
 name = "posetestbot"
 version = "0.1.0"
-description = "Add your description here"
+description = "Acquisition, calibration, synchronization, and BOP export for multi-camera robot datasets"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "opencv-python>=4.11.0.86",
     "pyrealsense2>=2.55.1.6486",
-    "requests>=2.32.4",
     "flask>=2.0.0",
     "depthai>=3,<4",
     "tqdm>=4.67.1",
     "pytransform3d>=3.14.1",
-    "pandas>=2.3.0",
     "trimesh>=4.12.2",
 ]
 
@@ -20,16 +18,30 @@ dependencies = [
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
+[project.scripts]
+posetestbot-web = "posetestbot.web.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"posetestbot.web" = [
+    "templates/*.html",
+    "static/*",
+]
+
 [tool.setuptools.packages.find]
 exclude = [
     "iiwa*",
     "object_models*",
     "output*",
     "scripts*",
+    "tests*",
 ]
 
 [dependency-groups]
 dev = [
     "playwright>=1.61.0",
     "pytest>=9.1.0",
+    "ruff>=0.15.21",
 ]

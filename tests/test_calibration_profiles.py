@@ -19,7 +19,9 @@ from posetestbot.calibration.profiles import (
     load_profile_collection,
     migrate_legacy_camera_ee_profiles,
     write_profile,
+    write_profile_collection,
 )
+import pytest
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 
 
@@ -35,7 +37,14 @@ def static_profile() -> CalibrationProfile:
             cam_k=(1.0, 0.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 1.0),
             width=1280,
             height=720,
-            distortion=(0.1, 0.2),
+            distortion=(0.1, 0.2, 0.0, 0.0, 0.0),
+            depth_scale_to_mm=1.0,
+        ),
+        rectified_intrinsics=CameraIntrinsics(
+            cam_k=(1.1, 0.0, 2.0, 0.0, 3.1, 4.0, 0.0, 0.0, 1.0),
+            width=1280,
+            height=720,
+            distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
             depth_scale_to_mm=1.0,
         ),
         extrinsics=RigidTransform(
@@ -63,23 +72,27 @@ def test_calibration_profile_round_trips_with_baseline_json_keys(tmp_path: Path)
     write_profile(profile, path)
     value = json.loads(path.read_text())
 
-    assert value["schema_version"] == "calibration.v1"
-    assert value["intrinsics"]["cam_K"] == [1.0, 0.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 1.0]
+    assert value["schema_version"] == "calibration.v2"
+    assert value["intrinsics"]["native"]["cam_K"] == [1.0, 0.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 1.0]
+    assert value["intrinsics"]["rectified"]["distortion"] == [0.0] * 5
     assert value["extrinsics"]["from"] == "camera"
-    assert value["extrinsics"]["to"] == "robot_base"
+    assert value["extrinsics"]["to"] == "template_base"
 
     loaded = load_profile(path)
-    assert loaded == profile
+    assert loaded.profile_id == profile.profile_id
+    assert loaded.intrinsics == profile.intrinsics
+    assert loaded.rectified_intrinsics == profile.rectified_intrinsics
+    assert loaded.rectified_valid_roi == tuple(value["intrinsics"]["rectified"]["valid_roi"])
 
 
-def test_eye_in_hand_profile_requires_camera_to_end_effector() -> None:
+def test_eye_in_hand_profile_requires_camera_to_robot_flange() -> None:
     profile = static_profile()
     invalid = replace(profile, mounting_mode=MountingMode.EYE_IN_HAND)
 
     try:
         invalid.validate()
     except ValueError as exc:
-        assert "eye_in_hand calibration must transform camera to end_effector" in str(exc)
+        assert "eye_in_hand calibration must transform camera to robot_flange" in str(exc)
     else:
         raise AssertionError("invalid eye-in-hand transform direction was accepted")
 
@@ -117,7 +130,7 @@ def test_blenderproc_transform_map_accepts_static_profiles() -> None:
 
     entry = transform_map["zed_2i_SN0001"]
     assert entry["mounting_mode"] == "static"
-    assert entry["to"] == "robot_base"
+    assert entry["to"] == "template_base"
     assert entry["profile_id"] == "zed_2i_SN0001_static_cell_top_v2026_01"
     assert entry["position"] == [100.0, 200.0, 300.0]
 
@@ -159,3 +172,97 @@ def test_validate_calibration_profiles_cli_migrates_legacy_defaults(
     profiles = load_profile_collection(output)
     assert profiles[0].profile_id == "realsense_d435_realsense_eye_in_hand_wrist_legacy"
     assert profiles[0].sync_delta_ms == 112.5
+
+
+@pytest.mark.parametrize(
+    ("profile", "message"),
+    [
+        (
+            replace(
+                static_profile(),
+                extrinsics=replace(
+                    static_profile().extrinsics,
+                    rotation_quaternion_wxyz=(2.0, 0.0, 0.0, 0.0),
+                ),
+            ),
+            "normalized",
+        ),
+        (
+            replace(
+                static_profile(),
+                intrinsics=replace(
+                    static_profile().intrinsics,
+                    depth_scale_to_mm=float("nan"),
+                ),
+            ),
+            "depth_scale_to_mm",
+        ),
+        (
+            replace(
+                static_profile(),
+                quality=replace(
+                    static_profile().quality,
+                    residual_translation_mm=-1.0,
+                ),
+            ),
+            "nonnegative",
+        ),
+    ],
+)
+def test_calibration_profile_rejects_invalid_numeric_contracts(
+    profile: CalibrationProfile, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        profile.validate()
+
+
+def test_profile_collection_rejects_duplicate_valid_sensor_slot(
+    tmp_path: Path,
+) -> None:
+    first = static_profile()
+    second = replace(first, profile_id="second_valid_profile")
+
+    with pytest.raises(ValueError, match="same sensor/mount/rig slot"):
+        write_profile_collection([first, second], tmp_path / "profiles.json")
+
+
+def test_calibration_v1_collection_loads_and_normalizes_explicit_frames(
+    tmp_path: Path,
+) -> None:
+    legacy = {
+        "schema_version": "calibration.v1",
+        "profiles": [
+            {
+                "schema_version": "calibration.v1",
+                "profile_id": "legacy_wrist",
+                "sensor_id": "123",
+                "sensor_type": "realsense_d435",
+                "mounting_mode": "eye_in_hand",
+                "rig_position": "wrist",
+                "intrinsics": {
+                    "cam_K": [600, 0, 320, 0, 600, 240, 0, 0, 1],
+                    "width": 640,
+                    "height": 480,
+                    "distortion": [0.1, 0, 0, 0, 0],
+                    "depth_scale_to_mm": 1.0,
+                },
+                "extrinsics": {
+                    "from": "camera",
+                    "to": "end_effector",
+                    "rotation_quaternion_wxyz": [1, 0, 0, 0],
+                    "translation_mm": [1, 2, 3],
+                },
+                "status": "needs_validation",
+                "quality": {"num_observations": 1, "num_inliers": 1},
+            }
+        ],
+    }
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(legacy))
+
+    profile = load_profile_collection(path)[0]
+
+    assert profile.schema_version == "calibration.v2"
+    assert profile.extrinsics.to_frame == TransformFrame.ROBOT_FLANGE
+    assert profile.rectified_intrinsics is not None
+    assert profile.rectified_intrinsics.distortion == (0.0,) * 5

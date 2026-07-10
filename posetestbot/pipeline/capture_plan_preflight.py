@@ -7,7 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from posetestbot.io.artifacts import CAPTURE_PLAN, CAPTURE_PLAN_PREFLIGHT_REPORT
+from posetestbot.io.atomic import atomic_write_json
+from posetestbot.io.artifacts import (
+    CAPTURE_PLAN,
+    CAPTURE_PLAN_PREFLIGHT_REPORT,
+    RAW_ROBOT_EE_POSES,
+)
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
     upsert_stage,
@@ -209,7 +214,7 @@ def _validate_output_folders(
             )
             continue
         child_count = sum(1 for _ in folder_path.iterdir()) if folder_path.is_dir() else 0
-        status = "warning" if child_count else "ok"
+        status = "error" if child_count else "ok"
         checks.append(
             _check(
                 f"sensor_output_folder:{folder_name}",
@@ -250,6 +255,22 @@ def _validate_output_folders(
             )
         )
     return checks
+
+
+def _validate_raw_pose_output(run_root: Path) -> list[dict[str, Any]]:
+    path = run_root / RAW_ROBOT_EE_POSES
+    return [
+        _check(
+            "raw_robot_pose_output",
+            "error" if path.exists() else "ok",
+            (
+                f"Raw robot pose artifact already exists: {path}. Use a new run root."
+                if path.exists()
+                else f"Raw robot pose output is available: {path}."
+            ),
+            details={"path": path.as_posix(), "exists": path.exists()},
+        )
+    ]
 
 
 def _validate_command_shape(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -543,11 +564,7 @@ def write_capture_plan_preflight_report(
     report: Mapping[str, Any],
 ) -> Path:
     path = capture_plan_preflight_report_path(run_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(dict(report), f, indent=2, sort_keys=True)
-        f.write("\n")
-    return path
+    return atomic_write_json(path, dict(report))
 
 
 def build_capture_plan_preflight(
@@ -566,6 +583,7 @@ def build_capture_plan_preflight(
     pre_plan_checks = []
     pre_plan_checks.extend(_validate_adapter_capabilities(config))
     pre_plan_checks.extend(_validate_output_folders(config, run_root=run_root_path))
+    pre_plan_checks.extend(_validate_raw_pose_output(run_root_path))
     pre_plan_has_errors = any(check["status"] == "error" for check in pre_plan_checks)
 
     plan: dict[str, Any] | None = None

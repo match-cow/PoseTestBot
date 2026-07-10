@@ -75,7 +75,8 @@ Keep or extend these areas:
   writer contracts.
 - `posetestbot.sync.non_destructive` and `posetestbot.sync.quality`.
 - `posetestbot.calibration.*` profile validation, preflight, observations,
-  candidates, solver, and validation/promotion.
+  target import, intrinsic/rectification, frame graph, candidates, explicit
+  extrinsic modes, and validation/promotion.
 - `scripts/run_aruco_stage.py` and `posetestbot.aruco.coverage` as calibration
   target support.
 - BlenderProc preparation/render planning for optional dataset GT/masks.
@@ -107,11 +108,13 @@ Do not reintroduce downstream estimator/evaluator behavior here:
 - Derived sync report: `sync_report.json`.
 - Run-level sync quality report: `sync_quality_report.json`.
 - Calibration artifacts: `calibration_preflight_report.json`,
+  `calibration_target.json`, `intrinsic_calibration_profiles.json`,
+  per-sensor `aruco_detections.json`, `camera_rectification_report.json`,
   `calibration_observations.json`, `calibration_candidates.json`,
   `calibration_profiles_from_observations.json`,
   `calibration_solver_report.json`, `calibration_profiles_solved.json`,
   `calibration_validation_report.json`, and promoted
-  `calibration_profiles.json`.
+  `calibration_profiles.json` (`calibration.v2`; v1 remains loadable).
 - BlenderProc render plan artifact: `blenderproc_render_plan.json`.
 - BOP export artifacts: `bop/bop_export_manifest.json`,
   `bop/posetestbot_bop_frame_map.json`, `bop/test_targets_bop19.json`,
@@ -151,6 +154,8 @@ Current acquisition sequences include:
 - `sync_to_bop_calibrated_dry_run`
 - `capture_to_bop_dataset_dry_run`
 - `fake_capture_to_bop_dataset_dry_run`
+- `aruco_grid_full_calibration`
+- `calibrated_capture_to_bop_dataset_dry_run`
 
 Keep `sync_quality` immediately after `sync_run` in reusable sequences unless
 there is a clear operator-facing reason to bypass that gate.
