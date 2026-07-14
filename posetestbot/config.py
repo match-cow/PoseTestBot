@@ -1,17 +1,10 @@
-"""Local runtime configuration defaults for PoseTestBot.
-
-The rewrite is fake-iiwa-first while preserving the real lab robot profile.
-Environment variables can override these defaults without editing scripts.
-"""
+"""Real lab robot configuration defaults for PoseTestBot."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, replace
 
-
-FAKE_ROBOT_IP = "127.0.0.1"
-FAKE_RECEIVER_IP = "127.0.0.1"
 
 LAB_ROBOT_IP = "172.31.1.147"
 LAB_ROBOT_RECEIVER_IP = "172.31.1.169"
@@ -74,38 +67,16 @@ def _env_float(name: str, default: float) -> float:
     return float(value)
 
 
-def _normalise_mode(mode: str | None) -> str:
-    resolved = mode or os.getenv("POSETESTBOT_ROBOT_MODE", "fake")
-    resolved = resolved.strip().lower()
-    if resolved not in {"fake", "real"}:
-        raise ValueError("robot mode must be 'fake' or 'real'")
-    return resolved
-
-
-def robot_profile(mode: str | None = None) -> RobotProfile:
-    """Return the configured iiwa profile.
-
-    Defaults are intentionally fake-first. Set ``POSETESTBOT_ROBOT_MODE=real`` or
-    pass ``mode="real"`` to target the lab robot at 172.31.1.147.
-    """
-
-    resolved_mode = _normalise_mode(mode)
-
-    if resolved_mode == "real":
-        robot_ip = LAB_ROBOT_IP
-        receiver_ip = LAB_ROBOT_RECEIVER_IP
-    else:
-        robot_ip = FAKE_ROBOT_IP
-        receiver_ip = FAKE_RECEIVER_IP
+def robot_profile() -> RobotProfile:
+    """Return the real lab iiwa profile with environment overrides."""
 
     return RobotProfile(
-        mode=resolved_mode,
-        robot_ip=os.getenv("POSETESTBOT_ROBOT_IP", robot_ip),
+        mode="real",
+        robot_ip=os.getenv("POSETESTBOT_ROBOT_IP", LAB_ROBOT_IP),
         command_port=_env_int("POSETESTBOT_ROBOT_PORT", DEFAULT_ROBOT_PORT),
-        receiver_ip=os.getenv("POSETESTBOT_RECEIVER_IP", receiver_ip),
+        receiver_ip=os.getenv("POSETESTBOT_RECEIVER_IP", LAB_ROBOT_RECEIVER_IP),
         receiver_port=_env_int("POSETESTBOT_RECEIVER_PORT", DEFAULT_RECEIVER_PORT),
         cartesian_velocity_m_s=_env_float(
             "POSETESTBOT_CAPTURE_VEL", DEFAULT_CAPTURE_VELOCITY_M_S
         ),
     )
-

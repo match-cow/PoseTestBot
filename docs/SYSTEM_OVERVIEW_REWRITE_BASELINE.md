@@ -14,7 +14,7 @@ repository.
 
 PoseTestBot owns:
 
-- robot profile selection and iiwa UDP command contracts,
+- fixed real lab robot profile and iiwa UDP command contracts,
 - capture planning, preflight, and supervised capture execution,
 - RGB-D sensor registry/status/capture adapters,
 - non-destructive frame/pose synchronization,
@@ -35,7 +35,7 @@ PoseTestBot does not own:
 
 ## Package Layout
 
-- `posetestbot.config`: robot profile configuration and fake/real selection.
+- `posetestbot.config`: fixed real lab robot profile configuration and overrides.
 - `posetestbot.robot`: read-only robot status and UDP helper contracts.
 - `posetestbot.sensors`: static registry, discovery/status helpers, frame
   writer contracts, and testable RealSense, OAK-D Pro, and ZED 2i capture
@@ -88,7 +88,6 @@ Important root artifacts:
 - `capture_execution_plan.json`
 - `capture_execution_status.json`
 - `capture_execution_report.json`
-- `capture_rehearsal_report.json`
 - `raw_robot_ee_poses.json`
 - `sync_quality_report.json`
 - `pipeline_sequence_plan.json`
@@ -155,13 +154,11 @@ The typed stage registry includes:
 - `capture_execution_plan`
 - `capture_execution`
 - `realsense_capture_smoke`
-- `synthetic_rgbd_fixture`
 - `calibration_preflight`
 - `calibration_observations`
 - `calibration_candidates`
 - `calibration_solver`
 - `calibration_validation`
-- `capture_rehearsal`
 - `sync_run`
 - `sync_quality`
 - `aruco`
@@ -178,8 +175,6 @@ external-input, or repository scope for web submission validation.
 
 The sequence registry includes:
 
-- `fake_capture_rehearsal`
-- `fake_capture_execution`
 - `real_full_capture_validation`
 - `sync_aruco`
 - `sync_aruco_calibration_observations`
@@ -189,7 +184,6 @@ The sequence registry includes:
 - `sync_to_bop_dry_run`
 - `sync_to_bop_calibrated_dry_run`
 - `capture_to_bop_dataset_dry_run`
-- `fake_capture_to_bop_dataset_dry_run`
 
 Sequences that begin with non-destructive sync should run `sync_quality`
 immediately after `sync_run`.
@@ -198,8 +192,6 @@ immediately after `sync_run`.
 
 Current gates:
 
-- `rewrite_fake_acquisition_to_bop.v1`: proves hardware-free fake capture,
-  synthetic RGB-D fixture, sync quality, and structural BOP export.
 - `rewrite_full_capture.v1`: proves intentional real robot/camera capture with
   command planning, status snapshots, supervised execution, and raw frames.
 - `rewrite_calibration_validation.v1`: proves validation and explicit
@@ -239,6 +231,5 @@ Baseline validation:
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 git diff --check
-uv run python scripts/run_rewrite_fake_e2e_smoke.py /tmp/posetestbot_fake_bop_smoke --overwrite
-uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke --gate rewrite_fake_acquisition_to_bop.v1 --write
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 ```

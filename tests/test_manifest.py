@@ -85,7 +85,7 @@ def test_manifest_write_load_and_stage_updates(tmp_path: Path) -> None:
     manifest = create_run_manifest(
         run_root,
         run_name="run-1",
-        robot_profile=robot_profile("fake"),
+        robot_profile=robot_profile(),
         capture_config={"fps": 6, "resolution": "720p"},
         sensors=[sensor],
     )

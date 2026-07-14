@@ -246,8 +246,6 @@ def build_run_preflight(
     robot = collect_robot()
     sensors = collect_sensors() if include_sensor_status else None
     runtimes = collect_runtimes() if include_runtime_status else None
-    configured_robot_mode = config["robot_profile"]["mode"]
-    selected_robot_mode = robot["selected_profile"]["mode"]
     plan_only = bool(config["pipeline"].get("plan_only", True))
     non_dry_run_steps = _non_dry_run_steps(plan)
 
@@ -267,7 +265,7 @@ def build_run_preflight(
             "ok",
             f"Loaded {config['schema_version']} for {len(config['capture']['sensors'])} sensor(s).",
             details={
-                "robot_mode": configured_robot_mode,
+                "robot_profile": "real",
                 "sensor_counts": _sensor_counts(config),
             },
         ),
@@ -283,20 +281,16 @@ def build_run_preflight(
             },
         ),
         _check(
-            "robot_mode",
-            "ok" if configured_robot_mode == selected_robot_mode else "warning",
+            "robot_profile",
+            "ok" if robot["selected_profile"]["mode"] == "real" else "error",
             (
-                f"Configured robot mode {configured_robot_mode} matches selected profile."
-                if configured_robot_mode == selected_robot_mode
-                else (
-                    "Configured robot mode "
-                    f"{configured_robot_mode} differs from selected profile "
-                    f"{selected_robot_mode}."
-                )
+                "Run config and runtime status use the real robot profile."
+                if robot["selected_profile"]["mode"] == "real"
+                else "Runtime robot status did not select the real profile."
             ),
             details={
-                "configured": configured_robot_mode,
-                "selected": selected_robot_mode,
+                "configured": "real",
+                "selected": robot["selected_profile"]["mode"],
             },
         ),
     ]

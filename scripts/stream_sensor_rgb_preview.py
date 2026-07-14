@@ -21,8 +21,8 @@ from posetestbot.sensors.previews import (
     PREVIEW_STOP_NAME,
 )
 from posetestbot.sensors.v4l2_preview import (
+    open_v4l2_capture,
     select_realsense_rgb_node,
-    select_usb_rgb_node,
 )
 
 
@@ -54,11 +54,7 @@ def _load_sensor_spec(value: str) -> dict[str, Any]:
     if not isinstance(loaded, Mapping):
         raise ValueError("--sensor-json must be a JSON object")
     raw_sensor_type = str(loaded.get("sensor_type", "")).strip()
-    sensor_type = (
-        raw_sensor_type
-        if raw_sensor_type == "monitor_webcam"
-        else normalize_sensor_type(raw_sensor_type).value
-    )
+    sensor_type = normalize_sensor_type(raw_sensor_type).value
     device_id = str(loaded.get("device_id", "")).strip()
     if not device_id:
         raise ValueError("sensor_json device_id must not be empty")
@@ -132,15 +128,13 @@ def _open_capture(
     fps: int,
     pixel_format: str = "YUYV",
 ):
-    capture = cv2.VideoCapture(path, cv2.CAP_V4L2)
-    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*pixel_format))
-    capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
-    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
-    capture.set(cv2.CAP_PROP_FPS, float(fps))
-    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    if not capture.isOpened():
-        raise RuntimeError(f"Could not open RGB preview node {path}.")
-    return capture
+    return open_v4l2_capture(
+        path,
+        width=width,
+        height=height,
+        fps=fps,
+        pixel_format=pixel_format,
+    )
 
 
 def run_preview(args: argparse.Namespace) -> int:
@@ -163,18 +157,6 @@ def run_preview(args: argparse.Namespace) -> int:
             ),
         )
         pixel_format = "YUYV"
-    elif spec["sensor_type"] == "monitor_webcam":
-        metadata = (
-            spec.get("metadata")
-            if isinstance(spec.get("metadata"), Mapping)
-            else {}
-        )
-        vendor_id = str(metadata.get("usb_vendor_id", "")).strip()
-        product_id = str(metadata.get("usb_product_id", "")).strip()
-        if not vendor_id or not product_id:
-            raise ValueError("Monitor webcam requires USB vendor and product IDs.")
-        selection = select_usb_rgb_node(vendor_id, product_id)
-        pixel_format = "MJPG" if "MJPG" in selection.formats else "YUYV"
     else:
         status.update(
             {

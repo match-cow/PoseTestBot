@@ -16,31 +16,6 @@ def step_ids(plan) -> list[str]:
     return [step.id for step in plan.steps]
 
 
-def test_fake_capture_to_bop_dataset_sequence_stops_at_bop_export(tmp_path: Path) -> None:
-    run_root = tmp_path / "fake-run"
-
-    plan = build_sequence_plan(
-        sequence_id="fake_capture_to_bop_dataset_dry_run",
-        run_root=run_root,
-    )
-
-    assert step_ids(plan) == [
-        "capture_plan",
-        "capture_plan_preflight",
-        "capture_execution_plan",
-        "capture_execution",
-        "synthetic_rgbd_fixture",
-        "sync_run",
-        "sync_quality",
-        "blenderproc_prepare",
-        "blenderproc_render",
-        "bop_export",
-    ]
-    assert plan.steps[-1].stage_id == "bop_export"
-    assert not any(step.stage_id in {"foundationpose", "bop_evaluation"} for step in plan.steps)
-    assert plan.resources == ["camera", "cpu", "disk_io", "render", "robot_command"]
-
-
 def test_capture_to_bop_dataset_sequence_uses_sync_quality_gate(tmp_path: Path) -> None:
     plan = build_sequence_plan(
         sequence_id="capture_to_bop_dataset_dry_run",
@@ -100,6 +75,9 @@ def test_real_full_capture_sequence_keeps_explicit_hardware_gates(tmp_path: Path
 def test_removed_downstream_sequences_are_unknown(tmp_path: Path) -> None:
     removed = [
         "capture_to_bop_foundationpose_dry_run",
+        "fake_capture_rehearsal",
+        "fake_capture_execution",
+        "fake_capture_to_bop_dataset_dry_run",
         "fake_capture_to_bop_foundationpose_dry_run",
         "fake_capture_to_bop_eval_dry_run",
         "foundationpose_to_bop_eval_dry_run",
@@ -117,10 +95,7 @@ def test_sequence_listing_is_acquisition_only() -> None:
     sequence_ids = {sequence["id"] for sequence in list_pipeline_sequences()}
 
     assert {
-        "fake_capture_rehearsal",
-        "fake_capture_execution",
         "capture_to_bop_dataset_dry_run",
-        "fake_capture_to_bop_dataset_dry_run",
         "sync_to_bop_dry_run",
         "sync_to_bop_calibrated_dry_run",
         "real_full_capture_validation",
@@ -133,7 +108,7 @@ def test_sequence_listing_is_acquisition_only() -> None:
 
 def test_sequence_job_plan_only_locks_disk_only(tmp_path: Path) -> None:
     job = build_sequence_job(
-        sequence_id="fake_capture_to_bop_dataset_dry_run",
+        sequence_id="real_full_capture_validation",
         run_root=tmp_path / "run",
         plan_only=True,
     )
@@ -142,9 +117,7 @@ def test_sequence_job_plan_only_locks_disk_only(tmp_path: Path) -> None:
     assert job.resources == ["disk_io"]
     assert job.parameters["planned_resources"] == [
         "camera",
-        "cpu",
         "disk_io",
-        "render",
         "robot_command",
     ]
 

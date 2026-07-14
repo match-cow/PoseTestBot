@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(0.982 0.006 100);
+  --foreground: oklch(0.19 0.012 100);
+  --card: oklch(1 0 0);
+  --card-foreground: var(--foreground);
+  --popover: oklch(1 0 0);
+  --popover-foreground: var(--foreground);
+  --primary: #b1cb21;
+  --primary-strong: #667700;
+  --primary-foreground: #172000;
+  --secondary: oklch(0.94 0.012 100);
+  --secondary-foreground: oklch(0.25 0.015 100);
+  --muted: oklch(0.945 0.009 100);
+  --muted-foreground: oklch(0.5 0.016 100);
+  --accent: oklch(0.92 0.045 107);
+  --accent-foreground: oklch(0.24 0.03 105);
+  --destructive: oklch(0.58 0.22 25);
+  --success: oklch(0.51 0.14 145);
+  --warning: oklch(0.76 0.15 76);
+  --warning-foreground: oklch(0.39 0.105 60);
+  --border: oklch(0.88 0.012 100);
+  --input: oklch(0.84 0.014 100);
+  --ring: #8da500;
+  --sidebar: oklch(0.205 0.016 100);
+  --sidebar-foreground: oklch(0.94 0.008 100);
+  --sidebar-accent: oklch(0.27 0.02 100);
+  --sidebar-border: oklch(0.31 0.018 100);
+}
+
+.dark {
+  --background: oklch(0.155 0.012 100);
+  --foreground: oklch(0.94 0.008 100);
+  --card: oklch(0.195 0.014 100);
+  --card-foreground: var(--foreground);
+  --popover: oklch(0.205 0.014 100);
+  --popover-foreground: var(--foreground);
+  --primary: #b1cb21;
+  --primary-strong: #c9e63a;
+  --primary-foreground: #172000;
+  --secondary: oklch(0.255 0.015 100);
+  --secondary-foreground: oklch(0.93 0.008 100);
+  --muted: oklch(0.25 0.012 100);
+  --muted-foreground: oklch(0.68 0.014 100);
+  --accent: oklch(0.29 0.035 105);
+  --accent-foreground: oklch(0.94 0.02 105);
+  --destructive: oklch(0.65 0.2 25);
+  --success: oklch(0.68 0.15 145);
+  --warning: oklch(0.77 0.14 76);
+  --warning-foreground: oklch(0.86 0.12 82);
+  --border: oklch(0.29 0.012 100);
+  --input: oklch(0.34 0.012 100);
+  --ring: #b1cb21;
+  --sidebar: oklch(0.12 0.01 100);
+  --sidebar-foreground: oklch(0.92 0.008 100);
+  --sidebar-accent: oklch(0.19 0.015 100);
+  --sidebar-border: oklch(0.24 0.012 100);
+}
+
+@theme inline {
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Aptos Display", Inter, ui-sans-serif, system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-strong: var(--primary-strong);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-border: var(--sidebar-border);
+}
+
+* { border-color: var(--border); }
+html { background: var(--background); }
+body { margin: 0; min-width: 1024px; min-height: 100vh; background: var(--background); font-family: var(--font-sans); }
+button, [role="button"] { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+code, pre { font-variant-ligatures: none; }
+::selection { background: color-mix(in srgb, var(--primary) 42%, transparent); }
+
+.operator-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 1rem; }
+.metric-number { font-family: var(--font-display); font-size: 1.75rem; line-height: 1; font-weight: 650; letter-spacing: -0.03em; }
+.surface-grid { background-image: linear-gradient(to right, color-mix(in srgb, var(--border) 45%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, var(--border) 45%, transparent) 1px, transparent 1px); background-size: 28px 28px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }

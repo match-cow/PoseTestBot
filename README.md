@@ -14,7 +14,7 @@ project.
 
 ## What Is In Scope
 
-- Fake-first and real iiwa robot profile selection.
+- Fixed real lab iiwa profile with explicit execution safety gates.
 - Capture planning, preflight, and supervised capture execution.
 - RealSense, OAK-D Pro, and ZED 2i sensor registry/status/capture contracts.
 - Non-destructive synchronization under `processed/synchronized/`.
@@ -25,7 +25,7 @@ project.
 - BlenderProc preparation/render planning for optional GT and masks.
 - BOP dataset export, model metadata, targets, frame maps, and optional
   multiview/COCO sidecars.
-- Flask transition UI/API for local lab operation.
+- React/shadcn operator console backed by the Flask API and local job runner.
 
 ## Quick Setup
 
@@ -52,7 +52,7 @@ Current lab expectations:
 - Lab receiver IP on the robot subnet: `172.31.1.169`.
 - Normal network IP on the same interface: `10.145.8.132`.
 
-The default robot profile is fake. Inspect it without sending UDP commands:
+The sole robot profile is the real lab iiwa. Inspect it without sending UDP commands:
 
 ```bash
 uv run python scripts/robot_status.py
@@ -70,18 +70,6 @@ uv run python scripts/runtime_status.py --json
 `runtime_status.py` checks acquisition-relevant external tools only:
 BlenderProc for optional GT rendering and the ZED SDK Python module.
 
-## Fake Acquisition To BOP Smoke
-
-The hardware-free acquisition smoke exercises fake iiwa capture, synthetic
-RGB-D fixture generation, non-destructive sync, sync quality, BlenderProc
-planning, BOP export, and the fake acquisition gate:
-
-```bash
-uv run python scripts/run_rewrite_fake_e2e_smoke.py /tmp/posetestbot_fake_bop_smoke --overwrite
-uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke \
-  --gate rewrite_fake_acquisition_to_bop.v1 --write
-```
-
 ## Run Configs
 
 Create an operator intent artifact:
@@ -92,16 +80,17 @@ uv run python scripts/create_run_config.py working_data/example_run
 
 Defaults:
 
-- fake robot profile,
+- real lab robot profile,
 - current lab sensor list,
 - `object_models` as the object registry,
-- `sync_to_bop_dry_run` as the saved sequence,
+- `real_full_capture_validation` as the saved sequence,
 - `plan_only=true`.
 
 New run configs also make the robot stream frames explicit:
 `robot_flange -> template_base` with `kuka_abc_radians`; optional fixed edges
 can describe flange-to-TCP or template-base-to-physical-base transforms. Older
-configs remain readable and receive a `legacy_frames_inferred` warning.
+real-profile configs without frame metadata remain readable and receive a
+`legacy_frames_inferred` warning; fake-profile configs are rejected.
 For example, a measured flange-to-TCP edge can be recorded at creation time:
 
 ```bash
@@ -109,11 +98,10 @@ uv run python scripts/create_run_config.py working_data/example_run \
   --fixed-transform-json '{"from":"robot_flange","to":"tcp","rotation_quaternion_wxyz":[1,0,0,0],"translation_mm":[0,0,125]}'
 ```
 
-Use real robot mode only intentionally:
+Preview the default physical validation workflow without executing it:
 
 ```bash
 uv run python scripts/create_run_config.py working_data/real_run \
-  --robot-mode real \
   --sequence real_full_capture_validation \
   --print-sequence-plan
 ```
@@ -136,20 +124,13 @@ uv run python scripts/run_capture_plan_preflight.py working_data/example_run
 uv run python scripts/run_capture_execution_plan.py working_data/example_run
 ```
 
-Run the safe fake pose-only path:
-
-```bash
-uv run python scripts/run_capture_execution_stage.py working_data/example_run \
-  --mode pose_only_fake
-```
-
-Full camera execution remains explicitly gated:
+Physical execution is explicitly gated and must be operator-triggered:
 
 ```bash
 uv run python scripts/run_capture_execution_plan.py working_data/real_run \
-  --mode full --allow-cameras --allow-real-robot --include-sensors
+  --allow-cameras --allow-real-robot --include-sensors
 uv run python scripts/run_capture_execution_stage.py working_data/real_run \
-  --mode full --allow-cameras --allow-real-robot --include-sensors
+  --allow-cameras --allow-real-robot --include-sensors
 ```
 
 ## Synchronization And Quality
@@ -268,8 +249,6 @@ The export preserves:
 
 Useful presets:
 
-- `fake_capture_rehearsal`
-- `fake_capture_execution`
 - `real_full_capture_validation`
 - `sync_aruco`
 - `sync_aruco_calibration_observations`
@@ -281,7 +260,6 @@ Useful presets:
 - `sync_to_bop_dry_run`
 - `sync_to_bop_calibrated_dry_run`
 - `capture_to_bop_dataset_dry_run`
-- `fake_capture_to_bop_dataset_dry_run`
 
 List current sequences and stages through the Flask API:
 
@@ -292,7 +270,7 @@ curl http://127.0.0.1:5000/pipeline/sequences
 
 ## Web UI
 
-Start the transition Flask app:
+Start the Flask-backed operator console:
 
 ```bash
 uv run posetestbot-web
@@ -311,8 +289,34 @@ the selected run are rejected. Installed deployments may set
 and an installed command uses its current working directory. CLI tools continue
 to accept explicit paths.
 
+The bundled console has desktop routes for Dashboard, Devices, Workflow,
+Artifacts, and Jobs. It remembers the selected run, system/light/dark theme,
+and manual IIWA target in the browser. Physical capture remains separate from
+ordinary stage forms: current preflight evidence is required, camera previews
+are stopped first, and two fresh acknowledgements send `allow_cameras` and
+`allow_real_robot` together in that one request. A non-plan-only capture
+sequence is rejected by `/pipeline/run-config`; use Advanced Capture instead.
+
+The checked-in `posetestbot/web/static/ui/` build is what Flask and installed
+wheels serve, so Bun is not a runtime dependency. Frontend development uses the
+Bun-locked Vite project:
+
+```bash
+cd frontend
+bun install --frozen-lockfile
+bun run typecheck
+bun run lint
+bun run build
+```
+
+The production build clears the previous output before writing hashed assets.
+Use `bash scripts/install.sh --with-web-build` to perform the locked install and
+build through the project installer.
+
 Important endpoints:
 
+- `GET /ui/bootstrap`
+- `GET /ui/runs`
 - `GET /robot/status`
 - `POST /run-command`
 - `GET /sensors/status`
@@ -339,7 +343,6 @@ reports, BOP scene/frame inspection, and GT/mask overlays.
 
 Current gates:
 
-- `rewrite_fake_acquisition_to_bop.v1`
 - `rewrite_full_capture.v1`
 - `rewrite_calibration_validation.v1`
 - `rewrite_bop_export_readiness.v1`
@@ -372,7 +375,5 @@ Recommended local validation:
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 git diff --check
-uv run python scripts/run_rewrite_fake_e2e_smoke.py /tmp/posetestbot_fake_bop_smoke --overwrite
-uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke \
-  --gate rewrite_fake_acquisition_to_bop.v1 --write
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 ```

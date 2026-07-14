@@ -70,18 +70,17 @@ def make_bop_scene(run_root: Path) -> Path:
     return scene
 
 
-def test_index_lists_acquisition_sequences_only() -> None:
+def test_index_serves_bundled_spa_without_cdn_dependencies() -> None:
     client = app.test_client()
 
     response = client.get("/")
     html = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert "fake_capture_to_bop_dataset_dry_run" in html
-    assert "capture_to_bop_dataset_dry_run" in html
-    assert "Inverted RealSense" in html
-    assert "foundationpose_runtime_to_bop_eval" not in html
-    assert "megapose_to_bop_eval_dry_run" not in html
+    assert '<div id="root"></div>' in html
+    assert "/static/ui/assets/index-" in html
+    assert "cdn.jsdelivr.net" not in html
+    assert "bootstrap" not in html.lower()
 
 
 def test_index_uses_cow_branding_asset() -> None:
@@ -94,54 +93,51 @@ def test_index_uses_cow_branding_asset() -> None:
     assert response.status_code == 200
     assert 'rel="icon" type="image/png" href="/assets/cow200.png"' in html
     assert 'rel="apple-touch-icon" href="/assets/cow200.png"' in html
-    assert 'class="brand-mark" src="/assets/cow200.png"' in html
-    assert "Acquisition Control" not in html
+    assert "PoseTestBot Operator Console" in html
     assert logo.status_code == 200
     assert logo.mimetype == "image/png"
 
 
-def test_index_includes_sidebar_robot_control_defaults() -> None:
+def test_ui_bootstrap_includes_robot_control_defaults() -> None:
     client = app.test_client()
 
-    response = client.get("/")
-    html = response.get_data(as_text=True)
+    response = client.get("/ui/bootstrap")
+    payload = response.get_json()
 
     assert response.status_code == 200
-    assert 'id="robotControlIp"' in html
-    assert f'data-default-robot-ip="{LAB_ROBOT_IP}"' in html
-    assert 'id="robotControlPort"' in html
-    assert f'data-default-robot-port="{DEFAULT_ROBOT_PORT}"' in html
-    assert "Start IIWA" in html
-    assert "Stop IIWA" in html
+    assert payload["schema_version"] == "web_bootstrap.v1"
+    assert payload["robot"] == {"ip": LAB_ROBOT_IP, "port": DEFAULT_ROBOT_PORT}
+    assert payload["brand"]["logo_url"] == "/assets/cow200.png"
+    assert "/tmp" in payload["allowed_run_roots"]
 
 
-def test_index_includes_ugreen_sidebar_monitor_below_iiwa_controls() -> None:
+def test_pipeline_sequence_api_lists_acquisition_sequences_only() -> None:
     client = app.test_client()
 
-    response = client.get("/")
-    html = response.get_data(as_text=True)
+    response = client.get("/pipeline/sequences")
+    sequence_ids = {item["id"] for item in response.get_json()["sequences"]}
 
     assert response.status_code == 200
-    assert 'class="webcam-monitor-panel"' in html
-    assert 'id="webcamMonitorImage"' in html
-    assert 'id="retryWebcamBtn"' in html
-    assert html.index('class="webcam-monitor-panel"') > html.index('class="robot-control-panel"')
+    assert "real_full_capture_validation" in sequence_ids
+    assert "capture_to_bop_dataset_dry_run" in sequence_ids
+    assert "fake_capture_to_bop_dataset_dry_run" not in sequence_ids
+    assert "foundationpose_runtime_to_bop_eval" not in sequence_ids
 
 
-def test_webcam_poll_log_filter_hides_successes_but_keeps_errors() -> None:
+def test_preview_poll_log_filter_only_hides_sensor_preview_successes() -> None:
     poll_filter = _PreviewPollLogFilter()
 
     def record(message: str) -> logging.LogRecord:
         return logging.LogRecord("werkzeug", logging.INFO, "", 0, message, (), None)
 
     assert not poll_filter.filter(
-        record('10.145.8.50 - - "GET /monitoring/webcam HTTP/1.1" 200 -')
-    )
-    assert not poll_filter.filter(
         record(
-            '10.145.8.50 - - "GET /monitoring/webcam/job/latest.jpg?t=1 '
+            '10.145.8.50 - - "GET /sensors/previews/job/latest.jpg?t=1 '
             'HTTP/1.1" 200 -'
         )
+    )
+    assert poll_filter.filter(
+        record('10.145.8.50 - - "GET /monitoring/webcam HTTP/1.1" 200 -')
     )
     assert poll_filter.filter(
         record('10.145.8.50 - - "GET /monitoring/webcam HTTP/1.1" 500 -')
@@ -151,7 +147,7 @@ def test_webcam_poll_log_filter_hides_successes_but_keeps_errors() -> None:
     )
 
 
-def test_ugreen_sidebar_monitor_queues_low_bandwidth_preview(
+def test_ugreen_sidebar_monitor_queues_webrtc_worker(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -186,8 +182,8 @@ def test_ugreen_sidebar_monitor_queues_low_bandwidth_preview(
     monkeypatch.setattr(web_monitoring, "job_runner", fake_runner)
     monkeypatch.setattr(
         web_monitoring,
-        "preview_stream_root",
-        lambda: tmp_path / "webcam-preview",
+        "monitor_stream_root",
+        lambda: tmp_path / "webcam-monitor",
     )
     client = app.test_client()
 
@@ -202,14 +198,13 @@ def test_ugreen_sidebar_monitor_queues_low_bandwidth_preview(
         "uv",
         "run",
         "python",
-        "scripts/stream_sensor_rgb_preview.py",
+        "scripts/run_monitor_webrtc.py",
     ]
-    assert command[command.index("--fps") + 1] == "5"
-    assert command[command.index("--width") + 1] == "320"
-    assert command[command.index("--height") + 1] == "240"
-    webcam_spec = json.loads(command[command.index("--sensor-json") + 1])
-    assert webcam_spec["sensor_type"] == "monitor_webcam"
-    assert webcam_spec["device_id"] == "0c45:2283"
+    assert command[command.index("--fps") + 1] == "30"
+    assert command[command.index("--width") + 1] == "640"
+    assert command[command.index("--height") + 1] == "480"
+    assert command[command.index("--vendor-id") + 1] == "0c45"
+    assert command[command.index("--product-id") + 1] == "2283"
 
 
 def test_pipeline_stage_and_sequence_endpoints_hide_downstream_ids() -> None:
@@ -223,7 +218,8 @@ def test_pipeline_stage_and_sequence_endpoints_hide_downstream_ids() -> None:
     assert "bop_export" in stage_ids
     assert "bop_evaluation" not in stage_ids
     assert "metric_report_export" not in stage_ids
-    assert "fake_capture_to_bop_dataset_dry_run" in sequence_ids
+    assert "fake_capture_to_bop_dataset_dry_run" not in sequence_ids
+    assert "real_full_capture_validation" in sequence_ids
     assert "foundationpose_to_bop_eval_dry_run" not in sequence_ids
 
 
@@ -268,14 +264,11 @@ def test_start_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
         "run",
         "python",
         "start_iiwa.py",
-        "--robot_mode",
-        "real",
         "--ip_robot",
         "172.31.1.150",
         "--port_robot",
         "30305",
     ]
-    assert fake_runner.submitted[0]["parameters"]["robot_mode"] == "real"
     assert fake_runner.submitted[0]["parameters"]["robot_ip"] == "172.31.1.150"
     assert fake_runner.submitted[0]["parameters"]["robot_port"] == 30305
 
@@ -319,8 +312,6 @@ def test_stop_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
         "run",
         "python",
         "stop_iiwa.py",
-        "--robot_mode",
-        "real",
         "--ip_robot",
         "172.31.1.151",
         "--port_robot",
@@ -429,7 +420,6 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
         "/run-config",
         json={
             "run_root": run_root.as_posix(),
-            "robot_mode": "fake",
             "sequence": "sync_aruco",
             "resolution": "720p",
             "fps": 6,
@@ -465,6 +455,32 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
 
     assert loaded["config"]["capture"]["sensors"][0]["inverted"] is True
     assert loaded["config"]["capture"]["sensors"][0]["sensor_type"] == "realsense_d435"
+
+
+def test_run_config_endpoint_rejects_retired_robot_mode(tmp_path: Path) -> None:
+    response = app.test_client().post(
+        "/run-config",
+        json={
+            "run_root": (tmp_path / "run-retired-mode").as_posix(),
+            "robot_mode": "real",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "robot_mode is retired" in response.get_json()["output"]
+
+
+def test_capture_execution_endpoint_rejects_retired_mode(tmp_path: Path) -> None:
+    response = app.test_client().post(
+        "/capture-plan/execution",
+        json={
+            "run_root": (tmp_path / "run-retired-execution-mode").as_posix(),
+            "mode": "full",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "execution mode is retired" in response.get_json()["output"]
 
 
 def test_sensor_alias_endpoint_round_trips_lab_local_file(

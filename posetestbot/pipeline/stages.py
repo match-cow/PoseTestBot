@@ -261,9 +261,8 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             PipelineParameter(
                 name="gate",
                 flag="--gate",
-                default="rewrite_fake_acquisition_to_bop.v1",
+                default="rewrite_full_capture.v1",
                 choices=(
-                    "rewrite_fake_acquisition_to_bop.v1",
                     "rewrite_full_capture.v1",
                     "rewrite_calibration_validation.v1",
                     "rewrite_bop_export_readiness.v1",
@@ -419,7 +418,7 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         label="Capture Plan Preflight",
         script="scripts/run_capture_plan_preflight.py",
         description=(
-            "Validate capture_plan.json command shape, fake/real robot safety, "
+            "Validate capture_plan.json command shape, real robot safety, "
             "script availability, and optional sensor readiness."
         ),
         resources=("disk_io",),
@@ -450,17 +449,11 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         label="Capture Execution Plan",
         script="scripts/run_capture_execution_plan.py",
         description=(
-            "Select capture-plan commands for a safe execution mode without "
+            "Select all full-capture commands without "
             "starting robot or camera processes."
         ),
         resources=("disk_io",),
         parameters=(
-            PipelineParameter(
-                name="mode",
-                flag="--mode",
-                default="pose_only_fake",
-                choices=("plan_only", "pose_only_fake", "full"),
-            ),
             PipelineParameter(
                 name="allow_cameras",
                 flag="--allow-cameras",
@@ -494,16 +487,10 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         script="scripts/run_capture_execution_stage.py",
         description=(
             "Execute selected capture-plan commands with process-group "
-            "supervision. Defaults to pose-only fake iiwa execution."
+            "supervision for the real robot and configured cameras."
         ),
         resources=("robot_command", "camera", "disk_io"),
         parameters=(
-            PipelineParameter(
-                name="mode",
-                flag="--mode",
-                default="pose_only_fake",
-                choices=("plan_only", "pose_only_fake", "full"),
-            ),
             PipelineParameter(
                 name="allow_cameras",
                 flag="--allow-cameras",
@@ -595,42 +582,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 kind="bool",
                 default=False,
             ),
-        ),
-    ),
-    "synthetic_rgbd_fixture": PipelineStageSpec(
-        id="synthetic_rgbd_fixture",
-        label="Synthetic RGB-D Fixture",
-        script="scripts/create_synthetic_rgbd_fixture.py",
-        description=(
-            "Write a small synthetic RGB-D sensor folder aligned to existing "
-            "raw robot poses so hardware-free runs can exercise sync and BOP export."
-        ),
-        resources=("disk_io",),
-        parameters=(
-            PipelineParameter(name="sensor_folder", flag="--sensor-folder"),
-            PipelineParameter(name="sensor_id", flag="--sensor-id"),
-            PipelineParameter(name="frame_count", flag="--frame-count", kind="int"),
-            PipelineParameter(name="width", flag="--width", kind="int"),
-            PipelineParameter(name="height", flag="--height", kind="int"),
-            PipelineParameter(
-                name="sync_delta_ms",
-                flag="--sync-delta-ms",
-                kind="float",
-                default=100.0,
-            ),
-            PipelineParameter(
-                name="include_end_motion",
-                flag="--include-end-motion",
-                kind="bool",
-                default=False,
-            ),
-            PipelineParameter(
-                name="overwrite",
-                flag="--overwrite",
-                kind="bool",
-                default=False,
-            ),
-            PipelineParameter(name="json", flag="--json", kind="bool", default=False),
         ),
     ),
     "calibration_preflight": PipelineStageSpec(
@@ -910,61 +861,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 help="Repeatable SENSOR=PROFILE_ID promotion selection.",
             ),
             PipelineParameter(name="json", flag="--json", kind="bool", default=False),
-        ),
-    ),
-    "capture_rehearsal": PipelineStageSpec(
-        id="capture_rehearsal",
-        label="Fake Pose Capture Rehearsal",
-        script="scripts/run_capture_rehearsal_stage.py",
-        description=(
-            "Run fake iiwa plus the pose receiver to produce raw robot poses "
-            "without starting camera hardware."
-        ),
-        resources=("robot_command", "disk_io"),
-        parameters=(
-            PipelineParameter(
-                name="run_config", flag="--run-config", kind="path", path_scope="run"
-            ),
-            PipelineParameter(
-                name="duration_s",
-                flag="--duration",
-                kind="float",
-                default=0.3,
-            ),
-            PipelineParameter(
-                name="sample_ms",
-                flag="--sample-ms",
-                kind="float",
-                default=25.0,
-            ),
-            PipelineParameter(
-                name="startup_delay_s",
-                flag="--startup-delay",
-                kind="float",
-                default=0.0,
-            ),
-            PipelineParameter(
-                name="timeout_s",
-                flag="--timeout-s",
-                kind="float",
-                default=10.0,
-            ),
-            PipelineParameter(name="robot_port", flag="--robot-port", kind="int"),
-            PipelineParameter(name="receiver_port", flag="--receiver-port", kind="int"),
-            PipelineParameter(name="robot_ip", flag="--robot-ip"),
-            PipelineParameter(name="receiver_ip", flag="--receiver-ip"),
-            PipelineParameter(
-                name="controller_startup_wait_s",
-                flag="--controller-startup-wait",
-                kind="float",
-                default=0.2,
-            ),
-            PipelineParameter(
-                name="print_json",
-                flag="--print-json",
-                kind="bool",
-                default=False,
-            ),
         ),
     ),
     "sync_run": PipelineStageSpec(

@@ -84,7 +84,7 @@ class CaptureRunConfig:
 class PipelineRunConfig:
     """Default sequence and options for one configured run."""
 
-    sequence_id: str = "sync_to_bop_dry_run"
+    sequence_id: str = "real_full_capture_validation"
     plan_only: bool = True
     options: Mapping[str, Any] = field(default_factory=dict)
 
@@ -385,14 +385,13 @@ def create_run_config(
     *,
     run_root: str | Path,
     run_name: str | None = None,
-    robot_mode: str = "fake",
     resolution: str = "720p",
     fps: int = 6,
     velocity_m_s: float = 0.2,
     sensors: tuple[SensorRunConfig, ...] | None = None,
     object_folder: str = "object_models",
     calibration_profiles: str | None = None,
-    sequence_id: str = "sync_to_bop_dry_run",
+    sequence_id: str = "real_full_capture_validation",
     sequence_options: Mapping[str, Any] | None = None,
     plan_only: bool = True,
     fixed_transforms: tuple[FixedFrameTransform, ...] = (),
@@ -403,7 +402,7 @@ def create_run_config(
         schema_version=SCHEMA_VERSION,
         run_name=run_name or run_root_path.name,
         run_root=run_root_path.as_posix(),
-        robot_profile=robot_profile(robot_mode).with_overrides(
+        robot_profile=robot_profile().with_overrides(
             cartesian_velocity_m_s=velocity_m_s,
         ),
         capture=CaptureRunConfig(
@@ -444,6 +443,12 @@ def fixed_transform_from_mapping(value: Mapping[str, Any]) -> FixedFrameTransfor
 def validate_run_config(value: Mapping[str, Any]) -> None:
     if value.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"Run config schema_version must be {SCHEMA_VERSION!r}")
+
+    robot = value.get("robot_profile")
+    if not isinstance(robot, Mapping):
+        raise ValueError("Run config robot_profile must be an object")
+    if robot.get("mode") != "real":
+        raise ValueError("Run config robot_profile.mode must be 'real'")
 
     capture = value.get("capture")
     if not isinstance(capture, Mapping):
@@ -539,7 +544,7 @@ def write_run_config_with_manifest(
         message=(
             "Created run config for "
             f"{len(config.capture.sensors)} sensor(s), "
-            f"robot mode {config.robot_profile.mode}, "
+            "real robot profile, "
             f"sequence {config.pipeline.sequence_id}."
         ),
     )

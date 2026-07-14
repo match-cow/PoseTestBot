@@ -88,12 +88,6 @@ def _validate_realsense_smoke(
     devices: list[SensorDeviceInfo],
     expected_count: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    robot_profile = config.get("robot_profile", {})
-    robot_mode = (
-        str(robot_profile.get("mode") or "fake")
-        if isinstance(robot_profile, Mapping)
-        else "fake"
-    )
     enabled = _enabled_sensors(config)
     realsense_sensors = [
         sensor
@@ -114,16 +108,6 @@ def _validate_realsense_smoke(
     )
     visible_serials = _visible_serials(devices)
     checks = [
-        _check(
-            "robot_profile_scope",
-            "ok" if robot_mode == "fake" else "error",
-            (
-                "RealSense smoke is scoped to camera-only fake-profile runs."
-                if robot_mode == "fake"
-                else "RealSense smoke keeps the real robot out of scope; use a fake-profile run config."
-            ),
-            details={"robot_mode": robot_mode},
-        ),
         _check(
             "realsense_only_config",
             "ok" if not non_realsense else "error",

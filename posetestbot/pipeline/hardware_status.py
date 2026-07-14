@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from posetestbot.io.atomic import atomic_write_json
-from posetestbot.io.artifacts import HARDWARE_STATUS_REPORT, RUN_CONFIG
+from posetestbot.io.artifacts import HARDWARE_STATUS_REPORT
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
     upsert_stage,
@@ -131,29 +131,10 @@ def _runtime_checks(runtime_status: Mapping[str, Any]) -> list[dict[str, Any]]:
     return checks
 
 
-def _run_config_robot_mode(run_root: Path) -> str | None:
-    path = run_root / RUN_CONFIG
-    if not path.is_file():
-        return None
-    try:
-        value = json.loads(path.read_text())
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(value, Mapping):
-        return None
-    robot = value.get("robot_profile")
-    if isinstance(robot, Mapping) and robot.get("mode"):
-        return str(robot["mode"])
-    return None
-
-
 def _collect_robot_status_for_run(
     run_root: Path,
     collect_robot: Callable[..., dict],
 ) -> dict[str, Any]:
-    if collect_robot is collect_robot_status:
-        mode = _run_config_robot_mode(run_root)
-        return collect_robot(selected_mode=mode)
     return collect_robot()
 
 
@@ -182,11 +163,11 @@ def build_hardware_status_report(
     checks = [
         _check(
             "robot_profile",
-            "ok" if selected_mode == "fake" else "warning",
+            "ok" if selected_mode == "real" else "error",
             (
-                "Fake iiwa profile is selected."
-                if selected_mode == "fake"
-                else f"Selected iiwa profile is {selected_mode!r}; use intentionally."
+                "Real iiwa profile is selected."
+                if selected_mode == "real"
+                else f"Unexpected iiwa profile {selected_mode!r}."
             ),
             details={"selected_mode": selected_mode},
         )

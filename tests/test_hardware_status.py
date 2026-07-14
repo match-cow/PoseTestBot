@@ -13,15 +13,14 @@ from posetestbot.pipeline.run_config import create_run_config, write_run_config
 
 def fake_robot_status() -> dict:
     return {
-        "schema_version": "robot_status.v1",
+        "schema_version": "robot_status.v2",
         "selected_profile": {
-            "mode": "fake",
-            "robot_ip": "127.0.0.1",
+            "mode": "real",
+            "robot_ip": "172.31.1.147",
             "command_port": 30300,
-            "receiver_ip": "127.0.0.1",
+            "receiver_ip": "172.31.1.169",
             "receiver_port": 8080,
         },
-        "fake_first": True,
     }
 
 
@@ -121,14 +120,14 @@ def test_hardware_status_report_writes_manifest_stage(tmp_path: Path) -> None:
     stage = next(stage for stage in manifest["stages"] if stage["name"] == "hardware_status")
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][HARDWARE_STATUS_REPORT] == HARDWARE_STATUS_REPORT
-    assert manifest["robot_profile"]["mode"] == "fake"
+    assert manifest["robot_profile"]["mode"] == "real"
 
 
 def test_hardware_status_report_uses_run_config_robot_profile(
     tmp_path: Path,
 ) -> None:
     run_root = tmp_path / "real-run"
-    config = create_run_config(run_root=run_root, robot_mode="real")
+    config = create_run_config(run_root=run_root)
     write_run_config(run_root, config)
 
     report = build_hardware_status_report(

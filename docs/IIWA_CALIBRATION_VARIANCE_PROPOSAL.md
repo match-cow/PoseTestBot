@@ -1,5 +1,8 @@
 # IIWA Calibration-Variance Program Proposal
 
+> Historical design record. The robot-mode environment selector shown below
+> was retired by the real-only acquisition cleanup and is not a current command.
+
 ## Outcome
 
 `iiwa/PoseTestBot_CalibrationVarianceProposal.java` is a separate Sunrise
@@ -110,4 +113,3 @@ intrinsics, image orientation, mount rigidity, and synchronization separately.
 The exact ArUcoGridGen JSON export is still required before producing physical
 intrinsic or extrinsic calibration results. Detection-only coverage checks can
 be used during motion commissioning without treating them as calibration.
-

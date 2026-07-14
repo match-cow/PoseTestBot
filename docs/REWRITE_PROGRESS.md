@@ -10,7 +10,7 @@ the finish line for this repo.
 
 In scope:
 
-- fake-first and real robot profile handling,
+- fixed real lab robot profile handling,
 - sensor registry/status/capture contracts,
 - capture planning, preflight, and supervised execution,
 - non-destructive synchronization,
@@ -21,7 +21,7 @@ In scope:
 - BlenderProc preparation/render planning for optional GT/masks,
 - BOP dataset export,
 - artifact browsing and BOP scene/frame/overlay inspection,
-- local Flask transition UI/API and job runner.
+- React/shadcn operator console, Flask API, and local job runner.
 
 Out of scope in this repository:
 
@@ -31,6 +31,35 @@ Out of scope in this repository:
 - metric report/export dashboards.
 
 ## Completed In This Acquisition-Only Pass
+
+- Replaced the Bootstrap/Jinja/vanilla-JavaScript transition page atomically
+  with a Bun-locked React, TypeScript, Vite, Tailwind, and Radix-based shadcn
+  operator console:
+  - fixed desktop navigation for Dashboard, Devices, phase-based Workflow,
+    Artifacts, and Jobs with a global contained run picker,
+  - system/light/dark theming and local selected-run/robot-target persistence,
+  - `web_bootstrap.v1` and symlink-safe, newest-first `web_run_index.v1` APIs,
+  - device cards with aliases, mounting/orientation, card-local previews,
+    queued snapshots, selection, raw detail sheets, and separated IIWA controls,
+  - metadata-generated stage forms, artifact statuses, plan-only setup defaults,
+    preflight blockers, preview shutdown before camera work, and a fresh two-gate
+    physical-capture dialog,
+  - searchable artifact previews, BOP frame/GT/mask overlays, active-first jobs,
+    live logs, cancellation, and immediate capture-stop controls,
+  - committed hashed UI assets included in wheels, installer verification, and
+    opt-in `scripts/install.sh --with-web-build`,
+  - Flask discovery/static/package tests plus mocked Playwright coverage.
+
+- Implemented `docs/REAL_ONLY_ROBOT_ACQUISITION_CLEANUP_PLAN.md`:
+  - collapsed robot configuration and `robot_status.v2` to the real lab iiwa,
+  - removed robot-mode flags, selectors, environment mode selection, fake
+    controller/rehearsal/synthetic capture workflows, and their artifacts,
+  - reduced capture planning to enabled sensor commands followed by exactly one
+    pose receiver and reduced execution to supervised full capture,
+  - retained independent `allow_real_robot` and `allow_cameras` gates,
+  - made `real_full_capture_validation` the default non-executing run sequence,
+  - kept the RealSense smoke camera-only and independent of robot profile,
+  - reduced rewrite status to the three real-data gates.
 
 - Completed the rewrite hardening audit in `docs/REWRITE_HARDENING_PLAN.md`:
   - atomic JSON/report/manifest writes and rollback-capable directory promotion,
@@ -101,11 +130,9 @@ Out of scope in this repository:
   - `metric_report_export`
 - Added/kept acquisition sequences:
   - `capture_to_bop_dataset_dry_run`
-  - `fake_capture_to_bop_dataset_dry_run`
   - calibration and sync-to-BOP sequences
   - real full capture validation
 - Replaced rewrite gates with acquisition-only gates:
-  - `rewrite_fake_acquisition_to_bop.v1`
   - `rewrite_full_capture.v1`
   - `rewrite_calibration_validation.v1`
   - `rewrite_bop_export_readiness.v1`
@@ -124,6 +151,28 @@ Out of scope in this repository:
 - Added an auto-starting sidebar monitor for the UGREEN USB webcam
   (`0c45:2283`) below the IIWA controls. It resolves the current V4L2 node by
   USB identity and captures through a resource-declared background job.
+- Replaced that monitor's 1 Hz JPEG polling with a video-only WebRTC worker:
+  MJPEG 640×480/30 capture with a one-frame V4L2 buffer, timestamped PyAV
+  frames, unbuffered aiortc relay fan-out, VP8-first negotiation, loopback-only
+  aiohttp signaling proxied by Flask, `monitor_webrtc.v1` status, and bounded
+  browser restart/renegotiation. RGB-D sensor previews remain JPEG-based, and
+  Playwright exercises the real peer connection with a synthetic track rather
+  than lab hardware.
+- Added a monitor-only WebRTC hardware smoke command with a non-hardware plan
+  mode and explicit operator/camera/physical-execution gates. It checks the
+  selected UGREEN node, active MJPG 640×480/30 negotiation, connected WebRTC
+  media with advancing frames, and clean peer, signaling, process, and camera
+  release without importing the global web job runner or contacting the robot.
+- Made web shutdown cancel and join all locally owned jobs, persisted process
+  identity for safe orphan cleanup after an interrupted restart, and added
+  release-and-retry behavior when opening V4L2 preview nodes. This prevents the
+  sidebar webcam and sensor previews from retaining camera devices after exit;
+  recovery also releases verified legacy orphans whose jobs were already marked
+  terminal by an older server instance.
+- Made the React dashboard replace one persisted terminal UGREEN monitor job on
+  page load, so V4L2 node renumbering after a reboot cannot leave the room
+  monitor stuck on a stale failure. Automatic retries remain bounded to one per
+  page load.
 - Changed sensor status to detection-first by default, while preserving
   explicit expected-count checks for CLI/preflight use.
 - Added ignored lab-local sensor aliases in `working_data/sensor_aliases.json`
@@ -133,6 +182,9 @@ Out of scope in this repository:
   RealSense inverted orientation restart behavior.
 - Added Playwright browser coverage for the sensor preview DOM workflow while
   keeping browser binary installation opt-in.
+- Fixed the React device cards to prefer an active RealSense preview over stale
+  terminal history for the same sensor. Playwright now covers the production
+  newest-first job ordering and requires the active preview JPEG to render.
 - Polished the transition web UI empty-run overview state and sidebar branding.
 - Reconciled RealSense SDK serials with USB/V4L2 node metadata so three
   connected D435-class cameras appear as three devices, not duplicated SDK and
@@ -156,19 +208,6 @@ Out of scope in this repository:
 - Rewrote stale downstream tests into acquisition-only coverage.
 
 ## Current Gates
-
-### `rewrite_fake_acquisition_to_bop.v1`
-
-Requires:
-
-- valid `run_config.json`,
-- acceptable `run_preflight_report.json`,
-- succeeded fake `capture_execution_report.json` with raw poses,
-- succeeded `synthetic_rgbd_report.json`,
-- acceptable `sync_quality_report.json`,
-- structural BOP export with scene RGB/depth, `scene_camera.json`,
-  `scene_gt.json`, an explicit target file (empty is acceptable for structural
-  no-GT smoke data), and model metadata.
 
 ### `rewrite_full_capture.v1`
 
@@ -228,14 +267,16 @@ Full validation:
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 git diff --check
-uv run python scripts/run_rewrite_fake_e2e_smoke.py /tmp/posetestbot_fake_bop_smoke --overwrite
-uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke \
-  --gate rewrite_fake_acquisition_to_bop.v1 --write
+uv run python scripts/run_pipeline_sequence.py working_data/new_real_run \
+  --sequence real_full_capture_validation --plan-only
 ```
 
 ## Remaining Work
 
+- On an operator-ready lab host with all configured cameras visible, create a
+  fresh `0.05 m/s` run, inspect `real_full_capture_validation` with
+  `--plan-only`, deliberately execute it, and require
+  `rewrite_full_capture.v1` to pass.
 - Promote robust calibration profiles from real observations.
 - Run BOP export readiness gates on real captured/calibrated datasets.
-- Keep improving live capture telemetry and operator ergonomics in the
-  transition web UI.
+- Keep improving live capture telemetry from real operator feedback.

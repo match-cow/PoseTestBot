@@ -18,8 +18,8 @@ and metric reporting belong in a separate consumer repo.
   SDK/runtime expectations, setup commands, or validation checks change.
 - Prefer running or checking `scripts/install.sh` before adding ad hoc setup
   instructions.
-- Keep the default robot path fake-iiwa-first unless the user explicitly asks to
-  target the physical robot.
+- The lab KUKA iiwa is the sole robot profile. Never execute physical capture
+  without explicit operator authorization and both execution safety gates.
 - Do not add blocking request handlers for long-running or hardware-touching
   work. Queue them through `posetestbot.jobs.runner.LocalJobRunner` and declare
   resources.
@@ -37,17 +37,18 @@ and metric reporting belong in a separate consumer repo.
 - Lab receiver IP on the robot subnet: `172.31.1.169`.
 - Normal network IP on the same interface: `10.145.8.132`.
 
-The default robot profile is fake:
+Robot status is read-only:
 
 ```bash
-uv run python iiwa/fake_iiwa_controller.py --receiver-ip 127.0.0.1
-uv run python scripts/pose_receiver_udp_json.py /tmp/posetestbot_fake_run --test
+uv run python scripts/robot_status.py --json
 ```
 
-Use the real robot only intentionally:
+Plan physical capture without executing it:
 
 ```bash
-POSETESTBOT_ROBOT_MODE=real uv run python scripts/pose_receiver_udp_json.py working_data/test_run
+uv run python scripts/create_run_config.py working_data/test_run
+uv run python scripts/run_pipeline_sequence.py working_data/test_run \
+  --sequence real_full_capture_validation --plan-only
 ```
 
 Read-only status commands:
@@ -69,8 +70,7 @@ Keep or extend these areas:
 
 - `posetestbot.pipeline.capture_plan`,
   `posetestbot.pipeline.capture_plan_preflight`,
-  `posetestbot.pipeline.capture_execution`, and
-  `posetestbot.pipeline.capture_rehearsal`.
+  and `posetestbot.pipeline.capture_execution`.
 - `posetestbot.sensors.*` adapters, registry, status, discovery, and frame
   writer contracts.
 - `posetestbot.sync.non_destructive` and `posetestbot.sync.quality`.
@@ -104,7 +104,7 @@ Do not reintroduce downstream estimator/evaluator behavior here:
 - Capture artifacts: `capture_plan.json`,
   `capture_plan_preflight_report.json`, `capture_execution_plan.json`,
   `capture_execution_status.json`, `capture_execution_report.json`,
-  `capture_rehearsal_report.json`.
+  and `capture_execution_logs/`.
 - Derived sync report: `sync_report.json`.
 - Run-level sync quality report: `sync_quality_report.json`.
 - Calibration artifacts: `calibration_preflight_report.json`,
@@ -142,8 +142,6 @@ RealSense, OAK-D Pro, and ZED 2i capture scripts should write frames through
 
 Current acquisition sequences include:
 
-- `fake_capture_rehearsal`
-- `fake_capture_execution`
 - `real_full_capture_validation`
 - `sync_aruco`
 - `sync_aruco_calibration_observations`
@@ -153,7 +151,6 @@ Current acquisition sequences include:
 - `sync_to_bop_dry_run`
 - `sync_to_bop_calibrated_dry_run`
 - `capture_to_bop_dataset_dry_run`
-- `fake_capture_to_bop_dataset_dry_run`
 - `aruco_grid_full_calibration`
 - `calibrated_capture_to_bop_dataset_dry_run`
 
@@ -164,7 +161,6 @@ there is a clear operator-facing reason to bypass that gate.
 
 The acquisition-only rewrite gates are:
 
-- `rewrite_fake_acquisition_to_bop.v1`
 - `rewrite_full_capture.v1`
 - `rewrite_calibration_validation.v1`
 - `rewrite_bop_export_readiness.v1`
@@ -172,7 +168,7 @@ The acquisition-only rewrite gates are:
 Run them with:
 
 ```bash
-uv run python scripts/run_rewrite_gate.py <run> --gate rewrite_fake_acquisition_to_bop.v1 --write
+uv run python scripts/run_rewrite_gate.py <run> --gate rewrite_full_capture.v1 --write
 uv run python scripts/run_rewrite_status.py <run> --write
 ```
 
@@ -185,6 +181,4 @@ UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 git diff --check
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium  # only if browser binaries are missing
-uv run python scripts/run_rewrite_fake_e2e_smoke.py /tmp/posetestbot_fake_bop_smoke --overwrite
-uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke --gate rewrite_fake_acquisition_to_bop.v1 --write
 ```

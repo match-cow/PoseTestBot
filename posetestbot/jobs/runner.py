@@ -43,6 +43,11 @@ class JobRecord:
     tail: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
     parameters: dict = field(default_factory=dict)
+    process_pid: int | None = None
+    process_group_id: int | None = None
+    process_start_time: int | None = None
+    runner_pid: int | None = None
+    runner_start_time: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -59,6 +64,9 @@ class LocalJobRunner:
         self._jobs: dict[str, JobRecord] = {}
         self._processes: dict[str, subprocess.Popen] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._local_job_ids: set[str] = set()
+        self._runner_pid = os.getpid()
+        self._runner_start_time = self._read_process_start_time(self._runner_pid)
         self._load_persisted_jobs()
 
     def submit(
@@ -90,8 +98,11 @@ class LocalJobRunner:
                 log_path=(job_dir / "log.txt").as_posix(),
                 resources=requested_resources,
                 parameters=dict(parameters or {}),
+                runner_pid=self._runner_pid,
+                runner_start_time=self._runner_start_time,
             )
             self._jobs[job_id] = job
+            self._local_job_ids.add(job_id)
             self._persist_job(job)
 
         thread = threading.Thread(
@@ -168,7 +179,8 @@ class LocalJobRunner:
             active_ids = [
                 job.id
                 for job in self._jobs.values()
-                if job.status not in TERMINAL_STATUSES
+                if job.id in self._local_job_ids
+                and job.status not in TERMINAL_STATUSES
             ]
         for job_id in active_ids:
             self.cancel(job_id)
@@ -226,6 +238,13 @@ class LocalJobRunner:
 
             with self._lock:
                 self._processes[job_id] = process
+                current = self._jobs[job_id]
+                current.process_pid = process.pid
+                current.process_group_id = (
+                    os.getpgid(process.pid) if os.name != "nt" else process.pid
+                )
+                current.process_start_time = self._read_process_start_time(process.pid)
+                self._persist_job(current)
                 should_terminate = self._jobs[job_id].status in {
                     CANCELED,
                     CANCELING,
@@ -343,12 +362,30 @@ class LocalJobRunner:
             except Exception:
                 continue
 
+            owner_alive = self._job_owner_is_alive(job)
+            orphan_stopped = (
+                self._terminate_persisted_process_group(job)
+                if not owner_alive
+                else False
+            )
             if job.status not in TERMINAL_STATUSES:
+                if owner_alive:
+                    self._jobs[job.id] = job
+                    continue
                 job.status = FAILED
                 job.ended_at = utc_now_iso()
                 job.returncode = None
                 job.message = "Job runner restarted before this job completed."
+                if orphan_stopped:
+                    job.message += " Its orphaned process group was stopped."
                 self._append_tail(job, job.message)
+                self._persist_job(job)
+            elif orphan_stopped:
+                self._append_tail(
+                    job,
+                    "A verified orphaned process group left by this terminal job "
+                    "was stopped.",
+                )
                 self._persist_job(job)
             self._jobs[job.id] = job
 
@@ -358,7 +395,72 @@ class LocalJobRunner:
         job_data.setdefault("tail", [])
         job_data.setdefault("resources", [])
         job_data.setdefault("parameters", {})
+        job_data.setdefault("process_pid", None)
+        job_data.setdefault("process_group_id", None)
+        job_data.setdefault("process_start_time", None)
+        job_data.setdefault("runner_pid", None)
+        job_data.setdefault("runner_start_time", None)
         return JobRecord(**job_data)
+
+    @staticmethod
+    def _read_process_start_time(pid: int) -> int | None:
+        """Return Linux process start ticks, used to guard against PID reuse."""
+
+        if os.name == "nt":
+            return None
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            fields_after_name = stat[stat.rfind(")") + 2 :].split()
+            return int(fields_after_name[19])
+        except (IndexError, OSError, ValueError):
+            return None
+
+    @classmethod
+    def _persisted_process_matches(cls, job: JobRecord) -> bool:
+        pid = job.process_pid
+        group_id = job.process_group_id
+        start_time = job.process_start_time
+        if pid is None or group_id is None or start_time is None or os.name == "nt":
+            return False
+        if cls._read_process_start_time(pid) != start_time:
+            return False
+        try:
+            return os.getpgid(pid) == group_id
+        except ProcessLookupError:
+            return False
+
+    @classmethod
+    def _job_owner_is_alive(cls, job: JobRecord) -> bool:
+        if job.runner_pid is None or job.runner_start_time is None:
+            return False
+        return cls._read_process_start_time(job.runner_pid) == job.runner_start_time
+
+    @classmethod
+    def _terminate_persisted_process_group(
+        cls,
+        job: JobRecord,
+        *,
+        timeout_s: float = 2.0,
+    ) -> bool:
+        """Stop a verified process group left by an interrupted runner."""
+
+        if not cls._persisted_process_matches(job):
+            return False
+        assert job.process_group_id is not None
+        try:
+            os.killpg(job.process_group_id, signal.SIGTERM)
+        except ProcessLookupError:
+            return False
+
+        deadline = time.monotonic() + max(timeout_s, 0.0)
+        while cls._persisted_process_matches(job) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if cls._persisted_process_matches(job):
+            try:
+                os.killpg(job.process_group_id, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        return True
 
     def _persist_job(self, job: JobRecord) -> None:
         path = Path(job.log_path).parent / "job.json"

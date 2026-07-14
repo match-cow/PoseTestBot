@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -133,6 +136,128 @@ def test_local_job_runner_marks_interrupted_jobs_failed_on_reload(tmp_path: Path
     assert loaded.status == FAILED
     assert loaded.message == "Job runner restarted before this job completed."
     assert loaded.parameters == {"capture": True}
+
+
+def test_local_job_runner_stops_verified_orphaned_process_group_on_reload(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Process-group recovery uses Linux process metadata")
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    process_start_time = LocalJobRunner._read_process_start_time(process.pid)
+    if process_start_time is None:
+        process.kill()
+        process.wait()
+        pytest.skip("Linux /proc process start metadata is unavailable")
+
+    job_root = tmp_path / "jobs"
+    job_dir = job_root / "orphaned"
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "id": "orphaned",
+                "name": "sleep",
+                "command": [sys.executable, "-c", "import time; time.sleep(30)"],
+                "cwd": None,
+                "status": "running",
+                "created_at": "2026-07-10T00:00:00+00:00",
+                "log_path": (job_dir / "log.txt").as_posix(),
+                "process_pid": process.pid,
+                "process_group_id": os.getpgid(process.pid),
+                "process_start_time": process_start_time,
+                "runner_pid": 999_999_999,
+                "runner_start_time": 1,
+            }
+        )
+    )
+
+    try:
+        reloaded = LocalJobRunner(job_root)
+        loaded = reloaded.get("orphaned")
+        process.wait(timeout=5)
+
+        assert loaded.status == FAILED
+        assert "orphaned process group was stopped" in loaded.message
+        assert process.returncode == -signal.SIGTERM
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def test_local_job_runner_stops_verified_orphan_from_legacy_terminal_job(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Process-group recovery uses Linux process metadata")
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    process_start_time = LocalJobRunner._read_process_start_time(process.pid)
+    if process_start_time is None:
+        process.kill()
+        process.wait()
+        pytest.skip("Linux /proc process start metadata is unavailable")
+
+    job_root = tmp_path / "jobs"
+    job_dir = job_root / "legacy-terminal-orphan"
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "id": "legacy-terminal-orphan",
+                "name": "sensor-preview:test",
+                "command": [sys.executable, "-c", "import time; time.sleep(30)"],
+                "cwd": None,
+                "status": FAILED,
+                "created_at": "2026-07-10T00:00:00+00:00",
+                "ended_at": "2026-07-10T00:01:00+00:00",
+                "log_path": (job_dir / "log.txt").as_posix(),
+                "message": "Job runner restarted before this job completed.",
+                "process_pid": process.pid,
+                "process_group_id": os.getpgid(process.pid),
+                "process_start_time": process_start_time,
+                "runner_pid": 999_999_999,
+                "runner_start_time": 1,
+            }
+        )
+    )
+
+    try:
+        reloaded = LocalJobRunner(job_root)
+        loaded = reloaded.get("legacy-terminal-orphan")
+        process.wait(timeout=5)
+
+        assert loaded.status == FAILED
+        assert loaded.message == "Job runner restarted before this job completed."
+        assert "verified orphaned process group" in loaded.tail[-1]
+        assert process.returncode == -signal.SIGTERM
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def test_shutdown_cancels_only_jobs_owned_by_this_runner(tmp_path: Path) -> None:
+    runner = LocalJobRunner(tmp_path / "jobs")
+    job = runner.submit(
+        name="sleep",
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
+    )
+    deadline = time.time() + 5
+    while job.id not in runner._processes and time.time() < deadline:
+        time.sleep(0.01)
+
+    runner.shutdown(timeout=5)
+
+    assert runner.wait(job.id, timeout=5).status == CANCELED
 
 
 def test_local_job_runner_rejects_busy_resources(tmp_path: Path) -> None:

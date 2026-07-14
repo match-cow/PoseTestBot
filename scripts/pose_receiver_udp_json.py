@@ -51,28 +51,22 @@ def main():
         help="Override robot UDP command port from the selected profile.",
     )
     parser.add_argument(
-        "--robot_mode",
-        choices=("fake", "real"),
-        default=None,
-        help="Robot target profile. Defaults to POSETESTBOT_ROBOT_MODE or fake.",
-    )
-    parser.add_argument(
         "--protocol",
         choices=("legacy", "v1"),
         default="legacy",
         help="Robot command protocol. Use legacy for the current Sunrise app.",
     )
     parser.add_argument(
-        "--test",
+        "--verbose",
         action="store_true",
-        help="Enable test mode, default is False",
+        help="Print received frame diagnostics.",
     )
 
     args = parser.parse_args()
 
     output_path = args.output_path
-    test = args.test
-    profile = robot_profile(args.robot_mode).with_overrides(
+    verbose = args.verbose
+    profile = robot_profile().with_overrides(
         robot_ip=args.ip_robot,
         command_port=args.port_robot,
         receiver_ip=args.ip,
@@ -97,7 +91,7 @@ def main():
         capture_config={
             "cartesian_velocity_m_s": profile.cartesian_velocity_m_s,
             "protocol": args.protocol,
-            "robot_mode": profile.mode,
+            "mode": "real",
         },
     )
     upsert_stage(manifest, name="robot_pose_capture", status="running")
@@ -156,7 +150,7 @@ def main():
                 },
             }
 
-            if test:
+            if verbose:
                 print(
                     f"framename: {framename}, addr: {addr}, "
                     f"motion: {motion}, pose_dict: {pose_dict}"

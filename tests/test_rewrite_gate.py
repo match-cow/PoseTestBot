@@ -4,30 +4,28 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
     BOP_TARGETS_BOP19,
     CALIBRATION_PROFILES,
     CALIBRATION_VALIDATION_REPORT,
-    CAPTURE_EXECUTION_REPORT,
     DEPTH_DIR,
     HARDWARE_STATUS_REPORT,
     RGB_DIR,
     RUN_PREFLIGHT_REPORT,
-    SYNTHETIC_RGBD_REPORT,
-    SYNC_QUALITY_REPORT,
 )
 from posetestbot.pipeline.rewrite_gate import (
     BOP_EXPORT_READINESS_GATE_ID,
     CALIBRATION_VALIDATION_GATE_ID,
-    FAKE_ACQUISITION_TO_BOP_GATE_ID,
     FULL_CAPTURE_GATE_ID,
     GATE_IDS,
     build_bop_export_readiness_gate_report,
     build_calibration_validation_gate_report,
-    build_fake_end_to_end_gate_report,
     build_rewrite_status_report,
+    build_gate_report,
 )
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 
@@ -120,66 +118,6 @@ def populate_bop_export(
             run_root / BOP_DIR / BOP_TARGETS_BOP19,
             [{"scene_id": 1, "im_id": 0, "obj_id": 1, "inst_count": 1}],
         )
-
-
-def populate_fake_acquisition_to_bop(run_root: Path) -> None:
-    config = create_run_config(
-        run_root=run_root,
-        sequence_id="fake_capture_to_bop_dataset_dry_run",
-    )
-    write_run_config(run_root, config)
-    write_json(
-        run_root / RUN_PREFLIGHT_REPORT,
-        {"schema_version": "run_preflight.v1", "overall_status": "warning", "config": config.to_dict()},
-    )
-    write_json(
-        run_root / CAPTURE_EXECUTION_REPORT,
-        {
-            "schema_version": "capture_execution_report.v1",
-            "status": "succeeded",
-            "raw_pose_count": 3,
-            "selected_roles": ["robot_controller", "robot_pose_receiver"],
-        },
-    )
-    write_json(
-        run_root / SYNTHETIC_RGBD_REPORT,
-        {"schema_version": "synthetic_rgbd_fixture.v1", "status": "succeeded", "frame_count": 1},
-    )
-    write_json(
-        run_root / SYNC_QUALITY_REPORT,
-        {"schema_version": "sync_quality_report.v2", "overall_status": "ok"},
-    )
-    populate_bop_export(run_root)
-
-
-def test_fake_acquisition_to_bop_gate_ready(tmp_path: Path) -> None:
-    run_root = tmp_path / "fake-run"
-    populate_fake_acquisition_to_bop(run_root)
-
-    report = build_fake_end_to_end_gate_report(run_root)
-
-    assert report["gate_id"] == FAKE_ACQUISITION_TO_BOP_GATE_ID
-    assert report["overall_status"] == "ready"
-    assert {check["name"] for check in report["checks"]} >= {
-        "capture_execution",
-        "synthetic_rgbd_fixture",
-        "sync_quality",
-        "bop_export",
-        "bop_targets",
-        "bop_models_info",
-    }
-
-
-def test_fake_acquisition_to_bop_gate_allows_empty_bop_targets(tmp_path: Path) -> None:
-    run_root = tmp_path / "fake-run-empty-targets"
-    populate_fake_acquisition_to_bop(run_root)
-    write_json(run_root / BOP_DIR / BOP_TARGETS_BOP19, [])
-
-    report = build_fake_end_to_end_gate_report(run_root)
-
-    assert report["overall_status"] == "ready"
-    targets = next(check for check in report["checks"] if check["name"] == "bop_targets")
-    assert targets["details"]["target_count"] == 0
 
 
 def test_bop_export_readiness_gate_blocks_missing_targets(tmp_path: Path) -> None:
@@ -282,14 +220,24 @@ def test_calibration_validation_gate_allows_preserved_valid_profiles(tmp_path: P
     assert report["overall_status"] == "ready"
 
 
-def test_rewrite_status_uses_acquisition_gate_ids(tmp_path: Path) -> None:
+def test_rewrite_status_uses_three_real_data_gate_ids(tmp_path: Path) -> None:
     run_root = tmp_path / "status-run"
 
     report = build_rewrite_status_report(run_root)
 
     gate_ids = [gate["gate_id"] for gate in report["gates"]]
     assert tuple(gate_ids) == GATE_IDS
+    assert len(gate_ids) == 3
+    assert "rewrite_fake_acquisition_to_bop.v1" not in gate_ids
     assert "rewrite_foundationpose_runtime.v1" not in gate_ids
+
+
+def test_retired_fake_gate_id_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unknown rewrite gate"):
+        build_gate_report(
+            tmp_path / "run",
+            gate_id="rewrite_fake_acquisition_to_bop.v1",
+        )
 
 
 def test_rewrite_gate_cli_accepts_bop_export_readiness_gate(tmp_path: Path) -> None:
@@ -321,7 +269,7 @@ def test_rewrite_gate_cli_accepts_bop_export_readiness_gate(tmp_path: Path) -> N
 
 def test_full_capture_gate_checks_real_hardware_snapshot(tmp_path: Path) -> None:
     run_root = tmp_path / "real-run"
-    config = create_run_config(run_root=run_root, robot_mode="real")
+    config = create_run_config(run_root=run_root)
     write_run_config(run_root, config)
     write_json(
         run_root / RUN_PREFLIGHT_REPORT,
@@ -332,7 +280,7 @@ def test_full_capture_gate_checks_real_hardware_snapshot(tmp_path: Path) -> None
         {
             "schema_version": "hardware_status_report.v1",
             "overall_status": "ok",
-            "robot_status": {"selected_profile": {"mode": "fake"}},
+            "robot_status": {"selected_profile": {"mode": "unexpected"}},
         },
     )
 

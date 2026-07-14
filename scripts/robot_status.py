@@ -12,7 +12,7 @@ from posetestbot.robot.status import collect_robot_status
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Print the configured fake/real iiwa profile without sending UDP "
+            "Print the configured real iiwa profile without sending UDP "
             "commands to the robot."
         )
     )

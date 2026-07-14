@@ -1,7 +1,8 @@
 """Compatibility entrypoint for the PoseTestBot Flask web UI."""
 
-from posetestbot.web.app import WEB_DEBUG, WEB_HOST, WEB_PORT, app
+from posetestbot.web.app import app as app
+from posetestbot.web.cli import main
 
 
 if __name__ == "__main__":
-    app.run(host=WEB_HOST, port=WEB_PORT, debug=WEB_DEBUG)
+    main()

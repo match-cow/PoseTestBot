@@ -9,7 +9,6 @@ from posetestbot.robot.udp import send_stop
 
 def send_stop_message(
     *,
-    robot_mode: str,
     ip_robot: str | None,
     port_robot: int | None,
     protocol: str,
@@ -17,7 +16,7 @@ def send_stop_message(
 ) -> bool:
     """Send a stop-like control message to the configured iiwa controller."""
 
-    profile = robot_profile(robot_mode).with_overrides(
+    profile = robot_profile().with_overrides(
         robot_ip=ip_robot,
         command_port=port_robot,
     )
@@ -37,12 +36,6 @@ def send_stop_message(
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Send stop message to robot via UDP")
-    parser.add_argument(
-        "--robot_mode",
-        choices=("fake", "real"),
-        default=None,
-        help="Robot target profile. Defaults to POSETESTBOT_ROBOT_MODE or fake.",
-    )
     parser.add_argument(
         "--ip_robot",
         type=str,
@@ -74,7 +67,7 @@ def main():
     )
 
     args = parser.parse_args()
-    selected_profile = robot_profile(args.robot_mode).with_overrides(
+    selected_profile = robot_profile().with_overrides(
         robot_ip=args.ip_robot,
         command_port=args.port_robot,
     )
@@ -87,7 +80,6 @@ def main():
         )
 
     success = send_stop_message(
-        robot_mode=selected_profile.mode,
         ip_robot=selected_profile.robot_ip,
         port_robot=selected_profile.command_port,
         protocol=args.protocol,

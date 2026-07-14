@@ -87,13 +87,14 @@ def test_capture_plan_preflight_reports_ok_for_mocked_connected_sensors(
 
     report = build_capture_plan_preflight(
         run_root,
+        allow_real_robot=True,
         collect_sensors=fake_sensor_status,
     )
 
     assert report["schema_version"] == "capture_plan_preflight.v1"
     assert report["overall_status"] == "ok"
     checks = {check["name"]: check for check in report["checks"]}
-    assert checks["robot_mode"]["status"] == "ok"
+    assert checks["real_robot_permission"]["status"] == "ok"
     assert checks["sensor_adapter:realsense_d435:123"]["status"] == "ok"
     assert checks["sensor_adapter:oak_d_pro:auto"]["status"] == "ok"
     assert checks["sensor_output_folder:realsense_123"]["status"] == "ok"
@@ -182,7 +183,6 @@ def test_capture_plan_preflight_errors_for_real_robot_without_override(
     run_root = tmp_path / "run"
     config = create_run_config(
         run_root=run_root,
-        robot_mode="real",
         sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
@@ -195,8 +195,8 @@ def test_capture_plan_preflight_errors_for_real_robot_without_override(
 
     assert report["overall_status"] == "error"
     checks = {check["name"]: check for check in report["checks"]}
-    assert checks["robot_mode"]["status"] == "error"
-    assert checks["robot_controller_command"]["status"] == "ok"
+    assert checks["real_robot_permission"]["status"] == "error"
+    assert "robot_controller_command" not in checks
 
 
 def test_capture_plan_preflight_reports_unsupported_resolution_without_throwing(
@@ -307,6 +307,7 @@ def test_capture_plan_preflight_writes_report_and_manifest(tmp_path: Path) -> No
     path, report = write_capture_plan_preflight_with_manifest(
         run_root,
         include_sensor_status=False,
+        allow_real_robot=True,
     )
 
     assert path == run_root / CAPTURE_PLAN_PREFLIGHT_REPORT
@@ -321,5 +322,5 @@ def test_capture_plan_preflight_writes_report_and_manifest(tmp_path: Path) -> No
         CAPTURE_PLAN_PREFLIGHT_REPORT
     )
     assert stage["artifacts"][CAPTURE_PLAN] == CAPTURE_PLAN
-    assert manifest["robot_profile"]["mode"] == "fake"
+    assert manifest["robot_profile"]["mode"] == "real"
     assert manifest["capture_config"]["fps"] == 6

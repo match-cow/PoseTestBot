@@ -1,5 +1,9 @@
 # Comprehensive Rewrite Hardening Plan
 
+> Historical design record. This plan is complete; references to the retired
+> fake-acquisition validation path describe the repository at that time and are
+> not current operator instructions.
+
 ## Summary
 
 The review covers the 183-file rewrite diff, static analysis, packaging, the

@@ -7,27 +7,21 @@ import argparse
 import json
 from pathlib import Path
 
-from posetestbot.pipeline.capture_execution import EXECUTION_MODES, run_capture_execution
+from posetestbot.pipeline.capture_execution import run_capture_execution
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Execute selected capture-plan commands with process-group "
-            "supervision. Defaults to pose-only fake iiwa execution."
+            "supervision for the real robot and configured cameras."
         )
     )
     parser.add_argument("run_root", help="Run folder containing run_config.json.")
     parser.add_argument(
-        "--mode",
-        choices=EXECUTION_MODES,
-        default="pose_only_fake",
-        help="Execution mode to select from capture_execution_plan.",
-    )
-    parser.add_argument(
         "--allow-cameras",
         action="store_true",
-        help="Allow full mode to select and execute camera capture commands.",
+        help="Allow camera capture commands to execute.",
     )
     parser.add_argument(
         "--allow-real-robot",
@@ -72,10 +66,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    include_sensor_status = True if args.include_sensors else None
+    include_sensor_status = args.include_sensors
     path, report = run_capture_execution(
         Path(args.run_root),
-        mode=args.mode,
         allow_cameras=args.allow_cameras,
         allow_real_robot=args.allow_real_robot,
         include_sensor_status=include_sensor_status,

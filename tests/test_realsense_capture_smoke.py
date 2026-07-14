@@ -312,11 +312,10 @@ def test_realsense_capture_smoke_refuses_nonempty_output_folder(
     assert report["captures"] == []
 
 
-def test_realsense_capture_smoke_refuses_real_robot_profile(tmp_path: Path) -> None:
+def test_realsense_capture_smoke_is_independent_of_robot_profile(tmp_path: Path) -> None:
     run_root = tmp_path / "run-real-robot"
     config = create_run_config(
         run_root=run_root,
-        robot_mode="real",
         sensors=tuple(
             sensor_config_from_token(f"realsense:{serial}:static:RealSense {serial}")
             for serial in SERIALS
@@ -330,10 +329,9 @@ def test_realsense_capture_smoke_refuses_real_robot_profile(tmp_path: Path) -> N
         capture_func=fake_capture,
     )
 
-    checks = {check["name"]: check for check in report["checks"]}
-    assert report["status"] == "failed"
-    assert checks["robot_profile_scope"]["status"] == "error"
-    assert report["captures"] == []
+    assert report["status"] == "succeeded"
+    assert "robot_profile_scope" not in {check["name"] for check in report["checks"]}
+    assert len(report["captures"]) == 3
 
 
 def test_realsense_capture_smoke_records_one_camera_capture_failure(

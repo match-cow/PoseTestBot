@@ -26,32 +26,20 @@ from posetestbot.io.artifacts import (
     RGB_DIR,
     RUN_CONFIG,
     RUN_PREFLIGHT_REPORT,
-    SYNTHETIC_RGBD_REPORT,
-    SYNC_QUALITY_REPORT,
     BOP_TARGETS_BOP19,
 )
 
 
 SCHEMA_VERSION = "rewrite_gate_report.v1"
 STATUS_SCHEMA_VERSION = "rewrite_status_report.v1"
-FAKE_ACQUISITION_TO_BOP_GATE_ID = "rewrite_fake_acquisition_to_bop.v1"
-FAKE_E2E_GATE_ID = FAKE_ACQUISITION_TO_BOP_GATE_ID
 FULL_CAPTURE_GATE_ID = "rewrite_full_capture.v1"
 CALIBRATION_VALIDATION_GATE_ID = "rewrite_calibration_validation.v1"
 BOP_EXPORT_READINESS_GATE_ID = "rewrite_bop_export_readiness.v1"
 GATE_IDS = (
-    FAKE_ACQUISITION_TO_BOP_GATE_ID,
     FULL_CAPTURE_GATE_ID,
     CALIBRATION_VALIDATION_GATE_ID,
     BOP_EXPORT_READINESS_GATE_ID,
 )
-
-
-def default_full_capture_run_root(run_root: str | Path) -> Path:
-    """Return the default sibling root for real full-capture evidence."""
-
-    root = Path(run_root)
-    return root.parent / f"{root.name}_real_full_capture"
 
 
 def _load_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -689,122 +677,6 @@ def _bop_export_readiness_checks(
     return checks
 
 
-def build_fake_end_to_end_gate_report(run_root: str | Path) -> dict[str, Any]:
-    """Report whether the first rewrite proof path is actually satisfied.
-
-    This gate is intentionally stricter than sequence planning. A dry-run plan
-    is useful, but the gate only passes when the run folder contains evidence
-    from fake capture, synthetic RGB-D fixture creation, synchronization, and
-    structural BOP dataset export.
-    """
-
-    root = Path(run_root)
-    checks: list[dict[str, Any]] = []
-
-    check, run_config = _json_file_check("run_config", root / RUN_CONFIG)
-    checks.append(check)
-    if run_config is not None:
-        checks[-1]["details"] = {
-            "robot_mode": run_config.get("robot", {}).get("mode"),
-            "sequence_id": run_config.get("pipeline", {}).get("sequence_id"),
-        }
-
-    check, preflight = _json_file_check("run_preflight", root / RUN_PREFLIGHT_REPORT)
-    if preflight is not None:
-        status = _status_value(preflight)
-        ok = status in {"ok", "warning", "ready", "succeeded"}
-        check = _check(
-            name="run_preflight",
-            path=root / RUN_PREFLIGHT_REPORT,
-            ok=ok,
-            message=(
-                "run_preflight_report.json has acceptable status."
-                if ok
-                else "run_preflight_report.json is missing an acceptable status."
-            ),
-            details={"status": status},
-        )
-    checks.append(check)
-
-    check, capture = _json_file_check(
-        "capture_execution",
-        root / CAPTURE_EXECUTION_REPORT,
-    )
-    if capture is not None:
-        status = capture.get("status")
-        raw_pose_count = int(capture.get("raw_pose_count") or 0)
-        selected_roles = _capture_selected_roles(capture)
-        ok = (
-            status == "succeeded"
-            and raw_pose_count > 0
-            and "robot_pose_receiver" in selected_roles
-        )
-        check = _check(
-            name="capture_execution",
-            path=root / CAPTURE_EXECUTION_REPORT,
-            ok=ok,
-            message=(
-                "capture_execution_report.json proves a fake pose capture."
-                if ok
-                else (
-                    "capture_execution_report.json must be succeeded, include "
-                    "robot_pose_receiver, and record at least one raw pose."
-                )
-            ),
-            details={
-                "status": status,
-                "raw_pose_count": raw_pose_count,
-                "selected_roles": selected_roles,
-            },
-        )
-    checks.append(check)
-
-    check, synthetic_rgbd = _json_file_check(
-        "synthetic_rgbd_fixture",
-        root / SYNTHETIC_RGBD_REPORT,
-    )
-    if synthetic_rgbd is not None:
-        status = synthetic_rgbd.get("status")
-        frame_count = int(synthetic_rgbd.get("frame_count") or 0)
-        ok = status == "succeeded" and frame_count > 0
-        check = _check(
-            name="synthetic_rgbd_fixture",
-            path=root / SYNTHETIC_RGBD_REPORT,
-            ok=ok,
-            message=(
-                "synthetic_rgbd_report.json proves RGB-D fixture frames exist."
-                if ok
-                else (
-                    "synthetic_rgbd_report.json must be succeeded and record "
-                    "at least one synthetic RGB-D frame."
-                )
-            ),
-            details={"status": status, "frame_count": frame_count},
-        )
-    checks.append(check)
-
-    check, sync_quality = _json_file_check("sync_quality", root / SYNC_QUALITY_REPORT)
-    if sync_quality is not None:
-        status = _status_value(sync_quality)
-        ok = status in {"ok", "warning", "succeeded"}
-        check = _check(
-            name="sync_quality",
-            path=root / SYNC_QUALITY_REPORT,
-            ok=ok,
-            message=(
-                "sync_quality_report.json has acceptable status."
-                if ok
-                else "sync_quality_report.json must be ok or warning."
-            ),
-            details={"status": status},
-        )
-    checks.append(check)
-
-    checks.extend(_bop_export_readiness_checks(root, require_targets=False))
-
-    return _gate_report(gate_id=FAKE_E2E_GATE_ID, run_root=root, checks=checks)
-
-
 def build_full_capture_gate_report(run_root: str | Path) -> dict[str, Any]:
     """Report whether real/full camera capture has actually been validated."""
 
@@ -1260,8 +1132,6 @@ def build_bop_export_readiness_gate_report(run_root: str | Path) -> dict[str, An
 
 
 def build_gate_report(run_root: str | Path, *, gate_id: str) -> dict[str, Any]:
-    if gate_id == FAKE_E2E_GATE_ID:
-        return build_fake_end_to_end_gate_report(run_root)
     if gate_id == FULL_CAPTURE_GATE_ID:
         return build_full_capture_gate_report(run_root)
     if gate_id == CALIBRATION_VALIDATION_GATE_ID:
@@ -1277,10 +1147,6 @@ def write_gate_report(run_root: str | Path, *, gate_id: str) -> tuple[Path, dict
     path = root / REWRITE_GATE_REPORT
     atomic_write_json(path, report)
     return path, report
-
-
-def write_fake_end_to_end_gate_report(run_root: str | Path) -> tuple[Path, dict[str, Any]]:
-    return write_gate_report(run_root, gate_id=FAKE_E2E_GATE_ID)
 
 
 def _action(
@@ -1366,8 +1232,6 @@ def _rewrite_status_next_actions(
                         "python",
                         "scripts/create_run_config.py",
                         run_root,
-                        "--robot-mode",
-                        "real",
                         "--sequence",
                         "real_full_capture_validation",
                         "--print-sequence-plan",
@@ -1464,9 +1328,9 @@ def _rewrite_status_next_actions(
                             run_root,
                         ],
                         reason=(
-                            "The latest hardware snapshot selected the fake "
-                            "robot profile; refresh it so the run-scoped "
-                            "snapshot uses the real profile saved in "
+                            "The latest hardware snapshot did not select the real "
+                            "robot profile; refresh it so the run-scoped snapshot "
+                            "uses the profile saved in "
                             "run_config.json before validating real full capture."
                         ),
                         blocks_on=["hardware_status"],
@@ -1797,20 +1661,11 @@ def build_rewrite_status_report(
     }
     gate_roots: dict[str, Path] = {}
     gate_reports: list[dict[str, Any]] = []
-    ready_gate_ids: set[str] = set()
     for gate_id in gate_ids:
         gate_root = explicit_gate_roots.get(gate_id, root)
-        if (
-            gate_id == FULL_CAPTURE_GATE_ID
-            and gate_id not in explicit_gate_roots
-            and FAKE_E2E_GATE_ID in ready_gate_ids
-        ):
-            gate_root = default_full_capture_run_root(root)
         gate_roots[gate_id] = gate_root
         report = build_gate_report(gate_root, gate_id=gate_id)
         gate_reports.append(report)
-        if report["overall_status"] == "ready":
-            ready_gate_ids.add(gate_id)
     ready_gates = [
         report for report in gate_reports if report["overall_status"] == "ready"
     ]

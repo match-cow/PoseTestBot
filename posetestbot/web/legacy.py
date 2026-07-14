@@ -127,13 +127,9 @@ CAPTURE_JOB_STAGE_IDS = {
     "capture_plan_preflight",
     "capture_execution_plan",
     "capture_execution",
-    "capture_rehearsal",
     "realsense_capture_smoke",
 }
-CAPTURE_JOB_SEQUENCE_IDS = {
-    "fake_capture_rehearsal",
-    "fake_capture_execution",
-}
+CAPTURE_JOB_SEQUENCE_IDS = {"real_full_capture_validation"}
 ACTIVE_JOB_STATUSES = {"queued", "running", "canceling"}
 ROBOT_CONTROL_COMMANDS = {"start_iiwa", "stop_iiwa"}
 
@@ -185,16 +181,16 @@ def _robot_control_command_args(command_name: str, data: dict) -> tuple[list[str
     if not 1 <= robot_port <= 65535:
         raise ValueError("robot_port must be an integer from 1 to 65535")
 
+    if "robot_mode" in data:
+        raise ValueError("robot_mode is retired; PoseTestBot only targets the real robot")
+
     args = [
-        "--robot_mode",
-        "real",
         "--ip_robot",
         robot_ip,
         "--port_robot",
         str(robot_port),
     ]
     parameters = {
-        "robot_mode": "real",
         "robot_ip": robot_ip,
         "robot_port": robot_port,
     }
@@ -265,7 +261,6 @@ def _capture_job_summary(job) -> dict:
         "stage": parameters.get("pipeline_stage"),
         "sequence": parameters.get("pipeline_sequence"),
         "run_root": parameters.get("run_root"),
-        "mode": options.get("mode"),
         "resources": list(job.resources or []),
         "message": job.message,
         "created_at": job.created_at,
@@ -302,10 +297,28 @@ def _json_object_from_text(value: str | None, *, label: str) -> dict:
     return loaded
 
 
+def _persisted_capture_gate(value) -> str | None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"allow_cameras", "allow_real_robot"}:
+                return key
+            nested = _persisted_capture_gate(item)
+            if nested is not None:
+                return nested
+    elif isinstance(value, list):
+        for item in value:
+            nested = _persisted_capture_gate(item)
+            if nested is not None:
+                return nested
+    return None
+
+
 def _run_config_from_payload(data: dict):
     run_root = data.get("run_root")
     if not run_root:
         raise ValueError("run_root is required")
+    if "robot_mode" in data:
+        raise ValueError("robot_mode is retired; run configs always use the real robot")
     sequence_options = data.get("sequence_options", data.get("options", {}))
     if isinstance(sequence_options, str):
         sequence_options = _json_object_from_text(
@@ -314,6 +327,12 @@ def _run_config_from_payload(data: dict):
         )
     if not isinstance(sequence_options, dict):
         raise ValueError("sequence_options must be an object")
+    persisted_gate = _persisted_capture_gate(sequence_options)
+    if persisted_gate is not None:
+        raise ValueError(
+            f"{persisted_gate} is an execution gate and must not be persisted "
+            "in run_config.json"
+        )
     mounting_mode = data.get("mounting_mode", "eye_in_hand")
     if _truthy(data.get("from_detected_sensors"), default=False) and not data.get(
         "sensors"
@@ -333,14 +352,13 @@ def _run_config_from_payload(data: dict):
     return create_run_config(
         run_root=run_root,
         run_name=data.get("run_name"),
-        robot_mode=data.get("robot_mode", "fake"),
         resolution=data.get("resolution", "720p"),
         fps=int(data.get("fps", 6)),
         velocity_m_s=float(data.get("velocity", data.get("velocity_m_s", 0.2))),
         sensors=sensors,
         object_folder=data.get("object_folder", "object_models"),
         calibration_profiles=data.get("calibration_profiles") or None,
-        sequence_id=data.get("sequence", data.get("sequence_id", "sync_to_bop_dry_run")),
+        sequence_id=data.get("sequence", data.get("sequence_id", "real_full_capture_validation")),
         sequence_options=sequence_options,
         plan_only=_truthy(data.get("plan_only"), default=True),
     )
@@ -937,6 +955,8 @@ def capture_plan_endpoint():
         data = request.get_json()
         if not isinstance(data, dict) or 'run_root' not in data:
             return jsonify({'output': 'Invalid request: run_root required'}), 400
+        if 'robot_mode' in data:
+            return jsonify({'output': 'Invalid request: robot_mode is retired'}), 400
         try:
             max_frames = _optional_nonnegative_int(
                 data.get('max_frames'),
@@ -986,6 +1006,8 @@ def capture_plan_preflight_endpoint():
         data = request.get_json()
         if not isinstance(data, dict) or 'run_root' not in data:
             return jsonify({'output': 'Invalid request: run_root required'}), 400
+        if 'robot_mode' in data:
+            return jsonify({'output': 'Invalid request: robot_mode is retired'}), 400
         include_sensors = not _truthy(data.get('no_sensors'), default=False)
         allow_real_robot = _truthy(data.get('allow_real_robot'), default=False)
         try:
@@ -1045,14 +1067,16 @@ def capture_plan_execution_endpoint():
         data = request.get_json()
         if not isinstance(data, dict) or 'run_root' not in data:
             return jsonify({'output': 'Invalid request: run_root required'}), 400
-        mode = str(data.get('mode') or 'pose_only_fake')
+        if 'mode' in data:
+            return jsonify({'output': 'Invalid request: execution mode is retired; only full capture is supported'}), 400
+        if 'robot_mode' in data:
+            return jsonify({'output': 'Invalid request: robot_mode is retired'}), 400
         allow_cameras = _truthy(data.get('allow_cameras'), default=False)
         allow_real_robot = _truthy(data.get('allow_real_robot'), default=False)
         include_sensor_status = _truthy(data.get('include_sensors'), default=False)
         try:
             path, plan = write_capture_execution_plan_with_manifest(
                 data['run_root'],
-                mode=mode,
                 allow_cameras=allow_cameras,
                 allow_real_robot=allow_real_robot,
                 include_sensor_status=include_sensor_status,
@@ -1647,6 +1671,8 @@ def run_pipeline_sequence():
     data = request.get_json()
     if not data or 'sequence' not in data or 'run_root' not in data:
         return jsonify({'output': 'Invalid request: sequence and run_root required'}), 400
+    if 'robot_mode' in data or 'mode' in data:
+        return jsonify({'output': 'Invalid request: retired robot/execution mode selector'}), 400
 
     options = data.get('options') or {}
     if not isinstance(options, dict):
@@ -1699,6 +1725,19 @@ def run_pipeline_from_config():
 
     try:
         config = load_run_config_for_run_root(data['run_root'])
+        config_plan = sequence_plan_from_run_config(config)
+        if not config['pipeline'].get('plan_only', True) and any(
+            step.stage_id == 'capture_execution' for step in config_plan.steps
+        ):
+            return jsonify(
+                {
+                    'output': (
+                        'Non-plan-only capture sequences cannot be queued from '
+                        '/pipeline/run-config; use the gated physical capture '
+                        'action and submit both execution gates in that request.'
+                    )
+                }
+            ), 409
         preflight = run_preflight_queue_summary(data['run_root'], config)
         if (
             preflight["queue_blocker"] == "missing_preflight"

@@ -1,23 +1,29 @@
-"""HTML page routes."""
+"""Bundled operator-console page route."""
 
 from __future__ import annotations
 
-from flask import Blueprint, render_template
+from pathlib import Path
 
-from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
-from posetestbot.pipeline.sequences import PIPELINE_SEQUENCES, list_pipeline_sequences
+from flask import Blueprint, jsonify, send_from_directory
 
 
 pages_bp = Blueprint("pages", __name__)
+UI_BUILD_DIR = Path(__file__).resolve().parents[1] / "static" / "ui"
 
 
 @pages_bp.get("/")
 def index():
-    return render_template(
-        "index.html",
-        sequences=list_pipeline_sequences(PIPELINE_SEQUENCES),
-        robot_control_defaults={
-            "robot_ip": LAB_ROBOT_IP,
-            "robot_port": DEFAULT_ROBOT_PORT,
-        },
-    )
+    index_path = UI_BUILD_DIR / "index.html"
+    if not index_path.is_file():
+        return (
+            jsonify(
+                {
+                    "output": (
+                        "The bundled operator console is missing. Run "
+                        "`bun run build` in frontend/."
+                    )
+                }
+            ),
+            503,
+        )
+    return send_from_directory(UI_BUILD_DIR, "index.html", max_age=0)

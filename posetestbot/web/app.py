@@ -13,6 +13,7 @@ from posetestbot.web.routes.monitoring import monitoring_bp
 from posetestbot.web.routes.overview import overview_bp
 from posetestbot.web.routes.pages import pages_bp
 from posetestbot.web.routes.sensors import sensors_bp
+from posetestbot.web.routes.ui import ui_bp
 from posetestbot.web.security import install_request_security
 
 
@@ -28,7 +29,6 @@ class _PreviewPollLogFilter(logging.Filter):
             marker in message
             for marker in (
                 '"GET /sensors/previews',
-                '"GET /monitoring/webcam',
             )
         )
         return not (successful_poll and noisy_preview_get)
@@ -44,7 +44,6 @@ def _install_preview_poll_log_filter() -> None:
 def create_app() -> Flask:
     app = Flask(
         __name__,
-        template_folder="templates",
         static_folder="static",
         static_url_path="/static",
     )
@@ -63,6 +62,7 @@ def create_app() -> Flask:
     app.register_blueprint(sensors_bp)
     app.register_blueprint(monitoring_bp)
     app.register_blueprint(overview_bp)
+    app.register_blueprint(ui_bp)
     app.register_blueprint(legacy_api)
     _install_preview_poll_log_filter()
     return app

@@ -68,16 +68,26 @@ def test_capture_plan_stage_accepts_warmup_frames(tmp_path: Path) -> None:
 def test_rewrite_gate_choices_are_acquisition_only(tmp_path: Path) -> None:
     job = build_pipeline_job(stage_id="rewrite_gate", run_root=tmp_path / "run")
 
-    assert "rewrite_fake_acquisition_to_bop.v1" in job.command
+    assert "rewrite_full_capture.v1" in job.command
     stage = PIPELINE_STAGES["rewrite_gate"]
     gate = next(parameter for parameter in stage.parameters if parameter.name == "gate")
     assert "rewrite_foundationpose_runtime.v1" not in gate.choices
+    assert "rewrite_fake_acquisition_to_bop.v1" not in gate.choices
     assert "rewrite_bop_export_readiness.v1" in gate.choices
 
 
 def test_unknown_downstream_stage_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unknown pipeline stage"):
         build_pipeline_job(stage_id="bop_evaluation", run_root=tmp_path / "run")
+
+
+@pytest.mark.parametrize("stage_id", ["capture_rehearsal", "synthetic_rgbd_fixture"])
+def test_retired_fake_stage_ids_are_rejected(
+    tmp_path: Path,
+    stage_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="Unknown pipeline stage"):
+        build_pipeline_job(stage_id=stage_id, run_root=tmp_path / "run")
 
 
 def test_stage_listing_contains_acquisition_stages_only() -> None:
@@ -96,6 +106,17 @@ def test_stage_listing_contains_acquisition_stages_only() -> None:
         "bop_export",
     } <= stage_ids
     assert "metric_report_export" not in stage_ids
+    assert "capture_rehearsal" not in stage_ids
+    assert "synthetic_rgbd_fixture" not in stage_ids
+
+
+def test_capture_execution_stage_rejects_retired_mode_option(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unknown pipeline option"):
+        build_pipeline_job(
+            stage_id="capture_execution",
+            run_root=tmp_path / "run",
+            options={"mode": "plan_only"},
+        )
 
 
 def test_every_pipeline_path_parameter_declares_web_scope() -> None:

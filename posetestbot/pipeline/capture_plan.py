@@ -112,9 +112,6 @@ def build_capture_plan(
     receiver_ip: str | None = None,
     robot_port: int | None = None,
     receiver_port: int | None = None,
-    fake_controller_duration_s: float | None = None,
-    fake_controller_sample_ms: float | None = None,
-    fake_controller_startup_delay_s: float | None = None,
 ) -> CapturePlan:
     """Build a non-executing capture command plan from ``run_config.json`` data."""
 
@@ -135,24 +132,9 @@ def build_capture_plan(
         raise ValueError("max_frames must be greater than or equal to 0")
     if warmup_frames is not None and warmup_frames < 0:
         raise ValueError("warmup_frames must be greater than or equal to 0")
-    if fake_controller_duration_s is not None and fake_controller_duration_s < 0:
-        raise ValueError(
-            "fake_controller_duration_s must be greater than or equal to 0"
-        )
-    if fake_controller_sample_ms is not None and fake_controller_sample_ms <= 0:
-        raise ValueError("fake_controller_sample_ms must be greater than 0")
-    if (
-        fake_controller_startup_delay_s is not None
-        and fake_controller_startup_delay_s < 0
-    ):
-        raise ValueError(
-            "fake_controller_startup_delay_s must be greater than or equal to 0"
-        )
-
-    mode = str(robot.get("mode") or "fake")
-    resolved_robot_ip = str(robot_ip or robot.get("robot_ip") or "127.0.0.1")
+    resolved_robot_ip = str(robot_ip or robot.get("robot_ip"))
     resolved_receiver_ip = str(
-        receiver_ip or robot.get("receiver_ip") or "127.0.0.1"
+        receiver_ip or robot.get("receiver_ip")
     )
     command_port = int(
         robot_port
@@ -171,50 +153,10 @@ def build_capture_plan(
         "Sensor capture commands are long-running and should be stopped after the pose receiver exits.",
     ]
 
-    if mode == "fake":
-        fake_controller_command = [
-            "uv",
-            "run",
-            "python",
-            "iiwa/fake_iiwa_controller.py",
-            "--bind-ip",
-            resolved_robot_ip,
-            "--robot-port",
-            str(command_port),
-            "--receiver-ip",
-            resolved_receiver_ip,
-            "--receiver-port",
-            str(resolved_receiver_port),
-        ]
-        if fake_controller_duration_s is not None:
-            fake_controller_command.extend(
-                ["--duration", str(fake_controller_duration_s)]
-            )
-        if fake_controller_sample_ms is not None:
-            fake_controller_command.extend(
-                ["--sample-ms", str(fake_controller_sample_ms)]
-            )
-        if fake_controller_startup_delay_s is not None:
-            fake_controller_command.extend(
-                ["--startup-delay", str(fake_controller_startup_delay_s)]
-            )
-        fake_controller_command.append("--once")
-
-        commands.append(
-            CaptureCommandPlan(
-                role="robot_controller",
-                name="fake_iiwa_controller",
-                startup_order=10,
-                command=fake_controller_command,
-                description="Start before the pose receiver when using fake iiwa mode.",
-                resources=("robot_command",),
-            )
-        )
-    else:
-        notes.append(
-            "Real iiwa mode targets "
-            f"{resolved_robot_ip}:{command_port}; verify the robot app is ready."
-        )
+    notes.append(
+        "The plan targets the real iiwa at "
+        f"{resolved_robot_ip}:{command_port}; verify the robot app is ready."
+    )
 
     sensor_records: list[Mapping[str, Any]] = []
     enabled_sensors = [
@@ -277,8 +219,6 @@ def build_capture_plan(
         run_root.as_posix(),
         "--capture_vel",
         str(velocity),
-        "--robot_mode",
-        mode,
         "--ip",
         resolved_receiver_ip,
         "--port",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -8,6 +9,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+from aiortc import VideoStreamTrack
+from aiortc.mediastreams import MediaStreamError
 from werkzeug.serving import make_server
 
 pytest.importorskip("playwright.sync_api")
@@ -18,6 +21,12 @@ from posetestbot.web import legacy as web_legacy
 from posetestbot.web.app import create_app
 from posetestbot.web.routes import monitoring as web_monitoring
 from posetestbot.web.routes import sensors as web_sensors
+from posetestbot.monitoring.webrtc import (
+    MonitorStatusWriter,
+    MonitorWebRTCServer,
+    bgr_frame_to_av,
+    load_monitor_status,
+)
 
 
 SENSOR_A = "realsense_d435:825412070181"
@@ -176,6 +185,110 @@ class LiveServer:
         self.thread.join(timeout=2)
 
 
+class SyntheticVideoTrack(VideoStreamTrack):
+    def __init__(self, on_frame) -> None:
+        super().__init__()
+        self.frame_count = 0
+        self.on_frame = on_frame
+        self.recv_idle = asyncio.Event()
+        self.recv_idle.set()
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
+        self.recv_idle.clear()
+        try:
+            await asyncio.sleep(1 / 30)
+            if self.readyState != "live":
+                raise MediaStreamError
+            image = np.zeros((480, 640, 3), dtype=np.uint8)
+            image[:, :, 1] = 80 + (self.frame_count % 120)
+            image[:, :, 2] = 180
+            frame = bgr_frame_to_av(image, frame_index=self.frame_count, fps=30)
+            self.frame_count += 1
+            self.on_frame(self.frame_count)
+            return frame
+        finally:
+            self.recv_idle.set()
+
+    async def wait_stopped(self) -> None:
+        await self.recv_idle.wait()
+
+
+class SyntheticMonitorServer:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.started = threading.Event()
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.stop_event: asyncio.Event | None = None
+        self.error: BaseException | None = None
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        self.loop = loop
+        asyncio.set_event_loop(loop)
+
+        async def serve() -> None:
+            status = MonitorStatusWriter(self.root)
+
+            def on_frame(frame_count: int) -> None:
+                if frame_count == 1 or frame_count % 5 == 0:
+                    status.update(frame_count=frame_count)
+
+            def on_peers(peer_count: int, connected_count: int) -> None:
+                status.update(
+                    status="connected" if connected_count else "ready",
+                    peer_count=peer_count,
+                )
+
+            track = SyntheticVideoTrack(on_frame)
+            server = MonitorWebRTCServer(track, on_peers_changed=on_peers)
+            self.stop_event = asyncio.Event()
+            try:
+                port = await server.start()
+                status.update(
+                    status="ready",
+                    signaling_ready=True,
+                    signaling_port=port,
+                    selected_node={"path": "synthetic://color-bars"},
+                )
+                self.started.set()
+                await self.stop_event.wait()
+            finally:
+                await server.stop()
+                track.stop()
+                status.update(
+                    status="stopped",
+                    signaling_ready=False,
+                    signaling_port=None,
+                    peer_count=0,
+                    frame_count=track.frame_count,
+                )
+
+        try:
+            loop.run_until_complete(serve())
+        except BaseException as exc:
+            self.error = exc
+            self.started.set()
+        finally:
+            loop.close()
+
+    def start(self) -> None:
+        self.thread.start()
+        assert self.started.wait(timeout=5)
+        if self.error is not None:
+            raise self.error
+
+    def stop(self) -> None:
+        if self.loop is not None and self.stop_event is not None:
+            self.loop.call_soon_threadsafe(self.stop_event.set)
+        self.thread.join(timeout=5)
+        assert not self.thread.is_alive()
+        if self.error is not None:
+            raise self.error
+
+
 @pytest.fixture
 def preview_server(monkeypatch, tmp_path: Path):
     runner = FakePreviewRunner()
@@ -188,7 +301,7 @@ def preview_server(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(web_monitoring, "job_runner", monitor_runner)
     monkeypatch.setattr(
         web_monitoring,
-        "preview_stream_root",
+        "monitor_stream_root",
         PreviewRootFactory(tmp_path / "monitor"),
     )
     monkeypatch.setattr(web_legacy, "job_runner", EmptyRunner())
@@ -224,45 +337,159 @@ def sensor_card(page, sensor_key: str):
     return page.locator(f'[data-testid="sensor-card"][data-sensor-key="{sensor_key}"]')
 
 
-def test_sidebar_webcam_monitor_displays_latest_frame(preview_server, page) -> None:
+def test_sidebar_webcam_monitor_plays_synthetic_webrtc_without_jpegs(
+    preview_server,
+    page,
+    tmp_path: Path,
+) -> None:
     server, runner = preview_server
-    page.goto(server.url, wait_until="domcontentloaded")
-
     monitor_runner = runner.monitor_runner
-    wait_for(lambda: len(monitor_runner.jobs) == 1)
-    job = next(iter(monitor_runner.jobs.values()))
-    preview_root = Path(job.parameters["preview_root"])
-    write_jpeg(preview_root / "latest.jpg")
-    write_json(
-        preview_root / "preview_status.json",
-        {
-            "schema_version": "sensor_rgb_preview.v1",
-            "status": "running",
-            "frame_count": 3,
-            "latest_image": "latest.jpg",
-            "selected_node": {"path": "/dev/video18"},
-            "error": None,
+    monitor_root = tmp_path / "synthetic-monitor"
+    synthetic = SyntheticMonitorServer(monitor_root)
+    synthetic.start()
+    job = FakePreviewJob(
+        "synthetic-monitor",
+        name="monitor-webrtc:synthetic",
+        parameters={
+            "monitor_webcam": True,
+            "monitor_webrtc": True,
+            "monitor_root": monitor_root.as_posix(),
         },
+        resources=["monitoring_camera:0c45:2283"],
     )
     job.status = "running"
+    monitor_runner.jobs[job.id] = job
+    jpeg_requests: list[str] = []
+    page.on(
+        "request",
+        lambda request: jpeg_requests.append(request.url)
+        if "/monitoring/webcam/" in request.url and ".jpg" in request.url
+        else None,
+    )
 
-    expect(page.locator("#webcamMonitorImage")).to_be_visible(timeout=4000)
-    expect(page.locator("#webcamMonitorStatus")).to_have_text("running")
-    expect(page.locator("#retryWebcamBtn")).to_be_hidden()
+    try:
+        page.goto(server.url, wait_until="domcontentloaded")
+        video = page.locator('[data-testid="room-monitor-video"]')
+        expect(video).to_have_attribute("data-connection-state", "connected", timeout=15_000)
+        expect(video).to_be_visible()
+        wait_for(
+            lambda: bool(
+                (status := load_monitor_status(monitor_root))
+                and status["frame_count"] >= 5
+                and status["peer_count"] == 1
+            ),
+            timeout_s=10,
+        )
+        assert video.evaluate("element => element.readyState >= 2 && element.videoWidth === 640")
+        assert jpeg_requests == []
+
+        page.goto("about:blank")
+        wait_for(
+            lambda: bool(
+                (status := load_monitor_status(monitor_root))
+                and status["peer_count"] == 0
+            ),
+            timeout_s=5,
+        )
+    finally:
+        synthetic.stop()
+
+
+def test_sidebar_webcam_monitor_restarts_one_stale_failed_job(
+    preview_server,
+    page,
+    tmp_path: Path,
+) -> None:
+    server, runner = preview_server
+    monitor_runner = runner.monitor_runner
+    stale_job = FakePreviewJob(
+        "stale-monitor",
+        name="monitor-webrtc:ugreen",
+        parameters={
+            "monitor_webcam": True,
+            "monitor_webrtc": True,
+            "monitor_root": (tmp_path / "stale-monitor").as_posix(),
+        },
+        resources=["monitoring_camera:0c45:2283"],
+    )
+    stale_job.status = "failed"
+    stale_job.message = "Could not open RGB preview node /dev/video18."
+    monitor_runner.jobs[stale_job.id] = stale_job
+
+    page.goto(server.url, wait_until="domcontentloaded")
+
+    wait_for(lambda: len(monitor_runner.submitted) == 1)
+    replacement = monitor_runner.jobs["preview-1"]
+    replacement.status = "failed"
+    time.sleep(1.2)
+    assert len(monitor_runner.submitted) == 1
+
+
+def test_sidebar_webcam_webrtc_retry_is_bounded_and_manual_retry_reuses_worker(
+    preview_server,
+    page,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    server, runner = preview_server
+    monitor_runner = runner.monitor_runner
+    monitor_root = tmp_path / "failed-signaling-monitor"
+    status = MonitorStatusWriter(monitor_root)
+    status.update(
+        status="ready",
+        signaling_ready=True,
+        signaling_port=39876,
+        selected_node={"path": "synthetic://unavailable"},
+    )
+    job = FakePreviewJob(
+        "active-monitor",
+        name="monitor-webrtc:synthetic",
+        parameters={
+            "monitor_webcam": True,
+            "monitor_webrtc": True,
+            "monitor_root": monitor_root.as_posix(),
+        },
+        resources=["monitoring_camera:0c45:2283"],
+    )
+    job.status = "running"
+    monitor_runner.jobs[job.id] = job
+    offer_count = 0
+
+    def fail_offer(_port, _payload):
+        nonlocal offer_count
+        offer_count += 1
+        raise RuntimeError("synthetic signaling failure")
+
+    monkeypatch.setattr(web_monitoring, "_proxy_webrtc_offer", fail_offer)
+
+    page.goto(server.url, wait_until="domcontentloaded")
+    wait_for(lambda: offer_count == 2, timeout_s=10)
+    page.wait_for_timeout(1500)
+    assert offer_count == 2
+    expect(page.locator('[data-testid="room-monitor-video"]')).to_have_attribute(
+        "data-connection-state",
+        "failed",
+    )
+
+    page.get_by_role("button", name="Retry").click()
+    wait_for(lambda: offer_count == 3, timeout_s=5)
+    page.wait_for_timeout(1500)
+    assert offer_count == 3
+    assert monitor_runner.submitted == []
 
 
 def test_card_local_preview_stream_lifecycle(preview_server, page) -> None:
     server, runner = preview_server
-    page.goto(server.url, wait_until="domcontentloaded")
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
 
     expect(page.locator('[data-testid="sensor-card"]')).to_have_count(2)
     first = sensor_card(page, SENSOR_A)
     second = sensor_card(page, SENSOR_B)
     toggle = first.locator('[data-testid="sensor-preview-toggle"]')
 
-    toggle.check()
+    toggle.click()
 
-    expect(toggle).to_be_checked()
+    expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(first.locator('[data-testid="sensor-preview-slot"]')).to_be_visible()
     expect(first.locator(".sensor-preview-empty")).to_contain_text("Waiting")
     wait_for(lambda: len(runner.submitted) == 1)
@@ -290,14 +517,79 @@ def test_card_local_preview_stream_lifecycle(preview_server, page) -> None:
     expect(first.locator('[data-testid="sensor-preview-image"]')).to_be_visible(timeout=4000)
     expect(first.locator('[data-testid="sensor-preview-meta"]')).to_contain_text("/dev/video4")
     expect(second.locator('[data-testid="sensor-preview-image"]')).to_have_count(0)
-    expect(page.locator("#previewPanel img")).to_have_count(0)
-
-    toggle.uncheck()
+    toggle.click()
 
     wait_for(lambda: runner.canceled == ["preview-1"])
-    expect(toggle).not_to_be_checked()
+    expect(toggle).to_have_attribute("aria-pressed", "false")
     expect(first.locator('[data-testid="sensor-preview-slot"]')).to_be_hidden()
     expect(first.locator('[data-testid="sensor-preview-image"]')).to_have_count(0)
+
+
+def test_running_preview_wins_over_stale_job_for_same_sensor(
+    preview_server,
+    page,
+    tmp_path: Path,
+) -> None:
+    server, runner = preview_server
+    active_root = tmp_path / "active-preview"
+    write_jpeg(active_root / "latest.jpg")
+    write_json(
+        active_root / "preview_status.json",
+        {
+            "schema_version": "sensor_rgb_preview.v1",
+            "status": "running",
+            "sensor_key": SENSOR_A,
+            "frame_count": 7,
+            "latest_image": "latest.jpg",
+            "selected_node": {"path": "/dev/video4"},
+            "inverted": False,
+            "error": None,
+        },
+    )
+    active = FakePreviewJob(
+        "active-preview",
+        name=f"sensor-preview:{SENSOR_A}",
+        parameters={
+            "preview_root": active_root.as_posix(),
+            "sensor_key": SENSOR_A,
+            "sensor_type": "realsense_d435",
+            "device_id": "825412070181",
+            "sensor_preview": True,
+        },
+        resources=[f"camera:{SENSOR_A}"],
+    )
+    active.status = "running"
+    runner.jobs[active.id] = active
+
+    stale = FakePreviewJob(
+        "stale-preview",
+        name=f"sensor-preview:{SENSOR_A}",
+        parameters={
+            "preview_root": (tmp_path / "stale-preview").as_posix(),
+            "sensor_key": SENSOR_A,
+            "sensor_type": "realsense_d435",
+            "device_id": "825412070181",
+            "sensor_preview": True,
+        },
+        resources=[f"camera:{SENSOR_A}"],
+    )
+    stale.status = "failed"
+    stale.message = "Historical preview failure."
+    runner.jobs[stale.id] = stale
+
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
+
+    first = sensor_card(page, SENSOR_A)
+    expect(first.locator('[data-testid="sensor-preview-toggle"]')).to_have_attribute(
+        "aria-pressed",
+        "true",
+    )
+    expect(first.locator('[data-testid="sensor-preview-image"]')).to_be_visible(
+        timeout=4_000
+    )
+    expect(first.locator('[data-testid="sensor-preview-meta"]')).to_contain_text(
+        "/dev/video4"
+    )
 
 
 def test_terminal_failed_preview_unchecks_switch_and_keeps_inline_error(
@@ -305,11 +597,11 @@ def test_terminal_failed_preview_unchecks_switch_and_keeps_inline_error(
     page,
 ) -> None:
     server, runner = preview_server
-    page.goto(server.url, wait_until="domcontentloaded")
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
     first = sensor_card(page, SENSOR_A)
     toggle = first.locator('[data-testid="sensor-preview-toggle"]')
 
-    toggle.check()
+    toggle.click()
     wait_for(lambda: len(runner.submitted) == 1)
     job = runner.jobs["preview-1"]
     preview_root = Path(job.parameters["preview_root"])
@@ -329,7 +621,7 @@ def test_terminal_failed_preview_unchecks_switch_and_keeps_inline_error(
     job.status = "failed"
     job.message = "Command exited with status 2."
 
-    expect(toggle).not_to_be_checked(timeout=4000)
+    expect(toggle).to_have_attribute("aria-pressed", "false", timeout=4000)
     expect(first.locator('[data-testid="sensor-preview-slot"]')).to_be_visible()
     expect(first.locator('[data-testid="sensor-preview-error"]')).to_contain_text(
         "camera missing"
@@ -338,11 +630,11 @@ def test_terminal_failed_preview_unchecks_switch_and_keeps_inline_error(
 
 def test_inverted_change_restarts_preview_in_waiting_state(preview_server, page) -> None:
     server, runner = preview_server
-    page.goto(server.url, wait_until="domcontentloaded")
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
     first = sensor_card(page, SENSOR_A)
     toggle = first.locator('[data-testid="sensor-preview-toggle"]')
 
-    toggle.check()
+    toggle.click()
     wait_for(lambda: len(runner.submitted) == 1)
     first_job = runner.jobs["preview-1"]
     preview_root = Path(first_job.parameters["preview_root"])
@@ -363,14 +655,50 @@ def test_inverted_change_restarts_preview_in_waiting_state(preview_server, page)
     first_job.status = "running"
     expect(first.locator('[data-testid="sensor-preview-image"]')).to_be_visible(timeout=4000)
 
-    first.locator(".inverted-input").check()
+    first.locator('[data-testid="sensor-orientation"]').click()
+    page.get_by_role("option", name="Inverted").click()
 
     wait_for(lambda: len(runner.submitted) == 2)
     assert runner.canceled == ["preview-1"]
     command = runner.submitted[1]["command"]
     sensor_spec = json.loads(command[command.index("--sensor-json") + 1])
     assert sensor_spec["inverted"] is True
-    expect(toggle).to_be_checked()
+    expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(first.locator('[data-testid="sensor-preview-slot"]')).to_be_visible()
     expect(first.locator(".sensor-preview-empty")).to_contain_text("Waiting")
     expect(first.locator('[data-testid="sensor-preview-image"]')).to_have_count(0)
+
+
+def test_card_snapshot_lifecycle_displays_completed_thumbnail(
+    preview_server,
+    page,
+) -> None:
+    server, runner = preview_server
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
+    first = sensor_card(page, SENSOR_A)
+
+    first.get_by_role("button", name="Snapshot").click()
+
+    wait_for(lambda: len(runner.submitted) == 1)
+    job = runner.jobs["preview-1"]
+    snapshot_root = Path(job.parameters["snapshot_root"])
+    write_jpeg(snapshot_root / "wrist" / "rgb_thumbnail.png")
+    write_json(
+        snapshot_root / "sensor_snapshot_manifest.json",
+        {
+            "schema_version": "sensor_snapshot_manifest.v1",
+            "sensors": [
+                {
+                    "sensor_key": SENSOR_A,
+                    "status": "succeeded",
+                    "rgb_thumbnail": "wrist/rgb_thumbnail.png",
+                    "error": None,
+                }
+            ],
+        },
+    )
+    job.status = "succeeded"
+
+    expect(first.locator('[data-testid="sensor-snapshot"] img')).to_be_visible(
+        timeout=4000
+    )

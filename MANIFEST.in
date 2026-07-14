@@ -1,0 +1,11 @@
+include frontend/bun.lock
+include frontend/components.json
+include frontend/eslint.config.js
+include frontend/index.html
+include frontend/package.json
+include frontend/tsconfig.app.json
+include frontend/tsconfig.json
+include frontend/tsconfig.node.json
+include frontend/vite.config.ts
+graft frontend/src
+prune frontend/node_modules

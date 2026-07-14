@@ -16,7 +16,7 @@ from posetestbot.pipeline.capture_plan_preflight import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Validate capture_plan.json command shape, fake/real robot safety, "
+            "Validate capture_plan.json command shape, real robot safety, "
             "scripts, and optional sensor readiness without launching capture."
         )
     )

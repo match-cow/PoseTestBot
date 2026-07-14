@@ -29,7 +29,7 @@ from posetestbot.sensors.status import collect_sensor_status
 
 
 SCHEMA_VERSION = "capture_plan_preflight.v1"
-VALID_COMMAND_ROLES = {"robot_controller", "sensor_capture", "robot_pose_receiver"}
+VALID_COMMAND_ROLES = {"sensor_capture", "robot_pose_receiver"}
 
 
 def _check(
@@ -364,59 +364,21 @@ def _validate_command_shape(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _validate_robot_safety(
-    config: Mapping[str, Any],
-    plan: Mapping[str, Any],
     *,
     allow_real_robot: bool,
 ) -> list[dict[str, Any]]:
-    robot = config.get("robot_profile", {})
-    mode = str(robot.get("mode") if isinstance(robot, Mapping) else "fake")
-    commands = [
-        command
-        for command in plan.get("commands", [])
-        if isinstance(command, Mapping)
-    ]
-    robot_controller_count = sum(
-        1 for command in commands if command.get("role") == "robot_controller"
-    )
-
     checks = [
         _check(
-            "robot_mode",
-            "ok" if mode == "fake" or allow_real_robot else "error",
+            "real_robot_permission",
+            "ok" if allow_real_robot else "error",
             (
-                "Fake robot mode is selected."
-                if mode == "fake"
-                else (
-                    "Real robot mode was explicitly allowed for this preflight."
-                    if allow_real_robot
-                    else "Real robot mode requires allow_real_robot=true."
-                )
+                "Real robot use was explicitly allowed for this preflight."
+                if allow_real_robot
+                else "Real robot use requires allow_real_robot=true."
             ),
-            details={"mode": mode, "allow_real_robot": allow_real_robot},
+            details={"allow_real_robot": allow_real_robot},
         )
     ]
-
-    expected_count = 1 if mode == "fake" else 0
-    checks.append(
-        _check(
-            "robot_controller_command",
-            "ok" if robot_controller_count == expected_count else "error",
-            (
-                f"Robot controller command count is {robot_controller_count}."
-                if robot_controller_count == expected_count
-                else (
-                    "Unexpected robot controller command count: "
-                    f"{robot_controller_count}, expected {expected_count}."
-                )
-            ),
-            details={
-                "mode": mode,
-                "count": robot_controller_count,
-                "expected_count": expected_count,
-            },
-        )
-    )
     return checks
 
 
@@ -647,8 +609,6 @@ def build_capture_plan_preflight(
         checks.extend(_validate_command_shape(plan))
         checks.extend(
             _validate_robot_safety(
-                config,
-                plan,
                 allow_real_robot=allow_real_robot,
             )
         )

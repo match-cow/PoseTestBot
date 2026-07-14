@@ -21,17 +21,17 @@ from posetestbot.pipeline.run_config import (
 )
 
 
-def test_default_run_config_uses_fake_robot_and_lab_sensors(tmp_path: Path) -> None:
+def test_default_run_config_uses_real_robot_and_lab_sensors(tmp_path: Path) -> None:
     run_root = tmp_path / "run-1"
 
     config = create_run_config(run_root=run_root)
     data = config.to_dict()
 
     assert data["schema_version"] == SCHEMA_VERSION
-    assert data["robot_profile"]["mode"] == "fake"
-    assert data["robot_profile"]["robot_ip"] == "127.0.0.1"
+    assert data["robot_profile"]["mode"] == "real"
+    assert data["robot_profile"]["robot_ip"] == "172.31.1.147"
     assert data["object_folder"] == "object_models"
-    assert data["pipeline"]["sequence_id"] == "sync_to_bop_dry_run"
+    assert data["pipeline"]["sequence_id"] == "real_full_capture_validation"
     assert data["pipeline"]["plan_only"] is True
     assert data["frames"]["robot_pose"] == {
         "from": "robot_flange",
@@ -47,7 +47,7 @@ def test_default_run_config_uses_fake_robot_and_lab_sensors(tmp_path: Path) -> N
 
     plan = sequence_plan_from_run_config(data)
 
-    assert plan.sequence_id == "sync_to_bop_dry_run"
+    assert plan.sequence_id == "real_full_capture_validation"
     assert plan.plan_only is True
     assert plan.steps[0].command[:3] == ["uv", "run", "python"]
 
@@ -198,8 +198,6 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
             "python",
             "scripts/create_run_config.py",
             run_root.as_posix(),
-            "--robot-mode",
-            "fake",
             "--sensor",
             "realsense:123:static:Cell RealSense",
             "--object-folder",
@@ -252,8 +250,6 @@ def test_create_run_config_cli_writes_real_full_capture_validation_plan(
             "python",
             "scripts/create_run_config.py",
             run_root.as_posix(),
-            "--robot-mode",
-            "real",
             "--sequence",
             "real_full_capture_validation",
             "--print-sequence-plan",
@@ -295,7 +291,7 @@ def test_create_run_config_cli_lists_sequence_choices() -> None:
     )
 
     assert "capture_to_bop_dataset_dry_run" in result.stdout
-    assert "fake_capture_to_bop_dataset_dry_run" in result.stdout
+    assert "fake_capture_to_bop_dataset_dry_run" not in result.stdout
     assert "real_full_capture_validation" in result.stdout
     assert "foundationpose_runtime_to_bop_eval" not in result.stdout
     assert "sam6d_runtime_to_bop_eval" not in result.stdout
@@ -336,6 +332,41 @@ def test_legacy_run_config_loads_with_frame_warning(tmp_path: Path) -> None:
     assert loaded["frames"]["robot_pose"]["from"] == "robot_flange"
     assert loaded["frames"]["robot_pose"]["to"] == "template_base"
     assert loaded["warnings"][0]["code"] == "legacy_frames_inferred"
+
+
+def test_run_config_rejects_retired_fake_robot_profile(tmp_path: Path) -> None:
+    run_root = tmp_path / "retired-fake-config"
+    value = create_run_config(run_root=run_root).to_dict()
+    value["robot_profile"]["mode"] = "fake"
+    run_root.mkdir()
+    (run_root / RUN_CONFIG).write_text(json.dumps(value))
+
+    with pytest.raises(ValueError, match="must be 'real'"):
+        load_run_config_for_run_root(run_root)
+
+
+@pytest.mark.parametrize("flag", ["--robot-mode", "--robot_mode"])
+def test_create_run_config_cli_rejects_retired_robot_mode_flag(
+    tmp_path: Path,
+    flag: str,
+) -> None:
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/create_run_config.py",
+            (tmp_path / "run-retired-flag").as_posix(),
+            flag,
+            "real",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "unrecognized arguments" in result.stderr
 
 
 def test_create_run_config_records_typed_fixed_frame_edges(tmp_path: Path) -> None:

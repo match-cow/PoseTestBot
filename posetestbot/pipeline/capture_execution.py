@@ -34,8 +34,6 @@ from posetestbot.sensors.status import collect_sensor_status
 SCHEMA_VERSION = "capture_execution_plan.v1"
 STATUS_SCHEMA_VERSION = "capture_execution_status.v1"
 REPORT_SCHEMA_VERSION = "capture_execution_report.v1"
-EXECUTION_MODES = ("plan_only", "pose_only_fake", "full")
-POSE_ONLY_ROLES = {"robot_controller", "robot_pose_receiver"}
 
 
 class CaptureExecutionCanceled(RuntimeError):
@@ -184,45 +182,8 @@ def _terminate_process_group(
         process.wait(timeout=timeout_s)
 
 
-def _robot_mode(preflight: Mapping[str, Any]) -> str:
-    config = preflight.get("config")
-    if not isinstance(config, Mapping):
-        return "unknown"
-    robot = config.get("robot_profile")
-    if not isinstance(robot, Mapping):
-        return "fake"
-    return str(robot.get("mode") or "fake")
-
-
-def _mode_gate(mode: str) -> CaptureExecutionGate:
-    return CaptureExecutionGate(
-        name="mode",
-        status="ok" if mode in EXECUTION_MODES else "error",
-        message=(
-            f"Capture execution mode is {mode}."
-            if mode in EXECUTION_MODES
-            else f"Unsupported capture execution mode: {mode!r}."
-        ),
-        details={"mode": mode, "supported_modes": list(EXECUTION_MODES)},
-    )
-
-
-def _preflight_gate(
-    preflight: Mapping[str, Any],
-    *,
-    mode: str,
-) -> CaptureExecutionGate:
+def _preflight_gate(preflight: Mapping[str, Any]) -> CaptureExecutionGate:
     preflight_status = str(preflight.get("overall_status", "error"))
-    if mode == "pose_only_fake" and preflight_status == "warning":
-        return CaptureExecutionGate(
-            name="capture_plan_preflight",
-            status="ok",
-            message=(
-                "Capture-plan preflight has warnings, but pose-only fake "
-                "execution does not require camera readiness."
-            ),
-            details={"preflight_status": preflight_status},
-        )
     return CaptureExecutionGate(
         name="capture_plan_preflight",
         status=preflight_status if preflight_status in {"ok", "warning"} else "error",
@@ -233,142 +194,53 @@ def _preflight_gate(
 
 def _robot_gate(
     *,
-    mode: str,
-    robot_mode: str,
     allow_real_robot: bool,
 ) -> CaptureExecutionGate:
-    if mode != "pose_only_fake":
-        return CaptureExecutionGate(
-            name="robot_mode",
-            status="ok" if robot_mode == "fake" or allow_real_robot else "error",
-            message=(
-                "Fake robot mode is selected."
-                if robot_mode == "fake"
-                else (
-                    "Real robot mode was explicitly allowed."
-                    if allow_real_robot
-                    else "Real robot mode requires allow_real_robot=true."
-                )
-            ),
-            details={"robot_mode": robot_mode, "allow_real_robot": allow_real_robot},
-        )
     return CaptureExecutionGate(
-        name="robot_mode",
-        status="ok" if robot_mode == "fake" else "error",
+        name="real_robot_permission",
+        status="ok" if allow_real_robot else "error",
         message=(
-            "Pose-only fake execution is using fake iiwa mode."
-            if robot_mode == "fake"
-            else "Pose-only fake execution refuses real iiwa mode."
+            "Real robot execution was explicitly allowed."
+            if allow_real_robot
+            else "Capture execution requires allow_real_robot=true."
         ),
-        details={"robot_mode": robot_mode},
+        details={"allow_real_robot": allow_real_robot},
     )
 
 
 def _camera_gate(
     *,
-    mode: str,
     allow_cameras: bool,
 ) -> CaptureExecutionGate:
-    if mode == "full":
-        return CaptureExecutionGate(
-            name="camera_permission",
-            status="ok" if allow_cameras else "error",
-            message=(
-                "Camera process selection was explicitly allowed."
-                if allow_cameras
-                else "Full capture planning requires allow_cameras=true."
-            ),
-            details={"allow_cameras": allow_cameras},
-        )
     return CaptureExecutionGate(
         name="camera_permission",
-        status="ok",
-        message="Camera capture commands are not selected in this mode.",
+        status="ok" if allow_cameras else "error",
+        message=(
+            "Camera execution was explicitly allowed."
+            if allow_cameras
+            else "Capture execution requires allow_cameras=true."
+        ),
         details={"allow_cameras": allow_cameras},
     )
 
 
-def _selection_for_mode(
+def _select_full_capture(
     commands: list[Mapping[str, Any]],
-    *,
-    mode: str,
-    allow_cameras: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], CaptureExecutionGate]:
-    selected: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-
-    if mode == "plan_only":
-        for index, command in enumerate(commands):
-            skipped_command = _command_with_metadata(command, index=index)
-            skipped_command["skip_reason"] = "plan_only"
-            skipped.append(skipped_command)
-        return (
-            selected,
-            skipped,
-            CaptureExecutionGate(
-                name="command_selection",
-                status="ok",
-                message="No capture commands are selected in plan-only mode.",
-                details={"selected_count": 0, "skipped_count": len(skipped)},
-            ),
-        )
-
-    if mode == "full" and not allow_cameras:
-        for index, command in enumerate(commands):
-            skipped_command = _command_with_metadata(command, index=index)
-            skipped_command["skip_reason"] = "camera_permission_required"
-            skipped.append(skipped_command)
-        return (
-            selected,
-            skipped,
-            CaptureExecutionGate(
-                name="command_selection",
-                status="error",
-                message=(
-                    "No full-capture commands are selected until camera "
-                    "execution is explicitly allowed."
-                ),
-                details={"selected_count": 0, "skipped_count": len(skipped)},
-            ),
-        )
-
-    expected_roles = POSE_ONLY_ROLES if mode == "pose_only_fake" else None
-    role_counts: dict[str, int] = {}
-    for index, command in enumerate(commands):
-        role = str(command.get("role", ""))
-        role_counts[role] = role_counts.get(role, 0) + 1
-        prepared = _command_with_metadata(command, index=index)
-        if mode == "full" or role in POSE_ONLY_ROLES:
-            selected.append(prepared)
-        else:
-            prepared["skip_reason"] = "camera_hardware_gated_for_pose_only_fake"
-            skipped.append(prepared)
-
-    missing_roles = []
-    if expected_roles is not None:
-        missing_roles = sorted(role for role in expected_roles if role_counts.get(role) != 1)
-
-    status = "ok" if not missing_roles else "error"
-    message = (
-        "Selected fake iiwa controller and pose receiver commands."
-        if mode == "pose_only_fake" and status == "ok"
-        else (
-            "Selected all capture-plan commands for full capture planning."
-            if mode == "full"
-            else f"Missing required pose-only command roles: {', '.join(missing_roles)}."
-        )
-    )
+    selected = [
+        _command_with_metadata(command, index=index)
+        for index, command in enumerate(commands)
+    ]
     return (
         selected,
-        skipped,
+        [],
         CaptureExecutionGate(
             name="command_selection",
-            status=status,
-            message=message,
+            status="ok",
+            message="Selected all capture-plan commands for full capture.",
             details={
                 "selected_count": len(selected),
-                "skipped_count": len(skipped),
-                "missing_roles": missing_roles,
+                "skipped_count": 0,
             },
         ),
     )
@@ -377,7 +249,6 @@ def _selection_for_mode(
 def build_capture_execution_plan(
     run_root: str | Path,
     *,
-    mode: str = "pose_only_fake",
     allow_cameras: bool = False,
     allow_real_robot: bool = False,
     include_sensor_status: bool | None = None,
@@ -386,14 +257,9 @@ def build_capture_execution_plan(
 ) -> dict[str, Any]:
     """Build a non-executing command selection plan for capture startup."""
 
-    if mode not in EXECUTION_MODES:
-        raise ValueError(
-            "mode must be one of: " + ", ".join(EXECUTION_MODES)
-        )
-
     run_root_path = Path(run_root)
     if include_sensor_status is None:
-        include_sensor_status = mode == "full"
+        include_sensor_status = True
 
     preflight = build_capture_plan_preflight(
         run_root_path,
@@ -409,21 +275,11 @@ def build_capture_execution_plan(
         if isinstance(command, Mapping)
     ]
 
-    selected, skipped, selection_gate = _selection_for_mode(
-        commands,
-        mode=mode,
-        allow_cameras=allow_cameras,
-    )
-    robot_mode = _robot_mode(preflight)
+    selected, skipped, selection_gate = _select_full_capture(commands)
     gates = [
-        _mode_gate(mode),
-        _robot_gate(
-            mode=mode,
-            robot_mode=robot_mode,
-            allow_real_robot=allow_real_robot,
-        ),
-        _camera_gate(mode=mode, allow_cameras=allow_cameras),
-        _preflight_gate(preflight, mode=mode),
+        _robot_gate(allow_real_robot=allow_real_robot),
+        _camera_gate(allow_cameras=allow_cameras),
+        _preflight_gate(preflight),
         selection_gate,
     ]
     status = _overall_status(gates)
@@ -432,7 +288,7 @@ def build_capture_execution_plan(
         "schema_version": SCHEMA_VERSION,
         "generated_at": _now(),
         "run_root": run_root_path.as_posix(),
-        "mode": mode,
+        "mode": "full",
         "status": status,
         "message": (
             "Capture execution plan is ready."
@@ -463,7 +319,7 @@ def build_capture_execution_plan(
             "start_order": "ascending startup_order",
             "stop_policy": (
                 "After robot_pose_receiver exits, terminate remaining selected "
-                "camera/controller processes by process group."
+                "camera processes by process group."
             ),
         },
         "capture_plan": capture_plan,
@@ -500,7 +356,6 @@ def write_capture_execution_plan(
 def write_capture_execution_plan_with_manifest(
     run_root: str | Path,
     *,
-    mode: str = "pose_only_fake",
     allow_cameras: bool = False,
     allow_real_robot: bool = False,
     include_sensor_status: bool | None = None,
@@ -516,7 +371,6 @@ def write_capture_execution_plan_with_manifest(
     try:
         plan = build_capture_execution_plan(
             run_root_path,
-            mode=mode,
             allow_cameras=allow_cameras,
             allow_real_robot=allow_real_robot,
             include_sensor_status=include_sensor_status,
@@ -682,7 +536,6 @@ def _build_capture_execution_status(
     *,
     status: str,
     message: str,
-    mode: str,
     allow_cameras: bool,
     allow_real_robot: bool,
     started_monotonic: float,
@@ -698,7 +551,7 @@ def _build_capture_execution_status(
         "run_root": run_root.as_posix(),
         "status": status,
         "message": message,
-        "mode": mode,
+        "mode": "full",
         "allow_cameras": allow_cameras,
         "allow_real_robot": allow_real_robot,
         "elapsed_s": time.monotonic() - started_monotonic,
@@ -737,7 +590,6 @@ def _selected_commands_for_execution(plan: Mapping[str, Any]) -> list[dict[str, 
 def run_capture_execution(
     run_root: str | Path,
     *,
-    mode: str = "pose_only_fake",
     allow_cameras: bool = False,
     allow_real_robot: bool = False,
     include_sensor_status: bool | None = None,
@@ -747,12 +599,7 @@ def run_capture_execution(
     collect_sensors: Callable[[], dict] = collect_sensor_status,
     write_plan_if_missing: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
-    """Execute selected capture-plan commands with process-group supervision.
-
-    The default ``pose_only_fake`` mode executes only fake iiwa and robot pose
-    receiving. Camera-capable full execution must be selected explicitly through
-    the plan gates.
-    """
+    """Execute full real capture with process-group supervision."""
 
     if timeout_s <= 0:
         raise ValueError("timeout_s must be greater than 0")
@@ -784,7 +631,6 @@ def run_capture_execution(
                 run_root_path,
                 status=status_value,
                 message=message_value,
-                mode=mode,
                 allow_cameras=allow_cameras,
                 allow_real_robot=allow_real_robot,
                 started_monotonic=started_monotonic,
@@ -839,7 +685,6 @@ def run_capture_execution(
     try:
         plan = build_capture_execution_plan(
             run_root_path,
-            mode=mode,
             allow_cameras=allow_cameras,
             allow_real_robot=allow_real_robot,
             include_sensor_status=include_sensor_status,
@@ -1010,15 +855,6 @@ def run_capture_execution(
                 f"Background command finished: {info['command'].get('name')}.",
             )
 
-            if (
-                mode == "pose_only_fake"
-                and info["command"].get("role") == "robot_controller"
-                and process.returncode != 0
-            ):
-                raise RuntimeError(
-                    "Fake iiwa controller exited with status "
-                    f"{process.returncode}."
-                )
     except CaptureExecutionCanceled as exc:
         status = "canceled"
         message = str(exc)
@@ -1028,7 +864,7 @@ def run_capture_execution(
             plan = {
                 "schema_version": SCHEMA_VERSION,
                 "run_root": run_root_path.as_posix(),
-                "mode": mode,
+                "mode": "full",
                 "status": "canceled",
                 "message": message,
             }
@@ -1042,7 +878,7 @@ def run_capture_execution(
             plan = {
                 "schema_version": SCHEMA_VERSION,
                 "run_root": run_root_path.as_posix(),
-                "mode": mode,
+                "mode": "full",
                 "status": "error",
                 "message": message,
             }
@@ -1078,7 +914,7 @@ def run_capture_execution(
         "run_root": run_root_path.as_posix(),
         "status": status,
         "message": message,
-        "mode": mode,
+        "mode": "full",
         "allow_cameras": allow_cameras,
         "allow_real_robot": allow_real_robot,
         "timeout_s": timeout_s,
@@ -1089,7 +925,7 @@ def run_capture_execution(
         "raw_pose_count": _raw_pose_count(run_root_path),
         "log_dir": (run_root_path / CAPTURE_EXECUTION_LOGS_DIR).as_posix(),
         "supervisor_stop_policy": (
-            "Background capture/controller commands are allowed to run while "
+            "Background camera capture commands are allowed to run while "
             "the robot pose receiver is active. After the receiver exits, the "
             "supervisor waits for them briefly and then stops remaining process "
             "groups."

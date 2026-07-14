@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 
 from posetestbot.pipeline.capture_execution import (
-    EXECUTION_MODES,
     build_capture_execution_plan,
     write_capture_execution_plan_with_manifest,
 )
@@ -17,24 +16,15 @@ from posetestbot.pipeline.capture_execution import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Select capture-plan commands for a safe execution mode without "
+            "Select full capture-plan commands without "
             "launching robot or camera processes."
         )
     )
     parser.add_argument("run_root", help="Run folder containing run_config.json.")
     parser.add_argument(
-        "--mode",
-        choices=EXECUTION_MODES,
-        default="pose_only_fake",
-        help=(
-            "Command-selection mode. pose_only_fake selects fake iiwa plus the "
-            "pose receiver and skips cameras."
-        ),
-    )
-    parser.add_argument(
         "--allow-cameras",
         action="store_true",
-        help="Allow full mode to select camera capture commands.",
+        help="Allow camera capture commands to be selected.",
     )
     parser.add_argument(
         "--allow-real-robot",
@@ -45,8 +35,7 @@ def parse_args() -> argparse.Namespace:
         "--include-sensors",
         action="store_true",
         help=(
-            "Force SDK/device discovery checks. Full mode includes this by "
-            "default."
+            "Force SDK/device discovery checks."
         ),
     )
     parser.add_argument(
@@ -70,9 +59,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
-    include_sensor_status = True if args.include_sensors else None
+    include_sensor_status = args.include_sensors
     plan_args = {
-        "mode": args.mode,
         "allow_cameras": args.allow_cameras,
         "allow_real_robot": args.allow_real_robot,
         "include_sensor_status": include_sensor_status,
@@ -90,7 +78,7 @@ def main() -> None:
 
     if path is not None:
         print(f"Wrote {path}")
-    print(f"Capture execution plan: {plan['status']} ({plan['mode']})")
+    print(f"Capture execution plan: {plan['status']} (full)")
     print(
         "Selected "
         f"{len(plan['selected_commands'])} command(s), skipped "

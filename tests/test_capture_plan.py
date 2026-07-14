@@ -15,7 +15,7 @@ from posetestbot.pipeline.run_config import (
 )
 
 
-def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
+def test_capture_plan_builds_sensor_commands_then_one_receiver(tmp_path: Path) -> None:
     run_root = tmp_path / "run-capture-plan"
     sensors = (
         sensor_config_from_token("realsense:123:eye_in_hand:Cell RealSense:inverted"),
@@ -41,23 +41,13 @@ def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
         "zed_2i_auto",
     ]
     assert [command["role"] for command in plan["commands"]] == [
-        "robot_controller",
         "sensor_capture",
         "sensor_capture",
         "sensor_capture",
         "robot_pose_receiver",
     ]
 
-    fake_controller = plan["commands"][0]
-    assert fake_controller["command"][:4] == [
-        "uv",
-        "run",
-        "python",
-        "iiwa/fake_iiwa_controller.py",
-    ]
-    assert "--once" in fake_controller["command"]
-
-    realsense = plan["commands"][1]
+    realsense = plan["commands"][0]
     assert realsense["command"] == [
         "uv",
         "run",
@@ -77,7 +67,7 @@ def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
     assert plan["sensors"][0]["metadata"]["inverted"] is True
     assert plan["sensors"][0]["metadata"]["image_rotation_degrees"] == 180
 
-    luxonis = plan["commands"][2]
+    luxonis = plan["commands"][1]
     assert luxonis["command"] == [
         "uv",
         "run",
@@ -93,7 +83,7 @@ def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
     ]
     assert "--inverted" not in luxonis["command"]
 
-    zed = plan["commands"][3]
+    zed = plan["commands"][2]
     assert zed["command"][-2:] == ["--resolution", "720p"]
     assert "--device" not in zed["command"]
     assert "--inverted" not in zed["command"]
@@ -105,8 +95,7 @@ def test_capture_plan_builds_fake_first_uv_commands(tmp_path: Path) -> None:
         "python",
         "scripts/pose_receiver_udp_json.py",
     ]
-    assert "--robot_mode" in receiver["command"]
-    assert "fake" in receiver["command"]
+    assert "--robot_mode" not in receiver["command"]
 
 
 def test_capture_plan_uses_adapter_resolution_validation(tmp_path: Path) -> None:
@@ -142,7 +131,7 @@ def test_capture_plan_treats_string_false_inverted_as_normal(tmp_path: Path) -> 
 
     plan = build_capture_plan(config).to_dict()
 
-    assert "--inverted" not in plan["commands"][1]["command"]
+    assert "--inverted" not in plan["commands"][0]["command"]
     assert plan["sensors"][0]["metadata"]["inverted"] is False
 
 
@@ -180,7 +169,7 @@ def test_capture_plan_stage_writes_manifest_artifact(tmp_path: Path) -> None:
     plan = json.loads((run_root / CAPTURE_PLAN).read_text())
     assert plan["capture"]["max_frames"] == 2
     assert plan["capture"]["warmup_frames"] == 3
-    assert plan["commands"][1]["command"][-6:] == [
+    assert plan["commands"][0]["command"][-6:] == [
         "--max_frames",
         "2",
         "--warmup-frames",

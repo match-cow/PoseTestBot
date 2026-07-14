@@ -37,12 +37,6 @@ def parse_args() -> argparse.Namespace:
             "rotation_quaternion_wxyz, and translation_mm. May be repeated."
         ),
     )
-    parser.add_argument(
-        "--robot-mode",
-        choices=("fake", "real"),
-        default="fake",
-        help="Robot profile to store in the config. Defaults to fake.",
-    )
     parser.add_argument("--resolution", default="720p")
     parser.add_argument("--fps", type=int, default=6)
     parser.add_argument("--velocity", type=float, default=0.2)
@@ -75,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sequence",
         choices=tuple(sorted(PIPELINE_SEQUENCES)),
-        default="sync_to_bop_dry_run",
+        default="real_full_capture_validation",
         help="Default pipeline sequence ID for this run config.",
     )
     parser.add_argument(
@@ -142,7 +136,6 @@ def main() -> None:
     config = create_run_config(
         run_root=run_root,
         run_name=args.run_name,
-        robot_mode=args.robot_mode,
         resolution=args.resolution,
         fps=args.fps,
         velocity_m_s=args.velocity,

@@ -391,65 +391,6 @@ def build_sequence_job(
 
 
 PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
-    "fake_capture_rehearsal": PipelineSequenceSpec(
-        id="fake_capture_rehearsal",
-        label="Fake Capture Rehearsal",
-        description=(
-            "Write and preflight the capture command plan, select the safe "
-            "pose-only fake execution commands, then run a fake iiwa rehearsal "
-            "without starting camera hardware."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="capture_plan", stage_id="capture_plan"),
-            PipelineSequenceStepSpec(
-                id="capture_plan_preflight",
-                stage_id="capture_plan_preflight",
-                depends_on=("capture_plan",),
-                options={"no_sensors": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="capture_execution_plan",
-                stage_id="capture_execution_plan",
-                depends_on=("capture_plan_preflight",),
-                options={"mode": "pose_only_fake"},
-            ),
-            PipelineSequenceStepSpec(
-                id="capture_rehearsal",
-                stage_id="capture_rehearsal",
-                depends_on=("capture_execution_plan",),
-            ),
-        ),
-    ),
-    "fake_capture_execution": PipelineSequenceSpec(
-        id="fake_capture_execution",
-        label="Supervised Fake Capture Execution",
-        description=(
-            "Write and preflight the capture command plan, write the safe "
-            "pose-only fake execution plan, then run the supervised capture "
-            "execution stage without starting camera hardware."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="capture_plan", stage_id="capture_plan"),
-            PipelineSequenceStepSpec(
-                id="capture_plan_preflight",
-                stage_id="capture_plan_preflight",
-                depends_on=("capture_plan",),
-                options={"no_sensors": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="capture_execution_plan",
-                stage_id="capture_execution_plan",
-                depends_on=("capture_plan_preflight",),
-                options={"mode": "pose_only_fake"},
-            ),
-            PipelineSequenceStepSpec(
-                id="capture_execution",
-                stage_id="capture_execution",
-                depends_on=("capture_execution_plan",),
-                options={"mode": "pose_only_fake"},
-            ),
-        ),
-    ),
     "real_full_capture_validation": PipelineSequenceSpec(
         id="real_full_capture_validation",
         label="Real Full Capture Validation",
@@ -458,7 +399,7 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
             "the capture command plan, explicitly select real robot plus camera "
             "commands, run supervised full capture, then audit "
             "rewrite_full_capture.v1. This sequence is intended for an "
-            "operator-controlled lab run, not the default fake development path."
+            "operator-controlled lab run."
         ),
         steps=(
             PipelineSequenceStepSpec(
@@ -488,7 +429,6 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 stage_id="capture_execution_plan",
                 depends_on=("capture_plan_preflight",),
                 options={
-                    "mode": "full",
                     "allow_cameras": True,
                     "allow_real_robot": True,
                     "include_sensors": True,
@@ -499,7 +439,6 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 stage_id="capture_execution",
                 depends_on=("capture_execution_plan",),
                 options={
-                    "mode": "full",
                     "allow_cameras": True,
                     "allow_real_robot": True,
                     "include_sensors": True,
@@ -755,69 +694,6 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
         ),
         steps=(
             PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
-            PipelineSequenceStepSpec(
-                id="sync_quality",
-                stage_id="sync_quality",
-                depends_on=("sync_run",),
-            ),
-            PipelineSequenceStepSpec(
-                id="blenderproc_prepare",
-                stage_id="blenderproc_prepare",
-                depends_on=("sync_quality",),
-            ),
-            PipelineSequenceStepSpec(
-                id="blenderproc_render",
-                stage_id="blenderproc_render",
-                depends_on=("blenderproc_prepare",),
-                options={"dry_run": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_export",
-                stage_id="bop_export",
-                depends_on=("blenderproc_render",),
-            ),
-        ),
-    ),
-    "fake_capture_to_bop_dataset_dry_run": PipelineSequenceSpec(
-        id="fake_capture_to_bop_dataset_dry_run",
-        label="Fake Capture To BOP Dataset Dry-Run",
-        description=(
-            "Run the safe pose-only fake capture path, synthesize one RGB-D "
-            "sensor folder from the raw robot poses, then exercise "
-            "non-destructive sync, BlenderProc preparation/render planning, BOP "
-            "export without camera hardware or external pose-estimation runtimes."
-        ),
-        steps=(
-            PipelineSequenceStepSpec(id="capture_plan", stage_id="capture_plan"),
-            PipelineSequenceStepSpec(
-                id="capture_plan_preflight",
-                stage_id="capture_plan_preflight",
-                depends_on=("capture_plan",),
-                options={"no_sensors": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="capture_execution_plan",
-                stage_id="capture_execution_plan",
-                depends_on=("capture_plan_preflight",),
-                options={"mode": "pose_only_fake"},
-            ),
-            PipelineSequenceStepSpec(
-                id="capture_execution",
-                stage_id="capture_execution",
-                depends_on=("capture_execution_plan",),
-                options={"mode": "pose_only_fake"},
-            ),
-            PipelineSequenceStepSpec(
-                id="synthetic_rgbd_fixture",
-                stage_id="synthetic_rgbd_fixture",
-                depends_on=("capture_execution",),
-                options={"overwrite": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="sync_run",
-                stage_id="sync_run",
-                depends_on=("synthetic_rgbd_fixture",),
-            ),
             PipelineSequenceStepSpec(
                 id="sync_quality",
                 stage_id="sync_quality",

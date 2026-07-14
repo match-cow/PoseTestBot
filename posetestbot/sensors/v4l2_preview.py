@@ -5,9 +5,12 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Mapping
+
+import cv2
 
 from posetestbot.sensors.discovery import (
     _udev_properties_for_node,
@@ -280,3 +283,28 @@ def select_usb_rgb_node(
             f"No accessible V4L2 nodes found for USB camera {vendor_id}:{product_id}."
         )
     return select_best_rgb_node(candidates, format_reader=format_reader)
+
+
+def open_v4l2_capture(
+    path: str,
+    *,
+    width: int,
+    height: int,
+    fps: int,
+    pixel_format: str = "YUYV",
+):
+    """Open a low-buffer V4L2 capture, releasing every failed attempt."""
+
+    for attempt in range(3):
+        capture = cv2.VideoCapture(path, cv2.CAP_V4L2)
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*pixel_format))
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
+        capture.set(cv2.CAP_PROP_FPS, float(fps))
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if capture.isOpened():
+            return capture
+        capture.release()
+        if attempt < 2:
+            time.sleep(0.5)
+    raise RuntimeError(f"Could not open RGB preview node {path} after 3 attempts.")

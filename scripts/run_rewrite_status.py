@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
         metavar="GATE_ID=RUN_ROOT",
         help=(
             "Override the evidence run root for one gate. May be repeated, "
-            f"for example {GATE_IDS[0]}=/tmp/fake-run."
+            f"for example {GATE_IDS[0]}=/data/real-run."
         ),
     )
     return parser.parse_args()

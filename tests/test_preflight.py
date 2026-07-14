@@ -13,8 +13,8 @@ from posetestbot.pipeline.run_config import create_run_config, write_run_config
 
 def fake_robot_status() -> dict:
     return {
-        "schema_version": "robot_status.v1",
-        "selected_profile": {"mode": "fake"},
+        "schema_version": "robot_status.v2",
+        "selected_profile": {"mode": "real"},
     }
 
 

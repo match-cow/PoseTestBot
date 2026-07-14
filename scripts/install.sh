@@ -5,6 +5,7 @@ CHECK_ONLY=false
 WITH_SYSTEM_PACKAGES=false
 WITH_BLENDERPROC=false
 WITH_PLAYWRIGHT_BROWSERS=false
+WITH_WEB_BUILD=false
 SKIP_RUNTIME_CHECKS=false
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -23,6 +24,7 @@ Options:
   --with-blenderproc       Install BlenderProc as a uv tool when missing.
   --with-playwright-browsers
                            Install Chromium for Playwright browser UI tests.
+  --with-web-build         Reinstall locked Bun packages and rebuild the bundled UI.
   --skip-runtime-checks    Skip runtime and sensor adapter verification.
   -h, --help               Show this help text.
 
@@ -84,6 +86,9 @@ parse_args() {
         ;;
       --with-playwright-browsers)
         WITH_PLAYWRIGHT_BROWSERS=true
+        ;;
+      --with-web-build)
+        WITH_WEB_BUILD=true
         ;;
       --skip-runtime-checks)
         SKIP_RUNTIME_CHECKS=true
@@ -223,6 +228,28 @@ install_playwright_browsers() {
   run uv run playwright install chromium
 }
 
+build_web_console() {
+  if [[ "${WITH_WEB_BUILD}" != true ]]; then
+    return 0
+  fi
+  if [[ "${CHECK_ONLY}" == true ]]; then
+    warn "Web build requested, but --check-only was provided; verifying bundled assets only."
+    return 0
+  fi
+  command_exists bun || die "Bun is required by --with-web-build. Install Bun, then retry."
+  log "Installing the locked frontend dependencies and rebuilding the operator console."
+  run bun install --cwd frontend --frozen-lockfile
+  run bun run --cwd frontend build
+}
+
+verify_web_console() {
+  local ui_root="${REPO_ROOT}/posetestbot/web/static/ui"
+  [[ -f "${ui_root}/index.html" ]] || die "Bundled web UI is missing ${ui_root}/index.html. Run scripts/install.sh --with-web-build."
+  compgen -G "${ui_root}/assets/*.js" >/dev/null || die "Bundled web UI has no JavaScript asset. Run scripts/install.sh --with-web-build."
+  compgen -G "${ui_root}/assets/*.css" >/dev/null || die "Bundled web UI has no CSS asset. Run scripts/install.sh --with-web-build."
+  log "Bundled operator-console assets are present."
+}
+
 uv_python() {
   if [[ "${CHECK_ONLY}" == true ]]; then
     run uv run --no-sync python "$@"
@@ -237,6 +264,9 @@ import importlib
 import sys
 
 modules = [
+    "aiohttp",
+    "aiortc",
+    "av",
     "cv2",
     "pyrealsense2",
     "flask",
@@ -285,7 +315,7 @@ print_followup_notes() {
   cat <<'EOF'
 
 [install] Notes:
-- The default robot path remains fake-iiwa-first. Select real robot mode only intentionally.
+- PoseTestBot targets only the real lab iiwa; installation and readiness checks never command it.
 - ZED 2i support requires the Stereolabs ZED SDK and pyzed.sl Python bindings outside ordinary uv/PyPI setup.
 - Camera discovery may require USB permissions and vendor udev rules on the lab host.
 - For physical sensor visibility, run:
@@ -300,6 +330,8 @@ main() {
   ensure_uv
   install_system_packages
   sync_python_environment
+  build_web_console
+  verify_web_console
   install_blenderproc
   install_playwright_browsers
   run_readiness_checks

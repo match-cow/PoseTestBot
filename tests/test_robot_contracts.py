@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,28 +17,15 @@ from posetestbot.config import (
 from posetestbot.robot import udp
 
 
-def load_fake_controller_module():
-    module_path = (
-        Path(__file__).resolve().parents[1] / "iiwa" / "fake_iiwa_controller.py"
-    )
-    spec = importlib.util.spec_from_file_location("fake_iiwa_controller", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_robot_profile_defaults_to_fake(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("POSETESTBOT_ROBOT_MODE", raising=False)
+def test_robot_profile_defaults_to_real_lab_robot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("POSETESTBOT_ROBOT_IP", raising=False)
     monkeypatch.delenv("POSETESTBOT_RECEIVER_IP", raising=False)
 
     profile = robot_profile()
 
-    assert profile.mode == "fake"
-    assert profile.robot_ip == "127.0.0.1"
-    assert profile.receiver_ip == "127.0.0.1"
+    assert profile.mode == "real"
+    assert profile.robot_ip == LAB_ROBOT_IP
+    assert profile.receiver_ip == LAB_ROBOT_RECEIVER_IP
     assert profile.command_port == DEFAULT_ROBOT_PORT
     assert profile.receiver_port == DEFAULT_RECEIVER_PORT
 
@@ -46,7 +34,7 @@ def test_robot_profile_real_lab_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("POSETESTBOT_ROBOT_IP", raising=False)
     monkeypatch.delenv("POSETESTBOT_RECEIVER_IP", raising=False)
 
-    profile = robot_profile("real")
+    profile = robot_profile()
 
     assert profile.mode == "real"
     assert profile.robot_ip == LAB_ROBOT_IP
@@ -54,7 +42,6 @@ def test_robot_profile_real_lab_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_robot_profile_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("POSETESTBOT_ROBOT_MODE", "real")
     monkeypatch.setenv("POSETESTBOT_ROBOT_IP", "172.31.1.200")
     monkeypatch.setenv("POSETESTBOT_ROBOT_PORT", "30301")
     monkeypatch.setenv("POSETESTBOT_RECEIVER_IP", "172.31.1.201")
@@ -115,7 +102,7 @@ def test_send_start_uses_selected_protocol(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(udp, "send_udp_json", fake_send)
     profile = RobotProfile(
-        mode="fake",
+        mode="real",
         robot_ip="127.0.0.1",
         command_port=30301,
         receiver_ip="127.0.0.1",
@@ -155,25 +142,46 @@ def test_send_start_omits_wildcard_receiver_ip(
     assert sent == [(message, "172.31.1.147", 30300)]
 
 
-def test_fake_controller_accepts_legacy_and_v1_commands() -> None:
-    fake_controller = load_fake_controller_module()
+@pytest.mark.parametrize(
+    ("script", "arguments", "retired_flag"),
+    [
+        ("start_iiwa.py", ["--robot_mode", "real"], "--robot_mode"),
+        ("stop_iiwa.py", ["--robot_mode", "real"], "--robot_mode"),
+        (
+            "scripts/pose_receiver_udp_json.py",
+            ["/tmp/unused-pose-output", "--robot_mode", "real"],
+            "--robot_mode",
+        ),
+        (
+            "scripts/pose_receiver_udp_json.py",
+            ["/tmp/unused-pose-output", "--test"],
+            "--test",
+        ),
+        (
+            "scripts/run_capture_execution_plan.py",
+            ["/tmp/unused-capture-run", "--mode", "full"],
+            "--mode",
+        ),
+        (
+            "scripts/run_capture_execution_stage.py",
+            ["/tmp/unused-capture-run", "--mode", "full"],
+            "--mode",
+        ),
+    ],
+)
+def test_robot_and_execution_clis_reject_retired_flags(
+    script: str,
+    arguments: list[str],
+    retired_flag: str,
+) -> None:
+    result = subprocess.run(
+        ["uv", "run", "python", script, *arguments],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        env={**os.environ, "UV_CACHE_DIR": "/tmp/uv-cache"},
+    )
 
-    assert fake_controller.start_value_from_command({"start": 0.2}) == 0.2
-    assert (
-        fake_controller.start_value_from_command(
-            {
-                "schema_version": "robot_command.v1",
-                "command": "start_capture",
-                "cartesian_velocity_m_s": 0.12,
-            }
-        )
-        == 0.12
-    )
-    assert fake_controller.is_stop_command({"stop": True})
-    assert fake_controller.is_stop_command(
-        {
-            "schema_version": "robot_command.v1",
-            "command": "stop_after_current_motion",
-        }
-    )
-    assert fake_controller.start_value_from_command({"command": "noop"}) is None
+    assert result.returncode != 0
+    assert retired_flag in result.stderr
+    assert "unrecognized arguments" in result.stderr

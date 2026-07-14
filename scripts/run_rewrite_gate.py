@@ -10,7 +10,6 @@ from pathlib import Path
 from posetestbot.pipeline.rewrite_gate import (
     BOP_EXPORT_READINESS_GATE_ID,
     CALIBRATION_VALIDATION_GATE_ID,
-    FAKE_E2E_GATE_ID,
     FULL_CAPTURE_GATE_ID,
     build_gate_report,
     format_blocker_detail_lines,
@@ -25,9 +24,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("run_root", help="Run root to audit.")
     parser.add_argument(
         "--gate",
-        default=FAKE_E2E_GATE_ID,
+        default=FULL_CAPTURE_GATE_ID,
         choices=(
-            FAKE_E2E_GATE_ID,
             FULL_CAPTURE_GATE_ID,
             CALIBRATION_VALIDATION_GATE_ID,
             BOP_EXPORT_READINESS_GATE_ID,

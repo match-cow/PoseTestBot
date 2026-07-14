@@ -2,8 +2,8 @@
 
 PoseTestBot is acquisition-first: the repository captures, calibrates,
 synchronizes, optionally prepares ground-truth/masks, and exports BOP datasets.
-Use `uv` for Python environment management and keep the default robot path fake
-unless you intentionally target the physical iiwa.
+Use `uv` for Python environment management. PoseTestBot targets only the
+physical lab iiwa; normal setup and validation never execute capture automatically.
 
 ## Quick Setup
 
@@ -19,10 +19,19 @@ This safe project bootstrap:
 - runs `uv sync --all-groups`,
 - checks required Python imports,
 - checks optional acquisition runtimes,
-- lists registered sensor adapters without opening hardware.
+- lists registered sensor adapters without opening hardware,
+- verifies that the self-contained operator-console build is bundled.
+
+The required Python environment also includes `aiortc`, `aiohttp`, and direct
+`av` support for the UGREEN room monitor's video-only WebRTC stream. The
+worker binds its offer/answer signaling service to an ephemeral loopback port;
+the Flask API proxies signaling while browsers exchange media directly over
+the trusted lab LAN. No STUN or TURN service is configured.
 
 If `UV_CACHE_DIR` is unset, the installer uses `/tmp/uv-cache`.
 Browser binaries for Playwright UI tests are not installed by default.
+Bun is not required for normal Python installation or runtime because the
+locked production build is committed and packaged in the wheel.
 
 Use check-only mode to inspect an already configured environment without
 installing or syncing:
@@ -53,6 +62,14 @@ unless you are actively running browser coverage:
 
 ```bash
 bash scripts/install.sh --with-playwright-browsers
+```
+
+Use `--with-web-build` only when changing the React/shadcn frontend. It requires
+Bun, installs exactly the versions in `frontend/bun.lock`, removes stale build
+output, and regenerates the bundled Flask assets:
+
+```bash
+bash scripts/install.sh --with-web-build
 ```
 
 ## Manual Prerequisites
@@ -143,20 +160,55 @@ Then run the sensor preview browser test:
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 ```
 
-## Fake Robot Default
+The room-monitor coverage in that file uses an in-process synthetic aiortc
+video track. It does not open the UGREEN camera or any RGB-D acquisition
+device.
 
-The default robot profile is fake. Use it for setup and hardware-free smoke
-tests:
+### UGREEN Room Monitor
+
+The UGREEN USB camera (`0c45:2283`) is reserved by the queued room-monitor
+worker as `monitoring_camera:0c45:2283`. It requests MJPEG 640×480 at 30 fps
+with a one-frame V4L2 buffer, publishes VP8-preferred WebRTC video, and has no
+JPEG fallback. The generic RGB-D sensor preview controls remain JPEG-based.
+
+Starting or retrying the monitor from the dashboard is safe with respect to
+the robot: it queues only the monitor worker and never runs an acquisition
+pipeline or robot command. A physical monitor smoke test still requires
+explicit operator authorization because it opens the USB camera.
+
+### Operator Console Development
+
+The frontend lives in `frontend/` and follows the shadcn Vite layout with
+React, TypeScript, Tailwind, Radix primitives, HashRouter, TanStack Query,
+React Hook Form, and Zod. Its production output is
+`posetestbot/web/static/ui/`.
 
 ```bash
-uv run python iiwa/fake_iiwa_controller.py --receiver-ip 127.0.0.1
-uv run python scripts/pose_receiver_udp_json.py /tmp/posetestbot_fake_run --test
+cd frontend
+bun install --frozen-lockfile
+bun run typecheck
+bun run lint
+bun run build
 ```
 
-Use the real robot only intentionally:
+Run the Flask server in another terminal when using `bun run dev`; Vite proxies
+the existing API routes to `127.0.0.1:5000`. Never point browser tests at lab
+hardware: use the mocked Playwright fixtures.
+
+## Real Robot Profile
+
+Robot status is read-only:
 
 ```bash
-POSETESTBOT_ROBOT_MODE=real uv run python scripts/pose_receiver_udp_json.py working_data/test_run
+uv run python scripts/robot_status.py --json
+```
+
+Create and inspect a physical capture plan without executing it:
+
+```bash
+uv run python scripts/create_run_config.py working_data/test_run
+uv run python scripts/run_pipeline_sequence.py working_data/test_run \
+  --sequence real_full_capture_validation --plan-only
 ```
 
 ## Validation
@@ -167,19 +219,12 @@ Recommended local validation:
 bash -n scripts/install.sh
 bash scripts/install.sh --help
 bash scripts/install.sh --check-only
+cd frontend && bun run typecheck && bun run lint && bun run build
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_runtime_status.py tests/test_hardware_status.py
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 UV_CACHE_DIR=/tmp/uv-cache uv build
 git diff --check
-```
-
-Hardware-free acquisition-to-BOP smoke:
-
-```bash
-uv run python scripts/run_rewrite_fake_e2e_smoke.py /tmp/posetestbot_fake_bop_smoke --overwrite
-uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke \
-  --gate rewrite_fake_acquisition_to_bop.v1 --write
 ```
 
 ## Troubleshooting
@@ -188,6 +233,17 @@ uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke \
   `uv` manually and rerun `uv sync --all-groups`.
 - Python import smoke fails: rerun `uv sync --all-groups`; add or update
   dependencies with `uv add ...` rather than hand-editing lock files.
+- Room-monitor signaling is unavailable: confirm the queued
+  `monitor-webrtc:ugreen` job is running, the `monitor_webrtc.v1` status says
+  `signaling_ready`, and local firewall rules allow WebRTC host-candidate
+  traffic on the trusted lab LAN. The loopback signaling port is intentionally
+  not exposed to browsers.
+- Plan the isolated UGREEN hardware smoke without opening the camera with
+  `uv run python scripts/run_monitor_webrtc_smoke.py --plan-only`. Physical
+  execution additionally requires explicit operator authorization and all
+  three command acknowledgements: `--operator-authorized --allow-cameras
+  --allow-real-robot`. Despite the shared lab safety gate, this monitor-only
+  command contains no robot or acquisition-pipeline action.
 - `pyzed.sl` missing: install the Stereolabs ZED SDK and Python bindings outside
   uv, then rerun `uv run python scripts/runtime_status.py --json`.
 - Camera SDK imports succeed but devices are missing: check USB cabling, power,
@@ -197,4 +253,8 @@ uv run python scripts/run_rewrite_gate.py /tmp/posetestbot_fake_bop_smoke \
 - Playwright reports a missing Chromium executable: run
   `UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium`, or use
   `bash scripts/install.sh --with-playwright-browsers`.
-- Real robot commands should only be run with deliberate real-mode selection.
+- Bundled web assets are missing: restore the committed
+  `posetestbot/web/static/ui/` files or run
+  `bash scripts/install.sh --with-web-build` on a machine with Bun.
+- Real robot commands require deliberate `--allow-real-robot` and camera
+  execution requires `--allow-cameras`.
