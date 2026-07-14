@@ -9,6 +9,7 @@ import numpy as np
 
 from posetestbot.io.artifacts import DEPTH_DIR, FRAME_METADATA_JSONL, RGB_DIR
 from posetestbot.sensors.oak_d_pro import (
+    OAKDProPreviewStream,
     OAKDProCaptureError,
     TIMESTAMP_SOURCE,
     camera_intrinsics_from_matrix,
@@ -178,3 +179,123 @@ def test_capture_wraps_depthai_device_open_failures(tmp_path: Path) -> None:
         assert "No available devices" in str(exc)
     else:
         raise AssertionError("device-open failure was not wrapped")
+
+
+def test_oak_preview_uses_nonblocking_latest_frame_queue_and_closes() -> None:
+    frames = [np.zeros((2, 3, 3), dtype=np.uint8), np.ones((2, 3, 3), dtype=np.uint8)]
+
+    class Packet:
+        def __init__(self, frame):
+            self.frame = frame
+
+        def getCvFrame(self):
+            return self.frame
+
+    class Queue:
+        def __init__(self):
+            self.blocking = None
+            self.max_size = None
+
+        def setBlocking(self, value):
+            self.blocking = value
+
+        def setMaxSize(self, value):
+            self.max_size = value
+
+        def tryGetAll(self):
+            return [Packet(frames[0]), Packet(frames[1])]
+
+    class Output:
+        def __init__(self, queue):
+            self.queue = queue
+
+        def createOutputQueue(self):
+            return self.queue
+
+    class CameraNode:
+        class InitialControl:
+            def setManualFocus(self, _value):
+                pass
+
+        def __init__(self, queue):
+            self.queue = queue
+            self.initialControl = self.InitialControl()
+
+        def build(self, *_args, **_kwargs):
+            pass
+
+        def requestOutput(self, *_args):
+            return Output(self.queue)
+
+    class Device:
+        def __init__(self, _device_id=None):
+            self.closed = False
+
+        def getMxId(self):
+            return "oak-1"
+
+        def readCalibration(self):
+            raise RuntimeError("no calibration in preview double")
+
+        def close(self):
+            self.closed = True
+
+    class Pipeline:
+        def __init__(self, device):
+            self.device = device
+            self.queue = Queue()
+            self.started = False
+            self.stopped = False
+            self.exited = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.exited = True
+
+        def create(self, _node):
+            return CameraNode(self.queue)
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.stopped = True
+
+        def wait(self):
+            pass
+
+    class FakeDai:
+        __version__ = "3.7.1"
+
+        class node:
+            Camera = object()
+
+        class CameraBoardSocket:
+            CAM_A = object()
+
+        class ImgFrame:
+            class Type:
+                BGR888i = object()
+
+        class ImgResizeMode:
+            STRETCH = object()
+
+    FakeDai.Device = Device
+    FakeDai.Pipeline = Pipeline
+
+    stream = OAKDProPreviewStream(device_id="oak-1", dai_module=FakeDai)
+    pipeline = stream.pipeline
+    device = stream.device
+
+    latest = stream.try_get_frame()
+    stream.close()
+
+    assert np.array_equal(latest, frames[1])
+    assert pipeline.queue.blocking is False
+    assert pipeline.queue.max_size == 1
+    assert pipeline.started is True
+    assert pipeline.stopped is True
+    assert pipeline.exited is True
+    assert device.closed is True

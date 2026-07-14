@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--stun-port", type=int, default=3478)
     return parser.parse_args()
 
 
@@ -37,6 +38,7 @@ async def async_main(args: argparse.Namespace) -> int:
         width=max(1, args.width),
         height=max(1, args.height),
         fps=max(1, args.fps),
+        stun_port=max(0, min(65535, args.stun_port)),
     )
 
 
@@ -46,4 +48,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

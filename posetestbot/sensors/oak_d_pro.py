@@ -31,6 +31,122 @@ class OAKDProCaptureError(RuntimeError):
     """Raised when an OAK-D Pro capture cannot be started or completed."""
 
 
+class OAKDProPreviewStream:
+    """Non-blocking DepthAI v3 RGB preview with a one-frame host queue."""
+
+    def __init__(
+        self,
+        *,
+        device_id: str | None = None,
+        fps: int = 6,
+        width: int = 640,
+        height: int = 480,
+        dai_module: Any | None = None,
+    ) -> None:
+        if fps <= 0 or width <= 0 or height <= 0:
+            raise ValueError("OAK-D Pro preview dimensions and fps must be positive")
+        self.dai = dai_module or _import_depthai()
+        version = getattr(self.dai, "__version__", None)
+        if not depthai_version_supported(version):
+            raise OAKDProCaptureError(
+                f"DepthAI v3 is required for OAK-D Pro preview; found "
+                f"depthai {version or 'unknown'}."
+            )
+        self.device: Any | None = None
+        self.pipeline_context: Any | None = None
+        self.pipeline: Any | None = None
+        self.queue: Any | None = None
+        self.device_id = device_id
+        self.resolved_device_id = device_id or "default"
+        self.closed = False
+        try:
+            self.device = _open_device(self.dai, device_id)
+            self.resolved_device_id = _device_id_from_device(self.device, device_id)
+            self.pipeline_context = self.dai.Pipeline(self.device)
+            enter = getattr(self.pipeline_context, "__enter__", None)
+            self.pipeline = enter() if callable(enter) else self.pipeline_context
+            color = self.pipeline.create(self.dai.node.Camera)
+            color.build(self.dai.CameraBoardSocket.CAM_A, sensorFps=float(fps))
+            _apply_lens_position(self.device, self.dai, color)
+            output = color.requestOutput(
+                (int(width), int(height)),
+                self.dai.ImgFrame.Type.BGR888i,
+                self.dai.ImgResizeMode.STRETCH,
+                float(fps),
+                True,
+            )
+            self.queue = output.createOutputQueue()
+            set_blocking = getattr(self.queue, "setBlocking", None)
+            if callable(set_blocking):
+                set_blocking(False)
+            set_max_size = getattr(self.queue, "setMaxSize", None)
+            if callable(set_max_size):
+                set_max_size(1)
+            self.pipeline.start()
+        except Exception as exc:
+            self.close()
+            if isinstance(exc, OAKDProCaptureError):
+                raise
+            raise OAKDProCaptureError(
+                f"Unable to start OAK-D Pro RGB preview: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+    @property
+    def selected_source(self) -> dict[str, Any]:
+        return {
+            "kind": "depthai",
+            "device_id": self.resolved_device_id,
+            "queue_blocking": False,
+            "queue_max_size": 1,
+        }
+
+    def try_get_frame(self) -> Any | None:
+        if self.closed or self.queue is None:
+            return None
+        packets: list[Any] = []
+        try_get_all = getattr(self.queue, "tryGetAll", None)
+        if callable(try_get_all):
+            packets = [packet for packet in try_get_all() if packet is not None]
+        else:
+            try_get = getattr(self.queue, "tryGet", None)
+            packet = try_get() if callable(try_get) else None
+            if packet is not None:
+                packets = [packet]
+        if not packets:
+            return None
+        return packets[-1].getCvFrame()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if self.pipeline is not None:
+            try:
+                self.pipeline.stop()
+                self.pipeline.wait()
+            except Exception:
+                pass
+        if self.pipeline_context is not None:
+            exit_context = getattr(self.pipeline_context, "__exit__", None)
+            if callable(exit_context):
+                try:
+                    exit_context(None, None, None)
+                except Exception:
+                    pass
+        if self.device is not None:
+            try:
+                self.device.close()
+            except Exception:
+                pass
+
+    def __enter__(self) -> "OAKDProPreviewStream":
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        self.close()
+
+
 def _version_major(version: str | None) -> int | None:
     if not version:
         return None

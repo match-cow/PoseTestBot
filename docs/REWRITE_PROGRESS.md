@@ -203,6 +203,11 @@ Out of scope in this repository:
 - Fixed the React device cards to prefer an active RealSense preview over stale
   terminal history for the same sensor. Playwright now covers the production
   newest-first job ordering and requires the active preview JPEG to render.
+- Prevented persisted/failed RealSense preview jobs from displaying their last
+  JPEG as a live frame, disabled browser caching for rolling preview images,
+  and locked preview images out of card layout flow. Playwright covers all
+  three RealSense previews while the lower OAK-D Pro and ZED controls remain
+  scrollable and selectable in a 1280×720 operator viewport.
 - Audited the dashboard, Devices, Setup, Preflight, and Capture controls for
   operator-console semantics: RealSense previews are explicit pressed-state
   toggles with transition locking, repeated snapshot/stop requests are guarded,
@@ -214,6 +219,28 @@ Out of scope in this repository:
   Required stage inputs, form labels, evidence refresh, and safe default button
   types now have browser-facing validation and accessibility semantics.
 - Polished the transition web UI empty-run overview state and sidebar branding.
+- Matched the operator-console sidebar to the selected light/dark theme, removed
+  the padded logo backing, and simplified the trusted-network note.
+- Added a persisted process supervisor for every local web job. Workloads and
+  descendants now have verified process-group identities, Linux parent-death
+  cleanup, restart orphan recovery, and a shared five-second TERM/KILL shutdown
+  window across every supported web entry point.
+- Promoted the UGREEN WebRTC monitor to a hidden managed service with lazy V4L2
+  ownership, `monitor_webrtc.v2` heartbeats and frame/peer health, idle release,
+  timed peer cleanup, automatic stale-worker replacement, and a configurable
+  local STUN binding responder for numeric Chrome ICE candidates.
+- Added OAK-D Pro 640×480/6 fps RGB preview through a non-blocking, one-frame
+  DepthAI v3 queue while retaining aligned 720p RGB-D snapshots. RealSense and
+  OAK preview reuse now rejects stale heartbeat artifacts.
+- Updated the operator console to use the monitor's advertised STUN service,
+  retry failed negotiation after 1/3/10 seconds, preserve the concrete final
+  error, and reset the bounded retry budget only on manual Retry. Rebuilt the
+  checked-in production assets without discarding existing console changes.
+- Fixed the room monitor's false-positive connected state: browser ICE
+  connectivity now remains `receiving` until a camera frame is decoded and
+  rendered. A five-second first-frame watchdog reports packet/receive/decode
+  counters and exercises the bounded reconnect path instead of exposing the
+  empty grid indefinitely.
 - Reconciled RealSense SDK serials with USB/V4L2 node metadata so three
   connected D435-class cameras appear as three devices, not duplicated SDK and
   USB entries.
@@ -305,6 +332,12 @@ uv run python scripts/run_pipeline_sequence.py working_data/new_real_run \
 
 ## Remaining Work
 
+- Run the safety-gated camera lifecycle acceptance from
+  `docs/CAMERA_SERVICE_LIFECYCLE_PLAN.md` on the operator-ready lab host through
+  both LAN and Tailscale. It must exercise the real UGREEN, all three
+  RealSense devices, and OAK-D Pro; this implementation session did not receive
+  physical-camera or robot safety authorization and therefore did not open any
+  device.
 - On an operator-ready lab host with all configured cameras visible, create a
   fresh `0.05 m/s` run, inspect `real_full_capture_validation` with
   `--plan-only`, deliberately execute it, and require

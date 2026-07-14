@@ -7,6 +7,7 @@ import os
 import signal
 import shlex
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -16,6 +17,7 @@ from typing import Mapping
 
 from posetestbot.io.manifest import utc_now_iso
 from posetestbot.io.atomic import atomic_write_json
+from posetestbot.jobs.supervisor import read_process_start_time
 
 
 QUEUED = "queued"
@@ -25,6 +27,9 @@ SUCCEEDED = "succeeded"
 FAILED = "failed"
 CANCELED = "canceled"
 TERMINAL_STATUSES = {SUCCEEDED, FAILED, CANCELED}
+OPERATOR_VISIBILITY = "operator"
+SERVICE_VISIBILITY = "service"
+JOB_VISIBILITIES = {OPERATOR_VISIBILITY, SERVICE_VISIBILITY}
 
 
 @dataclass
@@ -48,6 +53,10 @@ class JobRecord:
     process_start_time: int | None = None
     runner_pid: int | None = None
     runner_start_time: int | None = None
+    supervisor_pid: int | None = None
+    supervisor_process_group_id: int | None = None
+    supervisor_start_time: int | None = None
+    visibility: str = OPERATOR_VISIBILITY
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -78,9 +87,14 @@ class LocalJobRunner:
         env: Mapping[str, str] | None = None,
         resources: list[str] | None = None,
         parameters: Mapping[str, object] | None = None,
+        visibility: str = OPERATOR_VISIBILITY,
     ) -> JobRecord:
         if not command:
             raise ValueError("Job command must not be empty")
+        if visibility not in JOB_VISIBILITIES:
+            raise ValueError(
+                f"visibility must be one of: {', '.join(sorted(JOB_VISIBILITIES))}"
+            )
 
         requested_resources = sorted(set(resources or []))
         with self._lock:
@@ -100,6 +114,7 @@ class LocalJobRunner:
                 parameters=dict(parameters or {}),
                 runner_pid=self._runner_pid,
                 runner_start_time=self._runner_start_time,
+                visibility=visibility,
             )
             self._jobs[job_id] = job
             self._local_job_ids.add(job_id)
@@ -116,9 +131,9 @@ class LocalJobRunner:
         thread.start()
         return self.get(job_id)
 
-    def resource_holders(self) -> dict[str, str]:
+    def resource_holders(self, *, include_services: bool = False) -> dict[str, str]:
         with self._lock:
-            return self._resource_holders()
+            return self._resource_holders(include_services=include_services)
 
     def get(self, job_id: str) -> JobRecord:
         with self._lock:
@@ -127,12 +142,16 @@ class LocalJobRunner:
             except KeyError as exc:
                 raise KeyError(f"Unknown job: {job_id}") from exc
 
-    def list(self) -> list[JobRecord]:
+    def list(self, *, include_services: bool = True) -> list[JobRecord]:
         with self._lock:
             return [
                 JobRecord(**job.to_dict())
                 for job in sorted(
-                    self._jobs.values(),
+                    (
+                        job
+                        for job in self._jobs.values()
+                        if include_services or job.visibility == OPERATOR_VISIBILITY
+                    ),
                     key=lambda item: item.created_at,
                     reverse=True,
                 )
@@ -173,7 +192,7 @@ class LocalJobRunner:
         return self.get(job_id)
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
-        """Cancel active jobs and wait briefly for runner threads to finish."""
+        """Stop all locally owned groups, escalating once the grace period ends."""
 
         with self._lock:
             active_ids = [
@@ -182,8 +201,20 @@ class LocalJobRunner:
                 if job.id in self._local_job_ids
                 and job.status not in TERMINAL_STATUSES
             ]
-        for job_id in active_ids:
-            self.cancel(job_id)
+        processes: dict[str, subprocess.Popen] = {}
+        with self._lock:
+            for job_id in active_ids:
+                job = self._jobs[job_id]
+                job.status = CANCELED if job.status == QUEUED else CANCELING
+                job.message = "Shutdown requested."
+                self._append_tail(job, job.message)
+                self._persist_job(job)
+                process = self._processes.get(job_id)
+                if process is not None and process.poll() is None:
+                    processes[job_id] = process
+
+        for process in processes.values():
+            self._signal_supervisor(process, signal.SIGTERM)
 
         deadline = time.monotonic() + max(timeout, 0.0)
         for job_id in active_ids:
@@ -192,6 +223,15 @@ class LocalJobRunner:
             if thread is None:
                 continue
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        for job_id, process in processes.items():
+            if process.poll() is None:
+                self._signal_supervisor(process, signal.SIGKILL)
+                self._terminate_recorded_workload(self.get(job_id), signal.SIGKILL)
+        for job_id in active_ids:
+            with self._lock:
+                thread = self._threads.get(job_id)
+            if thread is not None:
+                thread.join(timeout=1.0)
 
     def log_text(self, job_id: str) -> str:
         job = self.get(job_id)
@@ -216,8 +256,24 @@ class LocalJobRunner:
         with open(job.log_path, "a", buffering=1) as log:
             log.write(f"$ {self._format_command(job.command)}\n")
             try:
+                identity_path = Path(job.log_path).parent / "supervisor.json"
+                supervisor_command = [
+                    sys.executable,
+                    "-m",
+                    "posetestbot.jobs.supervisor",
+                    "--owner-pid",
+                    str(self._runner_pid),
+                    "--owner-start-time",
+                    str(self._runner_start_time),
+                    "--identity-path",
+                    identity_path.as_posix(),
+                    "--termination-timeout",
+                    "5",
+                    "--",
+                    *job.command,
+                ]
                 process = subprocess.Popen(
-                    job.command,
+                    supervisor_command,
                     cwd=job.cwd,
                     env={**os.environ, **env},
                     stdout=subprocess.PIPE,
@@ -239,11 +295,11 @@ class LocalJobRunner:
             with self._lock:
                 self._processes[job_id] = process
                 current = self._jobs[job_id]
-                current.process_pid = process.pid
-                current.process_group_id = (
+                current.supervisor_pid = process.pid
+                current.supervisor_process_group_id = (
                     os.getpgid(process.pid) if os.name != "nt" else process.pid
                 )
-                current.process_start_time = self._read_process_start_time(process.pid)
+                current.supervisor_start_time = self._read_process_start_time(process.pid)
                 self._persist_job(current)
                 should_terminate = self._jobs[job_id].status in {
                     CANCELED,
@@ -252,6 +308,8 @@ class LocalJobRunner:
 
             if should_terminate:
                 self._terminate_process_group(process)
+
+            self._refresh_supervisor_identity(job_id, wait_s=2.0)
 
             assert process.stdout is not None
             for line in process.stdout:
@@ -262,6 +320,7 @@ class LocalJobRunner:
                     self._persist_job(current)
 
             returncode = process.wait()
+            self._cleanup_recorded_workload(job_id, timeout_s=1.0)
             with self._lock:
                 job = self._jobs[job_id]
                 job.returncode = returncode
@@ -285,17 +344,19 @@ class LocalJobRunner:
         if len(job.tail) > self.tail_limit:
             del job.tail[: len(job.tail) - self.tail_limit]
 
-    def _resource_holders(self) -> dict[str, str]:
+    def _resource_holders(self, *, include_services: bool = True) -> dict[str, str]:
         holders = {}
         for job in self._jobs.values():
             if job.status in TERMINAL_STATUSES:
+                continue
+            if not include_services and job.visibility == SERVICE_VISIBILITY:
                 continue
             for resource in job.resources:
                 holders[resource] = job.id
         return holders
 
     def _check_resources_available(self, resources: list[str]) -> None:
-        holders = self._resource_holders()
+        holders = self._resource_holders(include_services=True)
         conflicts: dict[str, str] = {}
         for requested in resources:
             for held, job_id in holders.items():
@@ -322,36 +383,102 @@ class LocalJobRunner:
         )
 
     def _terminate_process_group(
-        self, process: subprocess.Popen, *, timeout_s: float = 2.0
+        self, process: subprocess.Popen, *, timeout_s: float = 5.0
     ) -> None:
         if process.poll() is not None:
             return
 
-        if os.name == "nt":
-            process.terminate()
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                return
+        self._signal_supervisor(process, signal.SIGTERM)
 
         try:
             process.wait(timeout=timeout_s)
+            self._cleanup_workload_for_supervisor(process, timeout_s=1.0)
             return
         except subprocess.TimeoutExpired:
             pass
 
-        if os.name == "nt":
-            process.kill()
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                return
+        self._signal_supervisor(process, signal.SIGKILL)
         try:
             process.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             pass
+        with self._lock:
+            job_id = next(
+                (
+                    item_id
+                    for item_id, item_process in self._processes.items()
+                    if item_process is process
+                ),
+                None,
+            )
+        if job_id is not None:
+            self._cleanup_recorded_workload(job_id, timeout_s=0.0)
+
+    def _cleanup_workload_for_supervisor(
+        self,
+        process: subprocess.Popen,
+        *,
+        timeout_s: float,
+    ) -> None:
+        with self._lock:
+            job_id = next(
+                (
+                    item_id
+                    for item_id, item_process in self._processes.items()
+                    if item_process is process
+                ),
+                None,
+            )
+        if job_id is not None:
+            self._cleanup_recorded_workload(job_id, timeout_s=timeout_s)
+
+    def _cleanup_recorded_workload(self, job_id: str, *, timeout_s: float) -> None:
+        self._refresh_supervisor_identity(job_id)
+        job = self.get(job_id)
+        if not self._persisted_process_matches(job):
+            return
+        self._terminate_recorded_workload(job, signal.SIGTERM)
+        deadline = time.monotonic() + max(timeout_s, 0.0)
+        while self._persisted_process_matches(job) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if self._persisted_process_matches(job):
+            self._terminate_recorded_workload(job, signal.SIGKILL)
+
+    @staticmethod
+    def _signal_supervisor(process: subprocess.Popen, signum: int) -> None:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            process.terminate() if signum == signal.SIGTERM else process.kill()
+            return
+        try:
+            os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    def _refresh_supervisor_identity(self, job_id: str, *, wait_s: float = 0.0) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            path = Path(job.log_path).parent / "supervisor.json"
+        deadline = time.monotonic() + max(wait_s, 0.0)
+        while True:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    value = json.load(handle)
+                workload_pid = value.get("workload_pid")
+                if isinstance(workload_pid, int):
+                    with self._lock:
+                        job = self._jobs[job_id]
+                        job.process_pid = workload_pid
+                        job.process_group_id = value.get("workload_process_group_id")
+                        job.process_start_time = value.get("workload_start_time")
+                        self._persist_job(job)
+                    return
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.01)
 
     def _load_persisted_jobs(self) -> None:
         for path in sorted(self.job_root.glob("*/job.json")):
@@ -359,6 +486,7 @@ class LocalJobRunner:
                 with open(path, "r") as f:
                     data = json.load(f)
                 job = self._job_from_dict(data)
+                self._merge_supervisor_identity(job, path.parent / "supervisor.json")
             except Exception:
                 continue
 
@@ -400,20 +528,37 @@ class LocalJobRunner:
         job_data.setdefault("process_start_time", None)
         job_data.setdefault("runner_pid", None)
         job_data.setdefault("runner_start_time", None)
+        job_data.setdefault("supervisor_pid", None)
+        job_data.setdefault("supervisor_process_group_id", None)
+        job_data.setdefault("supervisor_start_time", None)
+        job_data.setdefault("visibility", OPERATOR_VISIBILITY)
         return JobRecord(**job_data)
 
     @staticmethod
     def _read_process_start_time(pid: int) -> int | None:
         """Return Linux process start ticks, used to guard against PID reuse."""
 
-        if os.name == "nt":
-            return None
+        return read_process_start_time(pid)
+
+    @staticmethod
+    def _merge_supervisor_identity(job: JobRecord, path: Path) -> None:
         try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
-            fields_after_name = stat[stat.rfind(")") + 2 :].split()
-            return int(fields_after_name[19])
-        except (IndexError, OSError, ValueError):
-            return None
+            with open(path, encoding="utf-8") as handle:
+                value = json.load(handle)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+        mappings = {
+            "supervisor_pid": "supervisor_pid",
+            "supervisor_process_group_id": "supervisor_process_group_id",
+            "supervisor_start_time": "supervisor_start_time",
+            "process_pid": "workload_pid",
+            "process_group_id": "workload_process_group_id",
+            "process_start_time": "workload_start_time",
+        }
+        for field_name, identity_name in mappings.items():
+            value_item = value.get(identity_name)
+            if getattr(job, field_name) is None and isinstance(value_item, int):
+                setattr(job, field_name, value_item)
 
     @classmethod
     def _persisted_process_matches(cls, job: JobRecord) -> bool:
@@ -444,13 +589,22 @@ class LocalJobRunner:
     ) -> bool:
         """Stop a verified process group left by an interrupted runner."""
 
+        stopped = False
+        if cls._persisted_supervisor_matches(job):
+            assert job.supervisor_process_group_id is not None
+            try:
+                os.killpg(job.supervisor_process_group_id, signal.SIGTERM)
+                stopped = True
+            except ProcessLookupError:
+                pass
         if not cls._persisted_process_matches(job):
-            return False
+            return stopped
         assert job.process_group_id is not None
         try:
             os.killpg(job.process_group_id, signal.SIGTERM)
+            stopped = True
         except ProcessLookupError:
-            return False
+            return stopped
 
         deadline = time.monotonic() + max(timeout_s, 0.0)
         while cls._persisted_process_matches(job) and time.monotonic() < deadline:
@@ -460,7 +614,32 @@ class LocalJobRunner:
                 os.killpg(job.process_group_id, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        return True
+        return stopped
+
+    @classmethod
+    def _persisted_supervisor_matches(cls, job: JobRecord) -> bool:
+        pid = job.supervisor_pid
+        group_id = job.supervisor_process_group_id
+        start_time = job.supervisor_start_time
+        if pid is None or group_id is None or start_time is None or os.name == "nt":
+            return False
+        if cls._read_process_start_time(pid) != start_time:
+            return False
+        try:
+            return os.getpgid(pid) == group_id
+        except ProcessLookupError:
+            return False
+
+    @classmethod
+    def _terminate_recorded_workload(cls, job: JobRecord, signum: int) -> bool:
+        if not cls._persisted_process_matches(job):
+            return False
+        assert job.process_group_id is not None
+        try:
+            os.killpg(job.process_group_id, signum)
+            return True
+        except ProcessLookupError:
+            return False
 
     def _persist_job(self, job: JobRecord) -> None:
         path = Path(job.log_path).parent / "job.json"

@@ -7,7 +7,6 @@ from pathlib import Path
 
 from flask import Flask, send_from_directory
 
-from posetestbot.web.legacy import WEB_DEBUG, WEB_HOST, WEB_PORT
 from posetestbot.web.legacy import app as legacy_api
 from posetestbot.web.routes.monitoring import monitoring_bp
 from posetestbot.web.routes.overview import overview_bp
@@ -83,4 +82,7 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host=WEB_HOST, port=WEB_PORT, debug=WEB_DEBUG)
+    from posetestbot.web.cli import run_web_server
+    from posetestbot.web.legacy import job_runner
+
+    run_web_server(app, job_runner)

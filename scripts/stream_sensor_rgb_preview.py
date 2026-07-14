@@ -15,10 +15,12 @@ import cv2
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.manifest import utc_now_iso
 from posetestbot.pipeline.run_config import normalize_inverted, normalize_sensor_type
+from posetestbot.sensors.oak_d_pro import OAKDProPreviewStream
 from posetestbot.sensors.previews import (
     PREVIEW_IMAGE_NAME,
     PREVIEW_STATUS_NAME,
     PREVIEW_STOP_NAME,
+    PREVIEW_STATUS_SCHEMA,
 )
 from posetestbot.sensors.v4l2_preview import (
     open_v4l2_capture,
@@ -98,7 +100,7 @@ def _base_status(preview_root: Path, spec: Mapping[str, Any]) -> dict[str, Any]:
     sensor_type = str(spec["sensor_type"])
     device_id = str(spec["device_id"])
     return {
-        "schema_version": "sensor_rgb_preview.v1",
+        "schema_version": PREVIEW_STATUS_SCHEMA,
         "generated_at": utc_now_iso(),
         "preview_root": preview_root.as_posix(),
         "sensor_key": f"{sensor_type}:{device_id}",
@@ -114,6 +116,8 @@ def _base_status(preview_root: Path, spec: Mapping[str, Any]) -> dict[str, Any]:
         "metadata": spec.get("metadata", {}),
         "status": "starting",
         "frame_count": 0,
+        "heartbeat_at": utc_now_iso(),
+        "last_frame_at": None,
         "latest_image": None,
         "selected_node": None,
         "error": None,
@@ -138,6 +142,8 @@ def _open_capture(
 
 
 def run_preview(args: argparse.Namespace) -> int:
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = False
     preview_root = Path(args.preview_root)
     preview_root.mkdir(parents=True, exist_ok=True)
     status_path = preview_root / PREVIEW_STATUS_NAME
@@ -147,6 +153,8 @@ def run_preview(args: argparse.Namespace) -> int:
     status = _base_status(preview_root, spec)
     _atomic_json(status_path, status)
 
+    oak_stream: OAKDProPreviewStream | None = None
+    capture = None
     if spec["sensor_type"] == "realsense_d435":
         selection = select_realsense_rgb_node(
             str(spec["device_id"]),
@@ -157,6 +165,15 @@ def run_preview(args: argparse.Namespace) -> int:
             ),
         )
         pixel_format = "YUYV"
+        selected_source = selection.as_dict()
+    elif spec["sensor_type"] == "oak_d_pro":
+        oak_stream = OAKDProPreviewStream(
+            device_id=str(spec["device_id"]),
+            fps=max(1, int(args.fps)),
+            width=max(1, int(args.width)),
+            height=max(1, int(args.height)),
+        )
+        selected_source = oak_stream.selected_source
     else:
         status.update(
             {
@@ -167,42 +184,66 @@ def run_preview(args: argparse.Namespace) -> int:
         )
         _atomic_json(status_path, status)
         return 2
-    status.update(
-        {
-            "status": "opening",
-            "generated_at": utc_now_iso(),
-            "selected_node": selection.as_dict(),
-        }
-    )
-    _atomic_json(status_path, status)
-    print(
-        f"Streaming {status['sensor_key']} RGB preview from {selection.path}",
-        flush=True,
-    )
+    try:
+        status.update(
+            {
+                "status": "opening",
+                "generated_at": utc_now_iso(),
+                "heartbeat_at": utc_now_iso(),
+                "selected_node": selected_source,
+            }
+        )
+        _atomic_json(status_path, status)
+        print(
+            f"Streaming {status['sensor_key']} RGB preview from "
+            f"{selected_source.get('path') or selected_source.get('device_id')}",
+            flush=True,
+        )
 
-    capture = _open_capture(
-        selection.path,
-        width=max(1, int(args.width)),
-        height=max(1, int(args.height)),
-        fps=max(1, int(args.fps)),
-        pixel_format=pixel_format,
-    )
+        if oak_stream is None:
+            capture = _open_capture(
+                selection.path,
+                width=max(1, int(args.width)),
+                height=max(1, int(args.height)),
+                fps=max(1, int(args.fps)),
+                pixel_format=pixel_format,
+            )
+    except BaseException:
+        if capture is not None:
+            capture.release()
+        if oak_stream is not None:
+            oak_stream.close()
+        raise
     frame_count = 0
-    failure_count = 0
     interval_s = 1.0 / max(1, int(args.fps))
+    opened_at = time.monotonic()
+    last_heartbeat = 0.0
+    last_frame_at = opened_at
     try:
         while not _STOP_REQUESTED and not stop_path.exists():
             start = time.monotonic()
-            ok, frame = capture.read()
-            if not ok:
-                failure_count += 1
-                if failure_count > max(10, int(args.fps) * 5):
+            if oak_stream is not None:
+                frame = oak_stream.try_get_frame()
+                ok = frame is not None
+            else:
+                assert capture is not None
+                ok, frame = capture.read()
+            if not ok or frame is None:
+                if time.monotonic() - last_frame_at > 5.0:
                     raise RuntimeError(
-                        f"No RGB frames received from {selection.path}."
+                        f"No RGB frames received from "
+                        f"{selected_source.get('path') or selected_source.get('device_id')}."
                     )
-                time.sleep(min(0.2, interval_s))
+                if time.monotonic() - last_heartbeat >= 1.0:
+                    last_heartbeat = time.monotonic()
+                    status.update(
+                        generated_at=utc_now_iso(),
+                        heartbeat_at=utc_now_iso(),
+                    )
+                    _atomic_json(status_path, status)
+                time.sleep(min(0.05 if oak_stream is not None else 0.2, interval_s))
                 continue
-            failure_count = 0
+            last_frame_at = time.monotonic()
             frame = _normalize_frame(frame)
             if frame is None:
                 continue
@@ -218,6 +259,8 @@ def run_preview(args: argparse.Namespace) -> int:
                 {
                     "status": "running",
                     "generated_at": utc_now_iso(),
+                    "heartbeat_at": utc_now_iso(),
+                    "last_frame_at": utc_now_iso(),
                     "frame_count": frame_count,
                     "latest_image": PREVIEW_IMAGE_NAME,
                     "error": None,
@@ -228,12 +271,16 @@ def run_preview(args: argparse.Namespace) -> int:
             if elapsed < interval_s:
                 time.sleep(interval_s - elapsed)
     finally:
-        capture.release()
+        if capture is not None:
+            capture.release()
+        if oak_stream is not None:
+            oak_stream.close()
 
     status.update(
         {
             "status": "stopped",
             "generated_at": utc_now_iso(),
+            "heartbeat_at": utc_now_iso(),
             "frame_count": frame_count,
             "latest_image": PREVIEW_IMAGE_NAME if image_path.is_file() else None,
         }
@@ -256,7 +303,7 @@ def main() -> int:
             status = _base_status(preview_root, spec)
         except Exception:
             status = {
-                "schema_version": "sensor_rgb_preview.v1",
+                "schema_version": PREVIEW_STATUS_SCHEMA,
                 "generated_at": utc_now_iso(),
                 "preview_root": preview_root.as_posix(),
                 "status": "failed",

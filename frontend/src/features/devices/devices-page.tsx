@@ -31,10 +31,11 @@ interface SnapshotState {
 function Preview({ preview }: { preview?: PreviewJob }) {
   if (!preview) return <div className="grid aspect-video place-items-center rounded-lg bg-muted text-xs text-muted-foreground">Preview is off</div>
   const status = preview.preview_status
+  const hasLiveFrame = PREVIEW_ON.has(preview.job.status) && status?.status === "running" && Boolean(status.latest_image)
   return (
     <div data-testid="sensor-preview-slot" className="relative aspect-video overflow-hidden rounded-lg bg-muted">
-      {status?.latest_image ? <img data-testid="sensor-preview-image" src={`/sensors/previews/${preview.job.id}/latest.jpg?t=${status.frame_count}`} className="size-full object-cover" alt="Live sensor preview" /> : <div className="sensor-preview-empty grid size-full place-items-center px-4 text-center text-xs text-muted-foreground">{status?.error ? <span data-testid="sensor-preview-error" className="text-destructive">{status.error}</span> : "Waiting for first frame…"}</div>}
-      <div data-testid="sensor-preview-meta" className="absolute inset-x-2 bottom-2 flex justify-between rounded bg-black/65 px-2 py-1 text-[10px] text-white"><span>{status?.status ?? preview.job.status}</span><span>{String(status?.selected_node?.path ?? "")}</span></div>
+      {hasLiveFrame ? <img data-testid="sensor-preview-image" src={`/sensors/previews/${preview.job.id}/latest.jpg?t=${status?.frame_count}`} className="absolute inset-0 size-full object-contain" alt="Live sensor preview" /> : <div className="sensor-preview-empty grid size-full place-items-center px-4 text-center text-xs text-muted-foreground">{status?.error ? <span data-testid="sensor-preview-error" className="text-destructive">{status.error}</span> : preview.job.status === "canceling" ? "Stopping preview…" : "Waiting for first frame…"}</div>}
+      <div data-testid="sensor-preview-meta" className="absolute inset-x-2 bottom-2 z-10 flex justify-between rounded bg-black/65 px-2 py-1 text-[10px] text-white"><span>{status?.status ?? preview.job.status}</span><span>{String(status?.selected_node?.path ?? "")}</span></div>
     </div>
   )
 }
@@ -180,7 +181,7 @@ export function DevicesPage() {
       </Card>
 
       <div className="flex items-center justify-between"><div><h2 className="font-display text-xl font-semibold">RGB-D sensors</h2><p className="text-sm text-muted-foreground">{status.data?.total_connected ?? 0} connected · {selected.size} selected for run setup</p></div><Button variant="outline" size="sm" onClick={() => stopAllPreviews.mutate()} disabled={!anyPreviewBusy || stopAllPreviews.isPending}><EyeOff />{stopAllPreviews.isPending ? "Stopping previews…" : "Stop all previews"}</Button></div>
-      {status.isPending ? <div className="grid grid-cols-3 gap-4">{Array.from({ length: 3 }).map((_, index) => <Skeleton className="h-[430px]" key={index} />)}</div> : devices.length === 0 ? <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">No RGB-D sensors were detected. Check SDKs, USB connections, and permissions, then refresh.</div> : <div className="grid grid-cols-3 gap-4">
+      {status.isPending ? <div className="grid grid-cols-3 items-start gap-4">{Array.from({ length: 3 }).map((_, index) => <Skeleton className="h-[430px]" key={index} />)}</div> : devices.length === 0 ? <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">No RGB-D sensors were detected. Check SDKs, USB connections, and permissions, then refresh.</div> : <div data-testid="sensor-grid" className="grid grid-cols-3 items-start gap-4">
         {devices.map((device) => {
           const key = sensorKey(device)
           const alias = aliasDraft[key] ?? aliases.data?.aliases[key]
@@ -191,7 +192,7 @@ export function DevicesPage() {
           const snapshotState = snapshotStates.data?.[key]
           const snapshotRecord = snapshotState?.manifest?.sensors?.find((item) => item.sensor_key === key)
           const snapshotJobId = snapshotJobs[key]
-          return <Card data-testid="sensor-card" data-sensor-key={key} key={key} className="overflow-hidden">
+          return <Card data-testid="sensor-card" data-sensor-key={key} key={key} className="min-w-0 overflow-hidden">
             <CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted"><Webcam className="size-4 text-primary-strong" /></div><div className="min-w-0"><CardTitle className="truncate text-base">{alias?.alias || device.effective_display_name || device.display_name || device.device_id}</CardTitle><CardDescription className="truncate">{device.sensor_type.replaceAll("_", " ")} · {device.device_id}</CardDescription></div></div><StatusBadge status={device.connected === false ? "disconnected" : "connected"} /></div></CardHeader>
             <CardContent className="space-y-4">
               <Preview preview={previewBusy || preview?.job.status === "failed" ? preview : undefined} />

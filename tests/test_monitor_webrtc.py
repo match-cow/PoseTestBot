@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 
@@ -243,3 +244,82 @@ Streaming Parameters Video Capture:
         "pixel_format": "MJPG",
         "fps": 30.0,
     }
+
+
+def test_stun_binding_protocol_returns_xor_mapped_address() -> None:
+    class Transport:
+        def __init__(self) -> None:
+            self.sent: list[tuple[bytes, tuple[str, int]]] = []
+
+        def sendto(self, data, addr) -> None:
+            self.sent.append((data, addr))
+
+    request = webrtc.stun.Message(
+        message_method=webrtc.stun.Method.BINDING,
+        message_class=webrtc.stun.Class.REQUEST,
+    )
+    transport = Transport()
+    protocol = webrtc.StunBindingProtocol()
+    protocol.connection_made(transport)  # type: ignore[arg-type]
+    protocol.datagram_received(bytes(request), ("10.145.8.50", 49152))
+
+    assert len(transport.sent) == 1
+    response = webrtc.stun.parse_message(transport.sent[0][0])
+    assert response.message_class == webrtc.stun.Class.RESPONSE
+    assert response.transaction_id == request.transaction_id
+    assert response.attributes["XOR-MAPPED-ADDRESS"] == ("10.145.8.50", 49152)
+
+
+def test_monitor_v2_health_rejects_stale_heartbeat_and_media() -> None:
+    now = datetime.now(UTC)
+    healthy = {
+        "schema_version": webrtc.MONITOR_STATUS_SCHEMA,
+        "status": "ready",
+        "signaling_ready": True,
+        "heartbeat_at": now.isoformat(),
+        "peer_count": 0,
+        "connected_peer_count": 0,
+    }
+
+    assert webrtc.monitor_status_health(healthy, now=now) == (True, None)
+
+    stale_heartbeat = dict(healthy)
+    stale_heartbeat["heartbeat_at"] = (now - timedelta(seconds=6)).isoformat()
+    ok, reason = webrtc.monitor_status_health(stale_heartbeat, now=now)
+    assert ok is False
+    assert "heartbeat" in str(reason).lower()
+
+    stale_media = dict(healthy)
+    stale_media.update(
+        connected_peer_count=1,
+        peer_count=1,
+        peer_connected_at=(now - timedelta(seconds=10)).isoformat(),
+        last_media_frame_at=(now - timedelta(seconds=6)).isoformat(),
+    )
+    ok, reason = webrtc.monitor_status_health(stale_media, now=now)
+    assert ok is False
+    assert "media" in str(reason).lower()
+
+
+def test_monitor_server_opens_and_releases_factory_track_lazily() -> None:
+    class EmptyTrack(VideoStreamTrack):
+        async def recv(self):
+            raise NotImplementedError
+
+    created: list[EmptyTrack] = []
+    camera_states: list[bool] = []
+    server = webrtc.MonitorWebRTCServer(
+        track_factory=lambda: created.append(EmptyTrack()) or created[-1],
+        on_camera_open_changed=camera_states.append,
+    )
+
+    async def exercise() -> None:
+        assert server.track is None
+        await server._ensure_track()
+        assert server.track is created[0]
+        await server._release_track()
+
+    asyncio.run(exercise())
+
+    assert camera_states == [True, False]
+    assert created[0].readyState == "ended"

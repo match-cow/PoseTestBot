@@ -25,10 +25,10 @@
   --border: oklch(0.88 0.012 100);
   --input: oklch(0.84 0.014 100);
   --ring: #8da500;
-  --sidebar: oklch(0.205 0.016 100);
-  --sidebar-foreground: oklch(0.94 0.008 100);
-  --sidebar-accent: oklch(0.27 0.02 100);
-  --sidebar-border: oklch(0.31 0.018 100);
+  --sidebar: oklch(0.965 0.007 100);
+  --sidebar-foreground: oklch(0.22 0.014 100);
+  --sidebar-accent: oklch(0.91 0.025 105);
+  --sidebar-border: oklch(0.86 0.012 100);
 }
 
 .dark {

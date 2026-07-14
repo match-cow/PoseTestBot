@@ -9,14 +9,21 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { api, errorMessage } from "@/lib/api"
 
 interface MonitorStatus {
-  schema_version: "monitor_webrtc.v1"
+  schema_version: "monitor_webrtc.v2"
   transport: "webrtc"
   status: string
   signaling_ready: boolean
   peer_count: number
   frame_count: number
+  capture_frame_count: number
+  media_frame_count: number
+  heartbeat_at: string
+  camera_open: boolean
+  connected_peer_count: number
+  stun_port: number | null
   selected_node: { path?: string } | null
   error: string | null
+  error_reason: string | null
 }
 
 interface MonitorPayload {
@@ -30,6 +37,8 @@ interface SessionDescriptionPayload {
 }
 
 const TERMINAL_JOB_STATUSES = new Set(["failed", "canceled", "succeeded"])
+const AUTOMATIC_RETRY_DELAYS_MS = [1_000, 3_000, 10_000]
+const FIRST_VIDEO_FRAME_TIMEOUT_MS = 5_000
 
 function waitForIceGatheringComplete(peer: RTCPeerConnection): Promise<void> {
   if (peer.iceGatheringState === "complete") return Promise.resolve()
@@ -69,10 +78,10 @@ export function RoomMonitor() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const peerRef = useRef<RTCPeerConnection | null>(null)
   const monitorStartAttempted = useRef(false)
-  const automaticRenegotiationUsed = useRef(false)
+  const negotiationAttempts = useRef(0)
   const previousJobId = useRef<string | null>(null)
   const negotiationSequence = useRef(0)
-  const [connection, setConnection] = useState({ jobId: null as string | null, status: "waiting" })
+  const [connection, setConnection] = useState({ jobId: null as string | null, status: "waiting", error: null as string | null })
   const [negotiationVersion, setNegotiationVersion] = useState(0)
 
   const monitor = useQuery({
@@ -108,46 +117,136 @@ export function RoomMonitor() {
   useEffect(() => {
     if (previousJobId.current === jobId) return
     previousJobId.current = jobId
-    automaticRenegotiationUsed.current = false
+    negotiationAttempts.current = 0
+    setConnection({ jobId, status: "waiting", error: null })
   }, [jobId])
 
   useEffect(() => {
     if (!jobId || jobStatus !== "running" || !signalingReady) return
     const sequence = ++negotiationSequence.current
+    const attempt = ++negotiationAttempts.current
     let disposed = false
+    let retryTimer: number | null = null
+    let firstFrameTimer: number | null = null
+    let videoFrameCallback: number | null = null
+    let failureHandled = false
+    let firstFrameRendered = false
     const video = videoRef.current
     stopPeer(peerRef.current, video)
 
-    const peer = new RTCPeerConnection({ iceServers: [] })
+    const stunPort = monitor.data?.webrtc_status?.stun_port
+    const peer = new RTCPeerConnection({
+      iceServers: stunPort ? [{ urls: `stun:${window.location.hostname}:${stunPort}` }] : [],
+    })
     peerRef.current = peer
     const transceiver = peer.addTransceiver("video", { direction: "recvonly" })
     preferBrowserVp8(transceiver)
 
-    const retryFailedConnection = () => {
-      if (disposed || sequence !== negotiationSequence.current) return
-      setConnection({ jobId, status: "failed" })
+    const retryFailedConnection = (reason = "WebRTC connection failed") => {
+      if (disposed || failureHandled || sequence !== negotiationSequence.current) return
+      failureHandled = true
+      if (firstFrameTimer !== null) window.clearTimeout(firstFrameTimer)
+      firstFrameTimer = null
+      setConnection({ jobId, status: "failed", error: reason })
       stopPeer(peer, video)
-      if (!automaticRenegotiationUsed.current) {
-        automaticRenegotiationUsed.current = true
-        setNegotiationVersion((version) => version + 1)
+      if (attempt <= AUTOMATIC_RETRY_DELAYS_MS.length) {
+        retryTimer = window.setTimeout(
+          () => setNegotiationVersion((version) => version + 1),
+          AUTOMATIC_RETRY_DELAYS_MS[attempt - 1],
+        )
       }
+    }
+
+    const markFirstFrameRendered = () => {
+      if (disposed || failureHandled || firstFrameRendered || sequence !== negotiationSequence.current) return
+      firstFrameRendered = true
+      if (firstFrameTimer !== null) window.clearTimeout(firstFrameTimer)
+      firstFrameTimer = null
+      setConnection({ jobId, status: "connected", error: null })
+    }
+
+    const markFirstFrameFromMediaEvent = () => {
+      if (
+        video
+        && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+        && video.videoWidth > 0
+        && video.videoHeight > 0
+      ) markFirstFrameRendered()
+    }
+
+    const diagnoseMissingFirstFrame = async () => {
+      let packetsReceived = 0
+      let framesReceived = 0
+      let framesDecoded = 0
+      try {
+        const stats = await peer.getStats()
+        stats.forEach((rawReport) => {
+          const report = rawReport as RTCInboundRtpStreamStats & {
+            kind?: string
+            mediaType?: string
+            framesReceived?: number
+            framesDecoded?: number
+          }
+          if (
+            report.type !== "inbound-rtp"
+            || (report.kind ?? report.mediaType) !== "video"
+          ) return
+          packetsReceived += report.packetsReceived ?? 0
+          framesReceived += report.framesReceived ?? 0
+          framesDecoded += report.framesDecoded ?? 0
+        })
+      } catch {
+        // A closing peer may make stats unavailable; the timeout is still useful.
+      }
+      retryFailedConnection(
+        "WebRTC connected, but the browser did not render a camera frame within "
+        + `${FIRST_VIDEO_FRAME_TIMEOUT_MS / 1_000} seconds `
+        + `(packets ${packetsReceived}, received frames ${framesReceived}, decoded frames ${framesDecoded}).`,
+      )
+    }
+
+    const waitForFirstFrame = () => {
+      if (firstFrameRendered || firstFrameTimer !== null) return
+      setConnection({ jobId, status: "receiving", error: null })
+      firstFrameTimer = window.setTimeout(
+        () => void diagnoseMissingFirstFrame(),
+        FIRST_VIDEO_FRAME_TIMEOUT_MS,
+      )
+    }
+
+    const handleVideoError = () => {
+      retryFailedConnection(video?.error?.message || "The browser could not decode the room-monitor video.")
+    }
+
+    video?.addEventListener("loadeddata", markFirstFrameFromMediaEvent)
+    video?.addEventListener("playing", markFirstFrameFromMediaEvent)
+    video?.addEventListener("timeupdate", markFirstFrameFromMediaEvent)
+    video?.addEventListener("error", handleVideoError)
+    if (video && "requestVideoFrameCallback" in video) {
+      videoFrameCallback = video.requestVideoFrameCallback(() => {
+        videoFrameCallback = null
+        markFirstFrameRendered()
+      })
     }
 
     peer.ontrack = (event) => {
       const stream = event.streams[0] ?? new MediaStream([event.track])
       if (videoRef.current) {
         videoRef.current.srcObject = stream
-        void videoRef.current.play().catch(retryFailedConnection)
+        void videoRef.current.play().catch((error) => retryFailedConnection(errorMessage(error)))
       }
     }
     peer.onconnectionstatechange = () => {
-      if (peer.connectionState === "connected") setConnection({ jobId, status: "connected" })
-      if (["failed", "disconnected"].includes(peer.connectionState)) retryFailedConnection()
+      if (peer.connectionState === "connected") {
+        if (firstFrameRendered) setConnection({ jobId, status: "connected", error: null })
+        else waitForFirstFrame()
+      }
+      if (["failed", "disconnected"].includes(peer.connectionState)) retryFailedConnection(`WebRTC peer became ${peer.connectionState}`)
     }
 
     void (async () => {
       try {
-        setConnection({ jobId, status: "connecting" })
+        setConnection({ jobId, status: "connecting", error: null })
         const offer = await peer.createOffer()
         await peer.setLocalDescription(offer)
         await waitForIceGatheringComplete(peer)
@@ -158,17 +257,26 @@ export function RoomMonitor() {
         })
         if (disposed) return
         await peer.setRemoteDescription(answer)
-      } catch {
-        retryFailedConnection()
+      } catch (error) {
+        retryFailedConnection(errorMessage(error))
       }
     })()
 
     return () => {
       disposed = true
+      if (retryTimer !== null) window.clearTimeout(retryTimer)
+      if (firstFrameTimer !== null) window.clearTimeout(firstFrameTimer)
+      if (video && videoFrameCallback !== null && "cancelVideoFrameCallback" in video) {
+        video.cancelVideoFrameCallback(videoFrameCallback)
+      }
+      video?.removeEventListener("loadeddata", markFirstFrameFromMediaEvent)
+      video?.removeEventListener("playing", markFirstFrameFromMediaEvent)
+      video?.removeEventListener("timeupdate", markFirstFrameFromMediaEvent)
+      video?.removeEventListener("error", handleVideoError)
       if (peerRef.current === peer) peerRef.current = null
       stopPeer(peer, video)
     }
-  }, [jobId, jobStatus, signalingReady, negotiationVersion])
+  }, [jobId, jobStatus, signalingReady, negotiationVersion, monitor.data?.webrtc_status?.stun_port])
 
   useEffect(() => {
     const video = videoRef.current
@@ -176,18 +284,24 @@ export function RoomMonitor() {
   }, [])
 
   const retry = () => {
+    negotiationAttempts.current = 0
+    setConnection({ jobId, status: "waiting", error: null })
     if (jobId && !TERMINAL_JOB_STATUSES.has(jobStatus ?? "") && signalingReady) {
       setNegotiationVersion((version) => version + 1)
       return
     }
     startMonitor.mutate()
   }
-  const displayStatus = connectionStatus === "connected" || connectionStatus === "connecting" || connectionStatus === "failed"
+  const displayStatus = ["connected", "connecting", "receiving", "failed"].includes(connectionStatus)
     ? connectionStatus
     : monitor.data?.webrtc_status?.status ?? jobStatus ?? "waiting"
   const message = startMonitor.isPending
     ? "Starting camera…"
-    : monitor.data?.webrtc_status?.error ?? (connectionStatus === "failed" ? "WebRTC connection failed" : "Waiting for room camera…")
+    : monitor.data?.webrtc_status?.error_reason
+      ?? monitor.data?.webrtc_status?.error
+      ?? connection.error
+      ?? (connectionStatus === "receiving" ? "WebRTC connected; waiting for the first camera frame…" : null)
+      ?? (connectionStatus === "failed" ? "WebRTC connection failed" : "Waiting for room camera…")
 
   return (
     <Card className="col-span-4 overflow-hidden">

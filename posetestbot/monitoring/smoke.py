@@ -349,12 +349,6 @@ async def run_monitor_webrtc_smoke(
             raise RuntimeError(
                 f"Expected worker to select {expected_node}, got {selected_path}"
             )
-        v4l2_output, negotiated = await asyncio.to_thread(
-            _query_v4l2,
-            expected_node,
-            timeout_s=float(plan["timeout_s"]),
-        )
-        _assert_expected_capture(negotiated)
         received = await _receive_frames(
             int(ready_status["signaling_port"]),
             frame_target=int(plan["frame_target"]),
@@ -362,6 +356,14 @@ async def run_monitor_webrtc_smoke(
         )
         if (received["width"], received["height"]) != (640, 480):
             raise RuntimeError(f"Expected decoded 640x480 frames, got {received!r}")
+        # The v2 worker owns the camera lazily.  Query the negotiated V4L2
+        # format only after a peer has requested and received media.
+        v4l2_output, negotiated = await asyncio.to_thread(
+            _query_v4l2,
+            expected_node,
+            timeout_s=float(plan["timeout_s"]),
+        )
+        _assert_expected_capture(negotiated)
 
         deadline = time.monotonic() + float(plan["timeout_s"])
         advancing_status = load_monitor_status(worker_root)
@@ -407,6 +409,7 @@ async def run_monitor_webrtc_smoke(
             and final_status.get("status") == "stopped"
             and final_status.get("signaling_ready") is False
             and final_status.get("peer_count") == 0
+            and final_status.get("camera_open") is False
             and not new_holders
         )
         if caught is None and not cleanup_ok:

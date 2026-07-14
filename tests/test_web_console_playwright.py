@@ -224,6 +224,21 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     page.get_by_role("combobox", name="Theme").click()
     page.get_by_role("option", name="Light").click()
     expect(page.locator("html")).to_have_class("light")
+    sidebar_rgb = page.locator("aside").evaluate(
+        """element => {
+            const canvas = document.createElement("canvas")
+            canvas.width = 1
+            canvas.height = 1
+            const context = canvas.getContext("2d")
+            context.fillStyle = getComputedStyle(element).backgroundColor
+            context.fillRect(0, 0, 1, 1)
+            return Array.from(context.getImageData(0, 0, 1, 1).data)
+        }"""
+    )
+    assert min(sidebar_rgb[:3]) > 220
+    expect(page.get_by_text("Physical capture always requires fresh operator acknowledgement.", exact=True)).to_have_count(0)
+    expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("background-color", "rgba(0, 0, 0, 0)")
+    expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("padding", "0px")
 
 
 def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, page) -> None:

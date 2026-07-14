@@ -268,6 +268,7 @@ import sys
 
 modules = [
     "aiohttp",
+    "aioice",
     "aiortc",
     "av",
     "cv2",

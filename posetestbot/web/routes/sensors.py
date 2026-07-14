@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import time
+from datetime import UTC, datetime
 from typing import Any, Mapping
 
 from flask import Blueprint, jsonify, request, send_file
@@ -18,6 +21,7 @@ from posetestbot.sensors.previews import (
     build_preview_command,
     load_preview_status,
     preview_stream_root,
+    preview_status_health,
     resolve_preview_image,
     stop_preview,
 )
@@ -34,6 +38,8 @@ from posetestbot.web.legacy import APP_ROOT, job_runner
 
 sensors_bp = Blueprint("sensors", __name__)
 ACTIVE_JOB_STATUSES = {"queued", "running", "canceling"}
+_preview_replacement_lock = threading.Lock()
+_preview_replacement_job_ids: set[str] = set()
 
 
 def _json_payload() -> dict[str, Any]:
@@ -103,17 +109,69 @@ def _camera_resource(spec: Mapping[str, Any]) -> str:
     return f"camera:{_sensor_key(spec)}"
 
 
-def _active_preview_jobs_by_key() -> dict[str, Any]:
+def _preview_job_health(job: Any) -> tuple[bool, str | None]:
+    if job.status == "queued":
+        return True, None
+    preview_root = job.parameters.get("preview_root")
+    if not preview_root:
+        return False, "Preview job is missing its artifact root."
+    try:
+        status = load_preview_status(preview_root)
+    except (OSError, ValueError) as exc:
+        return False, str(exc)
+    if status is None:
+        started_at = getattr(job, "started_at", None)
+        if started_at is None:
+            # Compatibility for lightweight queued/running test doubles.
+            return True, None
+        try:
+            started = datetime.fromisoformat(
+                str(started_at).replace("Z", "+00:00")
+            )
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            age = (datetime.now(UTC) - started).total_seconds()
+        except ValueError:
+            age = 6.0
+        if age <= 5.0:
+            return True, None
+    return preview_status_health(preview_root, status)
+
+
+def _cancel_preview_in_background(job: Any) -> None:
+    def cancel() -> None:
+        preview_root = job.parameters.get("preview_root")
+        if preview_root:
+            stop_preview(preview_root)
+        cancel_job = getattr(job_runner, "cancel", None)
+        if callable(cancel_job):
+            try:
+                cancel_job(job.id)
+            except KeyError:
+                pass
+
+    threading.Thread(
+        target=cancel,
+        name=f"stop-stale-preview-{job.id}",
+        daemon=True,
+    ).start()
+
+
+def _active_preview_jobs_by_key() -> tuple[dict[str, Any], dict[str, Any]]:
     active = {}
+    stale = {}
     for job in job_runner.list():
         if not job.parameters.get("sensor_preview"):
             continue
         if job.status not in ACTIVE_JOB_STATUSES:
             continue
         sensor_key = job.parameters.get("sensor_key")
-        if sensor_key:
+        healthy, _reason = _preview_job_health(job)
+        if sensor_key and healthy:
             active[str(sensor_key)] = job
-    return active
+        elif sensor_key:
+            stale[str(sensor_key)] = job
+    return active, stale
 
 
 def _preview_job_payload(job) -> dict[str, Any]:
@@ -156,6 +214,96 @@ def _stop_preview_job(job) -> dict[str, Any]:
         except KeyError:
             pass
     return _preview_job_payload(job)
+
+
+def _preview_submission(
+    spec: Mapping[str, Any],
+    *,
+    fps: int,
+    width: int,
+    height: int,
+    jpeg_quality: int,
+) -> Any:
+    key = _sensor_key(spec)
+    preview_root = preview_stream_root()
+    command = build_preview_command(
+        preview_root=preview_root,
+        spec=spec,
+        fps=fps,
+        width=width,
+        height=height,
+        jpeg_quality=jpeg_quality,
+    )
+    return job_runner.submit(
+        name=f"sensor-preview:{key}",
+        command=command,
+        cwd=APP_ROOT,
+        resources=[_camera_resource(spec)],
+        parameters={
+            "preview_root": preview_root.as_posix(),
+            "sensor_key": key,
+            "sensor_type": spec.get("sensor_type"),
+            "device_id": spec.get("device_id"),
+            "inverted": normalize_inverted(spec.get("inverted", False)),
+            "sensor_spec": dict(spec),
+            "sensor_preview": True,
+        },
+    )
+
+
+def _schedule_preview_replacement(
+    stale_job: Any,
+    spec: Mapping[str, Any],
+    *,
+    fps: int,
+    width: int,
+    height: int,
+    jpeg_quality: int,
+) -> None:
+    with _preview_replacement_lock:
+        if stale_job.id in _preview_replacement_job_ids:
+            return
+        _preview_replacement_job_ids.add(stale_job.id)
+
+    def replace() -> None:
+        try:
+            preview_root = stale_job.parameters.get("preview_root")
+            if preview_root:
+                stop_preview(preview_root)
+            try:
+                job_runner.cancel(stale_job.id)
+            except KeyError:
+                pass
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                try:
+                    current = job_runner.get(stale_job.id)
+                except KeyError:
+                    break
+                if current.status not in ACTIVE_JOB_STATUSES:
+                    break
+                time.sleep(0.05)
+            active, _stale = _active_preview_jobs_by_key()
+            if _sensor_key(spec) not in active:
+                try:
+                    _preview_submission(
+                        spec,
+                        fps=fps,
+                        width=width,
+                        height=height,
+                        jpeg_quality=jpeg_quality,
+                    )
+                except (ResourceBusyError, TypeError, ValueError):
+                    pass
+        finally:
+            with _preview_replacement_lock:
+                _preview_replacement_job_ids.discard(stale_job.id)
+
+    threading.Thread(
+        target=replace,
+        name=f"replace-preview-{stale_job.id}",
+        daemon=True,
+    ).start()
 
 
 @sensors_bp.post("/sensors/snapshots")
@@ -222,7 +370,7 @@ def post_sensor_previews():
     if not specs:
         return jsonify({"output": "No connected sensors selected for preview"}), 400
 
-    active_by_key = _active_preview_jobs_by_key()
+    active_by_key, stale_by_key = _active_preview_jobs_by_key()
     jobs = []
     errors = []
     for spec in specs:
@@ -232,30 +380,26 @@ def post_sensor_previews():
             jobs.append(_preview_job_payload(existing))
             continue
 
-        preview_root = preview_stream_root()
-        try:
-            command = build_preview_command(
-                preview_root=preview_root,
-                spec=spec,
+        stale = stale_by_key.get(key)
+        if stale is not None:
+            _schedule_preview_replacement(
+                stale,
+                spec,
                 fps=int(data.get("fps", 6)),
                 width=int(data.get("width", 640)),
                 height=int(data.get("height", 480)),
                 jpeg_quality=int(data.get("jpeg_quality", 82)),
             )
-            job = job_runner.submit(
-                name=f"sensor-preview:{key}",
-                command=command,
-                cwd=APP_ROOT,
-                resources=[_camera_resource(spec)],
-                parameters={
-                    "preview_root": preview_root.as_posix(),
-                    "sensor_key": key,
-                    "sensor_type": spec.get("sensor_type"),
-                    "device_id": spec.get("device_id"),
-                    "inverted": normalize_inverted(spec.get("inverted", False)),
-                    "sensor_spec": dict(spec),
-                    "sensor_preview": True,
-                },
+            jobs.append(_preview_job_payload(stale))
+            continue
+
+        try:
+            job = _preview_submission(
+                spec,
+                fps=int(data.get("fps", 6)),
+                width=int(data.get("width", 640)),
+                height=int(data.get("height", 480)),
+                jpeg_quality=int(data.get("jpeg_quality", 82)),
             )
         except ResourceBusyError as exc:
             errors.append({"sensor_key": key, "error": str(exc)})
@@ -293,6 +437,14 @@ def get_sensor_previews():
             continue
         if not include_terminal and job.status not in ACTIVE_JOB_STATUSES:
             continue
+        if job.status in ACTIVE_JOB_STATUSES:
+            healthy, _reason = _preview_job_health(job)
+            if not healthy:
+                _cancel_preview_in_background(job)
+                # A persisted active job can still point at a JPEG from an old
+                # worker. Never expose that artifact as a current preview,
+                # including on the terminal-history view used by the UI.
+                continue
         jobs.append(_preview_job_payload(job))
     return jsonify({"jobs": jobs})
 
@@ -348,7 +500,9 @@ def get_sensor_preview_image(job_id: str):
         return jsonify({"output": str(exc)}), 404
     except ValueError as exc:
         return jsonify({"output": str(exc)}), 400
-    return send_file(path, mimetype="image/jpeg", conditional=False)
+    response = send_file(path, mimetype="image/jpeg", conditional=False)
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 @sensors_bp.get("/sensors/snapshots/<job_id>")

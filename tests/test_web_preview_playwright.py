@@ -31,6 +31,9 @@ from posetestbot.monitoring.webrtc import (
 
 SENSOR_A = "realsense_d435:825412070181"
 SENSOR_B = "realsense_d435:923322072633"
+SENSOR_C = "realsense_d435:944122070001"
+OAK_SENSOR = "oak_d_pro:18443010D1A2B30D00"
+ZED_SENSOR = "zed_2i:zed-001"
 
 
 def write_json(path: Path, value: object) -> None:
@@ -94,6 +97,60 @@ def fake_sensor_status(expected_counts=None) -> dict:
         "all_expected_connected": True,
         "expected_counts_requested": False,
     }
+
+
+def fake_full_lab_sensor_status(expected_counts=None) -> dict:
+    status = fake_sensor_status(expected_counts)
+    status["families"][0]["devices"].append(
+        {
+            "sensor_type": "realsense_d435",
+            "device_id": SENSOR_C.split(":", 1)[1],
+            "display_name": "RealSense 3",
+            "effective_display_name": "Side RealSense",
+            "connected": True,
+            "inverted": False,
+            "metadata": {
+                "video_nodes": [{"path": "/dev/video12", "accessible": True}],
+                "video_accessible": True,
+            },
+        }
+    )
+    status["families"].extend(
+        [
+            {
+                "sensor_type": "oak_d_pro",
+                "display_name": "Luxonis OAK-D Pro",
+                "devices": [
+                    {
+                        "sensor_type": "oak_d_pro",
+                        "device_id": OAK_SENSOR.split(":", 1)[1],
+                        "display_name": "OAK-D Pro",
+                        "effective_display_name": "OAK-D Pro",
+                        "connected": True,
+                        "inverted": False,
+                        "metadata": {},
+                    }
+                ],
+            },
+            {
+                "sensor_type": "zed_2i",
+                "display_name": "Stereolabs ZED 2i",
+                "devices": [
+                    {
+                        "sensor_type": "zed_2i",
+                        "device_id": ZED_SENSOR.split(":", 1)[1],
+                        "display_name": "ZED 2i",
+                        "effective_display_name": "ZED 2i",
+                        "connected": True,
+                        "inverted": False,
+                        "metadata": {},
+                    }
+                ],
+            },
+        ]
+    )
+    status["total_connected"] = 5
+    return status
 
 
 class FakePreviewJob:
@@ -215,9 +272,35 @@ class SyntheticVideoTrack(VideoStreamTrack):
         await self.recv_idle.wait()
 
 
+class StalledVideoTrack(VideoStreamTrack):
+    """Connect transport without ever yielding a decodable video frame."""
+
+    frame_count = 0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.recv_idle = asyncio.Event()
+        self.recv_idle.set()
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
+        self.recv_idle.clear()
+        try:
+            while self.readyState == "live":
+                await asyncio.sleep(0.05)
+            raise MediaStreamError
+        finally:
+            self.recv_idle.set()
+
+    async def wait_stopped(self) -> None:
+        await self.recv_idle.wait()
+
+
 class SyntheticMonitorServer:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, emit_frames: bool = True) -> None:
         self.root = root
+        self.emit_frames = emit_frames
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.started = threading.Event()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -242,7 +325,11 @@ class SyntheticMonitorServer:
                     peer_count=peer_count,
                 )
 
-            track = SyntheticVideoTrack(on_frame)
+            track = (
+                SyntheticVideoTrack(on_frame)
+                if self.emit_frames
+                else StalledVideoTrack()
+            )
             server = MonitorWebRTCServer(track, on_peers_changed=on_peers)
             self.stop_event = asyncio.Event()
             try:
@@ -395,6 +482,57 @@ def test_sidebar_webcam_monitor_plays_synthetic_webrtc_without_jpegs(
         synthetic.stop()
 
 
+def test_sidebar_webcam_does_not_call_transport_connected_usable_video(
+    preview_server,
+    page,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    server, runner = preview_server
+    monitor_runner = runner.monitor_runner
+    monitor_root = tmp_path / "stalled-monitor"
+    synthetic = SyntheticMonitorServer(monitor_root, emit_frames=False)
+    synthetic.start()
+    job = FakePreviewJob(
+        "stalled-monitor",
+        name="monitor-webrtc:stalled",
+        parameters={
+            "monitor_webcam": True,
+            "monitor_webrtc": True,
+            "monitor_root": monitor_root.as_posix(),
+        },
+        resources=["monitoring_camera:0c45:2283"],
+    )
+    job.status = "running"
+    monitor_runner.jobs[job.id] = job
+    monkeypatch.setattr(
+        web_monitoring,
+        "_monitor_health",
+        lambda _job, _status: (True, None),
+    )
+
+    try:
+        page.goto(server.url, wait_until="domcontentloaded")
+        video = page.locator('[data-testid="room-monitor-video"]')
+        message = page.locator('[data-testid="room-monitor-message"]')
+
+        expect(video).to_have_attribute(
+            "data-connection-state",
+            "receiving",
+            timeout=10_000,
+        )
+        expect(message).to_contain_text("waiting for the first camera frame")
+        expect(message).to_contain_text(
+            "did not render a camera frame",
+            timeout=7_000,
+        )
+        assert video.get_attribute("data-connection-state") != "connected"
+        assert load_monitor_status(monitor_root)["frame_count"] == 0
+    finally:
+        page.goto("about:blank")
+        synthetic.stop()
+
+
 def test_sidebar_webcam_monitor_restarts_one_stale_failed_job(
     preview_server,
     page,
@@ -461,20 +599,25 @@ def test_sidebar_webcam_webrtc_retry_is_bounded_and_manual_retry_reuses_worker(
         raise RuntimeError("synthetic signaling failure")
 
     monkeypatch.setattr(web_monitoring, "_proxy_webrtc_offer", fail_offer)
+    monkeypatch.setattr(
+        web_monitoring,
+        "_monitor_health",
+        lambda _job, _status: (True, None),
+    )
 
     page.goto(server.url, wait_until="domcontentloaded")
-    wait_for(lambda: offer_count == 2, timeout_s=10)
+    wait_for(lambda: offer_count == 4, timeout_s=20)
     page.wait_for_timeout(1500)
-    assert offer_count == 2
+    assert offer_count == 4
     expect(page.locator('[data-testid="room-monitor-video"]')).to_have_attribute(
         "data-connection-state",
         "failed",
     )
 
     page.get_by_role("button", name="Retry").click()
-    wait_for(lambda: offer_count == 3, timeout_s=5)
+    wait_for(lambda: offer_count == 5, timeout_s=5)
     page.wait_for_timeout(1500)
-    assert offer_count == 3
+    assert offer_count == 6
     assert monitor_runner.submitted == []
 
 
@@ -612,14 +755,15 @@ def test_terminal_failed_preview_unchecks_switch_and_keeps_inline_error(
     wait_for(lambda: len(runner.submitted) == 1)
     job = runner.jobs["preview-1"]
     preview_root = Path(job.parameters["preview_root"])
+    write_jpeg(preview_root / "latest.jpg")
     write_json(
         preview_root / "preview_status.json",
         {
             "schema_version": "sensor_rgb_preview.v1",
             "status": "failed",
             "sensor_key": SENSOR_A,
-            "frame_count": 0,
-            "latest_image": None,
+            "frame_count": 4,
+            "latest_image": "latest.jpg",
             "selected_node": {"path": "/dev/video4"},
             "inverted": False,
             "error": "RuntimeError: camera missing",
@@ -633,6 +777,56 @@ def test_terminal_failed_preview_unchecks_switch_and_keeps_inline_error(
     expect(first.locator('[data-testid="sensor-preview-error"]')).to_contain_text(
         "camera missing"
     )
+    expect(first.locator('[data-testid="sensor-preview-image"]')).to_have_count(0)
+
+
+def test_three_live_realsense_previews_keep_lower_lab_sensors_reachable(
+    preview_server,
+    page,
+    monkeypatch,
+) -> None:
+    server, runner = preview_server
+    monkeypatch.setattr(web_sensors, "collect_sensor_status", fake_full_lab_sensor_status)
+    page.set_viewport_size({"width": 1280, "height": 720})
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
+
+    expect(page.locator('[data-testid="sensor-card"]')).to_have_count(5)
+    for sensor_key in (SENSOR_A, SENSOR_B, SENSOR_C):
+        card = sensor_card(page, sensor_key)
+        card.locator('[data-testid="sensor-preview-toggle"]').click()
+        expect(card.locator('[data-testid="sensor-preview-toggle"]')).to_have_attribute(
+            "aria-pressed", "true"
+        )
+
+    wait_for(lambda: len(runner.submitted) == 3)
+    for job in runner.jobs.values():
+        preview_root = Path(job.parameters["preview_root"])
+        write_jpeg(preview_root / "latest.jpg")
+        write_json(
+            preview_root / "preview_status.json",
+            {
+                "schema_version": "sensor_rgb_preview.v1",
+                "status": "running",
+                "sensor_key": job.parameters["sensor_key"],
+                "frame_count": 1,
+                "latest_image": "latest.jpg",
+                "selected_node": {"path": "/dev/video-test"},
+                "inverted": False,
+                "error": None,
+            },
+        )
+        job.status = "running"
+
+    expect(page.locator('[data-testid="sensor-preview-image"]')).to_have_count(3, timeout=4_000)
+    oak_card = sensor_card(page, OAK_SENSOR)
+    oak_card.scroll_into_view_if_needed()
+    expect(oak_card).to_be_visible()
+    use_in_run = oak_card.get_by_text("Use in run").locator('[role="checkbox"]')
+    use_in_run.click()
+    expect(use_in_run).to_be_checked()
+    zed_card = sensor_card(page, ZED_SENSOR)
+    zed_card.scroll_into_view_if_needed()
+    expect(zed_card).to_be_visible()
 
 
 def test_inverted_change_restarts_preview_in_waiting_state(preview_server, page) -> None:

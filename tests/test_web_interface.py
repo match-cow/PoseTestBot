@@ -4,6 +4,7 @@ import json
 import importlib.util
 import logging
 import os
+import threading
 from pathlib import Path
 
 import cv2
@@ -944,6 +945,93 @@ def test_sensor_preview_detail_reports_failed_status_payload(
     assert response.status_code == 200
     assert payload["preview_status"]["status"] == "failed"
     assert payload["preview_status"]["error"] == "RuntimeError: camera missing"
+
+
+def test_sensor_preview_list_hides_stale_active_image_during_cleanup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    preview_root = tmp_path / "stale-preview"
+    write_png(preview_root / "latest.jpg")
+    write_json(
+        preview_root / "preview_status.json",
+        {
+            "schema_version": "sensor_rgb_preview.v1",
+            "status": "running",
+            "sensor_key": "realsense_d435:825412070181",
+            "heartbeat_at": "2000-01-01T00:00:00Z",
+            "frame_count": 12,
+            "latest_image": "latest.jpg",
+            "error": None,
+        },
+    )
+
+    class FakeJob:
+        id = "stale-preview"
+        status = "running"
+        message = None
+        parameters = {
+            "preview_root": preview_root.as_posix(),
+            "sensor_key": "realsense_d435:825412070181",
+            "sensor_preview": True,
+        }
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "status": self.status,
+                "message": self.message,
+                "parameters": self.parameters,
+            }
+
+    class FakeRunner:
+        def __init__(self):
+            self.job = FakeJob()
+            self.cancelled = threading.Event()
+
+        def list(self):
+            return [self.job]
+
+        def cancel(self, job_id):
+            assert job_id == self.job.id
+            self.job.status = "canceled"
+            self.cancelled.set()
+            return self.job
+
+    runner = FakeRunner()
+    monkeypatch.setattr(web_sensors, "job_runner", runner)
+    client = app.test_client()
+
+    response = client.get("/sensors/previews?include_terminal=true")
+
+    assert response.status_code == 200
+    assert response.get_json()["jobs"] == []
+    assert runner.cancelled.wait(timeout=1)
+
+
+def test_sensor_preview_image_disables_browser_cache(monkeypatch, tmp_path: Path) -> None:
+    preview_root = tmp_path / "preview"
+    write_png(preview_root / "latest.jpg")
+
+    class FakeJob:
+        id = "preview-live"
+        parameters = {
+            "preview_root": preview_root.as_posix(),
+            "sensor_preview": True,
+        }
+
+    class FakeRunner:
+        def get(self, job_id):
+            assert job_id == "preview-live"
+            return FakeJob()
+
+    monkeypatch.setattr(web_sensors, "job_runner", FakeRunner())
+    client = app.test_client()
+
+    response = client.get("/sensors/previews/preview-live/latest.jpg")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store, max-age=0"
 
 
 def test_snapshot_worker_reports_inaccessible_realsense_video_nodes(

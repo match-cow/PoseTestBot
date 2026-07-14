@@ -41,7 +41,7 @@ export function AppShell() {
       <div className="min-h-screen bg-background text-foreground">
         <aside className="fixed inset-y-0 left-0 z-40 flex w-[244px] flex-col border-r border-sidebar-border bg-sidebar px-4 py-5 text-sidebar-foreground">
           <Link to="/dashboard" className="flex items-center gap-3 px-2">
-            <img src={bootstrap.brand.logo_url} alt="PoseTestBot" className="size-9 rounded-lg bg-white object-contain p-1" />
+            <img src={bootstrap.brand.logo_url} alt="PoseTestBot" className="size-9 object-contain" />
             <div><div className="font-display font-semibold tracking-tight">PoseTestBot</div><div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-sidebar-foreground/50">Operator console</div></div>
           </Link>
           <nav className="mt-9 space-y-1" aria-label="Primary navigation">
@@ -51,8 +51,7 @@ export function AppShell() {
             })}
           </nav>
           <div className="mt-auto rounded-xl border border-sidebar-border bg-sidebar-accent/50 p-3">
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold"><FlaskConical className="size-4 text-primary" />Trusted lab network</div>
-            <p className="text-[11px] leading-relaxed text-sidebar-foreground/55">Physical capture always requires fresh operator acknowledgement.</p>
+            <div className="flex items-center gap-2 text-xs font-semibold"><FlaskConical className="size-4 text-primary" />Trusted lab network</div>
           </div>
         </aside>
 

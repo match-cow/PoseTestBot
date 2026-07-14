@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import threading
+import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Mapping
 
 from flask import Blueprint, jsonify, request
 
-from posetestbot.jobs.runner import ResourceBusyError, TERMINAL_STATUSES
+from posetestbot.jobs.runner import (
+    ResourceBusyError,
+    SERVICE_VISIBILITY,
+    TERMINAL_STATUSES,
+)
 from posetestbot.monitoring.webrtc import (
     MAX_SDP_BYTES,
     MONITOR_STATUS_SCHEMA,
@@ -18,6 +27,7 @@ from posetestbot.monitoring.webrtc import (
     UGREEN_USB_VENDOR_ID,
     build_monitor_webrtc_command,
     load_monitor_status,
+    monitor_status_health,
     monitor_stream_root,
     public_monitor_status,
 )
@@ -28,6 +38,11 @@ monitoring_bp = Blueprint("monitoring", __name__)
 
 UGREEN_DEVICE_ID = f"{UGREEN_USB_VENDOR_ID}:{UGREEN_USB_PRODUCT_ID}"
 ACTIVE_JOB_STATUSES = {"queued", "running", "canceling"}
+MONITOR_STUN_PORT = int(os.environ.get("POSETESTBOT_MONITOR_STUN_PORT", "3478"))
+if not 1 <= MONITOR_STUN_PORT <= 65535:
+    raise ValueError("POSETESTBOT_MONITOR_STUN_PORT must be from 1 to 65535")
+_replacement_lock = threading.Lock()
+_replacement_job_ids: set[str] = set()
 
 
 def _monitor_jobs() -> list[Any]:
@@ -69,6 +84,43 @@ def _private_monitor_status(job: Any) -> dict[str, Any]:
     return status
 
 
+def _monitor_health(job: Any, status: Mapping[str, Any]) -> tuple[bool, str | None]:
+    if job.status == "queued":
+        return True, None
+    health_status = dict(status)
+    # A few v1-era tests and hand-written diagnostics used the current schema
+    # constant without populating heartbeat_at.  File freshness is a safe route-
+    # local compatibility bridge; real v2 workers always write the heartbeat.
+    if not health_status.get("heartbeat_at"):
+        root = job.parameters.get("monitor_root")
+        if root:
+            try:
+                modified = (Path(root) / "monitor_webrtc_status.json").stat().st_mtime
+                health_status["heartbeat_at"] = datetime.fromtimestamp(
+                    modified, tz=UTC
+                ).isoformat()
+            except OSError:
+                pass
+    healthy, reason = monitor_status_health(health_status)
+    if healthy:
+        return True, None
+    if status.get("status") in {"starting", "opening"} and not (
+        status.get("error_reason") or status.get("error")
+    ):
+        started_at = getattr(job, "started_at", None)
+        if started_at is None:
+            return True, None
+        try:
+            started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            if (datetime.now(UTC) - started).total_seconds() <= 5.0:
+                return True, None
+        except ValueError:
+            pass
+    return False, reason
+
+
 def _monitor_payload(job: Any | None) -> dict[str, Any]:
     if job is None:
         return {"job": None, "webrtc_status": None}
@@ -76,6 +128,72 @@ def _monitor_payload(job: Any | None) -> dict[str, Any]:
         "job": job.to_dict(),
         "webrtc_status": public_monitor_status(_private_monitor_status(job)),
     }
+
+
+def _submit_monitor_service() -> Any:
+    root = monitor_stream_root()
+    return job_runner.submit(
+        name="monitor-webrtc:ugreen",
+        command=build_monitor_webrtc_command(
+            monitor_root=root,
+            stun_port=MONITOR_STUN_PORT,
+        ),
+        cwd=APP_ROOT,
+        resources=[f"monitoring_camera:{UGREEN_DEVICE_ID}"],
+        visibility=SERVICE_VISIBILITY,
+        parameters={
+            "monitor_root": root.as_posix(),
+            "sensor_key": f"monitor_webcam:{UGREEN_DEVICE_ID}",
+            "sensor_type": "monitor_webcam",
+            "device_id": UGREEN_DEVICE_ID,
+            "monitor_webcam": True,
+            "monitor_webrtc": True,
+            "managed_service": True,
+            "transport": "webrtc",
+            "stun_port": MONITOR_STUN_PORT,
+        },
+    )
+
+
+def _schedule_monitor_replacement(job: Any, reason: str) -> None:
+    with _replacement_lock:
+        if job.id in _replacement_job_ids:
+            return
+        _replacement_job_ids.add(job.id)
+
+    def replace() -> None:
+        try:
+            cancel_job = getattr(job_runner, "cancel", None)
+            if not callable(cancel_job):
+                return
+            try:
+                cancel_job(job.id)
+            except KeyError:
+                pass
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                try:
+                    current = job_runner.get(job.id)
+                except KeyError:
+                    break
+                if current.status in TERMINAL_STATUSES:
+                    break
+                time.sleep(0.05)
+            if _active_monitor_job() is None:
+                try:
+                    _submit_monitor_service()
+                except ResourceBusyError:
+                    pass
+        finally:
+            with _replacement_lock:
+                _replacement_job_ids.discard(job.id)
+
+    thread = threading.Thread(
+        target=replace,
+        name=f"replace-monitor-{job.id}",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _proxy_webrtc_offer(port: int, payload: Mapping[str, str]) -> dict[str, Any]:
@@ -104,6 +222,17 @@ def _proxy_webrtc_offer(port: int, payload: Mapping[str, str]) -> dict[str, Any]
 def get_monitor_webcam():
     active = _active_monitor_job()
     if active is not None:
+        status = _private_monitor_status(active)
+        healthy, reason = _monitor_health(active, status)
+        if not healthy and active.status == "running":
+            _schedule_monitor_replacement(active, reason or "Monitor is unhealthy.")
+            status.update(status="unhealthy", error=reason, error_reason=reason)
+            return jsonify(
+                {
+                    "job": active.to_dict(),
+                    "webrtc_status": public_monitor_status(status),
+                }
+            )
         return jsonify(_monitor_payload(active))
     jobs = _monitor_jobs()
     return jsonify(_monitor_payload(jobs[0] if jobs else None))
@@ -113,25 +242,24 @@ def get_monitor_webcam():
 def start_monitor_webcam():
     existing = _active_monitor_job()
     if existing is not None:
+        status = _private_monitor_status(existing)
+        healthy, reason = _monitor_health(existing, status)
+        if not healthy and existing.status == "running":
+            _schedule_monitor_replacement(existing, reason or "Monitor is unhealthy.")
+            status.update(status="unhealthy", error=reason, error_reason=reason)
+            return (
+                jsonify(
+                    {
+                        "job": existing.to_dict(),
+                        "webrtc_status": public_monitor_status(status),
+                    }
+                ),
+                202,
+            )
         return jsonify(_monitor_payload(existing))
 
-    root = monitor_stream_root()
     try:
-        job = job_runner.submit(
-            name="monitor-webrtc:ugreen",
-            command=build_monitor_webrtc_command(monitor_root=root),
-            cwd=APP_ROOT,
-            resources=[f"monitoring_camera:{UGREEN_DEVICE_ID}"],
-            parameters={
-                "monitor_root": root.as_posix(),
-                "sensor_key": f"monitor_webcam:{UGREEN_DEVICE_ID}",
-                "sensor_type": "monitor_webcam",
-                "device_id": UGREEN_DEVICE_ID,
-                "monitor_webcam": True,
-                "monitor_webrtc": True,
-                "transport": "webrtc",
-            },
-        )
+        job = _submit_monitor_service()
     except ResourceBusyError as exc:
         return jsonify({"output": str(exc)}), 409
     return jsonify(_monitor_payload(job)), 202
@@ -161,6 +289,10 @@ def offer_monitor_webcam(job_id: str):
         return jsonify({"output": "SDP offer is too large"}), 400
 
     status = _private_monitor_status(job)
+    healthy, reason = _monitor_health(job, status)
+    if not healthy:
+        _schedule_monitor_replacement(job, reason or "Monitor worker is unhealthy.")
+        return jsonify({"output": reason or "Monitor worker is unhealthy"}), 503
     port = status.get("signaling_port")
     if (
         status.get("schema_version") != MONITOR_STATUS_SCHEMA

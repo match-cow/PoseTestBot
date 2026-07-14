@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
+import json
 from pathlib import Path
+
+import numpy as np
 
 from posetestbot.sensors.previews import build_preview_command
 from posetestbot.sensors.v4l2_preview import (
@@ -128,3 +132,66 @@ def test_open_capture_releases_failed_attempt_before_retry(monkeypatch) -> None:
 
     assert failed_capture.released is True
     assert opened.isOpened() is True
+
+
+def test_oak_preview_writes_latest_frame_heartbeat_and_closes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    stream_sensor_rgb_preview = load_preview_script()
+
+    class FakeOakStream:
+        def __init__(self, **_kwargs):
+            self.selected_source = {
+                "kind": "depthai",
+                "device_id": "18443010314F3B1300",
+                "queue_blocking": False,
+                "queue_max_size": 1,
+            }
+            self.calls = 0
+            self.closed = False
+
+        def try_get_frame(self):
+            self.calls += 1
+            if self.calls == 1:
+                return np.ones((4, 6, 3), dtype=np.uint8) * 80
+            stream_sensor_rgb_preview._STOP_REQUESTED = True
+            return None
+
+        def close(self):
+            self.closed = True
+
+    instances = []
+
+    def open_stream(**kwargs):
+        stream = FakeOakStream(**kwargs)
+        instances.append(stream)
+        return stream
+
+    monkeypatch.setattr(
+        stream_sensor_rgb_preview,
+        "OAKDProPreviewStream",
+        open_stream,
+    )
+    args = argparse.Namespace(
+        preview_root=(tmp_path / "preview").as_posix(),
+        sensor_json=json.dumps(
+            {
+                "sensor_type": "oak_d_pro",
+                "device_id": "18443010314F3B1300",
+            }
+        ),
+        fps=6,
+        width=640,
+        height=480,
+        jpeg_quality=82,
+    )
+
+    assert stream_sensor_rgb_preview.run_preview(args) == 0
+
+    status = json.loads((tmp_path / "preview" / "preview_status.json").read_text())
+    assert status["status"] == "stopped"
+    assert status["frame_count"] == 1
+    assert status["heartbeat_at"]
+    assert status["selected_node"]["queue_blocking"] is False
+    assert instances[0].closed is True

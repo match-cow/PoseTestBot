@@ -85,6 +85,13 @@ export interface Job {
   resources: string[]
   parameters: Record<string, JsonValue>
   log_path: string
+  visibility: "operator" | "service"
+  process_pid?: number | null
+  process_group_id?: number | null
+  process_start_time?: number | null
+  supervisor_pid?: number | null
+  supervisor_process_group_id?: number | null
+  supervisor_start_time?: number | null
 }
 
 export interface PreviewJob {

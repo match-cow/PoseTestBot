@@ -18,6 +18,7 @@ from posetestbot.jobs.runner import (
     SUCCEEDED,
     LocalJobRunner,
     ResourceBusyError,
+    SERVICE_VISIBILITY,
 )
 
 
@@ -336,3 +337,100 @@ def test_canceling_job_retains_resource_until_process_exits(
 
     terminate(process)
     assert runner.wait(job.id, timeout=5).status == CANCELED
+
+
+def test_service_visibility_filters_public_jobs_and_resources(tmp_path: Path) -> None:
+    runner = LocalJobRunner(tmp_path / "jobs")
+    service = runner.submit(
+        name="managed-monitor",
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
+        resources=["monitoring_camera:0c45:2283"],
+        visibility=SERVICE_VISIBILITY,
+    )
+    operator = runner.submit(
+        name="operator-job",
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
+        resources=["disk_io"],
+    )
+    try:
+        assert [job.id for job in runner.list(include_services=False)] == [operator.id]
+        assert runner.resource_holders() == {"disk_io": operator.id}
+        assert runner.resource_holders(include_services=True) == {
+            "disk_io": operator.id,
+            "monitoring_camera:0c45:2283": service.id,
+        }
+    finally:
+        runner.shutdown()
+
+
+def test_supervisor_stops_workload_descendants_after_owner_sigkill(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Linux parent-death signaling is required")
+
+    ready_path = tmp_path / "owner_ready.json"
+    child_ready = tmp_path / "child_pid.txt"
+    survived = tmp_path / "descendant_survived.txt"
+    job_root = tmp_path / "jobs"
+    descendant = (
+        "import pathlib, time; time.sleep(3); "
+        f"pathlib.Path({str(survived)!r}).write_text('alive'); time.sleep(30)"
+    )
+    workload = (
+        "import pathlib, subprocess, sys, time; "
+        f"child=subprocess.Popen([sys.executable, '-c', {descendant!r}]); "
+        f"pathlib.Path({str(child_ready)!r}).write_text(str(child.pid)); "
+        "time.sleep(30)"
+    )
+    owner = (
+        "import json, pathlib, sys, time; "
+        "from posetestbot.jobs.runner import LocalJobRunner; "
+        f"runner=LocalJobRunner(pathlib.Path({str(job_root)!r})); "
+        f"job=runner.submit(name='parent-death', command=[sys.executable, '-c', {workload!r}]); "
+        f"child=pathlib.Path({str(child_ready)!r}); "
+        "deadline=time.time()+5; "
+        "\nwhile (runner.get(job.id).process_pid is None or not child.exists()) and time.time()<deadline: time.sleep(0.02)\n"
+        "record=runner.get(job.id); "
+        f"pathlib.Path({str(ready_path)!r}).write_text(json.dumps({{'supervisor_pid':record.supervisor_pid,'workload_pid':record.process_pid,'child_pid':int(child.read_text())}})); "
+        "time.sleep(30)"
+    )
+    process = subprocess.Popen([sys.executable, "-c", owner])
+    try:
+        deadline = time.time() + 8
+        while not ready_path.is_file() and time.time() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(f"owner exited early with {process.returncode}")
+            time.sleep(0.02)
+        identities = json.loads(ready_path.read_text())
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+
+        deadline = time.time() + 7
+        while time.time() < deadline:
+            if all(
+                LocalJobRunner._read_process_start_time(int(pid)) is None
+                for pid in identities.values()
+            ):
+                break
+            time.sleep(0.05)
+        time.sleep(3.2)
+
+        assert not survived.exists()
+        assert all(
+            LocalJobRunner._read_process_start_time(int(pid)) is None
+            for pid in identities.values()
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        for pid in (
+            json.loads(ready_path.read_text()).values()
+            if ready_path.is_file()
+            else []
+        ):
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass

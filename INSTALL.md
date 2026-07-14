@@ -22,11 +22,14 @@ This safe project bootstrap:
 - lists registered sensor adapters without opening hardware,
 - verifies that the self-contained operator-console build is bundled.
 
-The required Python environment also includes `aiortc`, `aiohttp`, and direct
-`av` support for the UGREEN room monitor's video-only WebRTC stream. The
-worker binds its offer/answer signaling service to an ephemeral loopback port;
-the Flask API proxies signaling while browsers exchange media directly over
-the trusted lab LAN. No STUN or TURN service is configured.
+The required Python environment also includes `aiortc`, `aiohttp`, `aioice`,
+and direct `av` support for the UGREEN room monitor's video-only WebRTC stream.
+The worker binds offer/answer signaling to an ephemeral loopback port and runs
+a local STUN binding responder on UDP port 3478. The Flask API proxies only
+signaling; browsers use the advertised STUN port to obtain numeric candidates
+and exchange media directly over the trusted lab LAN. Set
+`POSETESTBOT_MONITOR_STUN_PORT` to use a different UDP port. TURN and Internet
+NAT traversal remain out of scope.
 
 If `UV_CACHE_DIR` is unset, the installer uses `/tmp/uv-cache`.
 Browser binaries for Playwright UI tests are not installed by default.
@@ -117,6 +120,11 @@ Check visibility:
 uv run python scripts/sensor_status.py --expected oak_d_pro=1 --check-expected
 ```
 
+The operator console supports an OAK-D Pro RGB preview at 640×480/6 fps. It
+uses a non-blocking DepthAI v3 queue with a single latest frame. The Snapshot
+control remains a one-frame aligned 1280×720 RGB-D acquisition, matching the
+RealSense snapshot contract.
+
 ### ZED 2i
 
 The Stereolabs ZED SDK and `pyzed.sl` Python module are not ordinary PyPI
@@ -169,15 +177,31 @@ device.
 
 ### UGREEN Room Monitor
 
-The UGREEN USB camera (`0c45:2283`) is reserved by the queued room-monitor
-worker as `monitoring_camera:0c45:2283`. It requests MJPEG 640×480 at 30 fps
-with a one-frame V4L2 buffer, publishes VP8-preferred WebRTC video, and has no
-JPEG fallback. The generic RGB-D sensor preview controls remain JPEG-based.
+The UGREEN USB camera (`0c45:2283`) is owned by a hidden managed service using
+the resource `monitoring_camera:0c45:2283`. The service starts lazily and does
+not open the V4L2 node until a browser requests WebRTC media. It requests MJPEG
+640×480 at 30 fps with a one-frame V4L2 buffer, publishes VP8-preferred WebRTC
+video, and releases the camera after 15 seconds without a connected peer. It
+has no JPEG fallback. The generic RGB-D sensor preview controls remain
+latest-frame JPEG streams.
+
+Managed services are excluded from the normal Jobs list and held-resource
+banner. Use `GET /jobs?include_services=1` for diagnostics. Monitor health is
+persisted as `monitor_webrtc.v2` with one-second heartbeats, camera state,
+capture/media counters, frame timestamps, peer counts, STUN port, and a
+concrete failure reason. Legacy v1 artifacts remain readable but are never
+reused as live state.
 
 Starting or retrying the monitor from the dashboard is safe with respect to
 the robot: it queues only the monitor worker and never runs an acquisition
 pipeline or robot command. A physical monitor smoke test still requires
 explicit operator authorization because it opens the USB camera.
+
+All commands queued by any supported web entry point run behind a persisted
+process supervisor. On graceful web shutdown, workload groups receive SIGTERM
+and have five seconds to exit before SIGKILL. On a forced web-app SIGKILL,
+Linux parent-death signaling wakes each supervisor, which verifies the owner
+PID/start time and terminates the complete workload descendant group.
 
 ### Operator Console Development
 
@@ -236,11 +260,12 @@ git diff --check
   `uv` manually and rerun `uv sync --all-groups`.
 - Python import smoke fails: rerun `uv sync --all-groups`; add or update
   dependencies with `uv add ...` rather than hand-editing lock files.
-- Room-monitor signaling is unavailable: confirm the queued
-  `monitor-webrtc:ugreen` job is running, the `monitor_webrtc.v1` status says
-  `signaling_ready`, and local firewall rules allow WebRTC host-candidate
-  traffic on the trusted lab LAN. The loopback signaling port is intentionally
-  not exposed to browsers.
+- Room-monitor signaling is unavailable: inspect
+  `GET /jobs?include_services=1`, confirm the managed `monitor-webrtc:ugreen`
+  service is running, and inspect its `monitor_webrtc.v2` error reason. Allow
+  the configured STUN UDP port (3478 by default) plus WebRTC media on the
+  trusted lab LAN. The loopback signaling port is intentionally not exposed to
+  browsers.
 - Plan the isolated UGREEN hardware smoke without opening the camera with
   `uv run python scripts/run_monitor_webrtc_smoke.py --plan-only`. Physical
   execution additionally requires explicit operator authorization and all

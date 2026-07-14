@@ -591,10 +591,35 @@ def run_command():
 
 @app.route('/jobs', methods=['GET'])
 def list_jobs():
+    include_services = request.args.get("include_services", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    jobs = [
+        job
+        for job in job_runner.list()
+        if include_services or getattr(job, "visibility", "operator") == "operator"
+    ]
+    resource_holders = getattr(job_runner, "resource_holders", None)
+    resources = {}
+    if callable(resource_holders):
+        try:
+            resources = resource_holders(include_services=include_services)
+        except TypeError:
+            resources = resource_holders()
+            if not include_services:
+                visible_ids = {job.id for job in jobs}
+                resources = {
+                    resource: job_id
+                    for resource, job_id in resources.items()
+                    if job_id in visible_ids
+                }
     return jsonify(
         {
-            'jobs': [job.to_dict() for job in job_runner.list()],
-            'resources': job_runner.resource_holders(),
+            'jobs': [job.to_dict() for job in jobs],
+            'resources': resources,
         }
     )
 
@@ -1841,5 +1866,6 @@ def run_pipeline_from_config():
 
 if __name__ == '__main__':
     from posetestbot.web.app import app as flask_app
+    from posetestbot.web.cli import run_web_server
 
-    flask_app.run(host=WEB_HOST, port=WEB_PORT, debug=WEB_DEBUG)
+    run_web_server(flask_app, job_runner)
