@@ -351,7 +351,9 @@ def _bop_export_readiness_checks(
     scene_objects: dict[tuple[int, int], set[int]] = {}
     scene_sensors: dict[int, str] = {}
     seen_scene_ids: set[int] = set()
+    objectless = False
     if bop_export is not None:
+        objectless = bop_export.get("objectless") is True
         raw_exports = bop_export.get("exports")
         exports = [
             export for export in raw_exports if isinstance(export, Mapping)
@@ -474,6 +476,12 @@ def _bop_export_readiness_checks(
                 else:
                     ok = False
                 scene_objects[(scene_id, int(image_id))] = object_ids
+        if objectless and (
+            any(scene_objects.get((scene_id, image_id), set()) for image_id in image_ids)
+            or (scene_folder / "mask").exists()
+            or (scene_folder / "mask_visib").exists()
+        ):
+            ok = False
         checks.append(
             _check(
                 name=f"bop_scene:{scene_label}",
@@ -604,7 +612,7 @@ def _bop_export_readiness_checks(
             ok = (
                 isinstance(target_rows, list)
                 and references_ok
-                and (target_count > 0 or not require_targets)
+                and (target_count > 0 or not require_targets or objectless)
             )
             check = _check(
                 name="bop_targets",
@@ -645,6 +653,19 @@ def _bop_export_readiness_checks(
                 else "models_info.json must contain at least one exported model."
             ),
             details={"model_count": model_count, "geometry_ok": geometry_ok},
+        )
+    elif objectless:
+        models_absent = not (bop_root / MODELS_DIR).exists()
+        check = _check(
+            name="bop_models_info",
+            path=models_info_path,
+            ok=models_absent,
+            message=(
+                "Explicit objectless export contains no model artifacts."
+                if models_absent
+                else "Objectless export must not contain a models directory."
+            ),
+            details={"objectless": True, "model_count": 0},
         )
     checks.append(check)
 

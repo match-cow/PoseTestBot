@@ -62,12 +62,14 @@ def write_config(
     *,
     plan_only: bool = False,
     options: dict | None = None,
+    selected_objects: list[str] | None = None,
 ) -> None:
     config = create_run_config(
         run_root=run_root,
         sequence_id="sync_to_bop_dry_run",
         sequence_options=options or {},
         plan_only=plan_only,
+        selected_objects=selected_objects,
     )
     write_run_config(run_root, config)
 
@@ -123,6 +125,33 @@ def test_preflight_errors_when_non_dry_run_blenderproc_is_missing(tmp_path: Path
         "blenderproc"
     ]
     assert report["overall_status"] == "error"
+
+
+def test_preflight_does_not_require_blenderproc_for_objectless_render(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    write_config(
+        run_root,
+        plan_only=False,
+        options={"blenderproc_render": {"dry_run": False}},
+        selected_objects=[],
+    )
+
+    report = build_run_preflight(
+        run_root,
+        include_sensor_status=False,
+        collect_robot=fake_robot_status,
+        collect_sensors=fake_sensor_status,
+        collect_runtimes=lambda: runtime_status(blenderproc_available=False),
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["runtime_status"]["status"] == "warning"
+    assert checks["runtime_status"]["details"]["missing_required_runtime_ids"] == []
+    assert checks["runtime_requirements"]["status"] == "ok"
+    assert checks["runtime_requirements"]["details"]["requirement_count"] == 0
+    assert report["overall_status"] == "warning"
 
 
 def test_run_preflight_queue_summary_tracks_missing_ready_and_stale(tmp_path: Path) -> None:

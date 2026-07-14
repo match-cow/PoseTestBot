@@ -61,6 +61,18 @@ def parse_args() -> argparse.Namespace:
         default="object_models",
         help="Object registry folder for preparation and BOP export stages.",
     )
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--object-name",
+        action="append",
+        default=None,
+        help="Registry object to include. May be repeated; defaults to all valid objects.",
+    )
+    selection.add_argument(
+        "--objectless",
+        action="store_true",
+        help="Snapshot an explicit objectless RGB-D run.",
+    )
     parser.add_argument(
         "--calibration-profiles",
         default=None,
@@ -141,6 +153,7 @@ def main() -> None:
         velocity_m_s=args.velocity,
         sensors=sensors,
         object_folder=args.object_folder,
+        selected_objects=[] if args.objectless else args.object_name,
         calibration_profiles=args.calibration_profiles,
         sequence_id=args.sequence,
         sequence_options=sequence_options,

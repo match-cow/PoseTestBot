@@ -30,9 +30,9 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
   asChild?: boolean
 }
 
-export function Button({ className, variant, size, asChild = false, ...props }: ButtonProps) {
+export function Button({ className, variant, size, asChild = false, type, ...props }: ButtonProps) {
   const Comp = asChild ? Slot : "button"
-  return <Comp className={cn(buttonVariants({ variant, size, className }))} {...props} />
+  return <Comp type={asChild ? undefined : type ?? "button"} className={cn(buttonVariants({ variant, size, className }))} {...props} />
 }
 
 export { buttonVariants }

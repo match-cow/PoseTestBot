@@ -22,11 +22,17 @@ from posetestbot.pipeline.sequences import (
     build_sequence_plan,
 )
 from posetestbot.pipeline.stages import PipelineStageSpec
+from posetestbot.objects.registry import load_object_registry
 from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
 SCHEMA_VERSION = "run_config.v1"
 CALIBRATION_PROFILE_OPTION_STAGES = ("blenderproc_prepare", "bop_export")
+OBJECT_SELECTION_OPTION_STAGES = (
+    "blenderproc_prepare",
+    "blenderproc_render",
+    "bop_export",
+)
 
 LAB_REALSENSE_SERIALS = (
     "825412070181",
@@ -143,6 +149,7 @@ class PoseTestBotRunConfig:
     capture: CaptureRunConfig
     frames: RunFramesConfig = field(default_factory=RunFramesConfig)
     object_folder: str = "object_models"
+    selected_objects: tuple[str, ...] = ()
     calibration_profiles: str | None = None
     pipeline: PipelineRunConfig = field(default_factory=PipelineRunConfig)
 
@@ -155,6 +162,7 @@ class PoseTestBotRunConfig:
             "capture": self.capture.to_dict(),
             "frames": self.frames.to_dict(),
             "object_folder": self.object_folder,
+            "selected_objects": list(self.selected_objects),
             "calibration_profiles": self.calibration_profiles,
             "pipeline": self.pipeline.to_dict(),
         }
@@ -390,6 +398,7 @@ def create_run_config(
     velocity_m_s: float = 0.2,
     sensors: tuple[SensorRunConfig, ...] | None = None,
     object_folder: str = "object_models",
+    selected_objects: tuple[str, ...] | list[str] | None = None,
     calibration_profiles: str | None = None,
     sequence_id: str = "real_full_capture_validation",
     sequence_options: Mapping[str, Any] | None = None,
@@ -397,7 +406,15 @@ def create_run_config(
     fixed_transforms: tuple[FixedFrameTransform, ...] = (),
 ) -> PoseTestBotRunConfig:
     run_root_path = Path(run_root)
+    if not str(object_folder).strip():
+        raise ValueError("Run config object_folder must not be empty")
     sensor_configs = sensors if sensors is not None else default_lab_sensors()
+    registry = load_object_registry(object_folder)
+    selection = (
+        registry.valid_names
+        if selected_objects is None
+        else registry.validate_selection(selected_objects)
+    )
     config = PoseTestBotRunConfig(
         schema_version=SCHEMA_VERSION,
         run_name=run_name or run_root_path.name,
@@ -413,6 +430,7 @@ def create_run_config(
         ),
         frames=RunFramesConfig(fixed_transforms=fixed_transforms),
         object_folder=object_folder,
+        selected_objects=selection,
         calibration_profiles=calibration_profiles,
         pipeline=PipelineRunConfig(
             sequence_id=sequence_id,
@@ -459,6 +477,13 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         raise ValueError("Run config capture.resolution must not be empty")
     if not str(value.get("object_folder", "")).strip():
         raise ValueError("Run config object_folder must not be empty")
+    selected_objects = value.get("selected_objects")
+    if not isinstance(selected_objects, list) or any(
+        not isinstance(name, str) or not name for name in selected_objects
+    ):
+        raise ValueError("Run config selected_objects must be a list of non-empty names")
+    if len(set(selected_objects)) != len(selected_objects):
+        raise ValueError("Run config selected_objects must not contain duplicates")
 
     frames = value.get("frames")
     if frames is not None:
@@ -572,7 +597,24 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
                 ),
             }
         )
+    if "selected_objects" not in value:
+        registry = load_object_registry(str(value.get("object_folder", "object_models")))
+        value["selected_objects"] = list(registry.valid_names)
+        warnings = value.setdefault("warnings", [])
+        if not isinstance(warnings, list):
+            raise ValueError("Run config warnings must be a list")
+        warnings.append(
+            {
+                "code": "legacy_object_selection_inferred",
+                "message": (
+                    "Run config omitted selected_objects; all currently valid registry "
+                    "objects were selected. Rewrite the config to snapshot this selection."
+                ),
+            }
+        )
     validate_run_config(value)
+    registry = load_object_registry(str(value["object_folder"]))
+    registry.validate_selection(value["selected_objects"])
     return value
 
 
@@ -596,10 +638,6 @@ def _sequence_options_with_run_config_defaults(
         str(key): dict(value)
         for key, value in dict(pipeline.get("options", {})).items()
     }
-    calibration_profiles = config.get("calibration_profiles")
-    if not isinstance(calibration_profiles, str) or not calibration_profiles.strip():
-        return options
-
     plan = build_sequence_plan(
         sequence_id=str(pipeline["sequence_id"]),
         run_root=str(config["run_root"]),
@@ -608,11 +646,29 @@ def _sequence_options_with_run_config_defaults(
     )
     available_groups = {step.id for step in plan.steps}
     available_groups.update(step.stage_id for step in plan.steps)
-    for group_name in CALIBRATION_PROFILE_OPTION_STAGES:
+    calibration_profiles = config.get("calibration_profiles")
+    if isinstance(calibration_profiles, str) and calibration_profiles.strip():
+        for group_name in CALIBRATION_PROFILE_OPTION_STAGES:
+            if group_name not in available_groups:
+                continue
+            group_options = dict(options.get(group_name, {}))
+            group_options.setdefault("calibration_profiles", calibration_profiles)
+            options[group_name] = group_options
+
+    selected_objects = list(config.get("selected_objects", []))
+    object_folder = str(config.get("object_folder", "object_models"))
+    for group_name in OBJECT_SELECTION_OPTION_STAGES:
         if group_name not in available_groups:
             continue
         group_options = dict(options.get(group_name, {}))
-        group_options.setdefault("calibration_profiles", calibration_profiles)
+        # Either explicit key is a stage override; otherwise inject the snapshot.
+        if "object_name" not in group_options and "objectless" not in group_options:
+            if selected_objects:
+                group_options["object_name"] = selected_objects
+            else:
+                group_options["objectless"] = True
+        if group_name in {"blenderproc_prepare", "bop_export"}:
+            group_options.setdefault("object_folder", object_folder)
         options[group_name] = group_options
     return options
 

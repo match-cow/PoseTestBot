@@ -107,6 +107,9 @@ def test_installed_package_data_contains_self_contained_ui() -> None:
     assert all(package.joinpath("static", "ui", "assets", name).is_file() for name in names)
     assert "http://" not in html
     assert "https://" not in html
+    hri = package.joinpath("static", "cell", "template_HRI_LBR_all_center_v2.svg")
+    assert hri.is_file()
+    assert 'width="420mm"' in hri.read_text()
 
 
 def test_run_config_endpoint_refuses_non_plan_capture_sequence(

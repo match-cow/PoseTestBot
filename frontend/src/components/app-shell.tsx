@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { Activity, Archive, Bot, ChevronDown, FlaskConical, Gauge, ListChecks, Moon, Plus, Sun, Workflow } from "lucide-react"
+import { Activity, Archive, Bot, Boxes, ChevronDown, FlaskConical, Gauge, ListChecks, Moon, Plus, Sun, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils"
 const navigation = [
   { to: "/dashboard", label: "Dashboard", icon: Gauge },
   { to: "/devices", label: "Devices", icon: Bot },
+  { to: "/cell", label: "Cell", icon: Boxes },
   { to: "/workflow/setup", label: "Workflow", icon: Workflow, match: "/workflow" },
   { to: "/artifacts", label: "Artifacts", icon: Archive },
   { to: "/jobs", label: "Jobs", icon: ListChecks },

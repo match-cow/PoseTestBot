@@ -19,6 +19,7 @@ from posetestbot.web.security import install_request_security
 
 BRAND_ASSET_DIR = Path(__file__).resolve().parent / "static"
 BRAND_LOGO_FILENAME = "cow200.png"
+CELL_ASSET_DIR = BRAND_ASSET_DIR / "cell"
 
 
 class _PreviewPollLogFilter(logging.Filter):
@@ -56,6 +57,16 @@ def create_app() -> Flask:
             BRAND_LOGO_FILENAME,
             max_age=86400,
             mimetype="image/png",
+        )
+
+    @app.get("/assets/cell/template_HRI_LBR_all_center_v2.svg")
+    def hri_cell_template():
+        return send_from_directory(
+            CELL_ASSET_DIR,
+            "template_HRI_LBR_all_center_v2.svg",
+            max_age=86400,
+            mimetype="image/svg+xml",
+            conditional=True,
         )
 
     app.register_blueprint(pages_bp)

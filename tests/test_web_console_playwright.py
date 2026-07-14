@@ -129,6 +129,40 @@ def overview_payload() -> dict:
     }
 
 
+def selected_sensor_status() -> dict:
+    return {
+        "schema_version": "sensor_status.v1",
+        "families": [
+            {
+                "sensor_type": "realsense_d435",
+                "display_name": "Intel RealSense D435",
+                "devices": [
+                    {
+                        "sensor_type": "realsense_d435",
+                        "device_id": "wrist-1",
+                        "display_name": "RealSense wrist",
+                        "effective_display_name": "Wrist RGB-D",
+                        "connected": True,
+                        "mounting_mode": "eye_in_hand",
+                        "inverted": False,
+                    },
+                    {
+                        "sensor_type": "realsense_d435",
+                        "device_id": "static-1",
+                        "display_name": "RealSense static",
+                        "effective_display_name": "Static RGB-D",
+                        "connected": True,
+                        "mounting_mode": "static",
+                        "inverted": True,
+                    },
+                ],
+            }
+        ],
+        "total_connected": 2,
+        "all_expected_connected": True,
+    }
+
+
 def install_common_mocks(page, *, preflight_state: dict | None = None, requests: list[dict] | None = None) -> None:
     requests = requests if requests is not None else []
     preflight_state = preflight_state if preflight_state is not None else {"blocker": None}
@@ -196,12 +230,22 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     requests: list[dict] = []
     preflight_state = {"blocker": "missing_preflight"}
     install_common_mocks(page, preflight_state=preflight_state, requests=requests)
+    page.route("**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status()))
+    page.add_init_script(
+        "localStorage.setItem('posetestbot.selectedSensors', "
+        "JSON.stringify(['realsense_d435:wrist-1', 'realsense_d435:static-1']))"
+    )
     page.goto(f"{console_server.url}/#/workflow/setup", wait_until="networkidle")
 
     page.get_by_role("button", name="Write run config").click()
     expect(page.get_by_text("Run configuration written")).to_be_visible()
     written = next(item["body"] for item in requests if item["path"] == "/run-config")
     assert written["plan_only"] is True
+    assert "mounting_mode" not in written
+    assert [sensor["mounting_mode"] for sensor in written["sensors"]] == [
+        "eye_in_hand",
+        "static",
+    ]
     assert "allow_cameras" not in json.dumps(written)
     assert "allow_real_robot" not in json.dumps(written)
 
@@ -227,6 +271,45 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     assert capture_request["options"]["allow_cameras"] is True
     assert capture_request["options"]["allow_real_robot"] is True
     assert any(item["path"] == "/sensors/previews/stop" for item in requests)
+
+
+def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page) -> None:
+    commands: list[dict] = []
+    install_common_mocks(page)
+
+    def command_handler(route) -> None:
+        commands.append(route.request.post_data_json)
+        fulfill_json(route, {"job_id": f"robot-{len(commands)}", "status": "queued"}, status=202)
+
+    page.route("**/run-command", command_handler)
+    page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
+
+    page.get_by_label("Robot IP").fill("")
+    page.get_by_role("button", name="Start IIWA").click()
+    expect(page.get_by_text("Enter a valid robot IP and port")).to_be_visible()
+    expect(page.get_by_role("dialog")).to_have_count(0)
+    assert commands == []
+
+    page.get_by_label("Robot IP").fill("172.31.1.200")
+    page.get_by_label("Command port").fill("30301")
+    page.get_by_role("button", name="Start IIWA").click()
+    expect(page.get_by_role("dialog")).to_contain_text("172.31.1.200:30301")
+    expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
+    page.get_by_text("I confirm this is the intended lab IIWA target.").click()
+    page.get_by_role("button", name="Queue start").click()
+    expect(page.get_by_text("IIWA start queued")).to_be_visible()
+
+    page.get_by_role("button", name="Stop IIWA").click()
+    expect(page.get_by_role("button", name="Queue stop")).to_be_disabled()
+    assert [item["command"] for item in commands] == ["start_iiwa"]
+    page.get_by_text("I confirm this is the intended lab IIWA target.").click()
+    page.get_by_role("button", name="Queue stop").click()
+    expect(page.get_by_text("IIWA stop queued")).to_be_visible()
+
+    assert commands == [
+        {"command": "start_iiwa", "robot_ip": "172.31.1.200", "robot_port": 30301},
+        {"command": "stop_iiwa", "robot_ip": "172.31.1.200", "robot_port": 30301},
+    ]
 
 
 def test_jobs_log_cancel_and_bop_overlay_preview(console_server, page) -> None:
@@ -255,6 +338,60 @@ def test_jobs_log_cancel_and_bop_overlay_preview(console_server, page) -> None:
     expect(page.get_by_role("button", name="Frame 0")).to_be_visible()
     expect(page.get_by_alt_text("BOP frame 0 GT and mask overlay")).to_be_visible()
     expect(page.get_by_text("1 masks")).to_be_visible()
+
+
+def cell_scene_payload(*, objectless: bool = False) -> dict:
+    identity = {"semantics": "entity_to_parent", "parent_frame": "template_base", "translation_mm": [0, 0, 0], "rotation_quaternion_wxyz": [1, 0, 0, 0]}
+    return {
+        "schema_version": "cell_scene.v1",
+        "coordinate_system": {"units": "millimetres", "handedness": "right", "up_axis": "+Z", "reference_frame": "template_base", "transform_semantics": "entity_to_parent"},
+        "run_root": RUN_ROOT,
+        "entities": [
+            {"id": "template_base", "type": "reference_frame", "label": "Template base", "status": "planned", "transform": {**identity, "parent_frame": None}, "unresolved_reason": None, "geometry": {"kind": "axes", "size_mm": 100}, "provenance": {"source": "config"}},
+            {"id": "robot_flange", "type": "robot_flange", "label": "Robot flange", "status": "recorded", "transform": identity, "unresolved_reason": None, "geometry": {"kind": "flange_proxy"}, "provenance": {"source": "match_robot_ee_poses.json"}},
+            {"id": "camera:missing", "type": "camera", "label": "Uncalibrated camera", "status": "unresolved", "transform": None, "unresolved_reason": "No valid calibration profile", "geometry": {"kind": "camera_frustum"}, "provenance": {"source": "calibration_profiles"}},
+        ],
+        "warnings": [{"code": "missing_calibration_profiles", "message": "No calibration profile collection is available"}],
+        "timelines": [{"id": "sensor:realsense_123", "label": "realsense_123", "kind": "synchronized", "frame_count": 2, "default": True, "exact": True, "interpolation": "none", "page_limit": 2000, "source": "match_robot_ee_poses.json"}],
+        "default_timeline_id": "sensor:realsense_123",
+        "trajectory_preview": [
+            {"index": 0, "frame_index": 0, "frame_id": "000000.png", "timestamp_ns": 1, "motion": "arc", "transform": identity},
+            {"index": 1, "frame_index": 1, "frame_id": "000001.png", "timestamp_ns": 2, "motion": "arc", "transform": {**identity, "translation_mm": [10, 20, 30]}},
+        ],
+        "object_selection": {"selected_objects": [] if objectless else ["cube"], "objectless": objectless, "registry": {"valid_count": 1}},
+    }
+
+
+def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -> None:
+    install_common_mocks(page)
+    scene = cell_scene_payload()
+    page.route("**/ui/cell-scene?**", lambda route: fulfill_json(route, scene))
+    page.route("**/ui/cell-scene/timeline?**", lambda route: fulfill_json(route, {"schema_version": "cell_timeline.v1", "timeline": scene["timelines"][0], "offset": 0, "limit": 2000, "total": 2, "next_offset": None, "previous_offset": None, "poses": scene["trajectory_preview"]}))
+
+    page.goto(f"{console_server.url}/#/cell", wait_until="networkidle")
+
+    expect(page.get_by_test_id("cell-webgl-canvas")).to_be_visible()
+    expect(page.get_by_text("Scene has unresolved provenance")).to_be_visible()
+    page.get_by_text("Robot flange", exact=True).click()
+    expect(page.get_by_text("10.00, 20.00, 30.00")).not_to_be_visible()
+    page.get_by_role("slider", name="Frame scrubber").fill("1")
+    expect(page.get_by_text("Exact frame 000001.png · arc")).to_be_visible()
+    page.get_by_text("Recorded trajectory").click()
+    expect(page.get_by_role("checkbox", name="Recorded trajectory")).not_to_be_checked()
+
+
+def test_cell_webgl_fallback_and_objectless_state(console_server, page) -> None:
+    install_common_mocks(page)
+    page.add_init_script("HTMLCanvasElement.prototype.getContext = () => null")
+    page.route("**/ui/cell-scene?**", lambda route: fulfill_json(route, cell_scene_payload(objectless=True)))
+    page.route("**/ui/cell-scene/timeline?**", lambda route: fulfill_json(route, {"schema_version": "cell_timeline.v1", "timeline": cell_scene_payload()["timelines"][0], "offset": 0, "limit": 2000, "total": 0, "next_offset": None, "previous_offset": None, "poses": []}))
+
+    page.goto(f"{console_server.url}/#/cell", wait_until="networkidle")
+
+    expect(page.get_by_test_id("cell-webgl-fallback")).to_be_visible()
+    expect(page.get_by_text("WebGL is unavailable")).to_be_visible()
+    expect(page.get_by_text("Explicit objectless RGB-D run")).to_be_visible()
+    expect(page.get_by_text("Robot flange", exact=True)).to_be_visible()
 
 
 def test_deterministic_1440_dashboard_screenshot(console_server, page, tmp_path: Path) -> None:

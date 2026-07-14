@@ -152,6 +152,10 @@ def _runtime_requirements(plan, runtimes: Mapping[str, Any]) -> list[dict[str, A
     for step in plan.steps:
         if step.options.get("dry_run") is not False:
             continue
+        if step.stage_id == "blenderproc_render" and step.options.get("objectless") is True:
+            # Objectless rendering writes a successful skipped plan without
+            # invoking BlenderProc, so its executable is not a requirement.
+            continue
         for runtime_id in STAGE_RUNTIME_REQUIREMENTS.get(step.stage_id, ()):
             runtime = runtime_by_id.get(runtime_id, {})
             requirements.append(

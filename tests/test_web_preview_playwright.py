@@ -487,9 +487,14 @@ def test_card_local_preview_stream_lifecycle(preview_server, page) -> None:
     second = sensor_card(page, SENSOR_B)
     toggle = first.locator('[data-testid="sensor-preview-toggle"]')
 
+    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(toggle).to_contain_text("Preview off")
+
     toggle.click()
 
     expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(toggle).to_contain_text("Preview on")
+    expect(first.get_by_role("button", name="Snapshot")).to_be_disabled()
     expect(first.locator('[data-testid="sensor-preview-slot"]')).to_be_visible()
     expect(first.locator(".sensor-preview-empty")).to_contain_text("Waiting")
     wait_for(lambda: len(runner.submitted) == 1)
@@ -521,6 +526,8 @@ def test_card_local_preview_stream_lifecycle(preview_server, page) -> None:
 
     wait_for(lambda: runner.canceled == ["preview-1"])
     expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(toggle).to_contain_text("Preview off")
+    expect(first.get_by_role("button", name="Snapshot")).to_be_enabled()
     expect(first.locator('[data-testid="sensor-preview-slot"]')).to_be_hidden()
     expect(first.locator('[data-testid="sensor-preview-image"]')).to_have_count(0)
 

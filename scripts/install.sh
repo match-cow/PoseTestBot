@@ -244,9 +244,12 @@ build_web_console() {
 
 verify_web_console() {
   local ui_root="${REPO_ROOT}/posetestbot/web/static/ui"
+  local cell_asset="${REPO_ROOT}/posetestbot/web/static/cell/template_HRI_LBR_all_center_v2.svg"
   [[ -f "${ui_root}/index.html" ]] || die "Bundled web UI is missing ${ui_root}/index.html. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/*.js" >/dev/null || die "Bundled web UI has no JavaScript asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/*.css" >/dev/null || die "Bundled web UI has no CSS asset. Run scripts/install.sh --with-web-build."
+  compgen -G "${ui_root}/assets/cell-page-*.js" >/dev/null || die "Bundled web UI has no lazy Cell asset. Run scripts/install.sh --with-web-build."
+  [[ -f "${cell_asset}" ]] || die "Bundled Cell template is missing ${cell_asset}."
   log "Bundled operator-console assets are present."
 }
 

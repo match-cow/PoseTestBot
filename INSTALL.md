@@ -66,7 +66,9 @@ bash scripts/install.sh --with-playwright-browsers
 
 Use `--with-web-build` only when changing the React/shadcn frontend. It requires
 Bun, installs exactly the versions in `frontend/bun.lock`, removes stale build
-output, and regenerates the bundled Flask assets:
+output, and regenerates the bundled Flask assets. The Cell bundle includes
+Three.js, React Three Fiber, and Drei; installed operation still requires
+neither Bun nor a network connection:
 
 ```bash
 bash scripts/install.sh --with-web-build
@@ -131,6 +133,7 @@ uv run python scripts/sensor_status.py --expected zed_2i=1 --check-expected
 
 BlenderProc is only needed for non-dry-run optional GT/mask rendering. Dry-run
 render planning and ordinary acquisition checks do not require it.
+Explicit objectless render plans also skip BlenderProc completely.
 
 Install through the PoseTestBot installer:
 
@@ -180,7 +183,7 @@ explicit operator authorization because it opens the USB camera.
 
 The frontend lives in `frontend/` and follows the shadcn Vite layout with
 React, TypeScript, Tailwind, Radix primitives, HashRouter, TanStack Query,
-React Hook Form, and Zod. Its production output is
+React Hook Form, Zod, Three.js, React Three Fiber, and Drei. Its production output is
 `posetestbot/web/static/ui/`.
 
 ```bash

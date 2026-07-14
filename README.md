@@ -91,6 +91,11 @@ New run configs also make the robot stream frames explicit:
 can describe flange-to-TCP or template-base-to-physical-base transforms. Older
 real-profile configs without frame metadata remain readable and receive a
 `legacy_frames_inferred` warning; fake-profile configs are rejected.
+Object inclusion is an explicit snapshot too. New configs select every valid
+registry entry by default; repeat `--object-name NAME` for a subset, or use
+`--objectless` for a camera-only RGB-D run. BOP IDs come from the complete
+alphabetically sorted registry, so subset IDs can contain gaps. Legacy configs
+infer all currently valid objects with a compatibility warning.
 For example, a measured flange-to-TCP edge can be recorded at creation time:
 
 ```bash
@@ -233,6 +238,11 @@ bop/
     └── mask_visib/    # optional
 ```
 
+The preparation and export CLIs accept the same repeatable `--object-name` /
+`--objectless` choice. Objectless rendering writes a successful skipped plan
+without invoking BlenderProc. Objectless BOP output retains RGB, depth, and
+camera metadata, writes empty GT and targets, and contains no models or masks.
+
 The export preserves:
 
 - scene RGB/depth,
@@ -289,8 +299,12 @@ the selected run are rejected. Installed deployments may set
 and an installed command uses its current working directory. CLI tools continue
 to accept explicit paths.
 
-The bundled console has desktop routes for Dashboard, Devices, Workflow,
-Artifacts, and Jobs. It remembers the selected run, system/light/dark theme,
+The bundled console has desktop routes for Dashboard, Devices, Cell, Workflow,
+Artifacts, and Jobs. The read-only Cell page renders the HRI template,
+base/flange/TCP proxies, calibrated cameras, selected PLY objects, calibration
+target, and exact recorded trajectories in right-handed Z-up millimetres.
+Missing frame edges remain visibly unresolved, and a component/provenance list
+remains available without WebGL. It remembers the selected run, system/light/dark theme,
 and manual IIWA target in the browser. Physical capture remains separate from
 ordinary stage forms: current preflight evidence is required, camera previews
 are stopped first, and two fresh acknowledgements send `allow_cameras` and

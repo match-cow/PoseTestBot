@@ -1143,6 +1143,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 default="object_models",
             ),
             PipelineParameter(
+                name="object_name", flag="--object-name", multiple=True
+            ),
+            PipelineParameter(
+                name="objectless", flag="--objectless", kind="bool", default=False
+            ),
+            PipelineParameter(
                 name="camera_transformations",
                 flag="--camera-transformations",
                 kind="path",
@@ -1179,6 +1185,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             PipelineParameter(name="subdir", flag="--subdir"),
             PipelineParameter(name="blenderproc", flag="--blenderproc"),
             PipelineParameter(
+                name="object_name", flag="--object-name", multiple=True
+            ),
+            PipelineParameter(
+                name="objectless", flag="--objectless", kind="bool", default=False
+            ),
+            PipelineParameter(
                 name="dry_run",
                 flag="--dry-run",
                 kind="bool",
@@ -1207,6 +1219,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 kind="path",
                 path_scope="input",
                 default="object_models",
+            ),
+            PipelineParameter(
+                name="object_name", flag="--object-name", multiple=True
+            ),
+            PipelineParameter(
+                name="objectless", flag="--objectless", kind="bool", default=False
             ),
             PipelineParameter(
                 name="no_model_export",

@@ -8,4 +8,5 @@ include frontend/tsconfig.json
 include frontend/tsconfig.node.json
 include frontend/vite.config.ts
 graft frontend/src
+recursive-include posetestbot/web/static/cell *.svg
 prune frontend/node_modules

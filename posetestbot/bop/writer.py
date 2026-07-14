@@ -36,6 +36,7 @@ from posetestbot.io.artifacts import (
     MODELS_DIR,
     RGB_DIR,
 )
+from posetestbot.objects.registry import load_object_registry
 
 SCHEMA_VERSION = "bop_export_manifest.v2"
 FRAME_MAP_SCHEMA_VERSION = "posetestbot_bop_frame_map.v2"
@@ -114,28 +115,11 @@ def _write_json(path: Path, value: object) -> Path:
 
 
 def object_registry_from_folder(object_folder: str | Path) -> dict[str, int]:
-    object_folder = Path(object_folder)
-    objects_json = object_folder / "objects.json"
-    if not objects_json.is_file():
-        raise FileNotFoundError(f"Missing object registry: {objects_json}")
-    value = _load_json_if_present(objects_json)
-    if not isinstance(value, dict):
-        raise ValueError(f"Object registry must be a JSON object: {objects_json}")
-    invalid_names = [
-        str(name)
-        for name in value
-        if not SAFE_OBJECT_NAME.fullmatch(str(name))
-        or str(name) in {".", ".."}
-    ]
-    if invalid_names:
-        raise ValueError(
-            "Object names must be safe filename components: "
-            + ", ".join(sorted(invalid_names))
-        )
-    return {
-        str(object_name): index
-        for index, object_name in enumerate(sorted(value), start=1)
-    }
+    registry = load_object_registry(object_folder)
+    invalid = [entry.name for entry in registry.entries if not entry.valid]
+    if invalid:
+        raise ValueError("Invalid object registry entries: " + ", ".join(invalid))
+    return registry.id_mapping
 
 
 def mesh_vertices(path: Path) -> np.ndarray:
@@ -236,10 +220,15 @@ def copy_bop_models(
     object_folder: str | Path,
     *,
     geometry_cache: Mapping[str, object] | None = None,
+    selected_objects: list[str] | tuple[str, ...] | None = None,
 ) -> list[BopObjectModel]:
     output_root = Path(output_root)
     object_folder = Path(object_folder)
-    object_name_to_id = object_registry_from_folder(object_folder)
+    registry = load_object_registry(object_folder)
+    selected = registry.selected_entries(
+        registry.valid_names if selected_objects is None else selected_objects
+    )
+    object_name_to_id = {entry.name: entry.obj_id for entry in selected}
     models_folder = output_root / MODELS_DIR
     models_folder.mkdir(parents=True, exist_ok=True)
 
@@ -309,7 +298,7 @@ def normalize_scene_gt_object_ids(
     scene_gt: Mapping[str, object],
     object_name_to_id: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
-    if not object_name_to_id:
+    if object_name_to_id is None:
         return dict(scene_gt)
 
     normalized: dict[str, object] = {}
@@ -485,7 +474,7 @@ def validate_scene_gt(
             "scene_gt image IDs must exactly match exported frames; "
             f"expected={sorted(expected_keys)}, actual={sorted(actual_keys)}"
         )
-    known_ids = set(object_name_to_id.values()) if object_name_to_id else None
+    known_ids = set(object_name_to_id.values()) if object_name_to_id is not None else None
     for image_id, image_annotations in scene_gt.items():
         if not isinstance(image_annotations, list):
             raise ValueError(f"scene_gt[{image_id!r}] must be a list")
@@ -518,6 +507,34 @@ def copy_optional_tree(source: Path, destination: Path) -> Path | None:
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(source, destination)
+    return destination
+
+
+def copy_scene_masks(
+    source: Path,
+    destination: Path,
+    scene_gt: Mapping[str, object],
+) -> Path | None:
+    """Copy only masks referenced by validated scene GT annotations."""
+
+    expected = {
+        mask_filename(int(image_id), annotation_index)
+        for image_id, annotations in scene_gt.items()
+        if isinstance(annotations, list)
+        for annotation_index in range(len(annotations))
+    }
+    if not expected:
+        return None
+    if not source.is_dir():
+        return None
+    missing = sorted(name for name in expected if not (source / name).is_file())
+    if missing:
+        raise FileNotFoundError(
+            f"Missing referenced masks in {source}: " + ", ".join(missing)
+        )
+    destination.mkdir(parents=True, exist_ok=False)
+    for name in sorted(expected):
+        shutil.copy2(source / name, destination / name)
     return destination
 
 
@@ -678,13 +695,17 @@ def export_sensor_scene_to_bop(
         "scene_gt": _write_json(scene_folder / "scene_gt.json", scene_gt),
         "scene_gt_info": _write_json(scene_folder / "scene_gt_info.json", scene_gt_info),
     }
-    mask_folder = copy_optional_tree(sensor_folder / MASKS_DIR, scene_folder / "mask")
+    objectless = object_name_to_id is not None and not object_name_to_id
+    mask_folder = None if objectless else copy_scene_masks(
+        sensor_folder / MASKS_DIR, scene_folder / "mask", scene_gt
+    )
     if mask_folder is not None:
         artifacts["mask"] = mask_folder
 
-    mask_visib_folder = copy_optional_tree(
+    mask_visib_folder = None if objectless else copy_scene_masks(
         blenderproc_output_folder(sensor_folder) / "mask_visib",
         scene_folder / "mask_visib",
+        scene_gt,
     )
     if mask_visib_folder is not None:
         artifacts["mask_visib"] = mask_visib_folder
@@ -1182,6 +1203,9 @@ def write_bop_export_manifest(
     frame_map_path: str | Path | None = None,
     dataset_info_path: str | Path | None = None,
     validation: Mapping[str, object] | None = None,
+    selected_objects: list[str] | tuple[str, ...] | None = None,
+    stable_id_mapping: Mapping[str, int] | None = None,
+    registry_provenance: Mapping[str, object] | None = None,
 ) -> Path:
     output_root = Path(output_root)
     manifest_path = output_root / BOP_EXPORT_MANIFEST
@@ -1217,6 +1241,14 @@ def write_bop_export_manifest(
                 profile_to_dict(profile) for profile in calibration_profiles or []
             ],
             "object_models": [asdict(model) for model in object_models or []],
+            "selected_objects": list(selected_objects or []),
+            "objectless": selected_objects is not None and len(selected_objects) == 0,
+            "stable_id_mapping": dict(stable_id_mapping or {}),
+            "registry_provenance": dict(registry_provenance or {}),
+            "registry_validation": {
+                "valid_count": (registry_provenance or {}).get("valid_count", 0),
+                "invalid_count": (registry_provenance or {}).get("invalid_count", 0),
+            },
             "targets_path": artifact_path(targets_path),
             "multiview_targets_path": artifact_path(multiview_targets_path),
             "coco_annotations_path": artifact_path(coco_annotations_path),

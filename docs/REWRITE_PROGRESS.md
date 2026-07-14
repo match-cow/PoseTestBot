@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-10
+Last updated: 2026-07-14
 
 PoseTestBot has been refocused as an acquisition, calibration,
 synchronization, and BOP dataset export repository. The BOP dataset export is
@@ -48,7 +48,25 @@ Out of scope in this repository:
     live logs, cancellation, and immediate capture-stop controls,
   - committed hashed UI assets included in wheels, installer verification, and
     opt-in `scripts/install.sh --with-web-build`,
+  - lazy read-only Cell route with a demand-driven React Three Fiber canvas,
+    Z-up millimetre coordinates, view presets, layers, selection provenance,
+    exact paged timeline playback, and a WebGL-free component-list fallback,
   - Flask discovery/static/package tests plus mocked Playwright coverage.
+
+- Implemented `docs/INTERACTIVE_3D_CELL_PLAN.md`:
+  - added one validated object registry for the viewer, BlenderProc, and BOP,
+    with stable full-registry IDs, explicit `run_config.v1.selected_objects`,
+    legacy fallback warnings, safe PLY/texture containment, and rigid-transform
+    inversion provenance,
+  - propagated subset and explicit objectless operation through configuration,
+    sequence option injection, transactional preparation, skipped rendering,
+    BOP GT/models/masks/targets/COCO output, v2 manifest provenance, and the
+    readiness gate,
+  - added pytransform3d-composed `cell_scene.v1`, exact non-interpolated paged
+    `cell_timeline.v1`, static/eye-in-hand frustums, fixed base/TCP frames,
+    targets, objects, bounded trajectory previews, and unresolved entities,
+  - packaged the 420 × 297 mm HRI SVG and added allowlisted conditional asset
+    routes plus Cell navigation, inspection, playback, and fallback behavior.
 
 - Implemented `docs/REAL_ONLY_ROBOT_ACQUISITION_CLEANUP_PLAN.md`:
   - collapsed robot configuration and `robot_status.v2` to the real lab iiwa,
@@ -185,6 +203,16 @@ Out of scope in this repository:
 - Fixed the React device cards to prefer an active RealSense preview over stale
   terminal history for the same sensor. Playwright now covers the production
   newest-first job ordering and requires the active preview JPEG to render.
+- Audited the dashboard, Devices, Setup, Preflight, and Capture controls for
+  operator-console semantics: RealSense previews are explicit pressed-state
+  toggles with transition locking, repeated snapshot/stop requests are guarded,
+  stop-all failures are visible, robot start and stop share validated target
+  confirmation, and capture/preflight controls expose loading states.
+- Made run setup snapshot exactly the cameras selected on Devices, reject
+  missing/disconnected selections, and preserve each camera's saved static or
+  eye-in-hand mounting mode instead of overwriting the lab layout globally.
+  Required stage inputs, form labels, evidence refresh, and safe default button
+  types now have browser-facing validation and accessibility semantics.
 - Polished the transition web UI empty-run overview state and sidebar branding.
 - Reconciled RealSense SDK serials with USB/V4L2 node metadata so three
   connected D435-class cameras appear as three devices, not duplicated SDK and
@@ -241,6 +269,10 @@ Requires:
 - `bop/test_targets_bop19.json` with at least one target row,
 - `bop/models/models_info.json` with positive exact diameters,
 - valid calibration provenance and correct target/model/scene references.
+
+Explicit objectless exports instead require empty targets and per-frame GT,
+with no model or mask trees. Valid calibration, RGB-D integrity, scene metadata,
+and frame-map provenance remain required.
 
 ## Validation Commands
 

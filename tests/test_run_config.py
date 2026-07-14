@@ -190,6 +190,9 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
 ) -> None:
     run_root = tmp_path / "run-cli"
     repo_root = Path(__file__).resolve().parents[1]
+    object_folder = tmp_path / "custom_object_models"
+    object_folder.mkdir()
+    (object_folder / "objects.json").write_text("{}\n")
 
     result = subprocess.run(
         [
@@ -201,7 +204,7 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
             "--sensor",
             "realsense:123:static:Cell RealSense",
             "--object-folder",
-            "custom_object_models",
+            object_folder.as_posix(),
             "--sequence",
             "sync_aruco",
             "--sequence-options-json",
@@ -229,7 +232,7 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
             "sensor_type": "realsense_d435",
         }
     ]
-    assert config["object_folder"] == "custom_object_models"
+    assert config["object_folder"] == object_folder.as_posix()
     assert config["pipeline"]["options"] == {"aruco": {"save_images": True}}
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(stage for stage in manifest["stages"] if stage["name"] == "run_config")

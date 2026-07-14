@@ -206,7 +206,7 @@ export function RoomMonitor() {
           />
           {connectionStatus !== "connected" && <div data-testid="room-monitor-message" className="absolute inset-0 grid place-items-center bg-muted/80 text-xs text-muted-foreground">{message}</div>}
         </div>
-        <div className="mt-3 flex items-center justify-between"><StatusBadge status={displayStatus} /><Button size="sm" variant="ghost" onClick={retry} disabled={startMonitor.isPending}><RefreshCw />Retry</Button></div>
+        <div className="mt-3 flex items-center justify-between"><StatusBadge status={displayStatus} /><Button size="sm" variant="ghost" onClick={retry} disabled={startMonitor.isPending}><RefreshCw />{connectionStatus === "connected" ? "Reconnect" : "Retry"}</Button></div>
       </CardContent>
     </Card>
   )

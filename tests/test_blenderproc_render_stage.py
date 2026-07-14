@@ -158,3 +158,31 @@ def test_render_failure_preserves_every_previous_sensor_output(tmp_path: Path) -
         assert (prepared / "output" / "previous.txt").read_text() == sensor.name
     assert not list(synchronized.rglob("*.staging"))
     assert not list(synchronized.rglob("*.work"))
+
+
+def test_objectless_render_skips_runtime_and_input_validation(tmp_path: Path) -> None:
+    run_root = tmp_path / "objectless"
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "run_blenderproc_render_stage.py"),
+            str(run_root),
+            "--objectless",
+            "--render-script",
+            str(tmp_path / "missing.py"),
+            "--blenderproc",
+            "definitely-missing",
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    plan = json.loads((run_root / BLENDERPROC_RENDER_PLAN).read_text())
+    assert plan["skipped"] is True
+    assert plan["skip_reason"] == "objectless_run"
+    assert plan["jobs"] == []
+    assert "Skipped BlenderProc" in result.stdout

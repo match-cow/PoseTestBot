@@ -357,6 +357,7 @@ def _run_config_from_payload(data: dict):
         velocity_m_s=float(data.get("velocity", data.get("velocity_m_s", 0.2))),
         sensors=sensors,
         object_folder=data.get("object_folder", "object_models"),
+        selected_objects=data.get("selected_objects"),
         calibration_profiles=data.get("calibration_profiles") or None,
         sequence_id=data.get("sequence", data.get("sequence_id", "real_full_capture_validation")),
         sequence_options=sequence_options,

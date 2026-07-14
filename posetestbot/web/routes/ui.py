@@ -7,12 +7,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request, send_file
 
 from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
 from posetestbot.io.artifacts import RUN_CONFIG
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
-from posetestbot.web.security import DEFAULT_RUN_ROOT, resolve_web_run_root, web_run_roots
+from posetestbot.cell.scene import build_cell_scene, cell_timeline_page
+from posetestbot.objects.registry import load_object_registry
+from posetestbot.web.security import (
+    DEFAULT_RUN_ROOT,
+    resolve_web_run_root,
+    resolve_web_scoped_path,
+    web_run_roots,
+)
 
 
 ui_bp = Blueprint("ui", __name__)
@@ -136,3 +143,115 @@ def ui_runs():
             "runs": discover_web_runs(),
         }
     )
+
+
+def _requested_run_root() -> Path:
+    value = request.args.get("run_root")
+    if not value:
+        raise ValueError("run_root is required")
+    return resolve_web_run_root(value)
+
+
+@ui_bp.get("/ui/object-registry")
+def ui_object_registry():
+    try:
+        run_root = _requested_run_root()
+        try:
+            config = load_run_config_for_run_root(run_root)
+        except FileNotFoundError:
+            config = None
+        folder_value = request.args.get("object_folder") or (
+            config["object_folder"] if config is not None else "object_models"
+        )
+        folder = resolve_web_scoped_path(
+            folder_value,
+            scope="input",
+            run_root=run_root,
+            label="object_folder",
+        )
+        registry = load_object_registry(folder)
+        selected = set(
+            config.get("selected_objects", [])
+            if config is not None
+            else registry.valid_names
+        )
+        missing = sorted(selected - set(registry.by_name))
+        return jsonify(
+            {
+                "schema_version": "object_registry.v1",
+                "run_root": run_root.as_posix(),
+                "object_folder": folder.as_posix(),
+                "selected_objects": sorted(selected & set(registry.by_name)),
+                "missing_selected_objects": missing,
+                "objectless": not selected,
+                "entries": [
+                    entry.to_dict(selected=entry.name in selected)
+                    for entry in registry.entries
+                ],
+                "provenance": registry.provenance(),
+            }
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return jsonify({"output": str(exc)}), 400
+
+
+@ui_bp.get("/ui/cell-scene")
+def ui_cell_scene():
+    try:
+        return jsonify(build_cell_scene(_requested_run_root()))
+    except FileNotFoundError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except (OSError, ValueError) as exc:
+        return jsonify({"output": str(exc)}), 400
+
+
+@ui_bp.get("/ui/cell-scene/timeline")
+def ui_cell_timeline():
+    timeline_id = request.args.get("timeline_id")
+    if not timeline_id:
+        return jsonify({"output": "timeline_id is required"}), 400
+    try:
+        payload = cell_timeline_page(
+            _requested_run_root(),
+            timeline_id,
+            offset=int(request.args.get("offset", "0")),
+            limit=int(request.args.get("limit", str(2_000))),
+        )
+        return jsonify(payload)
+    except KeyError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except FileNotFoundError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except (OSError, ValueError) as exc:
+        return jsonify({"output": str(exc)}), 400
+
+
+@ui_bp.get("/ui/cell-assets/<object_name>/<asset_kind>")
+def ui_cell_asset(object_name: str, asset_kind: str):
+    try:
+        run_root = _requested_run_root()
+        config = load_run_config_for_run_root(run_root)
+        if object_name not in config.get("selected_objects", []):
+            return jsonify({"output": "Object is not selected by this run"}), 404
+        folder = resolve_web_scoped_path(
+            config["object_folder"],
+            scope="input",
+            run_root=run_root,
+            label="object_folder",
+        )
+        registry = load_object_registry(folder)
+        entry = registry.by_name.get(object_name)
+        if entry is None or not entry.valid:
+            return jsonify({"output": "Unknown or invalid registered object"}), 404
+        if asset_kind == "mesh":
+            path = entry.model_path
+            mimetype = "application/octet-stream"
+        elif asset_kind == "texture" and entry.texture_path is not None:
+            path = entry.texture_path
+            mimetype = "image/png"
+        else:
+            return jsonify({"output": "Unknown or unavailable object asset"}), 404
+        # Registry loading already proves resolved containment and regular-file status.
+        return send_file(path, mimetype=mimetype, conditional=True, max_age=3600)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return jsonify({"output": str(exc)}), 400

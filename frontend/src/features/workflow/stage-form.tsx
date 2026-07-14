@@ -43,6 +43,16 @@ function normalizedOptions(parameters: PipelineParameter[], values: Record<strin
   return options
 }
 
+function missingRequired(parameters: PipelineParameter[], values: Record<string, JsonValue>) {
+  return parameters.filter((parameter) => {
+    if (!parameter.required) return false
+    const value = values[parameter.name]
+    if (value === null || value === undefined || value === "") return true
+    if (Array.isArray(value)) return value.length === 0
+    return false
+  })
+}
+
 export function StageForm({ stage, artifactStatus }: { stage: PipelineStage; artifactStatus?: string }) {
   const { selectedRun } = useOperator()
   const queryClient = useQueryClient()
@@ -51,6 +61,7 @@ export function StageForm({ stage, artifactStatus }: { stage: PipelineStage; art
   const [advanced, setAdvanced] = useState(false)
   const common = available.slice(0, 3)
   const uncommon = available.slice(3)
+  const missing = missingRequired(available, values)
   const cameraStage = stage.resources.some((resource) => resource === "camera" || resource.startsWith("camera:"))
 
   const run = useMutation({
@@ -72,8 +83,8 @@ export function StageForm({ stage, artifactStatus }: { stage: PipelineStage; art
       <CardHeader><div className="flex items-start justify-between gap-3"><div><CardTitle className="text-base">{stage.label}</CardTitle><CardDescription className="mt-1 leading-relaxed">{stage.description}</CardDescription></div><StatusBadge status={artifactStatus ?? "available"} /></div></CardHeader>
       <CardContent className="space-y-4">
         {common.length > 0 && <div className="grid grid-cols-2 gap-3">{common.map((parameter) => <ParameterField key={parameter.name} parameter={parameter} value={values[parameter.name]} setValue={(value) => setValues((current) => ({ ...current, [parameter.name]: value }))} />)}</div>}
-        {uncommon.length > 0 && <div><Button type="button" variant="ghost" size="sm" onClick={() => setAdvanced((value) => !value)}><ChevronDown className={advanced ? "rotate-180 transition" : "transition"} />Advanced · {uncommon.length} options</Button>{advanced && <div className="mt-3 grid grid-cols-2 gap-3 rounded-lg border border-border bg-muted/20 p-4">{uncommon.map((parameter) => <ParameterField key={parameter.name} parameter={parameter} value={values[parameter.name]} setValue={(value) => setValues((current) => ({ ...current, [parameter.name]: value }))} />)}</div>}</div>}
-        <div className="flex items-center justify-between border-t border-border pt-4"><div className="flex flex-wrap gap-1">{stage.resources.map((resource) => <StatusBadge status="available" key={resource}>{resource}</StatusBadge>)}</div><Button onClick={() => run.mutate()} disabled={run.isPending}><Play />Queue stage</Button></div>
+        {uncommon.length > 0 && <div><Button type="button" variant="ghost" size="sm" aria-expanded={advanced} aria-controls={`advanced-${stage.id}`} onClick={() => setAdvanced((value) => !value)}><ChevronDown className={advanced ? "rotate-180 transition" : "transition"} />Advanced · {uncommon.length} options</Button>{advanced && <div id={`advanced-${stage.id}`} className="mt-3 grid grid-cols-2 gap-3 rounded-lg border border-border bg-muted/20 p-4">{uncommon.map((parameter) => <ParameterField key={parameter.name} parameter={parameter} value={values[parameter.name]} setValue={(value) => setValues((current) => ({ ...current, [parameter.name]: value }))} />)}</div>}</div>}
+        <div className="flex items-center justify-between border-t border-border pt-4"><div><div className="flex flex-wrap gap-1">{stage.resources.map((resource) => <StatusBadge status="available" key={resource}>{resource}</StatusBadge>)}</div>{missing.length > 0 && <p className="mt-2 text-xs text-destructive">Required: {missing.map((parameter) => titleCase(parameter.name)).join(", ")}</p>}</div><Button onClick={() => run.mutate()} disabled={run.isPending || missing.length > 0}>{run.isPending ? null : <Play />}{run.isPending ? "Queueing…" : "Queue stage"}</Button></div>
       </CardContent>
     </Card>
   )

@@ -18,6 +18,7 @@ from pytransform3d.transform_manager import TransformManager
 
 from posetestbot.io.atomic import atomic_write_json, replace_directories
 from posetestbot.io.artifacts import CAM_K, MATCH_ROBOT_EE_POSES
+from posetestbot.objects.registry import load_object_registry
 
 SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
@@ -188,25 +189,17 @@ def _camera_poses(
     return np.asarray(poses, dtype=float)
 
 
-def _object_transforms(object_folder: Path) -> dict[str, np.ndarray]:
-    objects = _read_json_mapping(object_folder / "objects.json", "objects configuration")
+def _object_transforms(
+    object_folder: Path, selected_objects: list[str] | tuple[str, ...] | None
+) -> dict[str, np.ndarray]:
+    registry = load_object_registry(object_folder)
+    names = registry.valid_names if selected_objects is None else selected_objects
     transforms: dict[str, np.ndarray] = {}
-    for raw_name, value in objects.items():
-        name = str(raw_name)
-        if not SAFE_COMPONENT.fullmatch(name):
-            raise ValueError(f"Object name must be one safe component: {name!r}")
-        model_path = object_folder / f"{name}.ply"
-        if not model_path.is_file():
-            raise FileNotFoundError(f"Missing object model: {model_path}")
-        try:
-            transform = np.asarray(value, dtype=float)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Object transform for {name!r} must be a 4x4 matrix") from exc
-        if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
-            raise ValueError(f"Object transform for {name!r} must be a finite 4x4 matrix")
-        transform_metres = transform.copy()
+    for entry in registry.selected_entries(names):
+        assert entry.object_to_template is not None
+        transform_metres = entry.object_to_template.copy()
         transform_metres[:3, 3] *= 0.001
-        transforms[name] = pt.invert_transform(transform_metres)
+        transforms[entry.name] = transform_metres
     return transforms
 
 
@@ -223,7 +216,11 @@ def _prepare_sensor(
     camera_poses = _camera_poses(robot_poses, camera_transform)
     objects_output = staging / "objects"
     objects_output.mkdir(parents=True)
-    shutil.copy2(object_folder / "objects.json", staging / "objects.json")
+    raw_objects = json.loads((object_folder / "objects.json").read_text())
+    atomic_write_json(
+        staging / "objects.json",
+        {name: raw_objects[name] for name in object_transforms},
+    )
     np.save(staging / "camera_matrix.npy", camera_matrix)
     np.save(staging / "dist_coefficients.npy", distortion)
     np.save(staging / "camera_poses.npy", camera_poses)
@@ -249,6 +246,7 @@ def prepare_sensor_folders(
     object_folder: str | Path,
     camera_transformations: Mapping[str, object],
     subdir: str = "blenderproc",
+    selected_objects: list[str] | tuple[str, ...] | None = None,
 ) -> list[PreparedSensor]:
     """Prepare every sensor in staging and promote only after all validate."""
 
@@ -260,7 +258,7 @@ def prepare_sensor_folders(
     sensors = [path for path in sorted(input_path.iterdir()) if path.is_dir()]
     if not sensors:
         raise FileNotFoundError(f"No synchronized sensor folders in {input_path}")
-    object_transforms = _object_transforms(object_path)
+    object_transforms = _object_transforms(object_path, selected_objects)
     staged: list[tuple[Path, Path]] = []
     prepared: list[PreparedSensor] = []
     try:

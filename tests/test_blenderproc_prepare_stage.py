@@ -368,3 +368,24 @@ def test_blenderproc_prepare_failure_preserves_all_existing_outputs(
     assert (first_output / "previous.txt").read_text() == "keep"
     assert not (invalid_sensor / "blenderproc").exists()
     assert not list(synchronized.rglob("*.staging"))
+
+
+def test_blenderproc_prepare_objectless_clears_stale_models(tmp_path: Path) -> None:
+    run_root, object_folder, camera_transforms = create_blenderproc_prepare_fixture(tmp_path)
+    sensor = run_root / "processed" / "synchronized" / "realsense_123"
+    stale = sensor / "blenderproc" / "objects"
+    stale.mkdir(parents=True)
+    (stale / "stale.ply").write_text("stale")
+
+    prepared = prepare_sensor_folders(
+        input_folder=run_root / "processed" / "synchronized",
+        object_folder=object_folder,
+        camera_transformations=load_camera_transformations(camera_transforms),
+        selected_objects=[],
+    )
+
+    output = prepared[0].output_folder
+    assert prepared[0].object_count == 0
+    assert json.loads((output / "objects.json").read_text()) == {}
+    assert list((output / "objects").iterdir()) == []
+    assert (output / "camera_poses.npy").is_file()

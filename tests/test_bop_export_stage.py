@@ -37,6 +37,14 @@ from posetestbot.io.artifacts import (
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 
 
+IDENTITY_OBJECT_TRANSFORM = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+]
+
+
 def create_synchronized_sensor_fixture(tmp_path: Path) -> Path:
     run_root = tmp_path / "run-1"
     sensor_folder = run_root / "processed" / "synchronized" / "realsense_123"
@@ -451,7 +459,7 @@ def test_bop_export_stage_writes_models_and_targets(tmp_path: Path) -> None:
     object_folder = tmp_path / "objects"
     object_folder.mkdir()
     (object_folder / "objects.json").write_text(
-        json.dumps({"cube": [], "sphere": []})
+        json.dumps({"cube": IDENTITY_OBJECT_TRANSFORM, "sphere": IDENTITY_OBJECT_TRANSFORM})
     )
     write_simple_ply(object_folder / "cube.ply")
     write_simple_ply(object_folder / "sphere.ply")
@@ -537,7 +545,7 @@ def test_bop_export_stage_writes_multiview_targets(tmp_path: Path) -> None:
         write_annotation_mask(sensor_folder)
     object_folder = tmp_path / "objects"
     object_folder.mkdir()
-    (object_folder / "objects.json").write_text(json.dumps({"cube": []}))
+    (object_folder / "objects.json").write_text(json.dumps({"cube": IDENTITY_OBJECT_TRANSFORM}))
     write_simple_ply(object_folder / "cube.ply")
     repo_root = Path(__file__).resolve().parents[1]
 
@@ -616,7 +624,7 @@ def test_bop_export_stage_writes_coco_annotations(tmp_path: Path) -> None:
     )
     object_folder = tmp_path / "objects"
     object_folder.mkdir()
-    (object_folder / "objects.json").write_text(json.dumps({"cube": []}))
+    (object_folder / "objects.json").write_text(json.dumps({"cube": IDENTITY_OBJECT_TRANSFORM}))
     write_simple_ply(object_folder / "cube.ply")
     repo_root = Path(__file__).resolve().parents[1]
 
@@ -678,7 +686,7 @@ def test_bop_export_stage_writes_model_geometry_metadata(tmp_path: Path) -> None
     run_root = create_synchronized_sensor_fixture(tmp_path)
     object_folder = tmp_path / "objects"
     object_folder.mkdir()
-    (object_folder / "objects.json").write_text(json.dumps({"cuboid": []}))
+    (object_folder / "objects.json").write_text(json.dumps({"cuboid": IDENTITY_OBJECT_TRANSFORM}))
     (object_folder / "cuboid.ply").write_text(
         "\n".join(
             [
@@ -806,4 +814,62 @@ def test_bop_export_rejects_unvalidated_calibration_profile(
     )
 
     assert result.returncode != 0
+    assert not (run_root / BOP_DIR).exists()
+
+
+def test_bop_export_objectless_writes_empty_gt_targets_and_coco(tmp_path: Path) -> None:
+    run_root = create_synchronized_sensor_fixture(tmp_path)
+    object_folder = tmp_path / "objects"
+    object_folder.mkdir()
+    (object_folder / "objects.json").write_text(json.dumps({"cube": IDENTITY_OBJECT_TRANSFORM}))
+    write_simple_ply(object_folder / "cube.ply")
+    repo_root = Path(__file__).resolve().parents[1]
+
+    subprocess.run(
+        [sys.executable, str(repo_root / "scripts" / "run_bop_export_stage.py"), str(run_root), "--object-folder", str(object_folder), "--objectless", "--write-coco-annotations"],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    bop = run_root / BOP_DIR
+    manifest = json.loads((bop / BOP_EXPORT_MANIFEST).read_text())
+    scene = bop / "test" / "000001"
+    assert manifest["objectless"] is True
+    assert manifest["selected_objects"] == []
+    assert manifest["stable_id_mapping"] == {"cube": 1}
+    assert not (bop / MODELS_DIR).exists()
+    assert json.loads((bop / BOP_TARGETS_BOP19).read_text()) == []
+    assert all(value == [] for value in json.loads((scene / "scene_gt.json").read_text()).values())
+    assert all(value == [] for value in json.loads((scene / "scene_gt_info.json").read_text()).values())
+    assert not (scene / "mask").exists()
+    coco = json.loads((bop / BOP_COCO_ANNOTATIONS).read_text())
+    assert coco["images"]
+    assert coco["categories"] == []
+    assert coco["annotations"] == []
+
+
+def test_bop_export_objectless_rejects_stale_object_gt(tmp_path: Path) -> None:
+    run_root = create_synchronized_sensor_fixture(tmp_path)
+    sensor = run_root / "processed" / "synchronized" / "realsense_123"
+    output = sensor / "blenderproc" / "output"
+    output.mkdir(parents=True)
+    (output / "scene_gt.json").write_text(json.dumps({"0": [{"obj_id": "cube", "cam_R_m2c": [1, 0, 0, 0, 1, 0, 0, 0, 1], "cam_t_m2c": [0, 0, 1]}], "1": []}))
+    object_folder = tmp_path / "objects"
+    object_folder.mkdir()
+    (object_folder / "objects.json").write_text(json.dumps({"cube": IDENTITY_OBJECT_TRANSFORM}))
+    write_simple_ply(object_folder / "cube.ply")
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "scripts" / "run_bop_export_stage.py"), str(run_root), "--object-folder", str(object_folder), "--objectless"],
+        cwd=repo_root,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "Invalid obj_id" in result.stderr or "Unknown BOP obj_id" in result.stderr
     assert not (run_root / BOP_DIR).exists()

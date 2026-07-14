@@ -112,12 +112,21 @@ def discover_render_jobs(
     return jobs
 
 
-def write_render_plan(run_root: str | Path, jobs: list[RenderJob], *, dry_run: bool) -> Path:
+def write_render_plan(
+    run_root: str | Path,
+    jobs: list[RenderJob],
+    *,
+    dry_run: bool,
+    skipped: bool = False,
+    skip_reason: str | None = None,
+) -> Path:
     return atomic_write_json(
         Path(run_root) / BLENDERPROC_RENDER_PLAN,
         {
             "schema_version": "blenderproc_render_plan.v1",
             "dry_run": dry_run,
+            "skipped": skipped,
+            "skip_reason": skip_reason,
             "jobs": [asdict(job) for job in jobs],
         },
     )

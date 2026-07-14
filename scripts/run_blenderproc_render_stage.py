@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--subdir", default="blenderproc")
     parser.add_argument("--blenderproc", default="blenderproc")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--object-name", action="append", default=None)
+    selection.add_argument(
+        "--objectless", action="store_true",
+        help="Write a successful skipped plan without invoking BlenderProc.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -64,15 +70,23 @@ def main() -> None:
     upsert_stage(manifest, name="blenderproc_render", status="running")
     write_run_manifest(manifest, run_root)
     try:
-        jobs = discover_render_jobs(
+        jobs = [] if args.objectless else discover_render_jobs(
             input_folder=input_folder,
             render_script=Path(args.render_script),
             subdir=args.subdir,
             blenderproc_executable=args.blenderproc,
         )
-        plan_path = write_render_plan(run_root, jobs, dry_run=args.dry_run)
+        plan_path = write_render_plan(
+            run_root,
+            jobs,
+            dry_run=args.dry_run,
+            skipped=args.objectless,
+            skip_reason="objectless_run" if args.objectless else None,
+        )
         artifacts: dict[str, Path] = {BLENDERPROC_RENDER_PLAN: plan_path}
-        if args.dry_run:
+        if args.objectless:
+            message = "Skipped BlenderProc rendering for explicit objectless run."
+        elif args.dry_run:
             message = f"Dry-run render plan created for {len(jobs)} sensor folder(s)."
         else:
             artifacts.update(run_render_jobs(jobs))

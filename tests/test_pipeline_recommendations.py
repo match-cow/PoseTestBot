@@ -157,3 +157,27 @@ def test_recommendations_report_ready_bop_dataset_without_downstream_suggestions
     assert "evaluate_bop_results" not in ids
     assert "export_metric_reports" not in ids
     assert "plan_foundationpose" not in ids
+
+
+def test_recommendations_accept_explicit_objectless_bop_export(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    config = write_ready_run_config(run_root)
+    write_preflight(run_root, config)
+    make_synchronized_sensor(run_root)
+    write_json(run_root / SYNC_QUALITY_REPORT, {"schema_version": "sync_quality_report.v1", "overall_status": "ok"})
+    write_json(
+        run_root / BOP_DIR / BOP_EXPORT_MANIFEST,
+        {
+            "schema_version": "bop_export_manifest.v2",
+            "objectless": True,
+            "selected_objects": [],
+            "exports": [{"sensor_name": "realsense_123", "scene_id": 1}],
+            "object_models": [],
+        },
+    )
+    write_json(run_root / BOP_DIR / BOP_TARGETS_BOP19, [])
+
+    payload = build_pipeline_recommendations(run_root)
+
+    assert payload["facts"]["bop_export_ready_for_dataset_use"] is True
+    assert "export_bop_dataset" not in recommendation_ids(payload)

@@ -305,8 +305,13 @@ def _bop_export_summary(root: Path) -> dict[str, Any]:
     target_count = len(targets) if isinstance(targets, list) else 0
     object_models = manifest.get("object_models")
     model_count = len(object_models) if isinstance(object_models, list) else 0
+    objectless = manifest.get("objectless") is True
     if export_count == 0:
         blocker = "empty_bop_export_manifest"
+    elif objectless and (not isinstance(targets, list) or target_count or model_count):
+        blocker = "inconsistent_objectless_bop_export"
+    elif objectless:
+        blocker = None
     elif target_count == 0:
         blocker = "missing_bop_targets"
     elif model_count == 0:
@@ -319,6 +324,7 @@ def _bop_export_summary(root: Path) -> dict[str, Any]:
         "export_count": export_count,
         "target_count": target_count,
         "model_count": model_count,
+        "objectless": objectless,
     }
 
 

@@ -32,10 +32,12 @@ include-package-data = true
     "static/*",
     "static/ui/*",
     "static/ui/assets/*",
+    "static/cell/*",
 ]
 
 [tool.setuptools.packages.find]
 exclude = [
+    "build*",
     "frontend*",
     "iiwa*",
     "object_models*",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -130,6 +131,24 @@ def test_bop_export_readiness_gate_blocks_missing_targets(tmp_path: Path) -> Non
     assert report["overall_status"] == "blocked"
     blockers = {blocker["name"] for blocker in report["next_blockers"]}
     assert "bop_targets" in blockers
+
+
+def test_bop_export_readiness_accepts_consistent_objectless_dataset(tmp_path: Path) -> None:
+    run_root = tmp_path / "objectless-bop"
+    populate_bop_export(run_root)
+    bop = run_root / BOP_DIR
+    scene = bop / "test" / "000001"
+    write_json(scene / "scene_gt.json", {"0": []})
+    write_json(scene / "scene_gt_info.json", {"0": []})
+    write_json(bop / BOP_TARGETS_BOP19, [])
+    shutil.rmtree(bop / "models")
+    manifest = json.loads((bop / BOP_EXPORT_MANIFEST).read_text())
+    manifest.update({"objectless": True, "selected_objects": [], "object_models": []})
+    write_json(bop / BOP_EXPORT_MANIFEST, manifest)
+
+    report = build_bop_export_readiness_gate_report(run_root)
+
+    assert report["overall_status"] == "ready"
 
 
 def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> None:

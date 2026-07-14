@@ -15,9 +15,11 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage } from "@/lib/api"
 import type { PreviewJob, SensorDevice, SensorStatus } from "@/lib/contracts"
+import { loadSelectedSensorKeys, saveSelectedSensorKeys } from "@/lib/sensor-selection"
 import { useOperator } from "@/providers/operator-provider"
 
-const ACTIVE = new Set(["queued", "running", "canceling"])
+const PREVIEW_ON = new Set(["queued", "running"])
+const PREVIEW_BUSY = new Set(["queued", "running", "canceling"])
 const sensorKey = (device: SensorDevice) => `${device.sensor_type}:${device.device_id}`
 
 interface AliasRecord { alias: string; mounting_mode?: string; inverted?: boolean }
@@ -41,10 +43,12 @@ export function DevicesPage() {
   const queryClient = useQueryClient()
   const { robotTarget, setRobotTarget } = useOperator()
   const [aliasDraft, setAliasDraft] = useState<Record<string, AliasRecord>>({})
-  const [selected, setSelected] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("posetestbot.selectedSensors") ?? "[]") as string[]))
+  const [selected, setSelected] = useState<Set<string>>(loadSelectedSensorKeys)
   const [detail, setDetail] = useState<SensorDevice | null>(null)
   const [snapshotJobs, setSnapshotJobs] = useState<Record<string, string>>({})
   const [startDialog, setStartDialog] = useState(false)
+  const [robotDialogCommand, setRobotDialogCommand] = useState<"start_iiwa" | "stop_iiwa">("start_iiwa")
+  const [confirmedRobotTarget, setConfirmedRobotTarget] = useState(robotTarget)
   const [targetConfirmed, setTargetConfirmed] = useState(false)
   const [targetDraft, setTargetDraft] = useState(robotTarget)
 
@@ -57,7 +61,7 @@ export function DevicesPage() {
     for (const item of previews.data?.jobs ?? []) {
       const key = String(item.job.parameters.sensor_key)
       const current = byKey.get(key)
-      if (!current || (ACTIVE.has(item.job.status) && !ACTIVE.has(current.job.status))) {
+      if (!current || (PREVIEW_BUSY.has(item.job.status) && !PREVIEW_BUSY.has(current.job.status))) {
         byKey.set(key, item)
       }
     }
@@ -67,7 +71,7 @@ export function DevicesPage() {
     queryKey: ["sensors", "snapshots", snapshotJobs],
     enabled: Object.keys(snapshotJobs).length > 0,
     queryFn: async () => Object.fromEntries(await Promise.all(Object.entries(snapshotJobs).map(async ([key, jobId]) => [key, await api<SnapshotState>(`/sensors/snapshots/${jobId}`)]))) as Record<string, SnapshotState>,
-    refetchInterval: (queryState) => Object.values(queryState.state.data ?? {}).some((item) => ACTIVE.has(item.job.status)) ? 1_000 : false,
+    refetchInterval: (queryState) => Object.values(queryState.state.data ?? {}).some((item) => PREVIEW_BUSY.has(item.job.status)) ? 1_000 : false,
   })
 
   const startPreview = useMutation({
@@ -80,6 +84,11 @@ export function DevicesPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sensors", "previews"] }),
     onError: (error) => toast.error("Preview could not stop", { description: errorMessage(error) }),
   })
+  const stopAllPreviews = useMutation({
+    mutationFn: () => api<{ jobs: PreviewJob[] }>("/sensors/previews/stop", { method: "POST", body: "{}" }),
+    onSuccess: (data) => { toast.success(data.jobs.length ? `Stopping ${data.jobs.length} preview${data.jobs.length === 1 ? "" : "s"}` : "All previews are already off"); queryClient.invalidateQueries({ queryKey: ["sensors", "previews"] }) },
+    onError: (error) => toast.error("Previews could not be stopped", { description: errorMessage(error) }),
+  })
   const snapshot = useMutation({
     mutationFn: (device: SensorDevice) => api<{ job_id: string }>("/sensors/snapshots", { method: "POST", body: JSON.stringify({ sensors: [device], max_frames: 1 }) }),
     onSuccess: (data, device) => { setSnapshotJobs((current) => ({ ...current, [sensorKey(device)]: data.job_id })); toast.success("Snapshot queued", { description: `Job ${data.job_id}` }); queryClient.invalidateQueries({ queryKey: ["jobs"] }) },
@@ -91,8 +100,8 @@ export function DevicesPage() {
     onError: (error) => toast.error("Sensor labels could not be saved", { description: errorMessage(error) }),
   })
   const robotCommand = useMutation({
-    mutationFn: (command: "start_iiwa" | "stop_iiwa") => api<{ job_id: string }>("/run-command", { method: "POST", body: JSON.stringify({ command, robot_ip: robotTarget.ip, robot_port: robotTarget.port }) }),
-    onSuccess: (data, command) => { toast.success(command === "start_iiwa" ? "IIWA start queued" : "IIWA stop queued", { description: `Job ${data.job_id}` }); setStartDialog(false); setTargetConfirmed(false); queryClient.invalidateQueries({ queryKey: ["jobs"] }) },
+    mutationFn: ({ command, target }: { command: "start_iiwa" | "stop_iiwa"; target: { ip: string; port: number } }) => api<{ job_id: string }>("/run-command", { method: "POST", body: JSON.stringify({ command, robot_ip: target.ip, robot_port: target.port }) }),
+    onSuccess: (data, variables) => { toast.success(variables.command === "start_iiwa" ? "IIWA start queued" : "IIWA stop queued", { description: `Job ${data.job_id}` }); setStartDialog(false); setTargetConfirmed(false); queryClient.invalidateQueries({ queryKey: ["jobs"] }) },
     onError: (error) => toast.error("Robot command was not queued", { description: errorMessage(error) }),
   })
 
@@ -103,7 +112,7 @@ export function DevicesPage() {
   }
   const updateOrientation = async (device: SensorDevice, inverted: boolean, preview?: PreviewJob) => {
     updateAlias(device, { inverted })
-    if (!preview || !ACTIVE.has(preview.job.status)) return
+    if (!preview || !PREVIEW_ON.has(preview.job.status)) return
     try {
       await api(`/sensors/previews/${preview.job.id}/stop`, { method: "POST", body: "{}" })
       await api("/sensors/previews", { method: "POST", body: JSON.stringify({ sensors: [{ ...device, inverted }] }) })
@@ -123,48 +132,74 @@ export function DevicesPage() {
       const next = new Set(current)
       if (checked) next.add(key)
       else next.delete(key)
-      localStorage.setItem("posetestbot.selectedSensors", JSON.stringify([...next]))
+      saveSelectedSensorKeys(next)
       return next
     })
   }
+  const validatedTarget = () => {
+    const target = { ip: targetDraft.ip.trim(), port: targetDraft.port }
+    if (!target.ip || !Number.isInteger(target.port) || target.port < 1 || target.port > 65535) { toast.error("Enter a valid robot IP and port"); return null }
+    return target
+  }
   const applyTarget = () => {
-    if (!targetDraft.ip.trim() || targetDraft.port < 1 || targetDraft.port > 65535) { toast.error("Enter a valid robot IP and port"); return }
-    setRobotTarget(targetDraft)
+    const target = validatedTarget()
+    if (!target) return
+    setRobotTarget(target)
+    setTargetDraft(target)
     toast.success("Robot target saved locally")
+  }
+  const openRobotDialog = (command: "start_iiwa" | "stop_iiwa") => {
+    const target = validatedTarget()
+    if (!target) return
+    setRobotTarget(target)
+    setTargetDraft(target)
+    setConfirmedRobotTarget(target)
+    setRobotDialogCommand(command)
+    setTargetConfirmed(false)
+    setStartDialog(true)
+  }
+
+  const previewTransitionPending = startPreview.isPending || stopPreview.isPending
+  const anyPreviewBusy = [...previewByKey.values()].some((item) => PREVIEW_BUSY.has(item.job.status))
+  const refreshDiscovery = async () => {
+    const result = await status.refetch()
+    if (result.error) toast.error("Sensor discovery failed", { description: errorMessage(result.error) })
   }
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Lab hardware" title="Devices" description="Readable camera state and deliberately separated robot controls." actions={<><Button variant="outline" onClick={() => status.refetch()}><RefreshCw />Refresh discovery</Button><Button onClick={saveAllAliases} disabled={saveAliases.isPending}><Save />Save sensor setup</Button></>} />
+      <PageHeader eyebrow="Lab hardware" title="Devices" description="Readable camera state and deliberately separated robot controls." actions={<><Button variant="outline" onClick={() => void refreshDiscovery()} disabled={status.isFetching}><RefreshCw className={status.isFetching ? "animate-spin" : ""} />Refresh discovery</Button><Button onClick={saveAllAliases} disabled={saveAliases.isPending || status.isPending || aliases.isPending || devices.length === 0}><Save />{saveAliases.isPending ? "Saving…" : "Save sensor setup"}</Button></>} />
 
       <Card className="border-primary/25">
         <CardHeader className="flex-row items-start justify-between gap-6"><div><CardTitle className="flex items-center gap-2"><Bot className="size-5 text-primary-strong" />KUKA LBR iiwa</CardTitle><CardDescription>Robot commands are independent from camera previews and require explicit target confirmation.</CardDescription></div><StatusBadge status="ready">real lab profile</StatusBadge></CardHeader>
         <CardContent className="grid grid-cols-[1fr_1fr_auto] items-end gap-4">
           <div className="space-y-2"><Label htmlFor="robot-ip">Robot IP</Label><Input id="robot-ip" value={targetDraft.ip} onChange={(event) => setTargetDraft((value) => ({ ...value, ip: event.target.value }))} /></div>
           <div className="space-y-2"><Label htmlFor="robot-port">Command port</Label><Input id="robot-port" type="number" min={1} max={65535} value={targetDraft.port} onChange={(event) => setTargetDraft((value) => ({ ...value, port: Number(event.target.value) }))} /></div>
-          <div className="flex gap-2"><Button variant="outline" onClick={applyTarget}>Save target</Button><Button onClick={() => { applyTarget(); setTargetConfirmed(false); setStartDialog(true) }}><Power />Start IIWA</Button><Button variant="destructive" onClick={() => robotCommand.mutate("stop_iiwa")} disabled={robotCommand.isPending}><Square />Stop</Button></div>
+          <div className="flex gap-2"><Button variant="outline" onClick={applyTarget}>Save target</Button><Button onClick={() => openRobotDialog("start_iiwa")} disabled={robotCommand.isPending}><Power />Start IIWA</Button><Button variant="destructive" onClick={() => openRobotDialog("stop_iiwa")} disabled={robotCommand.isPending}><Square />Stop IIWA</Button></div>
         </CardContent>
       </Card>
 
-      <div className="flex items-center justify-between"><div><h2 className="font-display text-xl font-semibold">RGB-D sensors</h2><p className="text-sm text-muted-foreground">{status.data?.total_connected ?? 0} connected · {selected.size} selected for run setup</p></div><Button variant="outline" size="sm" onClick={() => api("/sensors/previews/stop", { method: "POST", body: "{}" }).then(() => queryClient.invalidateQueries({ queryKey: ["sensors", "previews"] }))}><EyeOff />Stop all previews</Button></div>
+      <div className="flex items-center justify-between"><div><h2 className="font-display text-xl font-semibold">RGB-D sensors</h2><p className="text-sm text-muted-foreground">{status.data?.total_connected ?? 0} connected · {selected.size} selected for run setup</p></div><Button variant="outline" size="sm" onClick={() => stopAllPreviews.mutate()} disabled={!anyPreviewBusy || stopAllPreviews.isPending}><EyeOff />{stopAllPreviews.isPending ? "Stopping previews…" : "Stop all previews"}</Button></div>
       {status.isPending ? <div className="grid grid-cols-3 gap-4">{Array.from({ length: 3 }).map((_, index) => <Skeleton className="h-[430px]" key={index} />)}</div> : devices.length === 0 ? <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">No RGB-D sensors were detected. Check SDKs, USB connections, and permissions, then refresh.</div> : <div className="grid grid-cols-3 gap-4">
         {devices.map((device) => {
           const key = sensorKey(device)
           const alias = aliasDraft[key] ?? aliases.data?.aliases[key]
           const preview = previewByKey.get(key)
-          const previewActive = preview && ACTIVE.has(preview.job.status)
+          const previewOn = Boolean(preview && PREVIEW_ON.has(preview.job.status))
+          const previewBusy = Boolean(preview && PREVIEW_BUSY.has(preview.job.status))
+          const previewStopping = preview?.job.status === "canceling"
           const snapshotState = snapshotStates.data?.[key]
           const snapshotRecord = snapshotState?.manifest?.sensors?.find((item) => item.sensor_key === key)
           const snapshotJobId = snapshotJobs[key]
           return <Card data-testid="sensor-card" data-sensor-key={key} key={key} className="overflow-hidden">
             <CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted"><Webcam className="size-4 text-primary-strong" /></div><div className="min-w-0"><CardTitle className="truncate text-base">{alias?.alias || device.effective_display_name || device.display_name || device.device_id}</CardTitle><CardDescription className="truncate">{device.sensor_type.replaceAll("_", " ")} · {device.device_id}</CardDescription></div></div><StatusBadge status={device.connected === false ? "disconnected" : "connected"} /></div></CardHeader>
             <CardContent className="space-y-4">
-              <Preview preview={previewActive || preview?.job.status === "failed" ? preview : undefined} />
-              {snapshotJobId && <div data-testid="sensor-snapshot" className="overflow-hidden rounded-lg border border-border bg-muted/20">{snapshotRecord?.rgb_thumbnail ? <img src={`/sensors/snapshots/${snapshotJobId}/image?path=${encodeURIComponent(snapshotRecord.rgb_thumbnail)}`} className="aspect-video w-full object-cover" alt="Latest sensor snapshot" /> : <div className="grid h-16 place-items-center px-3 text-center text-xs text-muted-foreground">{snapshotRecord?.error ?? (ACTIVE.has(snapshotState?.job.status ?? "queued") ? "Capturing snapshot…" : "Snapshot did not produce an image")}</div>}</div>}
+              <Preview preview={previewBusy || preview?.job.status === "failed" ? preview : undefined} />
+              {snapshotJobId && <div data-testid="sensor-snapshot" className="overflow-hidden rounded-lg border border-border bg-muted/20">{snapshotRecord?.rgb_thumbnail ? <img src={`/sensors/snapshots/${snapshotJobId}/image?path=${encodeURIComponent(snapshotRecord.rgb_thumbnail)}`} className="aspect-video w-full object-cover" alt="Latest sensor snapshot" /> : <div className="grid h-16 place-items-center px-3 text-center text-xs text-muted-foreground">{snapshotRecord?.error ?? (PREVIEW_BUSY.has(snapshotState?.job.status ?? "queued") ? "Capturing snapshot…" : "Snapshot did not produce an image")}</div>}</div>}
               <div className="space-y-2"><Label htmlFor={`alias-${key}`}>Operator alias</Label><Input id={`alias-${key}`} value={alias?.alias ?? device.effective_display_name ?? device.display_name ?? ""} onChange={(event) => updateAlias(device, { alias: event.target.value })} /></div>
-              <div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label>Mounting</Label><Select value={alias?.mounting_mode ?? device.mounting_mode ?? "eye_in_hand"} onValueChange={(value) => updateAlias(device, { mounting_mode: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="eye_in_hand">Eye in hand</SelectItem><SelectItem value="static">Static</SelectItem></SelectContent></Select></div><div className="space-y-2"><Label>Orientation</Label><Select value={alias?.inverted ?? device.inverted ? "inverted" : "normal"} onValueChange={(value) => void updateOrientation(device, value === "inverted", preview)} disabled={device.sensor_type !== "realsense_d435"}><SelectTrigger data-testid="sensor-orientation"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="inverted">Inverted</SelectItem></SelectContent></Select></div></div>
+              <div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label>Mounting</Label><Select value={alias?.mounting_mode ?? device.mounting_mode ?? "eye_in_hand"} onValueChange={(value) => updateAlias(device, { mounting_mode: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="eye_in_hand">Eye in hand</SelectItem><SelectItem value="static">Static</SelectItem></SelectContent></Select></div><div className="space-y-2"><Label>Orientation</Label><Select value={alias?.inverted ?? device.inverted ? "inverted" : "normal"} onValueChange={(value) => void updateOrientation(device, value === "inverted", preview)} disabled={device.sensor_type !== "realsense_d435" || previewStopping || previewTransitionPending}><SelectTrigger data-testid="sensor-orientation"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="inverted">Inverted</SelectItem></SelectContent></Select></div></div>
               <div className="flex items-center justify-between rounded-lg bg-muted/55 px-3 py-2"><Label className="flex items-center gap-2"><Checkbox checked={selected.has(key)} onCheckedChange={(value) => toggleSelected(key, value === true)} />Use in run</Label><Button variant="ghost" size="sm" onClick={() => setDetail(device)}><Info />Details</Button></div>
-              <div className="grid grid-cols-2 gap-2"><Button data-testid="sensor-preview-toggle" aria-pressed={Boolean(previewActive)} variant={previewActive ? "secondary" : "outline"} onClick={() => previewActive ? stopPreview.mutate(preview.job.id) : startPreview.mutate(device)}>{previewActive ? <><EyeOff />Stop preview</> : <><Eye />Preview</>}</Button><Button variant="outline" onClick={() => snapshot.mutate(device)}><Camera />Snapshot</Button></div>
+              <div className="grid grid-cols-2 gap-2"><Button data-testid="sensor-preview-toggle" aria-label={`Toggle preview for ${alias?.alias || device.effective_display_name || device.display_name || device.device_id}`} aria-pressed={previewOn} variant={previewOn ? "secondary" : "outline"} disabled={previewStopping || previewTransitionPending} onClick={() => previewOn && preview ? stopPreview.mutate(preview.job.id) : startPreview.mutate(device)}>{previewStopping ? <><EyeOff />Stopping…</> : previewOn ? <><Eye />Preview on</> : <><EyeOff />Preview off</>}</Button><Button variant="outline" title={previewBusy ? "Turn this preview off before taking a snapshot" : undefined} onClick={() => snapshot.mutate(device)} disabled={previewBusy || snapshot.isPending || PREVIEW_BUSY.has(snapshotState?.job.status ?? "")}><Camera />{PREVIEW_BUSY.has(snapshotState?.job.status ?? "") ? "Capturing…" : "Snapshot"}</Button></div>
             </CardContent>
           </Card>
         })}
@@ -172,7 +207,7 @@ export function DevicesPage() {
 
       <Sheet open={Boolean(detail)} onOpenChange={(open) => !open && setDetail(null)}><SheetContent><SheetHeader><SheetTitle className="font-display text-xl font-semibold">Raw sensor metadata</SheetTitle><SheetDescription>Discovery detail for troubleshooting. Routine controls stay on the device card.</SheetDescription></SheetHeader><pre className="mt-4 flex-1 overflow-auto rounded-lg bg-muted p-4 text-xs leading-relaxed">{JSON.stringify(detail, null, 2)}</pre></SheetContent></Sheet>
 
-      <Dialog open={startDialog} onOpenChange={(open) => { setStartDialog(open); if (!open) setTargetConfirmed(false) }}><DialogContent><DialogHeader><DialogTitle>Confirm IIWA target</DialogTitle><DialogDescription>Starting sends a command to the lab robot target. Verify the address before continuing.</DialogDescription></DialogHeader><div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{robotTarget.ip}:{robotTarget.port}</div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox checked={targetConfirmed} onCheckedChange={(value) => setTargetConfirmed(value === true)} /><span>I confirm this is the intended lab IIWA target.</span></Label><DialogFooter><Button variant="outline" onClick={() => setStartDialog(false)}>Cancel</Button><Button disabled={!targetConfirmed || robotCommand.isPending} onClick={() => robotCommand.mutate("start_iiwa")}><Power />Queue start</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={startDialog} onOpenChange={(open) => { setStartDialog(open); if (!open) setTargetConfirmed(false) }}><DialogContent><DialogHeader><DialogTitle>Confirm IIWA {robotDialogCommand === "start_iiwa" ? "start" : "stop"}</DialogTitle><DialogDescription>{robotDialogCommand === "start_iiwa" ? "Starting" : "Stopping"} sends a command to the lab robot target. Verify the address before continuing.</DialogDescription></DialogHeader><div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{confirmedRobotTarget.ip}:{confirmedRobotTarget.port}</div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox checked={targetConfirmed} onCheckedChange={(value) => setTargetConfirmed(value === true)} /><span>I confirm this is the intended lab IIWA target.</span></Label><DialogFooter><Button variant="outline" onClick={() => setStartDialog(false)}>Cancel</Button><Button variant={robotDialogCommand === "stop_iiwa" ? "destructive" : "default"} disabled={!targetConfirmed || robotCommand.isPending} onClick={() => robotCommand.mutate({ command: robotDialogCommand, target: confirmedRobotTarget })}>{robotDialogCommand === "start_iiwa" ? <Power /> : <Square />}{robotCommand.isPending ? "Queueing…" : robotDialogCommand === "start_iiwa" ? "Queue start" : "Queue stop"}</Button></DialogFooter></DialogContent></Dialog>
     </div>
   )
 }

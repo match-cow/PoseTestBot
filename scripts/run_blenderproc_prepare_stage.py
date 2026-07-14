@@ -49,6 +49,15 @@ def parse_args() -> argparse.Namespace:
         default="object_models",
         help="Folder containing objects.json and object model files.",
     )
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--object-name", action="append", default=None,
+        help="Registry object to prepare. May be repeated; defaults to all valid objects.",
+    )
+    selection.add_argument(
+        "--objectless", action="store_true",
+        help="Prepare camera inputs with explicit empty object metadata.",
+    )
     parser.add_argument(
         "--camera-transformations",
         default="scripts/default_data/camera_ee_transform.json",
@@ -108,12 +117,14 @@ def run_prepare(
     object_folder: Path,
     camera_transformations: dict[str, object],
     subdir: str,
+    selected_objects: list[str] | None = None,
 ) -> dict[str, Path]:
     prepared = prepare_sensor_folders(
         input_folder=input_folder,
         object_folder=object_folder,
         camera_transformations=camera_transformations,
         subdir=subdir,
+        selected_objects=selected_objects,
     )
     return {f"{item.sensor_name}:{subdir}": item.output_folder for item in prepared}
 
@@ -148,6 +159,7 @@ def main() -> None:
             object_folder=object_folder,
             camera_transformations=camera_transformations,
             subdir=args.subdir,
+            selected_objects=[] if args.objectless else args.object_name,
         )
         if calibration_profiles is not None:
             transform_path = write_camera_transformations(
