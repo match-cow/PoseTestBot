@@ -65,7 +65,8 @@ def sensor_status():
     if error is not None:
         payload, code = error
         return jsonify(payload), code
-    return jsonify(status)
+    assert status is not None
+    return jsonify(_include_preview_claimed_devices(status))
 
 
 @sensors_bp.get("/sensors/aliases")
@@ -172,6 +173,82 @@ def _active_preview_jobs_by_key() -> tuple[dict[str, Any], dict[str, Any]]:
         elif sensor_key:
             stale[str(sensor_key)] = job
     return active, stale
+
+
+def _include_preview_claimed_devices(status: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep healthy preview-owned sensors visible while SDK discovery is exclusive.
+
+    DepthAI discovery does not return an OAK device while another process owns
+    it.  The live preview worker is direct evidence that the device is still
+    connected, so merge its submitted sensor specification into the web status
+    response until the preview releases it.
+    """
+
+    merged = dict(status)
+    families = []
+    families_by_type: dict[str, dict[str, Any]] = {}
+    known_keys: set[str] = set()
+    for raw_family in status.get("families", []):
+        if not isinstance(raw_family, Mapping):
+            continue
+        family = dict(raw_family)
+        devices = [
+            dict(device)
+            for device in raw_family.get("devices", [])
+            if isinstance(device, Mapping)
+        ]
+        family["devices"] = devices
+        sensor_type = str(family.get("sensor_type", ""))
+        if sensor_type:
+            families_by_type[sensor_type] = family
+        for device in devices:
+            known_keys.add(_sensor_key(device))
+        families.append(family)
+
+    active_by_key, _stale_by_key = _active_preview_jobs_by_key()
+    for key, job in active_by_key.items():
+        if key in known_keys:
+            continue
+        spec = job.parameters.get("sensor_spec")
+        if not isinstance(spec, Mapping):
+            continue
+        sensor_type = str(spec.get("sensor_type", ""))
+        family = families_by_type.get(sensor_type)
+        if family is None:
+            continue
+        claimed_device = dict(spec)
+        claimed_device["connected"] = True
+        claimed_device["discovery_state"] = "claimed_by_preview"
+        family["devices"].append(claimed_device)
+        known_keys.add(key)
+
+    for family in families:
+        connected_count = sum(
+            device.get("connected") is not False for device in family["devices"]
+        )
+        family["connected_count"] = connected_count
+        expected_count = family.get("expected_count")
+        if isinstance(expected_count, int):
+            family["meets_expected"] = connected_count >= expected_count
+            diagnostics = family.get("diagnostics")
+            if connected_count >= expected_count and isinstance(diagnostics, list):
+                family["diagnostics"] = [
+                    item
+                    for item in diagnostics
+                    if not (
+                        isinstance(item, Mapping)
+                        and item.get("code") == "expected_count_not_met"
+                    )
+                ]
+
+    merged["families"] = families
+    merged["total_connected"] = sum(
+        int(family.get("connected_count", 0)) for family in families
+    )
+    merged["all_expected_connected"] = all(
+        family.get("meets_expected") is not False for family in families
+    )
+    return merged
 
 
 def _preview_job_payload(job) -> dict[str, Any]:

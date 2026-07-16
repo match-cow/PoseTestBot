@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { Activity, Archive, Bot, Boxes, ChevronDown, FlaskConical, Gauge, ListChecks, Moon, Plus, Sun, Workflow } from "lucide-react"
+import { Activity, Bot, Boxes, ChevronDown, FlaskConical, Gauge, Github, ListChecks, Moon, Plus, Sun, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useOperator } from "@/providers/operator-provider"
-import { useTheme, type Theme } from "@/providers/theme-provider"
+import { useTheme } from "@/providers/theme-provider"
 import { cn } from "@/lib/utils"
 
 const navigation = [
@@ -17,7 +17,6 @@ const navigation = [
   { to: "/devices", label: "Devices", icon: Bot },
   { to: "/cell", label: "Cell", icon: Boxes },
   { to: "/workflow/setup", label: "Workflow", icon: Workflow, match: "/workflow" },
-  { to: "/artifacts", label: "Artifacts", icon: Archive },
   { to: "/jobs", label: "Jobs", icon: ListChecks },
 ]
 
@@ -38,25 +37,25 @@ export function AppShell() {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="min-h-screen bg-background text-foreground">
+      <div className="min-h-screen bg-workspace text-foreground">
         <aside className="fixed inset-y-0 left-0 z-40 flex w-[244px] flex-col border-r border-sidebar-border bg-sidebar px-4 py-5 text-sidebar-foreground">
           <Link to="/dashboard" className="flex items-center gap-3 px-2">
-            <img src={bootstrap.brand.logo_url} alt="PoseTestBot" className="size-9 object-contain" />
-            <div><div className="font-display font-semibold tracking-tight">PoseTestBot</div><div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-sidebar-foreground/50">Operator console</div></div>
+            <img src={bootstrap.brand.logo_urls[theme]} alt={bootstrap.brand.name} className="size-9 rounded-[7px] object-contain" />
+            <div><div className="font-display text-[17px] font-semibold tracking-tight">PoseTestBot</div><div className="text-[9px] font-bold uppercase tracking-[0.18em] text-sidebar-foreground/50">Operator console</div></div>
           </Link>
           <nav className="mt-9 space-y-1" aria-label="Primary navigation">
             {navigation.map(({ to, label, icon: Icon, match }) => {
               const active = match ? location.pathname.startsWith(match) : location.pathname === to
-              return <NavLink key={to} to={to} className={cn("group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-sidebar-foreground/65 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground", active && "bg-sidebar-accent text-sidebar-foreground shadow-sm")}><Icon className={cn("size-[18px]", active && "text-primary")} />{label}</NavLink>
+              return <NavLink key={to} to={to} className={cn("group flex items-center gap-3 rounded-[8px] border border-transparent px-3 py-2.5 text-[13px] font-semibold text-sidebar-foreground/65 transition-colors duration-150 hover:bg-secondary hover:text-sidebar-foreground", active && "border-primary/55 bg-sidebar-accent text-sidebar-foreground")}><Icon className={cn("size-[17px]", active && "text-primary-strong")} />{label}</NavLink>
             })}
           </nav>
-          <div className="mt-auto rounded-xl border border-sidebar-border bg-sidebar-accent/50 p-3">
+          <div className="mt-auto rounded-[10px] border border-sidebar-border bg-secondary p-3">
             <div className="flex items-center gap-2 text-xs font-semibold"><FlaskConical className="size-4 text-primary" />Trusted lab network</div>
           </div>
         </aside>
 
         <div className="ml-[244px] min-w-0">
-          <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-4 border-b border-border bg-background/92 px-7 backdrop-blur-xl">
+          <header className="sticky top-0 z-30 flex h-[68px] items-center justify-between gap-4 border-b border-border bg-card/95 px-7 backdrop-blur-xl">
             <div className="flex min-w-0 items-center gap-3">
               <Activity className="size-4 shrink-0 text-primary-strong" />
               <Select value={runs.some((run) => run.path === selectedRun) ? selectedRun : "__custom"} onValueChange={(value) => value === "__new" ? setNewRunOpen(true) : value !== "__custom" && selectRun(value)}>
@@ -70,10 +69,8 @@ export function AppShell() {
               <span className="hidden truncate text-xs text-muted-foreground xl:block">{selectedRun}</span>
             </div>
             <div className="flex items-center gap-2">
-              <Select value={theme} onValueChange={(value) => setTheme(value as Theme)}>
-                <Tooltip><TooltipTrigger asChild><SelectTrigger className="w-[118px]" aria-label="Theme"><span className="flex items-center gap-2">{theme === "dark" ? <Moon /> : <Sun />}<SelectValue /></span></SelectTrigger></TooltipTrigger><TooltipContent>Color theme</TooltipContent></Tooltip>
-                <SelectContent><SelectItem value="system">System</SelectItem><SelectItem value="light">Light</SelectItem><SelectItem value="dark">Dark</SelectItem></SelectContent>
-              </Select>
+              <Tooltip><TooltipTrigger asChild><Button asChild variant="outline" size="icon" className="size-[34px]"><a href="https://github.com/match-cow/PoseTestBot" target="_blank" rel="noreferrer" aria-label="Open PoseTestBot on GitHub"><Github /></a></Button></TooltipTrigger><TooltipContent>GitHub repository</TooltipContent></Tooltip>
+              <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="size-[34px]" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}>{theme === "light" ? <Moon /> : <Sun />}</Button></TooltipTrigger><TooltipContent>{theme === "light" ? "Use dark theme" : "Use light theme"}</TooltipContent></Tooltip>
               <Button variant="outline" size="icon" onClick={() => setNewRunOpen(true)} aria-label="Choose run path"><ChevronDown /></Button>
             </div>
           </header>

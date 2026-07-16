@@ -123,7 +123,12 @@ def ui_bootstrap():
             "schema_version": "web_bootstrap.v1",
             "brand": {
                 "name": "PoseTestBot",
-                "logo_url": "/assets/cow200.png",
+                "logo_url": "/assets/cow_light.png",
+                "logo_urls": {
+                    "light": "/assets/cow_light.png",
+                    "dark": "/assets/cow_dark.png",
+                },
+                "favicon_url": "/assets/cow_favicon.png",
             },
             "robot": {
                 "ip": LAB_ROBOT_IP,

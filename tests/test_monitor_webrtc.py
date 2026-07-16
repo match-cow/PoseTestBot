@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from aiortc import VideoStreamTrack
+from aiortc.codecs import vpx as aiortc_vpx
 
 from posetestbot.monitoring import smoke
 from posetestbot.monitoring import webrtc
@@ -98,6 +99,17 @@ def test_bgr_frame_conversion_assigns_90khz_timestamps() -> None:
     assert first.time_base == Fraction(1, 90_000)
     assert second.pts == 3_000
     assert second.time_base == Fraction(1, 90_000)
+
+
+def test_vp8_packetization_leaves_tailscale_mtu_headroom(monkeypatch) -> None:
+    monkeypatch.setattr(aiortc_vpx, "PACKET_MAX", 1300)
+
+    configured = webrtc.configure_vp8_packet_size()
+    payloads = aiortc_vpx.Vp8Encoder._packetize(bytes(5000), picture_id=1)
+
+    assert configured == webrtc.VP8_PACKET_MAX_BYTES == 1100
+    assert len(payloads) > 1
+    assert max(map(len, payloads)) <= 1100
 
 
 def test_server_stop_closes_all_peers() -> None:

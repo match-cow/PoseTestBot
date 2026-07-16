@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-14
+Last updated: 2026-07-16
 
 PoseTestBot has been refocused as an acquisition, calibration,
 synchronization, and BOP dataset export repository. The BOP dataset export is
@@ -20,7 +20,6 @@ In scope:
 - ArUco/target detection support for calibration,
 - BlenderProc preparation/render planning for optional GT/masks,
 - BOP dataset export,
-- artifact browsing and BOP scene/frame/overlay inspection,
 - React/shadcn operator console, Flask API, and local job runner.
 
 Out of scope in this repository:
@@ -36,7 +35,7 @@ Out of scope in this repository:
   with a Bun-locked React, TypeScript, Vite, Tailwind, and Radix-based shadcn
   operator console:
   - fixed desktop navigation for Dashboard, Devices, phase-based Workflow,
-    Artifacts, and Jobs with a global contained run picker,
+    and Jobs with a global contained run picker,
   - system/light/dark theming and local selected-run/robot-target persistence,
   - `web_bootstrap.v1` and symlink-safe, newest-first `web_run_index.v1` APIs,
   - device cards with aliases, mounting/orientation, card-local previews,
@@ -44,10 +43,12 @@ Out of scope in this repository:
   - metadata-generated stage forms, artifact statuses, plan-only setup defaults,
     preflight blockers, preview shutdown before camera work, and a fresh two-gate
     physical-capture dialog,
-  - searchable artifact previews, BOP frame/GT/mask overlays, active-first jobs,
-    live logs, cancellation, and immediate capture-stop controls,
+  - active-first jobs, live logs, cancellation, and immediate capture-stop
+    controls,
   - committed hashed UI assets included in wheels, installer verification, and
     opt-in `scripts/install.sh --with-web-build`,
+  - theme-aware MATCH COW branding sourced from ArUcoGridGen, with dedicated
+    light/dark logos and the current cow favicon,
   - lazy read-only Cell route with a demand-driven React Three Fiber canvas,
     Z-up millimetre coordinates, view presets, layers, selection provenance,
     exact paged timeline playback, and a WebGL-free component-list fallback,
@@ -124,6 +125,25 @@ Out of scope in this repository:
   - synthetic recovery, rejection-gate, selection, legacy-loading,
     rectification, pipeline, and BOP integration tests.
 
+- Reworked the iiwa calibration-variance proposal into a teachable Workbench
+  program under `/PoseTestBot/TemplateBase`:
+  - versioned nine-frame teaching manifest covering the complete 3 × 3 raster,
+    with `CalibrationCenter` as the shared phase anchor,
+  - Sunrise `ObjectFrame` resolution during initialization with no runtime
+    numeric absolute targets, early missing-frame failure, center-anchored
+    phases, and the commissioning interlock still disabled,
+  - program-owned zero-translation A/B/C dither using nine `LIN_REL` legs
+    relative to the taught center; the former six orientation frames, two depth
+    frames, Ready frame, and depth phase are removed,
+  - reproducible equal-scale Matplotlib SVG/PNG engineering plot with the
+    measured 420 × 297 mm template, exact taught poses, derived orientation
+    triads/deltas, sequence views, and explicitly non-metric ceiling-cell
+    context,
+  - printable nine-row Workbench teaching, relative-path commissioning, T1, and capture
+    acceptance checklist,
+  - manifest/Java/delta consistency, KUKA degree conversion, known orientation,
+    and headless plot artifact tests. No robot or camera was accessed.
+
 - Removed downstream-only packages and scripts:
   - `posetestbot/estimation`
   - `posetestbot/evaluation`
@@ -155,8 +175,9 @@ Out of scope in this repository:
   - `rewrite_calibration_validation.v1`
   - `rewrite_bop_export_readiness.v1`
 - Reworked recommendations to suggest acquisition steps only.
-- Reworked artifact browser to list/preview acquisition artifacts and inspect
-  BOP scene/frame data, GT, masks, and provenance.
+- Removed the standalone Artifacts page and its Flask browsing/preview APIs;
+  operators use the focused workflow/readiness views while filesystem
+  inspection remains available for troubleshooting.
 - Removed Flask metric dashboard and BOP result CSV endpoints.
 - Added per-RealSense inverted-mount capture support that rotates saved RGB-D
   frames 180 degrees, corrects intrinsics, and carries orientation metadata
@@ -208,11 +229,24 @@ Out of scope in this repository:
   and locked preview images out of card layout flow. Playwright covers all
   three RealSense previews while the lower OAK-D Pro and ZED controls remain
   scrollable and selectable in a 1280×720 operator viewport.
+- Contained OAK-D Pro preview images, errors, and long DepthAI source IDs inside
+  their card-local slot so toggling that preview cannot resize or obscure the
+  remaining Devices page. Playwright covers the full OAK start/render/stop
+  lifecycle while keeping all five lab sensor cards reachable.
+- Kept OAK-D Pro visible during live preview by reconciling healthy preview job
+  sensor specs into the web sensor status while DepthAI exclusively owns the
+  camera and omits it from discovery. Flask and Playwright regressions cover
+  that claimed-device transition. A real browser acceptance kept the 640-pixel
+  live frame and card visible across periodic discovery refreshes, then stopped
+  and released the preview cleanly; no acquisition or robot command ran.
 - Audited the dashboard, Devices, Setup, Preflight, and Capture controls for
   operator-console semantics: RealSense previews are explicit pressed-state
   toggles with transition locking, repeated snapshot/stop requests are guarded,
   stop-all failures are visible, robot start and stop share validated target
   confirmation, and capture/preflight controls expose loading states.
+- Aligned the operator console with the compact MATCH engineering-tool theme:
+  exact neutral and lime semantic tokens, denser shared controls and cards,
+  quieter selection states, and an accessible persisted light/dark toggle.
 - Made run setup snapshot exactly the cameras selected on Devices, reject
   missing/disconnected selections, and preserve each camera's saved static or
   eye-in-hand mounting mode instead of overwriting the lab layout globally.
@@ -241,6 +275,17 @@ Out of scope in this repository:
   rendered. A five-second first-frame watchdog reports packet/receive/decode
   counters and exercises the bounded reconnect path instead of exposing the
   empty grid indefinitely.
+- Fixed real UGREEN streams that delivered RTP packets but no complete browser
+  frames over a 1280-byte Tailscale path. The dedicated worker now caps aiortc
+  VP8 payloads at 1100 bytes, publishes that limit in monitor status, and tests
+  browser playback with textured multi-packet frames instead of a flat-color
+  fixture that could not expose MTU fragmentation.
+- Completed an operator-authorized real UGREEN acceptance after the MTU fix.
+  Chromium rendered the live stream at 640×480 with `readyState=4` and advancing
+  playback time; a second receiver decoded 35/35 frames; V4L2 reported MJPEG
+  640×480 at 30 fps; and the validation peer detached while the operator peer
+  and media counters remained healthy. No robot or acquisition-pipeline command
+  was executed.
 - Reconciled RealSense SDK serials with USB/V4L2 node metadata so three
   connected D435-class cameras appear as three devices, not duplicated SDK and
   USB entries.
@@ -307,6 +352,8 @@ Targeted acquisition tests:
 
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest \
+  tests/test_iiwa_teaching_plan.py \
+  tests/test_iiwa_teaching_plot.py \
   tests/test_runtime_status.py \
   tests/test_hardware_status.py \
   tests/test_manifest.py \
@@ -314,7 +361,6 @@ UV_CACHE_DIR=/tmp/uv-cache uv run pytest \
   tests/test_pipeline_sequences.py \
   tests/test_preflight.py \
   tests/test_rewrite_gate.py \
-  tests/test_artifact_browser.py \
   tests/test_pipeline_recommendations.py \
   tests/test_web_interface.py \
   tests/test_web_preview_playwright.py
@@ -325,6 +371,8 @@ Full validation:
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
+MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
+  uv run python scripts/plot_iiwa_calibration_teaching_plan.py
 git diff --check
 uv run python scripts/run_pipeline_sequence.py working_data/new_real_run \
   --sequence real_full_capture_validation --plan-only
@@ -334,14 +382,18 @@ uv run python scripts/run_pipeline_sequence.py working_data/new_real_run \
 
 - Run the safety-gated camera lifecycle acceptance from
   `docs/CAMERA_SERVICE_LIFECYCLE_PLAN.md` on the operator-ready lab host through
-  both LAN and Tailscale. It must exercise the real UGREEN, all three
-  RealSense devices, and OAK-D Pro; this implementation session did not receive
-  physical-camera or robot safety authorization and therefore did not open any
-  device.
+  both LAN and Tailscale. The standalone UGREEN/browser leg now passes; the
+  remaining combined acceptance must exercise it concurrently with all three
+  RealSense devices and OAK-D Pro through the full restart matrix.
 - On an operator-ready lab host with all configured cameras visible, create a
   fresh `0.05 m/s` run, inspect `real_full_capture_validation` with
   `--plan-only`, deliberately execute it, and require
   `rewrite_full_capture.v1` to pass.
+- Import/compile `PoseTestBot_CalibrationVarianceProposal.java` in the real
+  Sunrise.Workbench project, create and teach all 18 persistent Application
+  Data children, resolve every frame, and complete offline path simulation with
+  the printable checklist. Then perform separately authorized T1 validation;
+  neither step is automated by repository tests.
 - Promote robust calibration profiles from real observations.
 - Run BOP export readiness gates on real captured/calibrated datasets.
 - Keep improving live capture telemetry from real operator feedback.

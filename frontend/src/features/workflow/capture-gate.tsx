@@ -30,7 +30,7 @@ export function CaptureGate() {
       await api("/sensors/previews/stop", { method: "POST", body: "{}" })
       return api<{ job_id: string }>("/pipeline/run", { method: "POST", body: JSON.stringify({ stage: "capture_execution", run_root: selectedRun, options: { allow_cameras: true, allow_real_robot: true, include_sensors: true } }) })
     },
-    onSuccess: (data) => { toast.success("Physical capture queued", { description: `Job ${data.job_id}` }); setOpen(false); setRobotAck(false); setCameraAck(false); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["capture-jobs", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["artifacts", selectedRun] }) },
+    onSuccess: (data) => { toast.success("Physical capture queued", { description: `Job ${data.job_id}` }); setOpen(false); setRobotAck(false); setCameraAck(false); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["capture-jobs", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] }) },
     onError: (error) => toast.error("Physical capture was not queued", { description: errorMessage(error) }),
   })
   const resetOpen = (value: boolean) => { setOpen(value); setRobotAck(false); setCameraAck(false) }

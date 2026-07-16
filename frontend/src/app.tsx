@@ -5,7 +5,6 @@ import { AppShell } from "@/components/app-shell"
 const DashboardPage = lazy(() => import("@/features/dashboard/dashboard-page").then((module) => ({ default: module.DashboardPage })))
 const DevicesPage = lazy(() => import("@/features/devices/devices-page").then((module) => ({ default: module.DevicesPage })))
 const WorkflowPage = lazy(() => import("@/features/workflow/workflow-page").then((module) => ({ default: module.WorkflowPage })))
-const ArtifactsPage = lazy(() => import("@/features/artifacts/artifacts-page").then((module) => ({ default: module.ArtifactsPage })))
 const JobsPage = lazy(() => import("@/features/jobs/jobs-page").then((module) => ({ default: module.JobsPage })))
 const CellPage = lazy(() => import("@/features/cell/cell-page").then((module) => ({ default: module.CellPage })))
 
@@ -22,7 +21,6 @@ export function App() {
         <Route path="/devices" element={<Page><DevicesPage /></Page>} />
         <Route path="/cell" element={<Page><CellPage /></Page>} />
         <Route path="/workflow/:phase" element={<Page><WorkflowPage /></Page>} />
-        <Route path="/artifacts" element={<Page><ArtifactsPage /></Page>} />
         <Route path="/jobs" element={<Page><JobsPage /></Page>} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>

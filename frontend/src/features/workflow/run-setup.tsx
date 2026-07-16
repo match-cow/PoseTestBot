@@ -74,7 +74,7 @@ export function RunSetup() {
       const selectedSensors = [...selectedKeys].map((key) => detected.get(key)!).map((device) => ({ ...device, display_name: device.effective_display_name ?? device.display_name }))
       return api("/run-config", { method: "POST", body: JSON.stringify({ run_root: selectedRun, ...values, sensors: selectedSensors, from_detected_sensors: false, sequence_options: {} }) })
     },
-    onSuccess: () => { toast.success("Run configuration written"); queryClient.invalidateQueries({ queryKey: ["run-config", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["artifacts", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["runs"] }) },
+    onSuccess: () => { toast.success("Run configuration written"); queryClient.invalidateQueries({ queryKey: ["run-config", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["runs"] }) },
     onError: (error) => toast.error("Run configuration was not written", { description: errorMessage(error) }),
   })
 

@@ -22,8 +22,9 @@ This safe project bootstrap:
 - lists registered sensor adapters without opening hardware,
 - verifies that the self-contained operator-console build is bundled.
 
-The required Python environment also includes `aiortc`, `aiohttp`, `aioice`,
-and direct `av` support for the UGREEN room monitor's video-only WebRTC stream.
+The required Python environment also includes Matplotlib for reproducible,
+headless calibration teaching plots plus `aiortc`, `aiohttp`, `aioice`, and
+direct `av` support for the UGREEN room monitor's video-only WebRTC stream.
 The worker binds offer/answer signaling to an ephemeral loopback port and runs
 a local STUN binding responder on UDP port 3478. The Flask API proxies only
 signaling; browsers use the advertised STUN port to obtain numeric candidates
@@ -155,6 +156,22 @@ Verify:
 uv run python scripts/runtime_status.py --json
 ```
 
+### Calibration Teaching Plot
+
+Matplotlib is a direct project dependency installed by `uv sync`. Regenerating
+the committed iiwa Workbench teaching SVG and PNG is headless and does not open
+the robot or cameras:
+
+```bash
+MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
+  uv run python scripts/plot_iiwa_calibration_teaching_plan.py
+```
+
+The script validates `iiwa/calibration_teaching_plan.v2.json` and writes
+`docs/images/iiwa_calibration_teaching_plan.svg` plus the corresponding PNG.
+The procedure and printable sign-off sheet are linked from
+`docs/IIWA_CALIBRATION_VARIANCE_PROPOSAL.md`.
+
 ### Playwright Browser Tests
 
 The Python Playwright package is a dev dependency installed by
@@ -181,16 +198,19 @@ The UGREEN USB camera (`0c45:2283`) is owned by a hidden managed service using
 the resource `monitoring_camera:0c45:2283`. The service starts lazily and does
 not open the V4L2 node until a browser requests WebRTC media. It requests MJPEG
 640×480 at 30 fps with a one-frame V4L2 buffer, publishes VP8-preferred WebRTC
-video, and releases the camera after 15 seconds without a connected peer. It
-has no JPEG fallback. The generic RGB-D sensor preview controls remain
-latest-frame JPEG streams.
+video, and releases the camera after 15 seconds without a connected peer. VP8
+payloads are capped at 1100 bytes so the complete RTP datagram remains below
+the 1280-byte Tailscale interface MTU after transport overhead. It has no JPEG
+fallback. The generic RGB-D sensor preview controls remain latest-frame JPEG
+streams.
 
 Managed services are excluded from the normal Jobs list and held-resource
 banner. Use `GET /jobs?include_services=1` for diagnostics. Monitor health is
 persisted as `monitor_webrtc.v2` with one-second heartbeats, camera state,
 capture/media counters, frame timestamps, peer counts, STUN port, and a
-concrete failure reason. Legacy v1 artifacts remain readable but are never
-reused as live state.
+concrete failure reason. The status also records `vp8_packet_max_bytes` for
+transport diagnostics. Legacy v1 artifacts remain readable but are never reused
+as live state.
 
 Starting or retrying the monitor from the dashboard is safe with respect to
 the robot: it queues only the monitor worker and never runs an acquisition
@@ -266,6 +286,10 @@ git diff --check
   the configured STUN UDP port (3478 by default) plus WebRTC media on the
   trusted lab LAN. The loopback signaling port is intentionally not exposed to
   browsers.
+- Room-monitor diagnostics show packets arriving but zero received/decoded
+  frames: confirm the active worker status reports
+  `vp8_packet_max_bytes: 1100`. A worker started before the MTU fix must be
+  restarted before retrying the browser connection.
 - Plan the isolated UGREEN hardware smoke without opening the camera with
   `uv run python scripts/run_monitor_webrtc_smoke.py --plan-only`. Physical
   execution additionally requires explicit operator authorization and all

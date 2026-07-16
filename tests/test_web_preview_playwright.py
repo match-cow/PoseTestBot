@@ -153,6 +153,21 @@ def fake_full_lab_sensor_status(expected_counts=None) -> dict:
     return status
 
 
+def fake_full_lab_sensor_status_with_claimed_oak(expected_counts=None) -> dict:
+    """Model DepthAI discovery while the preview process owns the OAK device."""
+
+    status = fake_full_lab_sensor_status(expected_counts)
+    oak_family = next(
+        family
+        for family in status["families"]
+        if family["sensor_type"] == "oak_d_pro"
+    )
+    oak_family["devices"] = []
+    oak_family["connected_count"] = 0
+    status["total_connected"] = 4
+    return status
+
+
 class FakePreviewJob:
     def __init__(self, job_id: str, *, name: str, parameters: dict, resources: list[str]):
         self.id = job_id
@@ -247,6 +262,12 @@ class SyntheticVideoTrack(VideoStreamTrack):
         super().__init__()
         self.frame_count = 0
         self.on_frame = on_frame
+        self.image = np.random.default_rng(42).integers(
+            0,
+            256,
+            size=(480, 640, 3),
+            dtype=np.uint8,
+        )
         self.recv_idle = asyncio.Event()
         self.recv_idle.set()
 
@@ -258,9 +279,9 @@ class SyntheticVideoTrack(VideoStreamTrack):
             await asyncio.sleep(1 / 30)
             if self.readyState != "live":
                 raise MediaStreamError
-            image = np.zeros((480, 640, 3), dtype=np.uint8)
-            image[:, :, 1] = 80 + (self.frame_count % 120)
-            image[:, :, 2] = 180
+            # A textured frame produces the same multi-packet VP8 keyframe as
+            # the real room camera. Flat-color fixtures hide path-MTU bugs.
+            image = np.roll(self.image, self.frame_count % 32, axis=1)
             frame = bgr_frame_to_av(image, frame_index=self.frame_count, fps=30)
             self.frame_count += 1
             self.on_frame(self.frame_count)
@@ -825,6 +846,92 @@ def test_three_live_realsense_previews_keep_lower_lab_sensors_reachable(
     use_in_run.click()
     expect(use_in_run).to_be_checked()
     zed_card = sensor_card(page, ZED_SENSOR)
+    zed_card.scroll_into_view_if_needed()
+    expect(zed_card).to_be_visible()
+
+
+def test_oak_preview_toggle_keeps_full_devices_page_reachable(
+    preview_server,
+    page,
+    monkeypatch,
+) -> None:
+    server, runner = preview_server
+    monkeypatch.setattr(web_sensors, "collect_sensor_status", fake_full_lab_sensor_status)
+    page.set_viewport_size({"width": 1280, "height": 720})
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
+
+    cards = page.locator('[data-testid="sensor-card"]')
+    grid = page.locator('[data-testid="sensor-grid"]')
+    oak_card = sensor_card(page, OAK_SENSOR)
+    zed_card = sensor_card(page, ZED_SENSOR)
+    toggle = oak_card.locator('[data-testid="sensor-preview-toggle"]')
+
+    expect(cards).to_have_count(5)
+    oak_card.scroll_into_view_if_needed()
+    toggle.click()
+    wait_for(lambda: len(runner.submitted) == 1)
+    job = runner.jobs["preview-1"]
+    assert job.parameters["sensor_key"] == OAK_SENSOR
+
+    preview_root = Path(job.parameters["preview_root"])
+    write_jpeg(preview_root / "latest.jpg")
+    write_json(
+        preview_root / "preview_status.json",
+        {
+            "schema_version": "sensor_rgb_preview.v1",
+            "status": "running",
+            "sensor_key": OAK_SENSOR,
+            "frame_count": 2,
+            "latest_image": "latest.jpg",
+            "selected_node": {
+                "kind": "depthai",
+                "device_id": OAK_SENSOR.split(":", 1)[1],
+                "queue_blocking": False,
+                "queue_max_size": 1,
+            },
+            "inverted": False,
+            "error": None,
+        },
+    )
+    job.status = "running"
+
+    expect(oak_card.locator('[data-testid="sensor-preview-image"]')).to_be_visible(
+        timeout=4_000
+    )
+    expect(oak_card.locator('[data-testid="sensor-preview-meta"]')).to_contain_text(
+        OAK_SENSOR.split(":", 1)[1]
+    )
+    expect(cards).to_have_count(5)
+    expect(grid).to_be_visible()
+    zed_card.scroll_into_view_if_needed()
+    expect(zed_card).to_be_visible()
+
+    # DepthAI no longer includes an OAK device in discovery while another
+    # process owns it. Reload through that transition and require the active
+    # preview specification to keep the card and frame in the Devices UI.
+    monkeypatch.setattr(
+        web_sensors,
+        "collect_sensor_status",
+        fake_full_lab_sensor_status_with_claimed_oak,
+    )
+    page.reload(wait_until="domcontentloaded")
+    oak_card = sensor_card(page, OAK_SENSOR)
+    zed_card = sensor_card(page, ZED_SENSOR)
+    toggle = oak_card.locator('[data-testid="sensor-preview-toggle"]')
+    expect(page.locator('[data-testid="sensor-card"]')).to_have_count(5)
+    expect(oak_card.locator('[data-testid="sensor-preview-image"]')).to_be_visible(
+        timeout=4_000
+    )
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+
+    oak_card.scroll_into_view_if_needed()
+    toggle.click()
+    wait_for(lambda: runner.canceled == ["preview-1"])
+
+    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(oak_card.locator('[data-testid="sensor-preview-image"]')).to_have_count(0)
+    expect(cards).to_have_count(5)
+    expect(grid).to_be_visible()
     zed_card.scroll_into_view_if_needed()
     expect(zed_card).to_be_visible()
 

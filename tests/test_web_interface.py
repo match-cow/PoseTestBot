@@ -14,7 +14,6 @@ os.environ.setdefault("POSETESTBOT_WEB_RUN_ROOTS", "/tmp")
 os.environ.setdefault("POSETESTBOT_WEB_INPUT_ROOTS", "/tmp")
 
 from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
-from posetestbot.io.artifacts import BOP_DIR, BOP_EXPORT_MANIFEST, BOP_TARGETS_BOP19, DEPTH_DIR, RGB_DIR
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.web import legacy as web_legacy
 from posetestbot.web.app import _PreviewPollLogFilter
@@ -46,31 +45,6 @@ def write_png(path: Path) -> None:
     assert cv2.imwrite(path.as_posix(), image)
 
 
-def make_bop_scene(run_root: Path) -> Path:
-    scene = run_root / BOP_DIR / "realsense_123" / "test" / "000001"
-    write_png(scene / RGB_DIR / "000000.png")
-    write_png(scene / DEPTH_DIR / "000000.png")
-    write_json(scene / "scene_camera.json", {"0": {"cam_K": [1, 0, 0, 0, 1, 0, 0, 0, 1]}})
-    write_json(scene / "scene_gt.json", {"0": []})
-    write_json(
-        run_root / BOP_DIR / BOP_EXPORT_MANIFEST,
-        {
-            "schema_version": "bop_export_manifest.v1",
-            "exports": [
-                {
-                    "sensor_name": "realsense_123",
-                    "scene_id": 1,
-                    "split": "test",
-                    "scene_folder": scene.relative_to(run_root).as_posix(),
-                }
-            ],
-            "object_models": [{"object_name": "cube", "obj_id": 1}],
-        },
-    )
-    write_json(run_root / BOP_DIR / BOP_TARGETS_BOP19, [{"scene_id": 1, "im_id": 0, "obj_id": 1, "inst_count": 1}])
-    return scene
-
-
 def test_index_serves_bundled_spa_without_cdn_dependencies() -> None:
     client = app.test_client()
 
@@ -84,19 +58,22 @@ def test_index_serves_bundled_spa_without_cdn_dependencies() -> None:
     assert "bootstrap" not in html.lower()
 
 
-def test_index_uses_cow_branding_asset() -> None:
+def test_index_uses_theme_aware_cow_branding_assets() -> None:
     client = app.test_client()
 
     response = client.get("/")
     html = response.get_data(as_text=True)
-    logo = client.get("/assets/cow200.png")
+    light_logo = client.get("/assets/cow_light.png")
+    dark_logo = client.get("/assets/cow_dark.png")
+    favicon = client.get("/assets/cow_favicon.png")
 
     assert response.status_code == 200
-    assert 'rel="icon" type="image/png" href="/assets/cow200.png"' in html
-    assert 'rel="apple-touch-icon" href="/assets/cow200.png"' in html
+    assert 'rel="icon" type="image/png" href="/assets/cow_favicon.png"' in html
+    assert 'rel="apple-touch-icon" href="/assets/cow_favicon.png"' in html
     assert "PoseTestBot Operator Console" in html
-    assert logo.status_code == 200
-    assert logo.mimetype == "image/png"
+    for asset in (light_logo, dark_logo, favicon):
+        assert asset.status_code == 200
+        assert asset.mimetype == "image/png"
 
 
 def test_ui_bootstrap_includes_robot_control_defaults() -> None:
@@ -108,7 +85,15 @@ def test_ui_bootstrap_includes_robot_control_defaults() -> None:
     assert response.status_code == 200
     assert payload["schema_version"] == "web_bootstrap.v1"
     assert payload["robot"] == {"ip": LAB_ROBOT_IP, "port": DEFAULT_ROBOT_PORT}
-    assert payload["brand"]["logo_url"] == "/assets/cow200.png"
+    assert payload["brand"] == {
+        "name": "PoseTestBot",
+        "logo_url": "/assets/cow_light.png",
+        "logo_urls": {
+            "light": "/assets/cow_light.png",
+            "dark": "/assets/cow_dark.png",
+        },
+        "favicon_url": "/assets/cow_favicon.png",
+    }
     assert "/tmp" in payload["allowed_run_roots"]
 
 
@@ -365,34 +350,20 @@ def test_run_command_unknown_command_still_returns_404() -> None:
     assert response.get_json()["output"] == "Unknown command"
 
 
-def test_removed_metric_and_bop_result_endpoints_are_not_registered(tmp_path: Path) -> None:
+def test_artifact_endpoints_are_not_registered(tmp_path: Path) -> None:
     client = app.test_client()
     run_root = tmp_path / "run"
     run_root.mkdir()
 
-    assert client.get(f"/artifacts/metrics?run_root={run_root.as_posix()}").status_code == 404
-    assert client.get(f"/artifacts/bop-result?run_root={run_root.as_posix()}&path=x.csv").status_code == 404
-
-
-def test_bop_frame_endpoint_reports_dataset_frame_without_results(tmp_path: Path) -> None:
-    client = app.test_client()
-    run_root = tmp_path / "run"
-    scene = make_bop_scene(run_root)
-
-    response = client.get(
+    for path in (
+        "/artifacts",
+        "/artifacts/preview",
+        "/artifacts/file",
+        "/artifacts/bop-scene",
         "/artifacts/bop-frame",
-        query_string={
-            "run_root": run_root.as_posix(),
-            "path": scene.relative_to(run_root).as_posix(),
-            "image_id": "0",
-        },
-    )
-
-    payload = response.get_json()
-    assert response.status_code == 200
-    assert payload["type"] == "bop_frame_detail"
-    assert payload["scene"]["scene_id"] == 1
-    assert payload["result"] is None
+        "/artifacts/bop-frame-overlay",
+    ):
+        assert client.get(path, query_string={"run_root": run_root.as_posix()}).status_code == 404
 
 
 def test_pipeline_recommendations_endpoint_is_acquisition_only(tmp_path: Path) -> None:
@@ -786,6 +757,76 @@ def test_sensor_preview_submission_queues_one_job_per_selected_sensor(
         "run",
         "python",
         "scripts/stream_sensor_rgb_preview.py",
+    ]
+
+
+def test_sensor_status_keeps_preview_claimed_oak_visible(monkeypatch) -> None:
+    class FakeJob:
+        id = "oak-preview"
+        status = "running"
+        parameters = {
+            "preview_root": "working_data/sensor_previews/oak-preview",
+            "sensor_key": "oak_d_pro:18443010314F3B1300",
+            "sensor_preview": True,
+            "sensor_spec": {
+                "sensor_type": "oak_d_pro",
+                "device_id": "18443010314F3B1300",
+                "display_name": "OAK-D Pro 18443010314F3B1300",
+                "metadata": {"state": "X_LINK_UNBOOTED"},
+            },
+        }
+
+    class FakeRunner:
+        def list(self):
+            return [FakeJob()]
+
+    monkeypatch.setattr(web_sensors, "job_runner", FakeRunner())
+    monkeypatch.setattr(
+        web_sensors,
+        "collect_sensor_status",
+        lambda **_kwargs: {
+            "schema_version": "sensor_status.v1",
+            "families": [
+                {
+                    "sensor_type": "oak_d_pro",
+                    "display_name": "Luxonis OAK-D Pro",
+                    "devices": [],
+                    "connected_count": 0,
+                    "expected_count": 1,
+                    "meets_expected": False,
+                    "diagnostics": [
+                        {
+                            "code": "expected_count_not_met",
+                            "message": "Connected 0 of expected 1 device(s).",
+                        }
+                    ],
+                }
+            ],
+            "total_connected": 0,
+            "all_expected_connected": False,
+            "expected_counts_requested": True,
+        },
+    )
+
+    response = app.test_client().get("/sensors/status")
+
+    payload = response.get_json()
+    family = payload["families"][0]
+    assert response.status_code == 200
+    assert payload["total_connected"] == 1
+    assert payload["all_expected_connected"] is True
+    assert family["connected_count"] == 1
+    assert family["meets_expected"] is True
+    assert family["diagnostics"] == []
+    assert family["devices"] == [
+        {
+            "connected": True,
+            "device_id": "18443010314F3B1300",
+            "discovery_state": "claimed_by_preview",
+            "display_name": "OAK-D Pro 18443010314F3B1300",
+            "metadata": {"state": "X_LINK_UNBOOTED"},
+            "sensor_type": "oak_d_pro",
+        }
     ]
 
 

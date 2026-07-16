@@ -12,9 +12,9 @@ export const SheetDescription = DialogPrimitive.Description
 export const SheetContent = React.forwardRef<React.ElementRef<typeof DialogPrimitive.Content>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>>(({ className, children, ...props }, ref) => (
   <DialogPrimitive.Portal>
     <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm" />
-    <DialogPrimitive.Content ref={ref} className={cn("fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col gap-4 border-l border-border bg-background p-6 shadow-2xl", className)} {...props}>
+    <DialogPrimitive.Content ref={ref} className={cn("fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col gap-4 border-l border-border bg-card p-5 shadow-xl", className)} {...props}>
       {children}
-      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100 focus:ring-2 focus:ring-ring"><X className="size-4" /><span className="sr-only">Close</span></DialogPrimitive.Close>
+      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-[7px] p-1 opacity-70 hover:bg-secondary hover:opacity-100 focus:ring-2 focus:ring-ring/55"><X className="size-4" /><span className="sr-only">Close</span></DialogPrimitive.Close>
     </DialogPrimitive.Content>
   </DialogPrimitive.Portal>
 ))

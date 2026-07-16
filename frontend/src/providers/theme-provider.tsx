@@ -1,30 +1,44 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react"
 
-export type Theme = "light" | "dark" | "system"
+export type Theme = "light" | "dark"
 
 const ThemeContext = createContext<{ theme: Theme; setTheme: (theme: Theme) => void } | null>(null)
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(() => {
+  const [hasExplicitTheme, setHasExplicitTheme] = useState(() => {
     const stored = localStorage.getItem("posetestbot.theme")
-    return stored === "light" || stored === "dark" || stored === "system" ? stored : "system"
+    return stored === "light" || stored === "dark"
+  })
+  const [theme, setThemeState] = useState<Theme>(() => {
+    const stored = localStorage.getItem("posetestbot.theme")
+    if (stored === "light" || stored === "dark") return stored
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
   })
 
   useEffect(() => {
     const root = document.documentElement
-    const media = window.matchMedia("(prefers-color-scheme: dark)")
-    const apply = () => {
-      root.classList.remove("light", "dark")
-      root.classList.add(theme === "system" ? (media.matches ? "dark" : "light") : theme)
-      root.style.colorScheme = theme === "system" ? (media.matches ? "dark" : "light") : theme
-    }
-    apply()
-    localStorage.setItem("posetestbot.theme", theme)
-    media.addEventListener("change", apply)
-    return () => media.removeEventListener("change", apply)
+    root.classList.remove("light", "dark")
+    root.classList.add(theme)
+    root.dataset.theme = theme
+    root.style.colorScheme = theme
   }, [theme])
 
-  const value = useMemo(() => ({ theme, setTheme }), [theme])
+  useEffect(() => {
+    if (hasExplicitTheme) return
+    localStorage.removeItem("posetestbot.theme")
+    const media = window.matchMedia("(prefers-color-scheme: dark)")
+    const applySystemTheme = (event: MediaQueryListEvent) => setThemeState(event.matches ? "dark" : "light")
+    media.addEventListener("change", applySystemTheme)
+    return () => media.removeEventListener("change", applySystemTheme)
+  }, [hasExplicitTheme])
+
+  const setTheme = useCallback((nextTheme: Theme) => {
+    localStorage.setItem("posetestbot.theme", nextTheme)
+    setHasExplicitTheme(true)
+    setThemeState(nextTheme)
+  }, [])
+
+  const value = useMemo(() => ({ theme, setTheme }), [theme, setTheme])
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
 }
 

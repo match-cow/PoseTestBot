@@ -66,7 +66,7 @@ export function DashboardPage() {
           <CardHeader className="border-b border-border bg-muted/20">
             <div className="flex items-start justify-between gap-4"><div><CardDescription>Recommended next action</CardDescription><CardTitle className="mt-1 text-2xl">{recommendedLabel}</CardTitle></div><div className="grid size-11 place-items-center rounded-full bg-primary text-primary-foreground"><ArrowRight /></div></div>
           </CardHeader>
-          <CardContent className="pt-5"><p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">{recommendedDescription}</p><div className="mt-5 flex gap-2"><Button asChild><Link to={overview.data?.config ? "/workflow/preflight" : "/workflow/setup"}><Play />Open workflow</Link></Button><Button asChild variant="outline"><Link to="/artifacts">Inspect evidence</Link></Button></div></CardContent>
+          <CardContent className="pt-5"><p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">{recommendedDescription}</p><div className="mt-5"><Button asChild><Link to={overview.data?.config ? "/workflow/preflight" : "/workflow/setup"}><Play />Open workflow</Link></Button></div></CardContent>
         </Card>
         <RoomMonitor />
       </div>

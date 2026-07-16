@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request, send_file
+from flask import Blueprint, Response, jsonify, request
 
 from posetestbot.calibration.preflight import (
     build_calibration_preflight,
@@ -35,15 +35,6 @@ from posetestbot.calibration.validation import (
     write_calibration_validation_with_manifest,
 )
 from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
-from posetestbot.io.artifact_browser import (
-    ArtifactPathError,
-    bop_frame_detail,
-    bop_scene_detail,
-    collect_run_artifacts,
-    preview_artifact,
-    render_bop_frame_overlay_png,
-    resolve_artifact_path,
-)
 from posetestbot.io.artifacts import (
     CAPTURE_EXECUTION_PLAN,
     CAPTURE_EXECUTION_STATUS,
@@ -199,36 +190,6 @@ def _robot_control_command_args(command_name: str, data: dict) -> tuple[list[str
 
 def _same_path(left: str | Path, right: str | Path) -> bool:
     return Path(left).resolve() == Path(right).resolve()
-
-
-def _job_log_artifacts(run_root: str | Path) -> list[dict]:
-    artifacts = []
-    for job in job_runner.list():
-        job_run_root = job.parameters.get("run_root")
-        if not job_run_root:
-            continue
-        if not _same_path(job_run_root, run_root):
-            continue
-        log_path = Path(job.log_path)
-        artifacts.append(
-            {
-                "key": "log",
-                "source": f"job:{job.id}",
-                "path": job.log_path,
-                "relative_path": None,
-                "kind": "job_log",
-                "exists": log_path.is_file(),
-                "preview_type": "job_log",
-                "size_bytes": log_path.stat().st_size if log_path.is_file() else None,
-                "modified_at": None,
-                "child_count": None,
-                "job_id": job.id,
-                "job_name": job.name,
-                "job_status": job.status,
-                "log_endpoint": f"/jobs/{job.id}/log",
-            }
-        )
-    return artifacts
 
 
 def _capture_job_kind(job) -> str | None:
@@ -761,133 +722,6 @@ def hardware_status():
             'report': report,
         }
     )
-
-
-@app.route('/artifacts', methods=['GET'])
-def list_artifacts():
-    run_root = request.args.get('run_root')
-    if not run_root:
-        return jsonify({'output': 'Missing run_root'}), 400
-    try:
-        artifacts = [record.to_dict() for record in collect_run_artifacts(run_root)]
-    except FileNotFoundError as exc:
-        return jsonify({'output': str(exc)}), 404
-    artifacts.extend(_job_log_artifacts(run_root))
-    return jsonify({'run_root': str(Path(run_root)), 'artifacts': artifacts})
-
-
-@app.route('/artifacts/preview', methods=['GET'])
-def artifact_preview():
-    run_root = request.args.get('run_root')
-    artifact_path = request.args.get('path')
-    if not run_root or not artifact_path:
-        return jsonify({'output': 'Missing run_root or path'}), 400
-    if not Path(run_root).exists():
-        return jsonify({'output': f'Run root not found: {run_root}'}), 404
-    try:
-        return jsonify(preview_artifact(run_root, artifact_path))
-    except ArtifactPathError as exc:
-        return jsonify({'output': str(exc)}), 400
-
-
-@app.route('/artifacts/file', methods=['GET'])
-def artifact_file():
-    run_root = request.args.get('run_root')
-    artifact_path = request.args.get('path')
-    if not run_root or not artifact_path:
-        return jsonify({'output': 'Missing run_root or path'}), 400
-    if not Path(run_root).exists():
-        return jsonify({'output': f'Run root not found: {run_root}'}), 404
-    try:
-        path = resolve_artifact_path(run_root, artifact_path)
-    except ArtifactPathError as exc:
-        return jsonify({'output': str(exc)}), 400
-    if not path.exists():
-        return jsonify({'output': f'Artifact file not found: {path}'}), 404
-    if not path.is_file():
-        return jsonify({'output': f'Artifact path is not a file: {path}'}), 400
-
-    download = request.args.get('download', '').lower() in {'1', 'true', 'yes'}
-    return send_file(path, conditional=True, as_attachment=download)
-
-
-@app.route('/artifacts/bop-scene', methods=['GET'])
-def artifact_bop_scene():
-    run_root = request.args.get('run_root')
-    scene_path = request.args.get('path')
-    if not run_root or not scene_path:
-        return jsonify({'output': 'Missing run_root or path'}), 400
-    if not Path(run_root).exists():
-        return jsonify({'output': f'Run root not found: {run_root}'}), 404
-    try:
-        frame_limit = int(request.args.get('frame_limit', '200'))
-    except ValueError:
-        return jsonify({'output': 'frame_limit must be an integer'}), 400
-    try:
-        return jsonify(
-            bop_scene_detail(run_root, scene_path, frame_limit=frame_limit)
-        )
-    except FileNotFoundError as exc:
-        return jsonify({'output': str(exc)}), 404
-    except (ArtifactPathError, ValueError) as exc:
-        return jsonify({'output': str(exc)}), 400
-
-
-@app.route('/artifacts/bop-frame', methods=['GET'])
-def artifact_bop_frame():
-    run_root = request.args.get('run_root')
-    scene_path = request.args.get('path')
-    if not run_root or not scene_path:
-        return jsonify({'output': 'Missing run_root or path'}), 400
-    if not Path(run_root).exists():
-        return jsonify({'output': f'Run root not found: {run_root}'}), 404
-    try:
-        image_id = int(request.args.get('image_id', '0'))
-        row_limit = int(request.args.get('row_limit', '100'))
-    except ValueError:
-        return jsonify({'output': 'image_id and row_limit must be integers'}), 400
-    try:
-        return jsonify(
-            bop_frame_detail(
-                run_root,
-                scene_path,
-                image_id=image_id,
-                row_limit=row_limit,
-            )
-        )
-    except FileNotFoundError as exc:
-        return jsonify({'output': str(exc)}), 404
-    except (ArtifactPathError, ValueError) as exc:
-        return jsonify({'output': str(exc)}), 400
-
-
-@app.route('/artifacts/bop-frame-overlay', methods=['GET'])
-def artifact_bop_frame_overlay():
-    run_root = request.args.get('run_root')
-    scene_path = request.args.get('path')
-    if not run_root or not scene_path:
-        return jsonify({'output': 'Missing run_root or path'}), 400
-    if not Path(run_root).exists():
-        return jsonify({'output': f'Run root not found: {run_root}'}), 404
-    try:
-        image_id = int(request.args.get('image_id', '0'))
-        row_limit = int(request.args.get('row_limit', '20'))
-    except ValueError:
-        return jsonify({'output': 'image_id and row_limit must be integers'}), 400
-    try:
-        overlay = render_bop_frame_overlay_png(
-            run_root,
-            scene_path,
-            image_id=image_id,
-            row_limit=row_limit,
-            include_masks=not _truthy(request.args.get('no_masks'), default=False),
-            include_gt=not _truthy(request.args.get('no_gt'), default=False),
-        )
-    except FileNotFoundError as exc:
-        return jsonify({'output': str(exc)}), 404
-    except (ArtifactPathError, ValueError) as exc:
-        return jsonify({'output': str(exc)}), 400
-    return Response(overlay, mimetype='image/png')
 
 
 @app.route('/pipeline/stages', methods=['GET'])

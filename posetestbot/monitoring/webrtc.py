@@ -24,6 +24,7 @@ from aiortc import (
     RTCSessionDescription,
     VideoStreamTrack,
 )
+from aiortc.codecs import vpx as aiortc_vpx
 from aiortc.contrib.media import MediaRelay
 from aiortc.mediastreams import MediaStreamError
 from av import VideoFrame
@@ -49,6 +50,29 @@ HEARTBEAT_STALE_S = 5.0
 PEER_CONNECT_TIMEOUT_S = 15.0
 MEDIA_FRAME_STALE_S = 5.0
 CAMERA_IDLE_RELEASE_S = 15.0
+# aiortc 1.14 packetizes VP8 into payloads up to 1300 bytes before adding RTP,
+# SRTP, UDP, and IP overhead. Those datagrams exceed Tailscale's 1280-byte
+# interface MTU. The large chunks are then lost while each frame's short tail
+# packet can still arrive, which looks in Chrome exactly like a connected peer
+# with advancing packets but zero complete or decoded frames.
+VP8_PACKET_MAX_BYTES = 1100
+
+
+def configure_vp8_packet_size(
+    max_payload_bytes: int = VP8_PACKET_MAX_BYTES,
+) -> int:
+    """Constrain aiortc VP8 payloads to leave room for transport overhead."""
+
+    if max_payload_bytes <= 0:
+        raise ValueError("max_payload_bytes must be positive")
+    configured = getattr(aiortc_vpx, "PACKET_MAX", None)
+    if not isinstance(configured, int) or configured <= 0:
+        raise RuntimeError(
+            "The installed aiortc VP8 packet-size control is unavailable."
+        )
+    configured = min(configured, max_payload_bytes)
+    aiortc_vpx.PACKET_MAX = configured
+    return configured
 
 
 def monitor_stream_root(
@@ -188,6 +212,7 @@ class MonitorStatusWriter:
             "last_media_frame_at": None,
             "heartbeat_at": utc_now_iso(),
             "selected_node": None,
+            "vp8_packet_max_bytes": VP8_PACKET_MAX_BYTES,
             "error": None,
             "error_reason": None,
         }
@@ -392,6 +417,7 @@ class MonitorWebRTCServer:
     ) -> None:
         if track is None and track_factory is None:
             raise ValueError("track or track_factory is required")
+        configure_vp8_packet_size()
         self.track = track
         self._track_factory = track_factory
         self.relay = MediaRelay() if track is not None else None

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import threading
 from pathlib import Path
@@ -16,9 +15,6 @@ from posetestbot.web.app import create_app
 
 
 RUN_ROOT = "/tmp/posetestbot-console/new-run"
-ONE_PIXEL_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-)
 
 
 class LiveServer:
@@ -125,7 +121,6 @@ def overview_payload() -> dict:
             }
         ],
         "recommendation_error": None,
-        "artifact_count": 3,
     }
 
 
@@ -169,7 +164,15 @@ def install_common_mocks(page, *, preflight_state: dict | None = None, requests:
 
     page.route("**/ui/bootstrap", lambda route: fulfill_json(route, {
         "schema_version": "web_bootstrap.v1",
-        "brand": {"name": "PoseTestBot", "logo_url": "/assets/cow200.png"},
+        "brand": {
+            "name": "PoseTestBot",
+            "logo_url": "/assets/cow_light.png",
+            "logo_urls": {
+                "light": "/assets/cow_light.png",
+                "dark": "/assets/cow_dark.png",
+            },
+            "favicon_url": "/assets/cow_favicon.png",
+        },
         "robot": {"ip": "172.31.1.147", "port": 30300},
         "default_run_root": "/tmp/posetestbot-console/default",
         "allowed_run_roots": ["/tmp/posetestbot-console"],
@@ -208,11 +211,17 @@ def install_common_mocks(page, *, preflight_state: dict | None = None, requests:
 
 def test_navigation_run_fallback_persistence_and_both_themes(console_server, page) -> None:
     install_common_mocks(page)
-    page.add_init_script("if (!localStorage.getItem('posetestbot.selectedRun')) localStorage.setItem('posetestbot.selectedRun', '/tmp/posetestbot-console/../outside'); if (!localStorage.getItem('posetestbot.theme')) localStorage.setItem('posetestbot.theme', 'dark')")
+    page.emulate_media(color_scheme="dark")
+    page.add_init_script("if (!localStorage.getItem('posetestbot.selectedRun')) localStorage.setItem('posetestbot.selectedRun', '/tmp/posetestbot-console/../outside'); localStorage.removeItem('posetestbot.theme')")
 
     page.goto(console_server.url, wait_until="networkidle")
 
     expect(page.locator("html")).to_have_class("dark")
+    expect(page.locator("html")).to_have_attribute("data-theme", "dark")
+    expect(page.get_by_role("img", name="PoseTestBot")).to_have_attribute(
+        "src", "/assets/cow_dark.png"
+    )
+    assert page.evaluate("localStorage.getItem('posetestbot.theme')") is None
     expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("new-run")
     page.get_by_role("combobox", name="Selected run").click()
     page.get_by_role("option", name="old-run · sync_aruco").click()
@@ -221,9 +230,21 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     expect(page).to_have_url(f"{console_server.url}/#/devices")
     page.reload(wait_until="networkidle")
     expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("old-run")
-    page.get_by_role("combobox", name="Theme").click()
-    page.get_by_role("option", name="Light").click()
+    theme_toggle = page.get_by_role("button", name="Switch to light theme")
+    theme_toggle_box = theme_toggle.bounding_box()
+    assert theme_toggle_box is not None
+    assert theme_toggle_box["width"] == pytest.approx(34)
+    assert theme_toggle_box["height"] == pytest.approx(34)
+    theme_toggle.click()
     expect(page.locator("html")).to_have_class("light")
+    expect(page.locator("html")).to_have_attribute("data-theme", "light")
+    expect(page.get_by_role("img", name="PoseTestBot")).to_have_attribute(
+        "src", "/assets/cow_light.png"
+    )
+    assert page.evaluate("localStorage.getItem('posetestbot.theme')") == "light"
+    expect(page.get_by_role("link", name="Open PoseTestBot on GitHub")).to_have_attribute(
+        "href", "https://github.com/match-cow/PoseTestBot"
+    )
     sidebar_rgb = page.locator("aside").evaluate(
         """element => {
             const canvas = document.createElement("canvas")
@@ -327,7 +348,7 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     ]
 
 
-def test_jobs_log_cancel_and_bop_overlay_preview(console_server, page) -> None:
+def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> None:
     install_common_mocks(page)
     canceled: list[str] = []
     job = {
@@ -336,23 +357,15 @@ def test_jobs_log_cancel_and_bop_overlay_preview(console_server, page) -> None:
     page.route("**/jobs", lambda route: fulfill_json(route, {"jobs": [job], "resources": {"disk_io": "capture-1"}}))
     page.route("**/jobs/capture-1/log", lambda route: route.fulfill(status=200, content_type="text/plain", body="line one\nline two\n"))
     page.route("**/jobs/capture-1/cancel", lambda route: (canceled.append("capture-1"), fulfill_json(route, {"job": {**job, "status": "canceling"}}))[1])
-    artifact = {"key": "bop_scene", "source": "bop_export", "path": f"{RUN_ROOT}/bop/test/000001", "relative_path": "bop/test/000001", "kind": "directory", "exists": True, "preview_type": "directory", "size_bytes": None, "modified_at": "2026-07-10T12:00:00Z", "child_count": 8, "summary": {"type": "bop_scene"}}
-    page.route("**/artifacts?**", lambda route: fulfill_json(route, {"run_root": RUN_ROOT, "artifacts": [artifact]}))
-    page.route("**/artifacts/bop-scene**", lambda route: fulfill_json(route, {"relative_path": "bop/test/000001", "frame_count": 1, "frames": [{"image_id": 0, "gt_count": 1, "rgb": {"exists": True}, "depth": {"exists": True}, "mask_files": ["000000_000000.png"]}]}))
-    page.route("**/artifacts/bop-frame**", lambda route: fulfill_json(route, {"type": "bop_frame_detail", "relative_path": "bop/test/000001", "image_id": 0, "gt_count": 1, "rgb": {"exists": True}, "depth": {"exists": True}, "mask_artifacts": [{"name": "000000_000000.png", "relative_path": "mask/000000_000000.png"}], "mask_visib_artifacts": [], "camera": {"cam_K": [1, 0, 0, 0, 1, 0, 0, 0, 1]}, "gt": [{"obj_id": 1}], "gt_info": []}))
-    page.route("**/artifacts/bop-frame-overlay**", lambda route: route.fulfill(status=200, content_type="image/png", body=ONE_PIXEL_PNG))
-
     page.goto(f"{console_server.url}/#/jobs", wait_until="networkidle")
     page.get_by_role("button", name="Log").click()
     expect(page.locator('[data-testid="job-log"]')).to_contain_text("line two")
     page.get_by_role("button", name="Cancel job").click()
     assert canceled == ["capture-1"]
 
+    expect(page.get_by_role("link", name="Artifacts")).to_have_count(0)
     page.goto(f"{console_server.url}/#/artifacts", wait_until="networkidle")
-    page.get_by_text("bop_scene", exact=True).click()
-    expect(page.get_by_role("button", name="Frame 0")).to_be_visible()
-    expect(page.get_by_alt_text("BOP frame 0 GT and mask overlay")).to_be_visible()
-    expect(page.get_by_text("1 masks")).to_be_visible()
+    expect(page).to_have_url(f"{console_server.url}/#/dashboard")
 
 
 def cell_scene_payload(*, objectless: bool = False) -> dict:

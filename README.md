@@ -1,4 +1,8 @@
-<img src="posetestbot/web/static/cow200.png" alt="PoseTestBot cow logo" width="96" align="right">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="posetestbot/web/static/cow_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="posetestbot/web/static/cow_light.png">
+  <img src="posetestbot/web/static/cow_light.png" alt="PoseTestBot cow logo" width="96" align="right">
+</picture>
 
 # PoseTestBot
 
@@ -300,7 +304,7 @@ and an installed command uses its current working directory. CLI tools continue
 to accept explicit paths.
 
 The bundled console has desktop routes for Dashboard, Devices, Cell, Workflow,
-Artifacts, and Jobs. The read-only Cell page renders the HRI template,
+and Jobs. The read-only Cell page renders the HRI template,
 base/flange/TCP proxies, calibrated cameras, selected PLY objects, calibration
 target, and exact recorded trajectories in right-handed Z-up millimetres.
 Missing frame edges remain visibly unresolved, and a component/provenance list
@@ -340,18 +344,9 @@ Important endpoints:
 - `GET|POST /pipeline/preflight`
 - `POST /pipeline/run-config`
 - `GET /pipeline/recommendations`
-- `GET /artifacts`
-- `GET /artifacts/preview`
-- `GET /artifacts/file`
-- `GET /artifacts/bop-scene`
-- `GET /artifacts/bop-frame`
-- `GET /artifacts/bop-frame-overlay`
 - `GET /capture/jobs`
 - `GET /capture/status`
 - `POST /capture/jobs/<job_id>/stop`
-
-The artifact browser is scoped to acquisition artifacts, job logs, calibration
-reports, BOP scene/frame inspection, and GT/mask overlays.
 
 ## Rewrite Gates
 

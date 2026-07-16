@@ -73,7 +73,6 @@ export function StageForm({ stage, artifactStatus }: { stage: PipelineStage; art
       toast.success(`${stage.label} queued`, { description: `Job ${data.job_id}` })
       queryClient.invalidateQueries({ queryKey: ["jobs"] })
       queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] })
-      queryClient.invalidateQueries({ queryKey: ["artifacts", selectedRun] })
     },
     onError: (error) => toast.error(`${stage.label} was not queued`, { description: errorMessage(error) }),
   })

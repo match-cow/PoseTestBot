@@ -13,9 +13,9 @@ import com.kuka.roboticsAPI.applicationModel.RoboticsAPIApplication;
 import static com.kuka.roboticsAPI.motionModel.BasicMotions.*;
 
 import com.kuka.roboticsAPI.deviceModel.LBR;
-import com.kuka.roboticsAPI.geometricModel.AbstractFrame;
 import com.kuka.roboticsAPI.geometricModel.Frame;
 import com.kuka.roboticsAPI.geometricModel.ObjectFrame;
+import com.kuka.roboticsAPI.geometricModel.math.Transformation;
 import com.kuka.roboticsAPI.motionModel.IMotionContainer;
 import com.kuka.roboticsAPI.persistenceModel.templateModel.InfoTemplate;
 
@@ -32,18 +32,30 @@ import org.json.simple.parser.JSONParser;
  * single-stepped in T1 at reduced override with the real tool, cables, target,
  * cameras, and safety equipment represented.
  *
- * Coordinates are relative to /HRC_Hub/Template_Base. They stay inside the
- * envelope suggested by HRC_Hub_Cap, but that is not proof of reachability,
- * collision freedom, singularity freedom, or target visibility.
+ * The nine raster targets are persistent Application Data ObjectFrames directly
+ * below /PoseTestBot/TemplateBase. Numeric values in the repository teaching
+ * manifest are uncommissioned Workbench seeds only. The A/B/C orientation
+ * dither is implemented as program-owned relative rotations from the taught
+ * CalibrationCenter; no numeric absolute target is created at runtime.
  */
 public class PoseTestBot_CalibrationVarianceProposal
 		extends RoboticsAPIApplication {
 
+	private static final String TEMPLATE_BASE_PATH = "/PoseTestBot/TemplateBase";
+	private static final String CALIBRATION_COVERAGE_UPPER_LEFT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageUpperLeft";
+	private static final String CALIBRATION_COVERAGE_UPPER_CENTER_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageUpperCenter";
+	private static final String CALIBRATION_COVERAGE_UPPER_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageUpperRight";
+	private static final String CALIBRATION_COVERAGE_MIDDLE_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageMiddleRight";
+	private static final String CALIBRATION_CENTER_PATH = "/PoseTestBot/TemplateBase/CalibrationCenter";
+	private static final String CALIBRATION_COVERAGE_MIDDLE_LEFT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageMiddleLeft";
+	private static final String CALIBRATION_COVERAGE_LOWER_LEFT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerLeft";
+	private static final String CALIBRATION_COVERAGE_LOWER_CENTER_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerCenter";
+	private static final String CALIBRATION_COVERAGE_LOWER_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerRight";
+
 	/* Deliberate deployment interlock for this uncommissioned proposal. */
 	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = false;
-	/* Commission one phase at a time before enabling all three together. */
+	/* Commission one phase at a time before enabling both together. */
 	private static final boolean RUN_COVERAGE_RASTER = true;
-	private static final boolean RUN_DEPTH_SWEEP = true;
 	private static final boolean RUN_ORIENTATION_DITHER = true;
 
 	private static final int SAMPLE_TIME_MS = 10;
@@ -54,7 +66,6 @@ public class PoseTestBot_CalibrationVarianceProposal
 	private static final int END_PACKET_INTERVAL_MS = 50;
 
 	private static final double REPOSITION_PTP_VEL_REL = 0.15;
-	private static final double CAPTURE_PTP_VEL_REL = 0.10;
 	private static final double MIN_CART_VEL_MM_S = 20.0;
 	private static final double MAX_CART_VEL_MM_S = 80.0;
 
@@ -63,22 +74,45 @@ public class PoseTestBot_CalibrationVarianceProposal
 	@Inject
 	private InfoTemplate robotinfo;
 
-	private AbstractFrame templateBaseRef;
 	private ObjectFrame templateBase;
+	private ObjectFrame coverageUpperLeft;
+	private ObjectFrame coverageUpperCenter;
+	private ObjectFrame coverageUpperRight;
+	private ObjectFrame coverageMiddleRight;
+	private ObjectFrame calibrationCenter;
+	private ObjectFrame coverageMiddleLeft;
+	private ObjectFrame coverageLowerLeft;
+	private ObjectFrame coverageLowerCenter;
+	private ObjectFrame coverageLowerRight;
 	private String receiverIp = "172.31.1.169";
 	private int receiverPort = DEFAULT_RECEIVER_PORT;
 
 	@Override
 	public void initialize() {
 		robot = getContext().getDeviceFromType(LBR.class);
-		robotinfo.setBase("/HRC_Hub/Template_Base");
-		templateBaseRef = getApplicationData().getFrame(
-				"/HRC_Hub/Template_Base");
-		templateBase = getApplicationData().getFrame(
-				"/HRC_Hub/Template_Base");
+		robotinfo.setBase(TEMPLATE_BASE_PATH);
+		templateBase = requiredFrame(TEMPLATE_BASE_PATH);
+		coverageUpperLeft = requiredFrame(CALIBRATION_COVERAGE_UPPER_LEFT_PATH);
+		coverageUpperCenter = requiredFrame(CALIBRATION_COVERAGE_UPPER_CENTER_PATH);
+		coverageUpperRight = requiredFrame(CALIBRATION_COVERAGE_UPPER_RIGHT_PATH);
+		coverageMiddleRight = requiredFrame(CALIBRATION_COVERAGE_MIDDLE_RIGHT_PATH);
+		calibrationCenter = requiredFrame(CALIBRATION_CENTER_PATH);
+		coverageMiddleLeft = requiredFrame(CALIBRATION_COVERAGE_MIDDLE_LEFT_PATH);
+		coverageLowerLeft = requiredFrame(CALIBRATION_COVERAGE_LOWER_LEFT_PATH);
+		coverageLowerCenter = requiredFrame(CALIBRATION_COVERAGE_LOWER_CENTER_PATH);
+		coverageLowerRight = requiredFrame(CALIBRATION_COVERAGE_LOWER_RIGHT_PATH);
 
-		getLogger().info("Calibration variance proposal base: "
+		getLogger().info("Resolved TemplateBase and all nine taught grid frames: "
 				+ robotinfo.getBase());
+	}
+
+	private ObjectFrame requiredFrame(String path) {
+		ObjectFrame frame = getApplicationData().getFrame(path);
+		if (frame == null) {
+			throw new IllegalStateException(
+					"Required Application Data frame is missing: " + path);
+		}
+		return frame;
 	}
 
 	@Override
@@ -88,6 +122,10 @@ public class PoseTestBot_CalibrationVarianceProposal
 					+ "Commission all frames and motions before enabling it.");
 			return;
 		}
+
+		getLogger().warn("Before the first start command, manually position the "
+				+ "robot at or near the taught CalibrationCenter pose. This is an "
+				+ "operator commissioning requirement, not an enforced safety check.");
 
 		while (true) {
 			Double requestedVelocityMps = waitForStartCommand();
@@ -99,15 +137,13 @@ public class PoseTestBot_CalibrationVarianceProposal
 					requestedVelocityMps.doubleValue());
 			getLogger().info("Starting calibration variance capture at "
 					+ cartVelocityMmS + " mm/s");
+			moveToCenter("capture start anchor");
 
 			if (RUN_COVERAGE_RASTER) {
 				runCoverageRaster(cartVelocityMmS);
 			}
-			if (RUN_DEPTH_SWEEP) {
-				runDepthSweep(cartVelocityMmS);
-			}
 			if (RUN_ORIENTATION_DITHER) {
-				runOrientationDither();
+				runOrientationDither(cartVelocityMmS);
 			}
 
 			transmitCurrentPose("end");
@@ -122,51 +158,24 @@ public class PoseTestBot_CalibrationVarianceProposal
 	 * camera perfectly at the board on every waypoint.
 	 */
 	private void runCoverageRaster(double cartVelocityMmS) {
-		Frame upperLeft = frame(-160, -320, 535, -90, 24, 180);
-		Frame upperCenter = frame(0, -320, 535, -90, 24, 180);
-		Frame upperRight = frame(160, -320, 535, -90, 24, 180);
-
-		Frame middleRight = frame(160, -285, 445, -90, 30, 180);
-		Frame middleCenter = frame(0, -285, 445, -90, 30, 180);
-		Frame middleLeft = frame(-160, -285, 445, -90, 30, 180);
-
-		Frame lowerLeft = frame(-160, -245, 355, -90, 36, 180);
-		Frame lowerCenter = frame(0, -245, 355, -90, 36, 180);
-		Frame lowerRight = frame(160, -245, 355, -90, 36, 180);
-
-		moveToStart(upperLeft, "coverage raster");
-		captureLinear(upperCenter, cartVelocityMmS,
+		moveFromCenter(coverageUpperLeft, "coverage raster");
+		captureLinear(coverageUpperCenter, cartVelocityMmS,
 				"coverage_upper_left_to_center");
-		captureLinear(upperRight, cartVelocityMmS,
+		captureLinear(coverageUpperRight, cartVelocityMmS,
 				"coverage_upper_center_to_right");
-		captureLinear(middleRight, cartVelocityMmS,
+		captureLinear(coverageMiddleRight, cartVelocityMmS,
 				"coverage_upper_to_middle_right");
-		captureLinear(middleCenter, cartVelocityMmS,
+		captureLinear(calibrationCenter, cartVelocityMmS,
 				"coverage_middle_right_to_center");
-		captureLinear(middleLeft, cartVelocityMmS,
+		captureLinear(coverageMiddleLeft, cartVelocityMmS,
 				"coverage_middle_center_to_left");
-		captureLinear(lowerLeft, cartVelocityMmS,
+		captureLinear(coverageLowerLeft, cartVelocityMmS,
 				"coverage_middle_to_lower_left");
-		captureLinear(lowerCenter, cartVelocityMmS,
+		captureLinear(coverageLowerCenter, cartVelocityMmS,
 				"coverage_lower_left_to_center");
-		captureLinear(lowerRight, cartVelocityMmS,
+		captureLinear(coverageLowerRight, cartVelocityMmS,
 				"coverage_lower_center_to_right");
-	}
-
-	/**
-	 * Varies board scale and perspective. The endpoints are based on the
-	 * Center/CenterClose/Top/Bottom envelope in HRC_Hub_Cap, not on a new
-	 * reachability study.
-	 */
-	private void runDepthSweep(double cartVelocityMmS) {
-		Frame farCenter = frame(0, -360, 600, -90, 20, 180);
-		Frame nearCenter = frame(0, -230, 350, -90, 38, 180);
-
-		moveToStart(farCenter, "depth sweep");
-		captureLinear(nearCenter, cartVelocityMmS,
-				"depth_far_to_near");
-		captureLinear(farCenter, cartVelocityMmS,
-				"depth_near_to_far");
+		moveToCenter("coverage raster return");
 	}
 
 	/**
@@ -175,52 +184,53 @@ public class PoseTestBot_CalibrationVarianceProposal
 	 * offsets. Which change maps to image yaw, pitch, or roll depends on the
 	 * actual flange-to-camera mounting transform and must be verified visually.
 	 */
-	private void runOrientationDither() {
-		Frame center = frame(0, -285, 445, -90, 30, 180);
-		Frame alphaMinus = frame(0, -285, 445, -105, 30, 180);
-		Frame alphaPlus = frame(0, -285, 445, -75, 30, 180);
-		Frame betaMinus = frame(0, -285, 445, -90, 18, 180);
-		Frame betaPlus = frame(0, -285, 445, -90, 42, 180);
-		Frame gammaMinus = frame(0, -285, 445, -90, 30, 165);
-		Frame gammaPlus = frame(0, -285, 445, -90, 30, -165);
-
-		moveToStart(center, "orientation dither");
-		capturePointToPoint(alphaMinus, "orientation_alpha_minus_15");
-		capturePointToPoint(alphaPlus, "orientation_alpha_plus_15");
-		capturePointToPoint(center, "orientation_alpha_return_center");
-		capturePointToPoint(betaMinus, "orientation_beta_minus_12");
-		capturePointToPoint(betaPlus, "orientation_beta_plus_12");
-		capturePointToPoint(center, "orientation_beta_return_center");
-		capturePointToPoint(gammaMinus, "orientation_gamma_minus_15");
-		capturePointToPoint(gammaPlus, "orientation_gamma_plus_15");
-		capturePointToPoint(center, "orientation_gamma_return_center");
+	private void runOrientationDither(double cartVelocityMmS) {
+		captureRelativeOrientation(-15, 0, 0, cartVelocityMmS,
+				"orientation_alpha_minus_15");
+		captureRelativeOrientation(30, 0, 0, cartVelocityMmS,
+				"orientation_alpha_plus_15");
+		captureRelativeOrientation(-15, 0, 0, cartVelocityMmS,
+				"orientation_alpha_return_center");
+		captureRelativeOrientation(0, -12, 0, cartVelocityMmS,
+				"orientation_beta_minus_12");
+		captureRelativeOrientation(0, 24, 0, cartVelocityMmS,
+				"orientation_beta_plus_12");
+		captureRelativeOrientation(0, -12, 0, cartVelocityMmS,
+				"orientation_beta_return_center");
+		captureRelativeOrientation(0, 0, -15, cartVelocityMmS,
+				"orientation_gamma_minus_15");
+		captureRelativeOrientation(0, 0, 30, cartVelocityMmS,
+				"orientation_gamma_plus_15");
+		captureRelativeOrientation(0, 0, -15, cartVelocityMmS,
+				"orientation_gamma_return_center");
 	}
 
-	private Frame frame(double xMm, double yMm, double zMm,
-			double alphaDeg, double betaDeg, double gammaDeg) {
-		Frame target = new Frame(xMm, yMm, zMm,
-				Math.toRadians(alphaDeg), Math.toRadians(betaDeg),
-				Math.toRadians(gammaDeg));
-		target.setParent(templateBase);
-		return target;
-	}
-
-	private void moveToStart(Frame target, String phaseName) {
-		getLogger().info("Repositioning for " + phaseName);
+	private void moveFromCenter(ObjectFrame target, String phaseName) {
+		getLogger().info("PTP from taught CalibrationCenter into " + phaseName);
 		robot.move(ptp(target).setJointVelocityRel(REPOSITION_PTP_VEL_REL));
 		sleep(SETTLE_TIME_MS);
 	}
 
-	private void captureLinear(Frame target, double cartVelocityMmS,
+	private void moveToCenter(String motionName) {
+		getLogger().info("PTP to taught CalibrationCenter: " + motionName);
+		robot.move(ptp(calibrationCenter)
+				.setJointVelocityRel(REPOSITION_PTP_VEL_REL));
+		sleep(SETTLE_TIME_MS);
+	}
+
+	private void captureLinear(ObjectFrame target, double cartVelocityMmS,
 			String motionName) {
 		IMotionContainer motion = robot.moveAsync(lin(target)
 				.setCartVelocity(cartVelocityMmS));
 		transmitPose(motion, SAMPLE_TIME_MS, motionName);
 	}
 
-	private void capturePointToPoint(Frame target, String motionName) {
-		IMotionContainer motion = robot.moveAsync(ptp(target)
-				.setJointVelocityRel(CAPTURE_PTP_VEL_REL));
+	private void captureRelativeOrientation(double alphaDeg, double betaDeg,
+			double gammaDeg, double cartVelocityMmS, String motionName) {
+		Transformation offset = Transformation.ofDeg(0, 0, 0,
+				alphaDeg, betaDeg, gammaDeg);
+		IMotionContainer motion = robot.moveAsync(linRel(offset,
+				calibrationCenter).setCartVelocity(cartVelocityMmS));
 		transmitPose(motion, SAMPLE_TIME_MS, motionName);
 	}
 
@@ -344,7 +354,7 @@ public class PoseTestBot_CalibrationVarianceProposal
 	@SuppressWarnings("unchecked")
 	private byte[] currentPosePayload(String motionName) {
 		Frame currentPose = robot.getCurrentCartesianPosition(robot.getFlange(),
-				templateBaseRef);
+				templateBase);
 
 		JSONObject jsonObject = new JSONObject();
 		jsonObject.put("motion", motionName);

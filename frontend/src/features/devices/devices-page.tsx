@@ -32,10 +32,11 @@ function Preview({ preview }: { preview?: PreviewJob }) {
   if (!preview) return <div className="grid aspect-video place-items-center rounded-lg bg-muted text-xs text-muted-foreground">Preview is off</div>
   const status = preview.preview_status
   const hasLiveFrame = PREVIEW_ON.has(preview.job.status) && status?.status === "running" && Boolean(status.latest_image)
+  const source = status?.selected_node?.path ?? status?.selected_node?.device_id ?? ""
   return (
-    <div data-testid="sensor-preview-slot" className="relative aspect-video overflow-hidden rounded-lg bg-muted">
-      {hasLiveFrame ? <img data-testid="sensor-preview-image" src={`/sensors/previews/${preview.job.id}/latest.jpg?t=${status?.frame_count}`} className="absolute inset-0 size-full object-contain" alt="Live sensor preview" /> : <div className="sensor-preview-empty grid size-full place-items-center px-4 text-center text-xs text-muted-foreground">{status?.error ? <span data-testid="sensor-preview-error" className="text-destructive">{status.error}</span> : preview.job.status === "canceling" ? "Stopping preview…" : "Waiting for first frame…"}</div>}
-      <div data-testid="sensor-preview-meta" className="absolute inset-x-2 bottom-2 z-10 flex justify-between rounded bg-black/65 px-2 py-1 text-[10px] text-white"><span>{status?.status ?? preview.job.status}</span><span>{String(status?.selected_node?.path ?? "")}</span></div>
+    <div data-testid="sensor-preview-slot" className="relative isolate aspect-video w-full min-w-0 overflow-hidden rounded-lg bg-muted" style={{ contain: "layout paint" }}>
+      {hasLiveFrame ? <img data-testid="sensor-preview-image" src={`/sensors/previews/${preview.job.id}/latest.jpg?t=${status?.frame_count}`} className="absolute inset-0 size-full object-contain" alt="Live sensor preview" /> : <div className="sensor-preview-empty absolute inset-0 grid place-items-center px-4 text-center text-xs text-muted-foreground">{status?.error ? <span data-testid="sensor-preview-error" className="max-w-full break-words text-destructive">{status.error}</span> : preview.job.status === "canceling" ? "Stopping preview…" : "Waiting for first frame…"}</div>}
+      <div data-testid="sensor-preview-meta" className="absolute inset-x-2 bottom-2 z-10 flex min-w-0 items-center justify-between gap-2 rounded bg-black/65 px-2 py-1 text-[10px] text-white"><span className="shrink-0">{status?.status ?? preview.job.status}</span><span className="min-w-0 truncate">{String(source)}</span></div>
     </div>
   )
 }

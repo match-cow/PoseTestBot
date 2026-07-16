@@ -2,7 +2,12 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export interface Bootstrap {
   schema_version: "web_bootstrap.v1"
-  brand: { name: string; logo_url: string }
+  brand: {
+    name: string
+    logo_url: string
+    logo_urls: { light: string; dark: string }
+    favicon_url: string
+  }
   robot: { ip: string; port: number }
   default_run_root: string
   allowed_run_roots: string[]
@@ -42,7 +47,6 @@ export interface Overview {
   }>
   recommendations: Array<Record<string, JsonValue>>
   recommendation_error: string | null
-  artifact_count: number
 }
 
 export interface SensorDevice {
@@ -280,54 +284,6 @@ export interface PreflightSummary {
   status?: string
   path?: string
   [key: string]: JsonValue | undefined
-}
-
-export interface ArtifactRecord {
-  key: string
-  source: string
-  path: string
-  relative_path: string | null
-  kind: string
-  exists: boolean
-  preview_type: string | null
-  size_bytes: number | null
-  modified_at: string | null
-  child_count: number | null
-  summary?: Record<string, JsonValue> | null
-  [key: string]: unknown
-}
-
-export interface BopSceneFrame {
-  image_id: number
-  image_key?: string
-  gt_count: number
-  rgb: { exists: boolean; relative_path?: string | null }
-  depth: { exists: boolean; relative_path?: string | null }
-  mask_files: string[]
-  mask_visib_files?: string[]
-  camera?: JsonValue
-  gt?: JsonValue
-}
-
-export interface BopSceneDetail {
-  type?: "bop_scene_detail"
-  relative_path: string
-  frame_count: number
-  frames: BopSceneFrame[]
-}
-
-export interface BopFrameDetail {
-  type: "bop_frame_detail"
-  relative_path: string
-  image_id: number
-  gt_count: number
-  rgb: BopSceneFrame["rgb"]
-  depth: BopSceneFrame["depth"]
-  mask_artifacts: Array<{ relative_path: string; name: string }>
-  mask_visib_artifacts: Array<{ relative_path: string; name: string }>
-  camera?: JsonValue
-  gt?: JsonValue
-  gt_info?: JsonValue
 }
 
 export interface ApiErrorBody {

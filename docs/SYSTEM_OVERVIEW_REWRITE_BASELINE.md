@@ -23,8 +23,7 @@ PoseTestBot owns:
   and promotion,
 - optional BlenderProc preparation/render planning for GT/masks,
 - BOP dataset export,
-- local job orchestration and transition Flask APIs,
-- safe artifact browsing and BOP scene/frame inspection.
+- local job orchestration and transition Flask APIs.
 
 PoseTestBot does not own:
 
@@ -53,7 +52,7 @@ PoseTestBot does not own:
 - `posetestbot.aruco`: calibration target coverage summaries.
 - `posetestbot.bop`: BOP writer and geometry helpers.
 - `posetestbot.io`: atomic artifact/directory promotion, artifact constants,
-  manifest helpers, and acquisition artifact browser.
+  and manifest helpers.
 
 Scripts under `scripts/` should stay thin wrappers over importable modules.
 
@@ -73,7 +72,7 @@ Scripts under `scripts/` should stay thin wrappers over importable modules.
 10. Optionally prepare/render BlenderProc GT/mask artifacts.
 11. Transactionally export standard `bop/<split>/<scene_id>/` scenes, model
     metadata, targets, root frame provenance, and `bop_export_manifest.v2`.
-12. Inspect artifacts and gates through Flask or CLI.
+12. Inspect gate status through Flask or CLI and inspect run files directly.
 
 ## Artifact Contracts
 

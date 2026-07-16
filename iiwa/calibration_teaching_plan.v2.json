@@ -1,0 +1,114 @@
+{
+  "schema_version": "iiwa_calibration_teaching_plan.v2",
+  "base_path": "/PoseTestBot/TemplateBase",
+  "motion_point": "robot_flange",
+  "units": {
+    "translation": "millimetres",
+    "orientation": "degrees",
+    "orientation_convention": "KUKA A/B/C"
+  },
+  "template": {
+    "name": "HRI template",
+    "width_mm": 420,
+    "height_mm": 297,
+    "centered_at": "TemplateBase"
+  },
+  "phase_anchor": "CalibrationCenter",
+  "phase_order": [
+    "coverage_raster",
+    "orientation_dither"
+  ],
+  "frames": [
+    {
+      "name": "CalibrationCoverageUpperLeft",
+      "path": "/PoseTestBot/TemplateBase/CalibrationCoverageUpperLeft",
+      "roles": ["coverage"],
+      "seed": {"X": -160, "Y": -320, "Z": 535, "A": -90, "B": 24, "C": 180}
+    },
+    {
+      "name": "CalibrationCoverageUpperCenter",
+      "path": "/PoseTestBot/TemplateBase/CalibrationCoverageUpperCenter",
+      "roles": ["coverage"],
+      "seed": {"X": 0, "Y": -320, "Z": 535, "A": -90, "B": 24, "C": 180}
+    },
+    {
+      "name": "CalibrationCoverageUpperRight",
+      "path": "/PoseTestBot/TemplateBase/CalibrationCoverageUpperRight",
+      "roles": ["coverage"],
+      "seed": {"X": 160, "Y": -320, "Z": 535, "A": -90, "B": 24, "C": 180}
+    },
+    {
+      "name": "CalibrationCoverageMiddleRight",
+      "path": "/PoseTestBot/TemplateBase/CalibrationCoverageMiddleRight",
+      "roles": ["coverage"],
+      "seed": {"X": 160, "Y": -285, "Z": 445, "A": -90, "B": 30, "C": 180}
+    },
+    {
+      "name": "CalibrationCenter",
+      "path": "/PoseTestBot/TemplateBase/CalibrationCenter",
+      "roles": ["coverage", "phase_anchor", "relative_orientation_anchor"],
+      "seed": {"X": 0, "Y": -285, "Z": 445, "A": -90, "B": 30, "C": 180}
+    },
+    {
+      "name": "CalibrationCoverageMiddleLeft",
+      "path": "/PoseTestBot/TemplateBase/CalibrationCoverageMiddleLeft",
+      "roles": ["coverage"],
+      "seed": {"X": -160, "Y": -285, "Z": 445, "A": -90, "B": 30, "C": 180}
+    },
+    {
+      "name": "CalibrationCoverageLowerLeft",
+      "path": "/PoseTestBot/TemplateBase/CalibrationCoverageLowerLeft",
+      "roles": ["coverage"],
+      "seed": {"X": -160, "Y": -245, "Z": 355, "A": -90, "B": 36, "C": 180}
+    },
+    {
+      "name": "CalibrationCoverageLowerCenter",
+      "path": "/PoseTestBot/TemplateBase/CalibrationCoverageLowerCenter",
+      "roles": ["coverage"],
+      "seed": {"X": 0, "Y": -245, "Z": 355, "A": -90, "B": 36, "C": 180}
+    },
+    {
+      "name": "CalibrationCoverageLowerRight",
+      "path": "/PoseTestBot/TemplateBase/CalibrationCoverageLowerRight",
+      "roles": ["coverage"],
+      "seed": {"X": 160, "Y": -245, "Z": 355, "A": -90, "B": 36, "C": 180}
+    }
+  ],
+  "phases": [
+    {
+      "id": "coverage_raster",
+      "enabled_flag": "RUN_COVERAGE_RASTER",
+      "anchor_frame": "CalibrationCenter",
+      "motions": [
+        {"from": "CalibrationCenter", "to": "CalibrationCoverageUpperLeft", "motion_type": "PTP", "capture_label": null},
+        {"from": "CalibrationCoverageUpperLeft", "to": "CalibrationCoverageUpperCenter", "motion_type": "LIN", "capture_label": "coverage_upper_left_to_center"},
+        {"from": "CalibrationCoverageUpperCenter", "to": "CalibrationCoverageUpperRight", "motion_type": "LIN", "capture_label": "coverage_upper_center_to_right"},
+        {"from": "CalibrationCoverageUpperRight", "to": "CalibrationCoverageMiddleRight", "motion_type": "LIN", "capture_label": "coverage_upper_to_middle_right"},
+        {"from": "CalibrationCoverageMiddleRight", "to": "CalibrationCenter", "motion_type": "LIN", "capture_label": "coverage_middle_right_to_center"},
+        {"from": "CalibrationCenter", "to": "CalibrationCoverageMiddleLeft", "motion_type": "LIN", "capture_label": "coverage_middle_center_to_left"},
+        {"from": "CalibrationCoverageMiddleLeft", "to": "CalibrationCoverageLowerLeft", "motion_type": "LIN", "capture_label": "coverage_middle_to_lower_left"},
+        {"from": "CalibrationCoverageLowerLeft", "to": "CalibrationCoverageLowerCenter", "motion_type": "LIN", "capture_label": "coverage_lower_left_to_center"},
+        {"from": "CalibrationCoverageLowerCenter", "to": "CalibrationCoverageLowerRight", "motion_type": "LIN", "capture_label": "coverage_lower_center_to_right"},
+        {"from": "CalibrationCoverageLowerRight", "to": "CalibrationCenter", "motion_type": "PTP", "capture_label": null}
+      ]
+    },
+    {
+      "id": "orientation_dither",
+      "enabled_flag": "RUN_ORIENTATION_DITHER",
+      "anchor_frame": "CalibrationCenter",
+      "reference_frame": "CalibrationCenter",
+      "motion_type": "LIN_REL",
+      "motions": [
+        {"delta": {"X": 0, "Y": 0, "Z": 0, "A": -15, "B": 0, "C": 0}, "result_offset": {"A": -15, "B": 0, "C": 0}, "capture_label": "orientation_alpha_minus_15"},
+        {"delta": {"X": 0, "Y": 0, "Z": 0, "A": 30, "B": 0, "C": 0}, "result_offset": {"A": 15, "B": 0, "C": 0}, "capture_label": "orientation_alpha_plus_15"},
+        {"delta": {"X": 0, "Y": 0, "Z": 0, "A": -15, "B": 0, "C": 0}, "result_offset": {"A": 0, "B": 0, "C": 0}, "capture_label": "orientation_alpha_return_center"},
+        {"delta": {"X": 0, "Y": 0, "Z": 0, "A": 0, "B": -12, "C": 0}, "result_offset": {"A": 0, "B": -12, "C": 0}, "capture_label": "orientation_beta_minus_12"},
+        {"delta": {"X": 0, "Y": 0, "Z": 0, "A": 0, "B": 24, "C": 0}, "result_offset": {"A": 0, "B": 12, "C": 0}, "capture_label": "orientation_beta_plus_12"},
+        {"delta": {"X": 0, "Y": 0, "Z": 0, "A": 0, "B": -12, "C": 0}, "result_offset": {"A": 0, "B": 0, "C": 0}, "capture_label": "orientation_beta_return_center"},
+        {"delta": {"X": 0, "Y": 0, "Z": 0, "A": 0, "B": 0, "C": -15}, "result_offset": {"A": 0, "B": 0, "C": -15}, "capture_label": "orientation_gamma_minus_15"},
+        {"delta": {"X": 0, "Y": 0, "Z": 0, "A": 0, "B": 0, "C": 30}, "result_offset": {"A": 0, "B": 0, "C": 15}, "capture_label": "orientation_gamma_plus_15"},
+        {"delta": {"X": 0, "Y": 0, "Z": 0, "A": 0, "B": 0, "C": -15}, "result_offset": {"A": 0, "B": 0, "C": 0}, "capture_label": "orientation_gamma_return_center"}
+      ]
+    }
+  ]
+}

@@ -8,7 +8,6 @@ from typing import Any, Mapping
 
 from flask import Blueprint, jsonify, request
 
-from posetestbot.io.artifact_browser import collect_run_artifacts
 from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
@@ -96,7 +95,6 @@ WORKFLOW_SECTIONS = [
         "label": "BOP Export",
         "artifacts": [f"{BOP_DIR}/{BOP_EXPORT_MANIFEST}"],
     },
-    {"id": "artifacts", "label": "Artifacts", "artifacts": []},
     {"id": "jobs", "label": "Jobs", "artifacts": []},
 ]
 
@@ -223,13 +221,6 @@ def ui_overview():
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             recommendation_error = str(exc)
 
-    artifact_count = 0
-    if root.exists():
-        try:
-            artifact_count = len(collect_run_artifacts(root))
-        except (FileNotFoundError, ValueError):
-            artifact_count = 0
-
     return jsonify(
         {
             "run_root": root.as_posix(),
@@ -239,6 +230,5 @@ def ui_overview():
             "steps": _sequence_steps(config, root),
             "recommendations": recommendations,
             "recommendation_error": recommendation_error,
-            "artifact_count": artifact_count,
         }
     )

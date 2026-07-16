@@ -1,115 +1,162 @@
-# IIWA Calibration-Variance Program Proposal
-
-> Historical design record. The robot-mode environment selector shown below
-> was retired by the real-only acquisition cleanup and is not a current command.
+# IIWA Nine-Frame Calibration Teaching Program
 
 ## Outcome
 
-`iiwa/PoseTestBot_CalibrationVarianceProposal.java` is a separate Sunrise
-application proposal for collecting ArUco calibration images with materially
-more image-space, distance, and orientation variance than
-`iiwa/PoseTestBot_Test.java`.
+`iiwa/PoseTestBot_CalibrationVarianceProposal.java` is a deliberately disabled
+Sunrise application for a teachable ArUco calibration capture. The Workbench
+contract is reduced to exactly nine persistent 3 × 3 raster frames below
+`/PoseTestBot/TemplateBase`. `CalibrationCenter` is one of those nine frames and
+anchors both phases.
 
-It is deliberately disabled in source. None of its proposed frames or paths
-has been validated on the physical cell.
+The six A/B/C orientation variants are no longer Workbench frames. Sunrise
+generates their nine motion legs with zero-translation `linRel` transformations
+relative to the taught center. The depth phase and its two frames are removed.
 
-## Motivation
+The repository owns three related commissioning artifacts:
 
-`PoseTestBot_Test` changes only A1 from -169 to +169 degrees while preserving
-the other six joints. That produces many robot poses, but it does not guarantee
-useful camera observations. In the diagnostic run
-`working_data/hot_full_capture_fixed_20260710_1351`, all 1,490 synchronized
-frames per RealSense detected the board, yet every board centroid stayed in
-image coverage cell 4, the center of the 3x3 grid. The intrinsic-calibration
-gate requires at least 6 of 9 cells.
+- the versioned [machine-readable teaching plan](../iiwa/calibration_teaching_plan.v2.json),
+  containing the nine seeds, center-anchored raster route, relative deltas,
+  documented result offsets, and capture labels;
+- the printable [Workbench teaching and commissioning checklist](IIWA_CALIBRATION_TEACHING_CHECKLIST.md);
+- the reproducible [SVG engineering plot](images/iiwa_calibration_teaching_plan.svg)
+  and [PNG rendering](images/iiwa_calibration_teaching_plan.png).
 
-At approximately 910 px focal length, moving a target by about 280 px
-horizontally corresponds to roughly 17 degrees of optical-axis change. At an
-estimated 500 mm working distance, a 160 mm translation without perfectly
-re-aiming the camera produces a similar shift. This proposal therefore uses
-translation as the primary coverage mechanism and smaller rotations for
-additional calibration observability.
+[![PoseTestBot iiwa nine-frame calibration teaching plot](images/iiwa_calibration_teaching_plan.png)](images/iiwa_calibration_teaching_plan.svg)
 
-## Proposed Sequence
+The 420 × 297 mm template and all nine taught flange frames in the metric views
+are drawn relative to `TemplateBase`. The ceiling-mounted robot/camera-rig inset
+is explicitly non-metric because this repository has no registered iiwa
+CAD/URDF, joint configurations, ceiling height, or
+physical-base-to-TemplateBase transform.
 
-All coordinates are millimetres and KUKA A/B/C degrees relative to
-`/HRC_Hub/Template_Base`.
+## Application Data Contract
 
-| Phase | Proposed motion | Intended variation |
+Validate the existing `/PoseTestBot/TemplateBase`, then create these nine direct
+children with the robot flange selected as the teaching and motion point.
+Values are uncommissioned initial seeds in millimetres and KUKA A/B/C degrees.
+
+| Child frame | X | Y | Z | A | B | C |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `CalibrationCoverageUpperLeft` | -160 | -320 | 535 | -90 | 24 | 180 |
+| `CalibrationCoverageUpperCenter` | 0 | -320 | 535 | -90 | 24 | 180 |
+| `CalibrationCoverageUpperRight` | 160 | -320 | 535 | -90 | 24 | 180 |
+| `CalibrationCoverageMiddleRight` | 160 | -285 | 445 | -90 | 30 | 180 |
+| `CalibrationCenter` | 0 | -285 | 445 | -90 | 30 | 180 |
+| `CalibrationCoverageMiddleLeft` | -160 | -285 | 445 | -90 | 30 | 180 |
+| `CalibrationCoverageLowerLeft` | -160 | -245 | 355 | -90 | 36 | 180 |
+| `CalibrationCoverageLowerCenter` | 0 | -245 | 355 | -90 | 36 | 180 |
+| `CalibrationCoverageLowerRight` | 160 | -245 | 355 | -90 | 36 | 180 |
+
+There are no `CalibrationReady`, depth, or orientation-variant Application Data
+frames in this revision. Existing `/PoseTestBot/CalibrationCirc01`–`03` remain
+untouched.
+
+The manifest is the plotting and consistency-test authority. Sunrise Java
+resolves the nine Workbench frames by absolute path during `initialize()` and
+does not read numeric seeds at runtime. Missing frames therefore fail before
+the UDP wait or motion.
+
+## Program Sequence
+
+Before running an enabled phase, the application commands a slow PTP to the
+taught `CalibrationCenter` anchor. Before the first start command, the operator
+must manually position the robot at or near that center pose. This is logged as
+a commissioning requirement and is not presented as an enforced safety check.
+
+| Phase | Ordered route | Motion contract |
 | --- | --- | --- |
-| Coverage raster | Nine waypoints at X = -160/0/+160 and Z = 355/445/535 | Cross image left/center/right and upper/middle/lower thirds |
-| Depth sweep | `(0, -360, 600)` to `(0, -230, 350)` and back | Board scale, depth, and oblique-view variation |
-| Orientation dither | Fixed XYZ with A/C +/-15 degrees and B +/-12 degrees | Rotation-axis and perspective diversity for intrinsics and hand-eye solving |
+| Coverage | Center → upper-left → upper-center → upper-right → middle-right → center → middle-left → lower-left → lower-center → lower-right → Center | Center transits are PTP; the eight raster legs are captured LIN motions. |
+| Orientation | Center → A−15° → A+15° → Center → B−12° → B+12° → Center → C−15° → C+15° → Center | All nine legs are captured zero-translation `LIN_REL` motions referenced to the taught center. |
 
-The raster is traversed continuously in a snake pattern. Each linear leg and
-each orientation motion has a distinct `motion` label in the UDP pose stream,
-so observations can later be grouped or rejected by phase.
+The relative dither uses these program-owned deltas:
 
-The positions are deliberately inside the broad envelope of the legacy
-`HRC_Hub_Cap.java` Center, CenterClose, LeftClose, RightClose, Top, and Bottom
-frames. This is only a starting point; it is not evidence that the new frames
-or their connecting paths are safe or reachable.
+| Leg | Relative ΔA | Relative ΔB | Relative ΔC | Result from center |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | -15° | 0° | 0° | A−15° |
+| 2 | +30° | 0° | 0° | A+15° |
+| 3 | -15° | 0° | 0° | Center |
+| 4 | 0° | -12° | 0° | B−12° |
+| 5 | 0° | +24° | 0° | B+12° |
+| 6 | 0° | -12° | 0° | Center |
+| 7 | 0° | 0° | -15° | C−15° |
+| 8 | 0° | 0° | +30° | C+15° |
+| 9 | 0° | 0° | -15° | Center |
 
-## Velocity Contract
+The program constructs each offset with `Transformation.ofDeg(0, 0, 0,
+ΔA, ΔB, ΔC)` and executes `linRel(offset, calibrationCenter)`. It moves to the
+absolute taught center before each capture command, so a new run re-establishes
+the anchor rather than assuming a prior relative state. The nine relative legs
+themselves remain stateful and must complete in order.
 
-The PoseTestBot receiver sends `cartesian_velocity_m_s`. The proposed program
-converts that value to the millimetres-per-second unit expected by Sunrise
-Cartesian motion and clamps it to 20--80 mm/s. A first image trial should use
-40 mm/s:
+This intentionally changes the original orientation phase from joint-space PTP
+to Cartesian relative orientation interpolation. Reducing the frame count
+reduces teaching work, not commissioning work: all six result orientations and
+all nine swept paths still require Workbench and physical T1 validation. The
+installed Sunrise.OS Javadoc is authoritative for the available `linRel`
+overload and must be checked during Workbench compilation.
+
+The receiver's `cartesian_velocity_m_s` is converted to Sunrise millimetres per
+second and clamped to 20–80 mm/s for raster and relative motions. The UDP stop
+message is read only while waiting for another start command. It cannot
+interrupt active motion and is not a safety control.
+
+## Plot Contract and Regeneration
+
+The plot uses the existing KUKA pose decoder. Manifest A/B/C degrees are
+converted to radians before transformation. It includes:
+
+- an equal-scale metric isometric view of the exact template and nine taught
+  flange frames, with the six program-only relative results overlaid at center;
+- a numbered raster view with solid LIN legs and dashed PTP order connectors;
+- an exploded center inset showing the nine `LIN_REL` legs and RGB flange axes;
+- a machine-readable-delta table and nine-frame Workbench teaching key;
+- a non-metric ceiling plate → hanging iiwa proxy → flange/camera rig → template
+  cell schematic;
+- the joint-space-path caveat and full teaching-aid safety disclaimer.
+
+No flange axis is described as a camera optical axis because no validated
+camera-to-flange transform is supplied. The historical
+`/HRC_Hub/Template_Base` A1 sweep is not overlaid because no transform to
+`/PoseTestBot/TemplateBase` is available.
+
+Matplotlib is a direct project dependency. Regenerate both committed outputs
+without opening hardware:
 
 ```bash
-POSETESTBOT_ROBOT_MODE=real uv run python scripts/pose_receiver_udp_json.py \
-  working_data/<new_run> --capture_vel 0.04
+MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
+  uv run python scripts/plot_iiwa_calibration_teaching_plan.py
 ```
 
-That command is an operator action for an intentionally selected real-robot
-trial; it has not been run as part of this proposal.
+## Commissioning and Acceptance
 
-## Required Commissioning
+Use the [printable checklist](IIWA_CALIBRATION_TEACHING_CHECKLIST.md) for frame
+creation, touch-up read-back, per-frame reviewer sign-off, Workbench endpoint
+and swept-path checks, T1 single-stepping, and the supervised capture trial.
 
-Before physical execution:
+`ENABLE_AFTER_OFFLINE_VALIDATION` must remain `false` until Workbench compiles
+the exact controller project, resolves all nine frames, and simulates both
+phases. Physical T1 validation and capture are operator-run work. Repository
+tests never access the robot or cameras.
 
-1. Import the class into the controller's Sunrise.Workbench project without
-   replacing `PoseTestBot_Test`.
-2. Confirm the active tool, load data, flange-to-camera mounts, and
-   `/HRC_Hub/Template_Base` definition match the real cell.
-3. Validate every waypoint and every PTP/LIN connection in the offline cell,
-   including joint limits, singularities, self-collision, fixtures, target,
-   camera bodies, and cable routing.
-4. Leave `ENABLE_AFTER_OFFLINE_VALIDATION = false` until that review passes.
-5. For T1 commissioning, enable only one of `RUN_COVERAGE_RASTER`,
-   `RUN_DEPTH_SWEEP`, and `RUN_ORIENTATION_DITHER` at a time, use reduced
-   override, and single-step with an operator at the enabling device.
-6. Confirm all mounted cameras keep enough of the board in view at each
-   extreme. Reduce the corresponding X/Z or A/B/C offset if any camera loses
-   the board.
-7. Only after all three phases pass separately, enable the combined sequence.
+For every required camera, the supervised trial must demonstrate at least 15
+accepted views, 6/9 coverage cells, strong extreme detections, per-view
+reprojection no greater than 3 px, intrinsic RMS no greater than 1.5 px,
+sufficient motion diversity, and passing synchronization quality. Continue to
+investigate the prior high-error RealSense `825412070181` separately;
+trajectory variance alone does not resolve its reprojection discrepancy.
 
-The UDP stop message is only read while the application is waiting for a new
-start command. It does not interrupt an active Sunrise motion, and it must not
-be treated as a safety stop. Normal controller safety functions remain the
-only safety controls for commissioning.
+## Limits and Assumptions
 
-## Capture Acceptance
-
-A short trial should be analysed before a full calibration capture. For every
-camera, require:
-
-- at least 15 accepted views;
-- at least 6 of the 9 image-centroid coverage cells;
-- strong detections at every raster extreme, with the full board preferred;
-- per-view reprojection error no greater than 3 px;
-- final intrinsic RMS no greater than 1.5 px;
-- sufficiently varied robot translations and rotations for the selected
-  extrinsic mode;
-- a passing synchronization-quality report.
-
-The previous diagnostic also found approximately 4.06 px mean board PnP
-reprojection error for RealSense `825412070181`, versus about 0.67 px and
-0.60 px for the other two sensors using factory intrinsics. More trajectory
-variance does not by itself fix that discrepancy; inspect that camera's
-intrinsics, image orientation, mount rigidity, and synchronization separately.
-
-The exact ArUcoGridGen JSON export is still required before producing physical
-intrinsic or extrinsic calibration results. Detection-only coverage checks can
-be used during motion commissioning without treating them as calibration.
+- “Swivel” means the existing flange A/B/C orientation dither. It does not mean
+  changing the iiwa redundancy/swivel angle while preserving an identical
+  Cartesian flange pose.
+- Frame names such as “upper” and “left” describe intended image-space outcomes;
+  verify them in every required camera rather than inferring them from
+  TemplateBase signs.
+- Removing `CalibrationReady` removes the separate high-clearance transit
+  anchor. Every center-to-raster PTP and the manual approach to center must be
+  assessed for the actual cell.
+- The depth sweep is removed. Add it back only through a separately reviewed
+  taught or relative-motion design.
+- The plot's template is the measured 420 × 297 mm HRI template. The ArUco board
+  is not drawn to scale until its physical size and placement are supplied.

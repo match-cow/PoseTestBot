@@ -82,8 +82,8 @@ Keep or extend these areas:
 - BlenderProc preparation/render planning for optional dataset GT/masks.
 - `scripts/run_bop_export_stage.py` and `posetestbot.bop.writer`.
 - Flask transition APIs for jobs, capture status, hardware/sensor/runtime
-  status, run config, preflight, calibration, sync quality, artifact browsing,
-  BOP scene/frame inspection, and pipeline sequence submission.
+  status, run config, preflight, calibration, sync quality, and pipeline
+  sequence submission.
 
 Do not reintroduce downstream estimator/evaluator behavior here:
 

@@ -17,7 +17,6 @@ from posetestbot.web.security import install_request_security
 
 
 BRAND_ASSET_DIR = Path(__file__).resolve().parent / "static"
-BRAND_LOGO_FILENAME = "cow200.png"
 CELL_ASSET_DIR = BRAND_ASSET_DIR / "cell"
 
 
@@ -49,11 +48,16 @@ def create_app() -> Flask:
     )
     install_request_security(app)
 
-    @app.get("/assets/cow200.png")
-    def brand_logo():
+    @app.get("/assets/cow_dark.png", defaults={"filename": "cow_dark.png"})
+    @app.get("/assets/cow_light.png", defaults={"filename": "cow_light.png"})
+    @app.get(
+        "/assets/cow_favicon.png",
+        defaults={"filename": "cow_favicon.png"},
+    )
+    def brand_asset(filename: str):
         return send_from_directory(
             BRAND_ASSET_DIR,
-            BRAND_LOGO_FILENAME,
+            filename,
             max_age=86400,
             mimetype="image/png",
         )

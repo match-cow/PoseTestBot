@@ -58,7 +58,7 @@ export function WorkflowPage() {
   const selectedStages = stages.data?.stages.filter((stage) => phaseFor(stage) === current && stage.id !== "capture_execution") ?? []
   const queueConfig = useMutation({
     mutationFn: () => api<{ job_id: string }>("/pipeline/run-config", { method: "POST", body: JSON.stringify({ run_root: selectedRun }) }),
-    onSuccess: (data) => { toast.success("Plan-only sequence queued", { description: `Job ${data.job_id}` }); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["artifacts", selectedRun] }) },
+    onSuccess: (data) => { toast.success("Plan-only sequence queued", { description: `Job ${data.job_id}` }); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] }) },
     onError: (error) => toast.error("Sequence was not queued", { description: errorMessage(error) }),
   })
   const artifactStatus = (stageId: string) => overview.data?.steps.find((step) => step.stage_id === stageId)?.status

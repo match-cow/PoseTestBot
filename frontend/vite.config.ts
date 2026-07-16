@@ -23,7 +23,6 @@ export default defineConfig({
       "/sensors": "http://127.0.0.1:5000",
       "/monitoring": "http://127.0.0.1:5000",
       "/pipeline": "http://127.0.0.1:5000",
-      "/artifacts": "http://127.0.0.1:5000",
       "/run-config": "http://127.0.0.1:5000",
       "/robot": "http://127.0.0.1:5000",
       "/runtime": "http://127.0.0.1:5000",

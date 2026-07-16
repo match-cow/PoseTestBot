@@ -9,7 +9,6 @@ from posetestbot.aruco.coverage import (
     build_aruco_coverage_report,
     write_aruco_coverage_report_with_manifest,
 )
-from posetestbot.io.artifact_browser import collect_run_artifacts
 from posetestbot.io.artifacts import (
     ARUCO_COVERAGE_REPORT,
     ARUCO_POSE_ESTIMATION,
@@ -85,7 +84,7 @@ def test_build_aruco_coverage_report_counts_detection_and_pose_frames(
     assert sensor["motions"] == ["motion_a", "motion_b"]
 
 
-def test_aruco_coverage_writes_manifest_and_artifact_summary(tmp_path: Path) -> None:
+def test_aruco_coverage_writes_manifest(tmp_path: Path) -> None:
     run_root = create_aruco_output_fixture(tmp_path)
 
     report = write_aruco_coverage_report_with_manifest(run_root)
@@ -97,20 +96,6 @@ def test_aruco_coverage_writes_manifest_and_artifact_summary(tmp_path: Path) -> 
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][ARUCO_COVERAGE_REPORT] == ARUCO_COVERAGE_REPORT
     assert (run_root / DATASET_MANIFEST).is_file()
-
-    records = collect_run_artifacts(run_root)
-    coverage = next(
-        record
-        for record in records
-        if record.key == ARUCO_COVERAGE_REPORT and record.source == "known"
-    )
-    assert coverage.summary["type"] == "aruco_coverage_report"
-    assert coverage.summary["ready_for_calibration"] is True
-    assert coverage.summary["blocker"] is None
-    assert coverage.summary["sensor_names"] == ["realsense_123"]
-    assert coverage.summary["valid_pose_count"] == 1
-    assert "aruco_coverage_report" in coverage.to_dict()["display_label"]
-
 
 def test_aruco_coverage_stage_cli_prints_json(tmp_path: Path) -> None:
     run_root = create_aruco_output_fixture(tmp_path)

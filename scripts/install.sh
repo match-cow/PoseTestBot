@@ -275,6 +275,7 @@ modules = [
     "pyrealsense2",
     "flask",
     "depthai",
+    "matplotlib",
     "tqdm",
     "pytransform3d",
     "trimesh",
