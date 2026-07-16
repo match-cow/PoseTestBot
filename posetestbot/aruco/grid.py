@@ -9,7 +9,12 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
-from posetestbot.calibration.targets import normalize_calibration_target_spec, opencv_grid_board
+from posetestbot.calibration.targets import (
+    normalize_calibration_target_spec,
+    opencv_grid_board,
+    target_identity,
+    validate_target_identity,
+)
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import ARUCO_DETECTIONS, ARUCO_POSE_ESTIMATION, MATCH_ROBOT_EE_POSES, RGB_DIR
 
@@ -31,6 +36,7 @@ def _image_paths(sensor_folder: Path) -> list[Path]:
 def _target_provenance(target: Mapping[str, Any]) -> dict[str, Any]:
     source = target.get("generator_source")
     return {
+        **target_identity(target),
         "schema_version": target.get("schema_version"),
         "dictionary": target.get("dictionary"),
         "grid_size": target.get("grid_size"),
@@ -52,7 +58,7 @@ def detect_sensor_folder(
     normalized = normalize_calibration_target_spec(target)
     dictionary, _board = opencv_grid_board(normalized)
     detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
-    allowed_ids = set(int(item) for item in normalized["marker_ids"])
+    allowed_ids = {int(marker["id"]) for marker in normalized["markers"]}
     frames: dict[str, Any] = {}
     image_size: list[int] | None = None
     for image_path in _image_paths(folder):
@@ -197,6 +203,12 @@ def estimate_sensor_poses(
 
     folder = Path(sensor_folder)
     normalized = normalize_calibration_target_spec(target)
+    validate_target_identity(detections.get("target"), normalized, label="ArUco detections")
+    profile_source = intrinsic_profile.get("source")
+    if isinstance(profile_source, Mapping) and profile_source.get("mode") == "calibrate":
+        validate_target_identity(
+            profile_source.get("target"), normalized, label="calibrated intrinsics"
+        )
     _dictionary, board = opencv_grid_board(normalized)
     matrix, distortion = _projection(intrinsic_profile)
     frames = detections.get("frames")

@@ -188,6 +188,16 @@ export interface RunConfig {
   object_folder: string
   selected_objects: string[]
   calibration_profiles: string | null
+  calibration_target: {
+    target_id: string
+    bundle_path: string
+    source_sha256: string
+    spec_sha256: string
+    pdf_sha256: string
+    configuration_sha256: string
+    geometry_sha256: string
+    placement: { mode: "unknown" | "template_base_identity" | "posegridgen_board_to_base" }
+  } | null
   pipeline: {
     sequence_id: string
     plan_only: boolean

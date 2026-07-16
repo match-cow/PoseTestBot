@@ -95,6 +95,8 @@ def discover_web_runs() -> list[dict[str, Any]]:
             continue
         for candidate in allowed_root.iterdir():
             try:
+                if candidate.name == "calibration_targets":
+                    continue
                 if candidate.is_symlink() or not candidate.is_dir():
                     continue
                 resolved = candidate.resolve()

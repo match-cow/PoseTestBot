@@ -1,4 +1,4 @@
-"""Calibration target import and normalized geometry contracts."""
+"""Versioned calibration-target geometry and import contracts."""
 
 from __future__ import annotations
 
@@ -6,19 +6,25 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 from posetestbot.io.atomic import atomic_write_json
 
 
-SCHEMA_VERSION = "calibration_target.v1"
+SCHEMA_VERSION = "calibration_target.v2"
+LEGACY_SCHEMA_VERSION = "calibration_target.v1"
 SUPPORTED_GENERATOR_VERSION = "1.0"
+POSEGRIDGEN_SCHEMA_VERSION = "2.0"
 SUPPORTED_TARGET_TYPES = ("aruco_grid", "charuco", "checkerboard")
 SUPPORTED_ARUCO_DICTIONARIES = frozenset(
     [
-        *(f"DICT_{bits}X{bits}_{capacity}" for bits in range(4, 8) for capacity in (50, 100, 250, 1000)),
+        *(
+            f"DICT_{bits}X{bits}_{capacity}"
+            for bits in range(4, 8)
+            for capacity in (50, 100, 250, 1000)
+        ),
         "DICT_ARUCO_ORIGINAL",
         "DICT_APRILTAG_16h5",
         "DICT_APRILTAG_25h9",
@@ -33,15 +39,24 @@ DEFAULT_TARGET_SPEC = {
     "dictionary": "DICT_5X5_50",
     "grid_size": [4, 3],
     "marker_length": 50.0,
-    "marker_separation": 65.0,
+    "marker_separation": 15.0,
     "marker_ids": list(range(12)),
     "unit": "mm",
     "frame": {
         "name": "aruco_grid",
-        "origin": "marker_0_outer_top_left",
+        "origin": "compensated_outer_board_top_left",
         "axes": {"x": "right", "y": "down", "z": "into_board"},
     },
 }
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
 
 
 def _size(value: str | list[Any] | tuple[Any, ...], *, label: str) -> list[int]:
@@ -63,13 +78,20 @@ def _size(value: str | list[Any] | tuple[Any, ...], *, label: str) -> list[int]:
     return parsed
 
 
-def _positive_float(value: Any, *, label: str) -> float:
+def _finite_float(value: Any, *, label: str) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must be a number") from exc
-    if not math.isfinite(parsed) or parsed <= 0:
-        raise ValueError(f"{label} must be finite and greater than 0")
+    if not math.isfinite(parsed):
+        raise ValueError(f"{label} must be finite")
+    return parsed
+
+
+def _positive_float(value: Any, *, label: str) -> float:
+    parsed = _finite_float(value, label=label)
+    if parsed <= 0:
+        raise ValueError(f"{label} must be greater than 0")
     return parsed
 
 
@@ -80,12 +102,385 @@ def _validate_dictionary(value: Any) -> str:
     return dictionary
 
 
+def _dictionary_capacity(dictionary: str) -> int:
+    import cv2
+
+    try:
+        dictionary_id = getattr(cv2.aruco, dictionary)
+        value = cv2.aruco.getPredefinedDictionary(dictionary_id)
+    except (AttributeError, cv2.error) as exc:
+        raise ValueError(f"Installed OpenCV does not support {dictionary}") from exc
+    return int(value.bytesList.shape[0])
+
+
 def _normalized_grid_frame() -> dict[str, Any]:
     return {
         "name": "aruco_grid",
-        "origin": "marker_0_outer_top_left",
+        "origin": "compensated_outer_board_top_left",
         "axes": {"x": "right", "y": "down", "z": "into_board"},
     }
+
+
+def _rectangular_markers(
+    *,
+    cols: int,
+    rows: int,
+    marker_width: float,
+    marker_height: float,
+    separation_x: float,
+    separation_y: float,
+    marker_ids: Sequence[int],
+) -> list[dict[str, Any]]:
+    markers = []
+    for index, marker_id in enumerate(marker_ids):
+        row, col = divmod(index, cols)
+        x = col * (marker_width + separation_x)
+        y = row * (marker_height + separation_y)
+        markers.append(
+            {
+                "id": int(marker_id),
+                "corners_mm": [
+                    [x, y, 0.0],
+                    [x + marker_width, y, 0.0],
+                    [x + marker_width, y + marker_height, 0.0],
+                    [x, y + marker_height, 0.0],
+                ],
+            }
+        )
+    return markers
+
+
+def _bounds_from_markers(markers: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    points = np.asarray(
+        [point for marker in markers for point in marker["corners_mm"]],
+        dtype=float,
+    )
+    minimum = points.min(axis=0)
+    maximum = points.max(axis=0)
+    return {
+        "x_mm": float(minimum[0]),
+        "y_mm": float(minimum[1]),
+        "width_mm": float(maximum[0] - minimum[0]),
+        "height_mm": float(maximum[1] - minimum[1]),
+    }
+
+
+def _geometry_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "target_type": value["target_type"],
+        "dictionary": value["dictionary"],
+        "unit": value["unit"],
+        "frame": value["frame"],
+        "target_bounds": value["target_bounds"],
+        "print_compensation": value["print_compensation"],
+        "markers": value["markers"],
+    }
+
+
+def geometry_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_bytes(_geometry_payload(value))).hexdigest()
+
+
+def target_identity(value: Mapping[str, Any]) -> dict[str, str | None]:
+    normalized = normalize_calibration_target_spec(value)
+    target_id = normalized.get("target_id")
+    return {
+        "target_id": str(target_id) if target_id is not None else None,
+        "geometry_sha256": (
+            str(normalized["geometry_sha256"])
+            if normalized.get("geometry_sha256") is not None
+            else None
+        ),
+    }
+
+
+def validate_target_identity(
+    evidence: Mapping[str, Any] | None,
+    target: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    expected = target_identity(target)
+    if expected["geometry_sha256"] is None:
+        return
+    if not isinstance(evidence, Mapping):
+        if expected["target_id"] is None:
+            return
+        raise ValueError(f"{label} is missing calibration-target provenance")
+    if evidence.get("geometry_sha256") is None and expected["target_id"] is None:
+        return
+    if evidence.get("geometry_sha256") != expected["geometry_sha256"]:
+        raise ValueError(f"{label} calibration-target geometry_sha256 mismatch")
+    if expected["target_id"] is not None and evidence.get("target_id") != expected["target_id"]:
+        raise ValueError(f"{label} calibration-target target_id mismatch")
+
+
+def posegridgen_configuration_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _normalized_compensation(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, Mapping) else {}
+    x_percent = _positive_float(source.get("x_percent", 100.0), label="x_percent")
+    y_percent = _positive_float(source.get("y_percent", 100.0), label="y_percent")
+    if x_percent > 200 or y_percent > 200:
+        raise ValueError("Print compensation percentages must not exceed 200")
+    application = str(source.get("application", "already_applied"))
+    if application != "already_applied":
+        raise ValueError("Compensated target geometry must be marked already_applied")
+    return {
+        "x_percent": x_percent,
+        "y_percent": y_percent,
+        "application": "already_applied",
+    }
+
+
+def _normalized_bounds(value: Any) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        raise ValueError("target_bounds must be an object")
+    bounds = {
+        key: _finite_float(value.get(key), label=f"target_bounds.{key}")
+        for key in ("x_mm", "y_mm", "width_mm", "height_mm")
+    }
+    if bounds["width_mm"] <= 0 or bounds["height_mm"] <= 0:
+        raise ValueError("target_bounds width and height must be greater than 0")
+    return bounds
+
+
+def _normalized_markers(value: Any, *, capacity: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("aruco_grid markers must be a non-empty list")
+    markers: list[dict[str, Any]] = []
+    ids: set[int] = set()
+    winding: float | None = None
+    plane_z: float | None = None
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"Marker {index} must be an object")
+        marker_id = int(item.get("id", -1))
+        if marker_id < 0:
+            raise ValueError(f"Marker {index} ID must be nonnegative")
+        if marker_id in ids:
+            raise ValueError(f"Duplicate marker ID: {marker_id}")
+        if marker_id >= capacity:
+            raise ValueError(
+                f"Marker ID {marker_id} exceeds dictionary capacity {capacity}"
+            )
+        raw_corners = item.get("corners_mm")
+        if not isinstance(raw_corners, list) or len(raw_corners) != 4:
+            raise ValueError(f"Marker {marker_id} must have exactly four corners_mm")
+        corners = np.asarray(raw_corners, dtype=float)
+        if corners.shape != (4, 3) or not np.isfinite(corners).all():
+            raise ValueError(f"Marker {marker_id} corners must be finite 3D points")
+        marker_plane = float(corners[0, 2])
+        if not np.allclose(corners[:, 2], marker_plane, atol=1e-9, rtol=0):
+            raise ValueError(f"Marker {marker_id} corners must be coplanar")
+        if plane_z is None:
+            plane_z = marker_plane
+        elif not math.isclose(plane_z, marker_plane, abs_tol=1e-9):
+            raise ValueError("All marker corners must lie on one plane")
+        area = 0.5 * sum(
+            corners[i, 0] * corners[(i + 1) % 4, 1]
+            - corners[(i + 1) % 4, 0] * corners[i, 1]
+            for i in range(4)
+        )
+        if abs(area) <= 1e-9:
+            raise ValueError(f"Marker {marker_id} corners are degenerate")
+        minimum_xy = corners[:, :2].min(axis=0)
+        maximum_xy = corners[:, :2].max(axis=0)
+        expected_xy = np.asarray(
+            [
+                [minimum_xy[0], minimum_xy[1]],
+                [maximum_xy[0], minimum_xy[1]],
+                [maximum_xy[0], maximum_xy[1]],
+                [minimum_xy[0], maximum_xy[1]],
+            ]
+        )
+        if not np.allclose(corners[:, :2], expected_xy, atol=1e-9, rtol=0):
+            raise ValueError(
+                f"Marker {marker_id} corners must use consistent winding and be "
+                "ordered top-left, top-right, bottom-right, bottom-left"
+            )
+        current_winding = math.copysign(1.0, area)
+        if current_winding < 0:
+            raise ValueError(
+                f"Marker {marker_id} corners must use consistent winding and be "
+                "ordered top-left, top-right, bottom-right, bottom-left"
+            )
+        if winding is None:
+            winding = current_winding
+        elif winding != current_winding:
+            raise ValueError("Marker corners must use consistent winding")
+        ids.add(marker_id)
+        markers.append(
+            {
+                "id": marker_id,
+                "corners_mm": [
+                    [float(component) for component in point] for point in corners.tolist()
+                ],
+            }
+        )
+    return markers
+
+
+def _validate_bounds_containment(
+    markers: Sequence[Mapping[str, Any]], bounds: Mapping[str, float]
+) -> None:
+    x0, y0 = bounds["x_mm"], bounds["y_mm"]
+    x1 = x0 + bounds["width_mm"]
+    y1 = y0 + bounds["height_mm"]
+    tolerance = 1e-8
+    for marker in markers:
+        for point in marker["corners_mm"]:
+            if not (
+                x0 - tolerance <= point[0] <= x1 + tolerance
+                and y0 - tolerance <= point[1] <= y1 + tolerance
+            ):
+                raise ValueError(
+                    f"Marker {marker['id']} corner lies outside target_bounds"
+                )
+
+
+def _normalized_placement(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Calibration target placement must be an object")
+    if value.get("from") != "aruco_grid" or value.get("to") != "template_base":
+        raise ValueError("Calibration target placement must map aruco_grid to template_base")
+    quaternion = value.get("rotation_quaternion_wxyz")
+    translation = value.get("translation_mm")
+    if not isinstance(quaternion, list | tuple) or len(quaternion) != 4:
+        raise ValueError("Calibration target placement quaternion must contain four values")
+    if not isinstance(translation, list | tuple) or len(translation) != 3:
+        raise ValueError("Calibration target placement translation must contain three values")
+    normalized_quaternion = [
+        _finite_float(item, label="placement.rotation_quaternion_wxyz")
+        for item in quaternion
+    ]
+    normalized_translation = [
+        _finite_float(item, label="placement.translation_mm") for item in translation
+    ]
+    if not math.isclose(
+        sum(item * item for item in normalized_quaternion),
+        1.0,
+        abs_tol=1e-8,
+    ):
+        raise ValueError("Calibration target placement quaternion must be normalized")
+    placement = {
+        "from": "aruco_grid",
+        "to": "template_base",
+        "rotation_quaternion_wxyz": normalized_quaternion,
+        "translation_mm": normalized_translation,
+    }
+    for key in ("source", "source_base_frame_interpretation", "unit"):
+        if key in value:
+            placement[key] = value[key]
+    return placement
+
+
+def _normalize_v2(value: Mapping[str, Any]) -> dict[str, Any]:
+    if str(value.get("target_type", "")) != "aruco_grid":
+        raise ValueError("calibration_target.v2 currently supports only aruco_grid")
+    if str(value.get("unit", "")) != "mm":
+        raise ValueError("Calibration target geometry must use millimetres")
+    dictionary = _validate_dictionary(value.get("dictionary"))
+    capacity = _dictionary_capacity(dictionary)
+    markers = _normalized_markers(value.get("markers"), capacity=capacity)
+    bounds = _normalized_bounds(value.get("target_bounds"))
+    _validate_bounds_containment(markers, bounds)
+    frame = value.get("frame")
+    expected_frame = _normalized_grid_frame()
+    if not isinstance(frame, Mapping) or dict(frame) != expected_frame:
+        raise ValueError(
+            "Calibration target frame must use the compensated board top-left "
+            "aruco_grid convention"
+        )
+    normalized: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "target_type": "aruco_grid",
+        "dictionary": dictionary,
+        "unit": "mm",
+        "frame": _normalized_grid_frame(),
+        "target_bounds": bounds,
+        "print_compensation": _normalized_compensation(
+            value.get("print_compensation")
+        ),
+        "markers": markers,
+    }
+    for key in (
+        "target_id",
+        "display_name",
+        "grid_size",
+        "generator_source",
+        "posegridgen",
+        "placement",
+        "source_schema_version",
+    ):
+        if key in value:
+            normalized[key] = value[key]
+    if "grid_size" in normalized:
+        normalized["grid_size"] = _size(normalized["grid_size"], label="grid_size")
+        if math.prod(normalized["grid_size"]) != len(markers):
+            raise ValueError("Calibration target grid_size does not match marker count")
+    if "placement" in normalized:
+        normalized["placement"] = _normalized_placement(normalized["placement"])
+    posegridgen = normalized.get("posegridgen")
+    if posegridgen is not None:
+        if not isinstance(posegridgen, Mapping):
+            raise ValueError("posegridgen provenance must be an object")
+        configuration = posegridgen.get("configuration")
+        expected_hash = str(posegridgen.get("configuration_hash", ""))
+        if not isinstance(configuration, Mapping):
+            raise ValueError("posegridgen.configuration must be an object")
+        actual_hash = posegridgen_configuration_sha256(configuration)
+        if actual_hash != expected_hash:
+            raise ValueError("PoseGridGen configuration hash does not match configuration")
+    actual_geometry_hash = geometry_sha256(normalized)
+    supplied_hash = value.get("geometry_sha256")
+    if supplied_hash is not None and str(supplied_hash) != actual_geometry_hash:
+        raise ValueError("Calibration target geometry_sha256 does not match geometry")
+    normalized["geometry_sha256"] = actual_geometry_hash
+    return normalized
+
+
+def _normalize_legacy_aruco(value: Mapping[str, Any]) -> dict[str, Any]:
+    cols, rows = _size(value.get("grid_size"), label="grid_size")
+    marker_length = _positive_float(value.get("marker_length"), label="marker_length")
+    marker_separation = _positive_float(
+        value.get("marker_separation"), label="marker_separation"
+    )
+    expected_ids = list(range(cols * rows))
+    marker_ids = [int(item) for item in value.get("marker_ids", expected_ids)]
+    if marker_ids != expected_ids:
+        raise ValueError("ArUco grid marker IDs must be contiguous row-major IDs starting at 0")
+    markers = _rectangular_markers(
+        cols=cols,
+        rows=rows,
+        marker_width=marker_length,
+        marker_height=marker_length,
+        separation_x=marker_separation,
+        separation_y=marker_separation,
+        marker_ids=marker_ids,
+    )
+    upgraded: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "source_schema_version": LEGACY_SCHEMA_VERSION,
+        "target_type": "aruco_grid",
+        "dictionary": value.get("dictionary"),
+        "grid_size": [cols, rows],
+        "unit": value.get("unit", "mm"),
+        "frame": _normalized_grid_frame(),
+        "target_bounds": _bounds_from_markers(markers),
+        "print_compensation": {
+            "x_percent": 100.0,
+            "y_percent": 100.0,
+            "application": "already_applied",
+        },
+        "markers": markers,
+    }
+    for key in ("target_id", "display_name", "generator_source", "placement"):
+        if key in value:
+            upgraded[key] = value[key]
+    return _normalize_v2(upgraded)
 
 
 def normalize_calibration_target_spec(
@@ -100,7 +495,7 @@ def normalize_calibration_target_spec(
     checkerboard_size: str | list[Any] | tuple[Any, ...] | None = None,
     unit: str | None = None,
 ) -> dict[str, Any]:
-    """Return normalized target metadata, including deterministic grid IDs/frame."""
+    """Return validated geometry, expanding legacy ArUco grids to exact corners."""
 
     data = dict(DEFAULT_TARGET_SPEC if value is None else value)
     overrides = {
@@ -114,41 +509,124 @@ def normalize_calibration_target_spec(
         "unit": unit,
     }
     data.update({key: item for key, item in overrides.items() if item is not None})
-    data["schema_version"] = SCHEMA_VERSION
-    data["target_type"] = str(data.get("target_type", "aruco_grid"))
-    if data["target_type"] not in SUPPORTED_TARGET_TYPES:
+    resolved_type = str(data.get("target_type", "aruco_grid"))
+    if resolved_type not in SUPPORTED_TARGET_TYPES:
         raise ValueError("target_type must be one of: " + ", ".join(SUPPORTED_TARGET_TYPES))
+    if resolved_type == "aruco_grid":
+        if "markers" in data:
+            data["schema_version"] = SCHEMA_VERSION
+            return _normalize_v2(data)
+        return _normalize_legacy_aruco(data)
+
+    # ChArUco and checkerboard remain legacy reader-only geometry in this iteration.
+    data["schema_version"] = LEGACY_SCHEMA_VERSION
+    data["target_type"] = resolved_type
     data["unit"] = str(data.get("unit", "mm"))
     if data["unit"] != "mm":
         raise ValueError("Calibration target geometry must use millimetres")
-
     if "grid_size" in data:
         data["grid_size"] = _size(data["grid_size"], label="grid_size")
     if "checkerboard_size" in data:
-        data["checkerboard_size"] = _size(data["checkerboard_size"], label="checkerboard_size")
+        data["checkerboard_size"] = _size(
+            data["checkerboard_size"], label="checkerboard_size"
+        )
     for key in ("marker_length", "marker_separation", "square_length"):
         if key in data and data[key] is not None:
             data[key] = _positive_float(data[key], label=key)
-
-    if data["target_type"] in {"aruco_grid", "charuco"}:
+    if resolved_type == "charuco":
         data["dictionary"] = _validate_dictionary(data.get("dictionary"))
-        if "grid_size" not in data or "marker_length" not in data:
-            raise ValueError(f"{data['target_type']} target requires grid_size and marker_length")
-    if data["target_type"] == "aruco_grid":
-        if "marker_separation" not in data:
-            raise ValueError("aruco_grid target requires marker_separation")
-        expected_ids = list(range(data["grid_size"][0] * data["grid_size"][1]))
-        marker_ids = [int(item) for item in data.get("marker_ids", expected_ids)]
-        if marker_ids != expected_ids:
-            raise ValueError("ArUco grid marker IDs must be contiguous row-major IDs starting at 0")
-        data["marker_ids"] = marker_ids
-        data["frame"] = _normalized_grid_frame()
-    if data["target_type"] == "charuco" and "square_length" not in data:
-        raise ValueError("charuco target requires square_length")
-    if data["target_type"] == "checkerboard":
-        if "checkerboard_size" not in data or "square_length" not in data:
-            raise ValueError("checkerboard target requires checkerboard_size and square_length")
+        if not all(key in data for key in ("grid_size", "marker_length", "square_length")):
+            raise ValueError("charuco target requires grid_size, marker_length, and square_length")
+    if resolved_type == "checkerboard" and not all(
+        key in data for key in ("checkerboard_size", "square_length")
+    ):
+        raise ValueError("checkerboard target requires checkerboard_size and square_length")
     return data
+
+
+def target_from_posegridgen_manifest(
+    source: Mapping[str, Any],
+    *,
+    target_id: str | None = None,
+    display_name: str | None = None,
+) -> dict[str, Any]:
+    if str(source.get("schema_version")) != POSEGRIDGEN_SCHEMA_VERSION:
+        raise ValueError("PoseGridGen source schema_version must be '2.0'")
+    configuration = source.get("request")
+    if not isinstance(configuration, Mapping):
+        raise ValueError("PoseGridGen source requires a request object")
+    board = configuration.get("board")
+    if not isinstance(board, Mapping) or board.get("type") != "aruco":
+        raise ValueError("Only PoseGridGen ArUco boards can be imported")
+    expected_configuration_hash = posegridgen_configuration_sha256(configuration)
+    if source.get("configuration_hash") != expected_configuration_hash:
+        raise ValueError("PoseGridGen configuration hash does not match request")
+    features = source.get("features")
+    if not isinstance(features, list):
+        raise ValueError("PoseGridGen source requires features")
+    markers = [
+        {"id": item.get("id"), "corners_mm": item.get("corners_mm")}
+        for item in features
+        if isinstance(item, Mapping) and item.get("kind") == "marker"
+    ]
+    target_bounds = source.get("target_bounds")
+    if not isinstance(target_bounds, Mapping):
+        raise ValueError("PoseGridGen source requires target_bounds")
+    target: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "target_type": "aruco_grid",
+        "dictionary": board.get("dictionary"),
+        "grid_size": [board.get("columns"), board.get("rows")],
+        "unit": "mm",
+        "frame": _normalized_grid_frame(),
+        "target_bounds": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "width_mm": target_bounds.get("width_mm"),
+            "height_mm": target_bounds.get("height_mm"),
+        },
+        "print_compensation": {
+            **dict(configuration.get("print_compensation", {})),
+            "application": "already_applied",
+        },
+        "markers": markers,
+        "posegridgen": {
+            "revision": None,
+            "configuration_hash": expected_configuration_hash,
+            "configuration": dict(configuration),
+        },
+    }
+    if target_id is not None:
+        target["target_id"] = target_id
+    if display_name is not None:
+        target["display_name"] = display_name
+    return _normalize_v2(target)
+
+
+def import_posegridgen_export(
+    source_path: str | Path,
+    *,
+    target_id: str | None = None,
+    display_name: str | None = None,
+) -> dict[str, Any]:
+    path = Path(source_path)
+    raw = path.read_bytes()
+    try:
+        source = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid PoseGridGen JSON: {path}: {exc}") from exc
+    if not isinstance(source, Mapping):
+        raise ValueError("PoseGridGen export must be a JSON object")
+    target = target_from_posegridgen_manifest(
+        source, target_id=target_id, display_name=display_name
+    )
+    target["generator_source"] = {
+        "format": "PoseGridGen",
+        "version": POSEGRIDGEN_SCHEMA_VERSION,
+        "path": path.as_posix(),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    return _normalize_v2(target)
 
 
 def import_aruco_gridgen_export(
@@ -156,7 +634,7 @@ def import_aruco_gridgen_export(
     *,
     aligned_to_template_base: bool = False,
 ) -> dict[str, Any]:
-    """Import an exact ArUcoGridGen 1.0 JSON export into calibration_target.v1."""
+    """Import an exact legacy ArUcoGridGen 1.0 JSON export into v2 geometry."""
 
     path = Path(source_path)
     source_bytes = path.read_bytes()
@@ -167,9 +645,7 @@ def import_aruco_gridgen_export(
     if not isinstance(source, Mapping):
         raise ValueError("ArUcoGridGen export must be a JSON object")
     if str(source.get("version")) != SUPPORTED_GENERATOR_VERSION:
-        raise ValueError(
-            f"ArUcoGridGen version must be {SUPPORTED_GENERATOR_VERSION!r}"
-        )
+        raise ValueError(f"ArUcoGridGen version must be {SUPPORTED_GENERATOR_VERSION!r}")
     settings = source.get("settings")
     grid_info = source.get("grid_info")
     if not isinstance(settings, Mapping) or not isinstance(grid_info, Mapping):
@@ -177,15 +653,14 @@ def import_aruco_gridgen_export(
     if settings.get("board_type") != "aruco_grid":
         raise ValueError("ArUcoGridGen board_type must be 'aruco_grid'")
     for scale_name in ("horizontal_scale", "vertical_scale"):
-        try:
-            scale = float(settings.get(scale_name, 100.0))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"ArUcoGridGen {scale_name} must be numeric") from exc
+        scale = _finite_float(settings.get(scale_name, 100.0), label=scale_name)
         if not math.isclose(scale, 100.0, rel_tol=0.0, abs_tol=1e-9):
             raise ValueError(f"ArUcoGridGen {scale_name} must be exactly 100%")
 
     rows = int(settings.get("rows", 0))
     cols = int(settings.get("cols", 0))
+    if rows < 1 or cols < 1:
+        raise ValueError("ArUcoGridGen rows and cols must be positive")
     expected_ids = list(range(rows * cols))
     ids = grid_info.get("marker_ids")
     if not isinstance(ids, list) or [int(item) for item in ids] != expected_ids:
@@ -195,30 +670,52 @@ def import_aruco_gridgen_export(
     positions = grid_info.get("marker_positions_mm")
     if not isinstance(positions, list) or len(positions) != len(expected_ids):
         raise ValueError("ArUcoGridGen marker_positions_mm does not match marker IDs")
+    marker_length = _positive_float(settings.get("marker_size_mm"), label="marker_size_mm")
+    first_x = _finite_float(positions[0].get("x_mm"), label="marker_positions_mm.x_mm")
+    first_y = _finite_float(positions[0].get("y_mm"), label="marker_positions_mm.y_mm")
+    markers = []
     for expected_id, position in zip(expected_ids, positions, strict=True):
         if not isinstance(position, Mapping) or int(position.get("id", -1)) != expected_id:
             raise ValueError("ArUcoGridGen marker positions must follow row-major marker IDs")
-        if int(position.get("row", -1)) != expected_id // cols or int(position.get("col", -1)) != expected_id % cols:
+        if (
+            int(position.get("row", -1)) != expected_id // cols
+            or int(position.get("col", -1)) != expected_id % cols
+        ):
             raise ValueError("ArUcoGridGen marker positions contain inconsistent row/column values")
-
-    target = normalize_calibration_target_spec(
-        {
-            "target_type": "aruco_grid",
-            "dictionary": settings.get("dictionary"),
-            "grid_size": [cols, rows],
-            "marker_length": settings.get("marker_size_mm"),
-            "marker_separation": settings.get("separation_mm"),
-            "marker_ids": expected_ids,
-            "unit": "mm",
-        }
-    )
-    target["generator_source"] = {
-        "format": "ArUcoGridGen",
-        "version": SUPPORTED_GENERATOR_VERSION,
-        "path": path.as_posix(),
-        "sha256": hashlib.sha256(source_bytes).hexdigest(),
-        "export": dict(source),
-        "ignored_fields": ["transformation", "grid_info.marker_positions_mm"],
+        x = _finite_float(position.get("x_mm"), label="marker_positions_mm.x_mm") - first_x
+        y = _finite_float(position.get("y_mm"), label="marker_positions_mm.y_mm") - first_y
+        markers.append(
+            {
+                "id": expected_id,
+                "corners_mm": [
+                    [x, y, 0.0],
+                    [x + marker_length, y, 0.0],
+                    [x + marker_length, y + marker_length, 0.0],
+                    [x, y + marker_length, 0.0],
+                ],
+            }
+        )
+    target: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "target_type": "aruco_grid",
+        "dictionary": settings.get("dictionary"),
+        "grid_size": [cols, rows],
+        "unit": "mm",
+        "frame": _normalized_grid_frame(),
+        "target_bounds": _bounds_from_markers(markers),
+        "print_compensation": {
+            "x_percent": 100.0,
+            "y_percent": 100.0,
+            "application": "already_applied",
+        },
+        "markers": markers,
+        "generator_source": {
+            "format": "ArUcoGridGen",
+            "version": SUPPORTED_GENERATOR_VERSION,
+            "path": path.as_posix(),
+            "sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "export": dict(source),
+        },
     }
     if aligned_to_template_base:
         target["placement"] = {
@@ -228,7 +725,7 @@ def import_aruco_gridgen_export(
             "translation_mm": [0.0, 0.0, 0.0],
             "source": "operator_declared_aligned_identity",
         }
-    return target
+    return _normalize_v2(target)
 
 
 def load_calibration_target_spec(path: str | Path) -> dict[str, Any]:
@@ -236,43 +733,39 @@ def load_calibration_target_spec(path: str | Path) -> dict[str, Any]:
         value = json.load(file)
     if not isinstance(value, Mapping):
         raise ValueError(f"Calibration target spec must be a JSON object: {path}")
-    if value.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError(f"Calibration target schema must be {SCHEMA_VERSION!r}")
-    normalized = normalize_calibration_target_spec(value)
-    for provenance_key in ("generator_source", "placement"):
-        if provenance_key in value:
-            normalized[provenance_key] = value[provenance_key]
-    return normalized
+    schema = value.get("schema_version")
+    if schema not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}:
+        raise ValueError(
+            f"Calibration target schema must be {SCHEMA_VERSION!r} or {LEGACY_SCHEMA_VERSION!r}"
+        )
+    return normalize_calibration_target_spec(value)
 
 
 def write_calibration_target(target: Mapping[str, Any], path: str | Path) -> Path:
     normalized = normalize_calibration_target_spec(target)
-    for provenance_key in ("generator_source", "placement"):
-        if provenance_key in target:
-            normalized[provenance_key] = target[provenance_key]
     return atomic_write_json(Path(path), normalized)
 
 
 def opencv_grid_board(target: Mapping[str, Any]):
-    """Construct the OpenCV dictionary/GridBoard represented by a normalized target."""
+    """Construct a generic OpenCV Board from authoritative marker corners."""
 
     import cv2
 
     normalized = normalize_calibration_target_spec(target)
     if normalized["target_type"] != "aruco_grid":
-        raise ValueError("OpenCV GridBoard construction requires an aruco_grid target")
+        raise ValueError("OpenCV Board construction requires an aruco_grid target")
     dictionary_name = normalized["dictionary"]
     try:
         dictionary_id = getattr(cv2.aruco, dictionary_name)
-    except AttributeError as exc:
-        raise ValueError(f"Installed OpenCV does not support {dictionary_name}") from exc
-    dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
-    cols, rows = normalized["grid_size"]
-    board = cv2.aruco.GridBoard(
-        (cols, rows),
-        float(normalized["marker_length"]),
-        float(normalized["marker_separation"]),
-        dictionary,
-        np.array(normalized["marker_ids"], dtype=np.int32),
-    )
+        dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
+        object_points = [
+            np.asarray(marker["corners_mm"], dtype=np.float32)
+            for marker in normalized["markers"]
+        ]
+        ids = np.asarray([marker["id"] for marker in normalized["markers"]], dtype=np.int32)
+        board = cv2.aruco.Board(object_points, dictionary, ids)
+    except (AttributeError, cv2.error) as exc:
+        raise ValueError(
+            "Installed opencv-python lacks the required cv2.aruco.Board APIs"
+        ) from exc
     return dictionary, board

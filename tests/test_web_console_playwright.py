@@ -4,6 +4,7 @@ import json
 import threading
 from pathlib import Path
 import cv2
+import numpy as np
 import pytest
 from werkzeug.serving import make_server
 
@@ -158,7 +159,13 @@ def selected_sensor_status() -> dict:
     }
 
 
-def install_common_mocks(page, *, preflight_state: dict | None = None, requests: list[dict] | None = None) -> None:
+def install_common_mocks(
+    page,
+    *,
+    preflight_state: dict | None = None,
+    requests: list[dict] | None = None,
+    generator_available: bool = False,
+) -> None:
     requests = requests if requests is not None else []
     preflight_state = preflight_state if preflight_state is not None else {"blocker": None}
 
@@ -183,6 +190,15 @@ def install_common_mocks(page, *, preflight_state: dict | None = None, requests:
             {"path": RUN_ROOT, "name": "new-run", "sequence": "real_full_capture_validation", "plan_only": True, "config_valid": True, "config_error": None, "modified_at": "2026-07-10T12:00:00Z"},
             {"path": "/tmp/posetestbot-console/old-run", "name": "old-run", "sequence": "sync_aruco", "plan_only": True, "config_valid": True, "config_error": None, "modified_at": "2026-07-09T12:00:00Z"},
         ],
+    }))
+    page.route("**/calibration-targets/status", lambda route: fulfill_json(route, {
+        "schema_version": "calibration_target_generator_status.v1",
+        "generation_available": generator_available,
+        "generator": {
+            "checkout": "/repo/third_party/PoseGridGen",
+            "required_revision": "ad152e369e8d2746d0cf66cb1455f2371b0ec0f0",
+            "reason": None if generator_available else "Pinned source checkout is unavailable",
+        },
     }))
     page.route("**/ui/overview**", lambda route: fulfill_json(route, overview_payload()))
     page.route("**/sensors/status", lambda route: fulfill_json(route, {"schema_version": "sensor_status.v1", "families": [], "total_connected": 0, "all_expected_connected": True}))
@@ -366,6 +382,194 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     expect(page.get_by_role("link", name="Artifacts")).to_have_count(0)
     page.goto(f"{console_server.url}/#/artifacts", wait_until="networkidle")
     expect(page).to_have_url(f"{console_server.url}/#/dashboard")
+
+
+def test_calibration_target_unavailable_hides_nav_but_direct_route_explains_setup(
+    console_server, page
+) -> None:
+    install_common_mocks(page, generator_available=False)
+    page.goto(console_server.url, wait_until="networkidle")
+
+    expect(page.get_by_role("link", name="Calibration Targets")).to_have_count(0)
+    page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
+    expect(page.get_by_text("Calibration target generation is unavailable")).to_be_visible()
+    expect(page.get_by_text("git submodule update --init third_party/PoseGridGen")).to_be_visible()
+
+
+def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
+    console_server, page
+) -> None:
+    requests: list[dict] = []
+    library_urls: list[str] = []
+    blocked = {"value": True}
+    selected_runs: set[str] = set()
+    target_id = "5f09f41c-dd91-44ef-a048-1f43fc990e17"
+    old_run = "/tmp/posetestbot-console/old-run"
+    configuration = {
+        "schema_version": "2.0",
+        "page": {"paper_size": "A4", "orientation": "landscape"},
+        "board": {
+            "type": "aruco",
+            "dictionary": "DICT_5X5_50",
+            "rows": 2,
+            "columns": 3,
+            "marker_size_mm": 30,
+            "separation_mm": 10,
+            "show_ids": False,
+            "id_font_size_pt": 8,
+        },
+        "print_compensation": {"x_percent": 101, "y_percent": 99},
+        "annotations": {
+            "show_ruler": True,
+            "show_parameters": True,
+            "show_frame_legend": False,
+        },
+        "coordinate_frame": {
+            "enabled": True,
+            "pose": {
+                "translation_x_m": 0.1,
+                "translation_y_m": -0.2,
+                "translation_z_m": 0.3,
+                "roll_deg": 10,
+                "pitch_deg": 20,
+                "yaw_deg": 30,
+            },
+        },
+    }
+    install_common_mocks(page, requests=requests, generator_available=True)
+    page.route("**/calibration-targets/capabilities", lambda route: fulfill_json(route, {
+        "schema_version": "posegridgen_capabilities.v1",
+        "paper_sizes_mm": {"A4": [210, 297], "A3": [297, 420]},
+        "dictionaries": {"DICT_5X5_50": 50},
+        "defaults": configuration,
+    }))
+
+    def bundle_payload(run_root: str) -> dict:
+        selected = run_root in selected_runs
+        return {
+            "schema_version": "calibration_target_library.v1",
+            "run_root": run_root,
+            "bundles": [{
+                "target_id": target_id,
+                "display_name": "Anisotropic calibration board",
+                "created_at": "2026-07-16T12:00:00Z",
+                "valid": True,
+                "selected": selected,
+                "selected_placement": (
+                    {"mode": "posegridgen_board_to_base"} if selected else None
+                ),
+                "geometry_sha256": "a" * 64,
+                "target": {
+                    "target_bounds": {"width_mm": 111.1, "height_mm": 69.3},
+                    "print_compensation": {"x_percent": 101, "y_percent": 99},
+                    "grid_size": [3, 2],
+                },
+            }],
+        }
+
+    def library_handler(route) -> None:
+        library_urls.append(route.request.url)
+        run_root = route.request.url.split("run_root=", 1)[-1]
+        run_root = run_root.replace("%2F", "/")
+        fulfill_json(route, bundle_payload(run_root))
+
+    page.route("**/calibration-targets/bundles?**", library_handler)
+    png = cv2.imencode(".png", np.full((12, 16, 3), 220, dtype=np.uint8))[1].tobytes()
+
+    def preview_handler(route) -> None:
+        requests.append({"path": "/calibration-targets/preview", "body": route.request.post_data_json})
+        route.fulfill(status=200, content_type="image/png", body=png)
+
+    page.route("**/calibration-targets/preview", preview_handler)
+
+    def fit_handler(route) -> None:
+        body = route.request.post_data_json
+        requests.append({"path": "/calibration-targets/fit", "body": body})
+        fulfill_json(route, {"request": body, "adjusted": False, "scale_factor": 1, "changes": []})
+
+    page.route("**/calibration-targets/fit", fit_handler)
+
+    def generate_handler(route) -> None:
+        requests.append({"path": "/calibration-targets/generate", "body": route.request.post_data_json})
+        fulfill_json(route, {"job_id": "generate-1", "job": {"id": "generate-1", "status": "queued"}}, status=202)
+
+    page.route("**/calibration-targets/generate", generate_handler)
+    page.route("**/jobs/generate-1", lambda route: fulfill_json(route, {"job": {"id": "generate-1", "status": "succeeded", "message": None, "tail": []}}))
+    page.route("**/jobs/select-1", lambda route: fulfill_json(route, {"job": {"id": "select-1", "status": "succeeded", "message": None, "tail": []}}))
+
+    def select_handler(route) -> None:
+        body = route.request.post_data_json
+        requests.append({"path": "/calibration-targets/select", "body": body})
+        if blocked["value"]:
+            fulfill_json(
+                route,
+                {
+                    "output": "The active calibration target cannot be replaced; create a new run.",
+                    "blockers": ["calibration_observations.json"],
+                },
+                status=409,
+            )
+            return
+        selected_runs.add(body["run_root"])
+        fulfill_json(route, {"job_id": "select-1", "job": {"id": "select-1", "status": "queued"}}, status=202)
+
+    page.route(f"**/calibration-targets/bundles/{target_id}/select", select_handler)
+    page.route(
+        f"**/calibration-targets/bundles/{target_id}/download/pdf",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/octet-stream",
+            headers={"Content-Disposition": "attachment; filename=target-artifact.bin"},
+            body=b"target artifact",
+        ),
+    )
+
+    page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
+    expect(page.get_by_role("link", name="Calibration Targets")).to_be_visible()
+    expect(page.get_by_role("img", name="Calibration target preview")).to_be_visible()
+    expect(page.get_by_text("297 × 210 mm", exact=True)).to_be_visible()
+    preview_page_ratio = page.get_by_test_id("calibration-preview-page").evaluate(
+        "element => { const box = element.getBoundingClientRect(); return box.width / box.height }"
+    )
+    assert preview_page_ratio == pytest.approx(297 / 210, abs=0.002)
+    assert any(item["path"] == "/calibration-targets/preview" for item in requests)
+
+    page.get_by_role("button", name="Fit to page").click()
+    expect(page.get_by_text("Board fitted to the selected page")).to_be_visible()
+    page.get_by_label("Target display name").fill("Printed target 01")
+    page.get_by_role("button", name="Generate bundle").click()
+    expect(page.get_by_text("Calibration target generated")).to_be_visible()
+    generated = next(item["body"] for item in requests if item["path"] == "/calibration-targets/generate")
+    assert generated["display_name"] == "Printed target 01"
+    assert generated["configuration"]["print_compensation"] == {"x_percent": 101, "y_percent": 99}
+    expect(page.get_by_text(f"Active for {RUN_ROOT}")).to_have_count(0)
+
+    pdf_link = page.get_by_role("link", name="PDF")
+    expect(pdf_link).to_have_attribute(
+        "href", f"/calibration-targets/bundles/{target_id}/download/pdf"
+    )
+    expect(pdf_link).to_have_attribute("download", "")
+
+    page.get_by_role("button", name="Select for run").click()
+    page.get_by_role("combobox", name="Target placement").click()
+    page.get_by_role("option", name="Use PoseGridGen board pose").click()
+    page.get_by_role("button", name="Select target").click()
+    expect(page.get_by_text("Target was not selected")).to_be_visible()
+    expect(page.get_by_text("The active calibration target cannot be replaced; create a new run.")).to_be_visible()
+    expect(page.get_by_text("calibration_observations.json", exact=False)).to_be_visible()
+
+    blocked["value"] = False
+    page.get_by_role("button", name="Select target").click()
+    expect(page.get_by_text("Calibration target selected")).to_be_visible()
+    selection = [item["body"] for item in requests if item["path"] == "/calibration-targets/select"][-1]
+    assert selection == {"run_root": RUN_ROOT, "placement": "posegridgen_board_to_base"}
+    expect(page.get_by_text(f"Active for {RUN_ROOT}")).to_be_visible()
+
+    page.get_by_role("combobox", name="Selected run").click()
+    page.get_by_role("option", name="old-run · sync_aruco").click()
+    expect(page.get_by_text(f"Active for {old_run}")).to_have_count(0)
+    expect(page.get_by_role("button", name="Select for run")).to_be_visible()
+    assert any("old-run" in url for url in library_urls)
 
 
 def cell_scene_payload(*, objectless: bool = False) -> dict:

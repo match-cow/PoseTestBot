@@ -34,6 +34,7 @@ from posetestbot.calibration.candidates import (
     _transform_from_quaternion_translation,
 )
 from posetestbot.calibration.observations import SCHEMA_VERSION as OBSERVATION_SCHEMA
+from posetestbot.calibration.targets import target_identity, validate_target_identity
 from posetestbot.calibration.profiles import (
     SCHEMA_VERSION as PROFILE_SCHEMA_VERSION,
     CalibrationProfile,
@@ -119,6 +120,7 @@ def _profile_from_solution(
     residual_frame: str,
     holdout_summary: Mapping[str, float] | None = None,
     holdout_count: int = 0,
+    calibration_target: Mapping[str, Any] | None = None,
 ) -> CalibrationProfile:
     x, y, z, qw, qx, qy, qz = pt.pq_from_transform(solution)
     to_frame = (
@@ -170,6 +172,7 @@ def _profile_from_solution(
             "max_residual_translation_mm": residuals["max_translation_mm"],
             "max_residual_rotation_deg": residuals["max_rotation_deg"],
             "holdout_count": holdout_count,
+            "calibration_target": dict(calibration_target or {}),
         },
     )
     if holdout_summary is not None:
@@ -585,6 +588,12 @@ def build_calibration_solver(
             "Unsupported calibration observation schema: "
             f"{observations_report.get('schema_version')!r}"
         )
+    calibration_target = observations_report.get("target")
+    calibration_target_evidence = (
+        target_identity(calibration_target)
+        if isinstance(calibration_target, Mapping)
+        else {}
+    )
 
     target = _target_transform(target_to_reference)
     target_transform = _transform_from_quaternion_translation(
@@ -614,6 +623,13 @@ def build_calibration_solver(
 
     for sensor_name, raw_observations in sorted(by_sensor.items()):
         observations = list(raw_observations)
+        if isinstance(calibration_target, Mapping):
+            for observation in observations:
+                validate_target_identity(
+                    observation,
+                    calibration_target,
+                    label=f"Calibration observation {observation.get('observation_id', '')}",
+                )
         total_observation_count += len(observations)
         sensor = dict(sensor_metadata.get(sensor_name, {}))
         sensor.setdefault("sensor_name", sensor_name)
@@ -860,6 +876,7 @@ def build_calibration_solver(
             residual_frame=residual_frame,
             holdout_summary=holdout_summary,
             holdout_count=len(holdout_observations),
+            calibration_target=calibration_target_evidence,
         )
         profiles.append(profile_to_dict(profile))
         x, y, z, qw, qx, qy, qz = pt.pq_from_transform(solution)
@@ -925,6 +942,7 @@ def build_calibration_solver(
         "generated_at": _generated_at(),
         "run_root": root.as_posix(),
         "source_observations": _relative(source_path, root),
+        "calibration_target": calibration_target_evidence,
         "target_to_reference": target,
         "hand_eye_method": hand_eye_method,
         "compare_hand_eye_methods": compare_hand_eye_methods,

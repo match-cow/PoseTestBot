@@ -1,0 +1,3 @@
+[submodule "third_party/PoseGridGen"]
+	path = third_party/PoseGridGen
+	url = https://github.com/match-cow/PoseGridGen.git

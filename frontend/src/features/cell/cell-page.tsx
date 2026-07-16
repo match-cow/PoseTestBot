@@ -107,10 +107,11 @@ function TemplatePlane({ url, onSelect }: { url: string; onSelect: () => void })
 
 function TargetGeometry({ entity, color, onSelect }: { entity: CellEntity; color: string; onSelect: () => void }) {
   const grid = entity.geometry.grid_size as number[] | undefined
+  const bounds = entity.geometry.target_bounds as { width_mm?: number; height_mm?: number } | undefined
   const marker = Number(entity.geometry.marker_length_mm || entity.geometry.square_length_mm || 40)
   const gap = Number(entity.geometry.marker_separation_mm || marker)
-  const width = grid ? marker + Math.max(0, grid[0] - 1) * gap : 200
-  const height = grid ? marker + Math.max(0, grid[1] - 1) * gap : 150
+  const width = Number(bounds?.width_mm) || (grid ? marker + Math.max(0, grid[0] - 1) * gap : 200)
+  const height = Number(bounds?.height_mm) || (grid ? marker + Math.max(0, grid[1] - 1) * gap : 150)
   return <mesh position={[width / 2, height / 2, 1]} onClick={(event) => selectEvent(event, onSelect)}>
     <boxGeometry args={[width, height, 2]} />
     <meshStandardMaterial color={color} transparent opacity={0.55} />

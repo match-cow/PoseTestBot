@@ -151,6 +151,7 @@ class PoseTestBotRunConfig:
     object_folder: str = "object_models"
     selected_objects: tuple[str, ...] = ()
     calibration_profiles: str | None = None
+    calibration_target: Mapping[str, Any] | None = None
     pipeline: PipelineRunConfig = field(default_factory=PipelineRunConfig)
 
     def to_dict(self) -> dict[str, Any]:
@@ -164,6 +165,9 @@ class PoseTestBotRunConfig:
             "object_folder": self.object_folder,
             "selected_objects": list(self.selected_objects),
             "calibration_profiles": self.calibration_profiles,
+            "calibration_target": (
+                dict(self.calibration_target) if self.calibration_target is not None else None
+            ),
             "pipeline": self.pipeline.to_dict(),
         }
 
@@ -400,6 +404,7 @@ def create_run_config(
     object_folder: str = "object_models",
     selected_objects: tuple[str, ...] | list[str] | None = None,
     calibration_profiles: str | None = None,
+    calibration_target: Mapping[str, Any] | None = None,
     sequence_id: str = "real_full_capture_validation",
     sequence_options: Mapping[str, Any] | None = None,
     plan_only: bool = True,
@@ -432,6 +437,9 @@ def create_run_config(
         object_folder=object_folder,
         selected_objects=selection,
         calibration_profiles=calibration_profiles,
+        calibration_target=(
+            dict(calibration_target) if calibration_target is not None else None
+        ),
         pipeline=PipelineRunConfig(
             sequence_id=sequence_id,
             plan_only=plan_only,
@@ -477,6 +485,50 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         raise ValueError("Run config capture.resolution must not be empty")
     if not str(value.get("object_folder", "")).strip():
         raise ValueError("Run config object_folder must not be empty")
+    calibration_target = value.get("calibration_target")
+    if calibration_target is not None:
+        if not isinstance(calibration_target, Mapping):
+            raise ValueError("Run config calibration_target must be an object or null")
+        required_target_fields = {
+            "target_id",
+            "bundle_path",
+            "source_sha256",
+            "spec_sha256",
+            "pdf_sha256",
+            "configuration_sha256",
+            "geometry_sha256",
+            "placement",
+        }
+        missing_target_fields = sorted(required_target_fields - calibration_target.keys())
+        if missing_target_fields:
+            raise ValueError(
+                "Run config calibration_target is missing: "
+                + ", ".join(missing_target_fields)
+            )
+        if not str(calibration_target.get("target_id", "")).strip():
+            raise ValueError("Run config calibration_target.target_id must not be empty")
+        bundle_path = Path(str(calibration_target.get("bundle_path", "")))
+        if bundle_path.is_absolute() or ".." in bundle_path.parts:
+            raise ValueError("Run config calibration_target.bundle_path must be run-relative")
+        for hash_key in (
+            "source_sha256",
+            "spec_sha256",
+            "pdf_sha256",
+            "configuration_sha256",
+            "geometry_sha256",
+        ):
+            digest = str(calibration_target.get(hash_key, ""))
+            if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+                raise ValueError(
+                    f"Run config calibration_target.{hash_key} must be a SHA-256 digest"
+                )
+        placement = calibration_target.get("placement")
+        if not isinstance(placement, Mapping) or placement.get("mode") not in {
+            "unknown",
+            "template_base_identity",
+            "posegridgen_board_to_base",
+        }:
+            raise ValueError("Run config calibration_target placement mode is invalid")
     selected_objects = value.get("selected_objects")
     if not isinstance(selected_objects, list) or any(
         not isinstance(name, str) or not name for name in selected_objects
@@ -612,6 +664,7 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
                 ),
             }
         )
+    value.setdefault("calibration_target", None)
     validate_run_config(value)
     registry = load_object_registry(str(value["object_folder"]))
     registry.validate_selection(value["selected_objects"])

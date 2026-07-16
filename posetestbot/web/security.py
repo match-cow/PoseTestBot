@@ -49,6 +49,7 @@ INPUT_PATH_FIELDS = {
     "target_to_reference",
     "target_to_reference_path",
 }
+CALIBRATION_TARGET_MAX_REQUEST_BYTES = 256 * 1024
 
 
 def parse_strict_bool(value: Any, *, name: str, default: bool | None = None) -> bool:
@@ -266,6 +267,12 @@ def _normalize_query_arguments() -> None:
 def install_request_security(app: Flask) -> None:
     @app.before_request
     def validate_request_boundaries():
+        if (
+            request.path.startswith("/calibration-targets/")
+            and request.content_length is not None
+            and request.content_length > CALIBRATION_TARGET_MAX_REQUEST_BYTES
+        ):
+            return jsonify({"output": "Calibration-target request exceeds 256 KiB"}), 413
         try:
             _normalize_query_arguments()
             data = request.get_json(silent=True)

@@ -3,7 +3,7 @@ name = "posetestbot"
 version = "0.1.0"
 description = "Acquisition, calibration, synchronization, and BOP export for multi-camera robot datasets"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "opencv-python>=4.11.0.86",
     "pyrealsense2>=2.55.1.6486",
@@ -17,6 +17,11 @@ dependencies = [
     "av>=16.1.0",
     "aioice>=0.10.2",
     "matplotlib>=3.10.3",
+    "pydantic>=2.11,<3",
+    "numpy>=2.0,<3",
+    "scipy>=1.14,<2",
+    "pillow>=11,<13",
+    "reportlab>=4.2,<6",
 ]
 
 [build-system]
@@ -46,6 +51,7 @@ exclude = [
     "output*",
     "scripts*",
     "tests*",
+    "third_party*",
 ]
 
 [dependency-groups]
@@ -54,3 +60,6 @@ dev = [
     "pytest>=9.1.0",
     "ruff>=0.15.21",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

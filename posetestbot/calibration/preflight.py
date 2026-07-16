@@ -13,6 +13,7 @@ from posetestbot.calibration.profiles import (
     load_profile_collection,
     select_profile_for_sensor,
 )
+from posetestbot.calibration.target_library import validate_run_target_selection
 from posetestbot.io.artifacts import CALIBRATION_PREFLIGHT_REPORT, CALIBRATION_PROFILES
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -190,6 +191,26 @@ def build_calibration_preflight(
     checks: list[dict[str, Any]] = []
     matched_sensors: list[dict[str, Any]] = []
     profiles: list[CalibrationProfile] = []
+
+    if config.get("calibration_target") is not None:
+        try:
+            target_selection = validate_run_target_selection(run_root_path)
+            checks.append(
+                _check(
+                    "calibration_target_selection",
+                    "ok",
+                    "Selected calibration target passed bundle and canonical-target checks.",
+                    details=target_selection,
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                _check(
+                    "calibration_target_selection",
+                    "error",
+                    f"Selected calibration target is invalid: {type(exc).__name__}: {exc}",
+                )
+            )
 
     if profile_path is None:
         checks.append(

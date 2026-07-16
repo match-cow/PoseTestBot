@@ -23,7 +23,8 @@ project.
 - RealSense, OAK-D Pro, and ZED 2i sensor registry/status/capture contracts.
 - Non-destructive synchronization under `processed/synchronized/`.
 - Sync quality reporting.
-- Imported ArUcoGridGen target validation, split marker detection/pose solving,
+- Pinned PoseGridGen target preview/generation, immutable target bundles,
+  legacy ArUcoGridGen import, split marker detection/pose solving,
   optional RealSense color intrinsic calibration, explicit hand-eye/known-grid
   extrinsic solving, selection-gated promotion, and derived RGB-D rectification.
 - BlenderProc preparation/render planning for optional GT and masks.
@@ -33,10 +34,10 @@ project.
 
 ## Quick Setup
 
-Install dependencies with `uv`:
+Install the Python 3.12 dependencies and initialize the pinned target generator:
 
 ```bash
-uv sync
+bash scripts/install.sh --with-posegridgen
 ```
 
 Run Python entry points through `uv`:
@@ -165,8 +166,21 @@ root when capture preflight reports existing raw data.
 
 ## Calibration
 
-Real grid calibration starts from the exact ArUcoGridGen 1.0 JSON downloaded
-for the physically printed, 100%-scale board:
+The preferred workflow is the native **Calibration Targets** console page. It
+previews and fits a PoseGridGen ArUco board, generates an immutable bundle under
+`working_data/calibration_targets/<target_id>/`, and requires an explicit run
+selection and placement. Generation never selects a target automatically.
+
+Placement choices are unknown, identity-aligned to `template_base`, or the
+PoseGridGen board-to-base pose converted to PoseTestBot's millimetre/WXYZ frame
+contract. Once target-dependent calibration or BOP artifacts exist, changing
+the target or placement is blocked and a new run is required. See
+[`docs/POSEGRIDGEN_CALIBRATION_TARGETS.md`](docs/POSEGRIDGEN_CALIBRATION_TARGETS.md)
+for bundle, provenance, API, and recovery details.
+
+The calibration import stage prefers that run-config selection. For an older
+run it still accepts an exact legacy ArUcoGridGen 1.0 JSON or a PoseGridGen 2.0
+source manifest:
 
 ```bash
 uv run python scripts/run_calibration_target_import.py working_data/example_run \
@@ -339,6 +353,11 @@ Important endpoints:
 - `POST /run-command`
 - `GET /sensors/status`
 - `GET /runtime/status`
+- `GET /calibration-targets/status`
+- `GET /calibration-targets/capabilities`
+- `POST /calibration-targets/fit`
+- `POST /calibration-targets/preview`
+- `GET|POST /calibration-targets/bundles...`
 - `POST /hardware/status`
 - `GET|POST /run-config`
 - `GET|POST /pipeline/preflight`

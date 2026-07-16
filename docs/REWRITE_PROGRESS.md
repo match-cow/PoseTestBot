@@ -31,6 +31,29 @@ Out of scope in this repository:
 
 ## Completed In This Acquisition-Only Pass
 
+- Integrated the pinned PoseGridGen calibration-target workflow:
+  - upgraded the project contract and lock to Python `>=3.12,<3.13`, Pydantic
+    2, NumPy 2, SciPy, Pillow, and ReportLab while retaining the single
+    `opencv-python` wheel,
+  - committed PoseGridGen as an exact, clean submodule at
+    `ad152e369e8d2746d0cf66cb1455f2371b0ec0f0` and added lazy source-only
+    verification plus an isolated backend namespace with no FastAPI import,
+  - added `calibration_target.v2` with authoritative compensated marker
+    corners, exact bounds, geometry/configuration hashes, v1 expansion, and
+    generic `cv2.aruco.Board` construction,
+  - added immutable UUID source/spec/PDF bundles, hash/symlink/containment
+    validation, rollback-capable selection, three explicit placements, and
+    concrete target-dependent replacement blockers,
+  - propagated target identity through detection, intrinsic, pose, coverage,
+    observation, candidate, and solver evidence with mismatch rejection,
+  - added queued generation/selection jobs, scoped Flask APIs, run/calibration
+    preflight checks, exact Cell bounds, and selected-target workflow context,
+  - added a native lazy React page for form editing, fit, debounced preview,
+    generation, downloads, placement selection, run switching, and unavailable
+    source-checkout guidance,
+  - updated the installer, operator documentation, committed web build, unit/API
+    coverage, and mocked Playwright coverage without accessing lab hardware.
+
 - Replaced the Bootstrap/Jinja/vanilla-JavaScript transition page atomically
   with a Bun-locked React, TypeScript, Vite, Tailwind, and Radix-based shadcn
   operator console:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from posetestbot.io.atomic import atomic_write_json
+from posetestbot.calibration.target_library import validate_run_target_selection
 from posetestbot.io.artifacts import CALIBRATION_PROFILES, RUN_PREFLIGHT_REPORT
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -298,6 +299,34 @@ def build_run_preflight(
             },
         ),
     ]
+
+    if config.get("calibration_target") is not None:
+        requires_target_placement = any(
+            step.stage_id == "calibration_solver"
+            and step.options.get("mode") in {"known_target", "compare"}
+            for step in plan.steps
+        )
+        try:
+            target_selection = validate_run_target_selection(
+                run_root_path,
+                require_placement=requires_target_placement,
+            )
+            checks.append(
+                _check(
+                    "calibration_target_selection",
+                    "ok",
+                    "Selected immutable calibration target passed containment and hash checks.",
+                    details=target_selection,
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                _check(
+                    "calibration_target_selection",
+                    "error",
+                    f"Selected calibration target is invalid: {type(exc).__name__}: {exc}",
+                )
+            )
 
     calibration_inputs = _calibration_profile_inputs(
         config=config,

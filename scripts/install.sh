@@ -6,6 +6,7 @@ WITH_SYSTEM_PACKAGES=false
 WITH_BLENDERPROC=false
 WITH_PLAYWRIGHT_BROWSERS=false
 WITH_WEB_BUILD=false
+WITH_POSEGRIDGEN=false
 SKIP_RUNTIME_CHECKS=false
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -25,6 +26,7 @@ Options:
   --with-playwright-browsers
                            Install Chromium for Playwright browser UI tests.
   --with-web-build         Reinstall locked Bun packages and rebuild the bundled UI.
+  --with-posegridgen       Initialize and verify the pinned PoseGridGen submodule.
   --skip-runtime-checks    Skip runtime and sensor adapter verification.
   -h, --help               Show this help text.
 
@@ -89,6 +91,9 @@ parse_args() {
         ;;
       --with-web-build)
         WITH_WEB_BUILD=true
+        ;;
+      --with-posegridgen)
+        WITH_POSEGRIDGEN=true
         ;;
       --skip-runtime-checks)
         SKIP_RUNTIME_CHECKS=true
@@ -191,6 +196,26 @@ sync_python_environment() {
   run uv sync --all-groups
 }
 
+install_posegridgen() {
+  if [[ "${WITH_POSEGRIDGEN}" != true ]]; then
+    return 0
+  fi
+  command_exists git || die "git is required for --with-posegridgen."
+  local checkout="${REPO_ROOT}/third_party/PoseGridGen"
+  local revision="ad152e369e8d2746d0cf66cb1455f2371b0ec0f0"
+  if [[ "${CHECK_ONLY}" != true ]]; then
+    log "Initializing the pinned PoseGridGen source checkout."
+    run git submodule update --init --checkout third_party/PoseGridGen
+  fi
+  [[ -d "${checkout}" ]] || die "PoseGridGen checkout is missing; rerun without --check-only."
+  [[ -f "${checkout}/backend/models.py" ]] || die "PoseGridGen backend files are missing."
+  local actual_revision
+  actual_revision="$(git -C "${checkout}" rev-parse HEAD)"
+  [[ "${actual_revision}" == "${revision}" ]] || die "PoseGridGen is at ${actual_revision}; required ${revision}."
+  [[ -z "$(git -C "${checkout}" status --porcelain --untracked-files=all)" ]] || die "PoseGridGen checkout is dirty."
+  log "PoseGridGen checkout is clean and pinned to ${revision}."
+}
+
 install_blenderproc() {
   if [[ "${WITH_BLENDERPROC}" != true ]]; then
     return 0
@@ -249,6 +274,7 @@ verify_web_console() {
   compgen -G "${ui_root}/assets/*.js" >/dev/null || die "Bundled web UI has no JavaScript asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/*.css" >/dev/null || die "Bundled web UI has no CSS asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/cell-page-*.js" >/dev/null || die "Bundled web UI has no lazy Cell asset. Run scripts/install.sh --with-web-build."
+  compgen -G "${ui_root}/assets/calibration-targets-page-*.js" >/dev/null || die "Bundled web UI has no lazy Calibration Targets asset. Run scripts/install.sh --with-web-build."
   [[ -f "${cell_asset}" ]] || die "Bundled Cell template is missing ${cell_asset}."
   log "Bundled operator-console assets are present."
 }
@@ -276,6 +302,11 @@ modules = [
     "flask",
     "depthai",
     "matplotlib",
+    "numpy",
+    "PIL",
+    "pydantic",
+    "reportlab",
+    "scipy",
     "tqdm",
     "pytransform3d",
     "trimesh",
@@ -283,11 +314,20 @@ modules = [
 ]
 
 failures = []
+if not (sys.version_info.major == 3 and sys.version_info.minor == 12):
+    failures.append(f"python: expected 3.12, found {sys.version.split()[0]}")
 for module in modules:
     try:
         importlib.import_module(module)
     except Exception as exc:
         failures.append(f"{module}: {type(exc).__name__}: {exc}")
+
+try:
+    import cv2
+    if not all(hasattr(cv2.aruco, name) for name in ("Board", "ArucoDetector")):
+        failures.append("cv2: required cv2.aruco.Board/ArucoDetector APIs are missing")
+except Exception:
+    pass
 
 if failures:
     print("Required Python import smoke failed:", file=sys.stderr)
@@ -308,6 +348,18 @@ run_readiness_checks() {
 
   log "Checking required Python imports."
   run_import_smoke
+
+  if [[ "${WITH_POSEGRIDGEN}" == true ]]; then
+    log "Checking the pinned PoseGridGen backend and renderer capabilities."
+    uv_python -c '
+from posetestbot.calibration.posegridgen import posegridgen_status
+
+status = posegridgen_status()
+if not status["available"] or not status["renderer_compatible"]:
+    raise SystemExit(status.get("reason") or "PoseGridGen renderer is unavailable")
+print(f"PoseGridGen renderer OK ({status['"'"'revision'"'"']})")
+'
+  fi
 
   log "Checking acquisition runtime visibility."
   uv_python scripts/runtime_status.py --json
@@ -333,6 +385,7 @@ main() {
   verify_repo_root
   configure_uv_cache
   ensure_uv
+  install_posegridgen
   install_system_packages
   sync_python_environment
   build_web_console

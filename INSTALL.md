@@ -2,7 +2,8 @@
 
 PoseTestBot is acquisition-first: the repository captures, calibrates,
 synchronizes, optionally prepares ground-truth/masks, and exports BOP datasets.
-Use `uv` for Python environment management. PoseTestBot targets only the
+Use Python 3.12 and `uv` for Python environment management. The project requires
+`>=3.12,<3.13`; `uv` installs the matching interpreter when necessary. PoseTestBot targets only the
 physical lab iiwa; normal setup and validation never execute capture automatically.
 
 ## Quick Setup
@@ -10,13 +11,14 @@ physical lab iiwa; normal setup and validation never execute capture automatical
 From the repository root:
 
 ```bash
-bash scripts/install.sh
+bash scripts/install.sh --with-posegridgen
 ```
 
 This safe project bootstrap:
 
 - ensures `uv` is available,
 - runs `uv sync --all-groups`,
+- initializes and verifies the exact, clean PoseGridGen source submodule,
 - checks required Python imports,
 - checks optional acquisition runtimes,
 - lists registered sensor adapters without opening hardware,
@@ -36,6 +38,11 @@ If `UV_CACHE_DIR` is unset, the installer uses `/tmp/uv-cache`.
 Browser binaries for Playwright UI tests are not installed by default.
 Bun is not required for normal Python installation or runtime because the
 locked production build is committed and packaged in the wheel.
+
+Omit `--with-posegridgen` when this checkout only needs to consume existing
+`calibration_target.v1/v2` files. The Calibration Targets generator is then
+reported unavailable, while calibration readers and the bundled UI continue
+to work.
 
 Use check-only mode to inspect an already configured environment without
 installing or syncing:
@@ -97,6 +104,29 @@ Run project scripts through `uv`:
 uv run python scripts/robot_status.py --json
 uv run posetestbot-web
 ```
+
+### PoseGridGen Calibration Targets
+
+Printable target generation is source-checkout-only. Initialize the committed
+submodule at `third_party/PoseGridGen` and verify the pinned revision through
+the installer:
+
+```bash
+bash scripts/install.sh --with-posegridgen
+bash scripts/install.sh --check-only --with-posegridgen
+```
+
+The required revision is
+`ad152e369e8d2746d0cf66cb1455f2371b0ec0f0`. Generation is disabled if the
+checkout is missing, dirty, at another revision, lacks the required backend
+files, or cannot provide the renderer/OpenCV capabilities. PoseTestBot loads
+only PoseGridGen's backend models, errors, fitting, scene, and rendering modules
+under a private namespace; FastAPI and Uvicorn are not runtime dependencies.
+
+Use the operator console's **Calibration Targets** page to preview, fit, and
+generate immutable source/spec/PDF bundles, then select one for a configured
+run. The complete artifact and placement contract is documented in
+[`docs/POSEGRIDGEN_CALIBRATION_TARGETS.md`](docs/POSEGRIDGEN_CALIBRATION_TARGETS.md).
 
 ### RealSense D435
 
@@ -182,9 +212,10 @@ Chromium only when running browser UI coverage:
 UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium
 ```
 
-Then run the sensor preview browser test:
+Then run the operator-console and sensor-preview browser tests:
 
 ```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_console_playwright.py
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 ```
 
@@ -265,7 +296,7 @@ Recommended local validation:
 ```bash
 bash -n scripts/install.sh
 bash scripts/install.sh --help
-bash scripts/install.sh --check-only
+bash scripts/install.sh --check-only --with-posegridgen
 cd frontend && bun run typecheck && bun run lint && bun run build
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_runtime_status.py tests/test_hardware_status.py
@@ -280,6 +311,10 @@ git diff --check
   `uv` manually and rerun `uv sync --all-groups`.
 - Python import smoke fails: rerun `uv sync --all-groups`; add or update
   dependencies with `uv add ...` rather than hand-editing lock files.
+- Calibration target generation is unavailable: run
+  `git submodule update --init --checkout third_party/PoseGridGen`, confirm the
+  checkout is clean at the pinned revision, then run
+  `bash scripts/install.sh --check-only --with-posegridgen`.
 - Room-monitor signaling is unavailable: inspect
   `GET /jobs?include_services=1`, confirm the managed `monitor-webrtc:ugreen`
   service is running, and inspect its `monitor_webrtc.v2` error reason. Allow

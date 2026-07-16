@@ -32,6 +32,26 @@ def atomic_write_text(path: str | Path, text: str) -> Path:
     return destination
 
 
+def atomic_write_bytes(path: str | Path, payload: bytes) -> Path:
+    """Write binary data through a same-directory temporary file."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(temporary, "xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return destination
+
+
 def atomic_write_json(
     path: str | Path,
     value: Any,

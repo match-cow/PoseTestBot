@@ -76,12 +76,18 @@ def test_import_aruco_gridgen_target_preserves_source_and_uses_grid_frame(
 
     target = import_aruco_gridgen_export(source, aligned_to_template_base=True)
 
-    assert target["schema_version"] == "calibration_target.v1"
+    assert target["schema_version"] == "calibration_target.v2"
     assert target["grid_size"] == [3, 2]
-    assert target["marker_ids"] == list(range(6))
+    assert [marker["id"] for marker in target["markers"]] == list(range(6))
+    assert target["markers"][0]["corners_mm"] == [
+        [0.0, 0.0, 0.0],
+        [30.0, 0.0, 0.0],
+        [30.0, 30.0, 0.0],
+        [0.0, 30.0, 0.0],
+    ]
     assert target["frame"] == {
         "name": "aruco_grid",
-        "origin": "marker_0_outer_top_left",
+        "origin": "compensated_outer_board_top_left",
         "axes": {"x": "right", "y": "down", "z": "into_board"},
     }
     assert target["generator_source"]["sha256"] == hashlib.sha256(raw).hexdigest()

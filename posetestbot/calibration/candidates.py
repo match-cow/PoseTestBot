@@ -29,6 +29,7 @@ from posetestbot.calibration.profiles import (
     rectified_intrinsics_from_native,
     write_profile_collection,
 )
+from posetestbot.calibration.targets import target_identity, validate_target_identity
 from posetestbot.io.artifacts import (
     CALIBRATION_CANDIDATES,
     CALIBRATION_OBSERVATIONS,
@@ -370,6 +371,7 @@ def _profile_from_average(
     inlier_count: int,
     sensor_folder: Path,
     mounting_mode: MountingMode,
+    calibration_target: Mapping[str, Any] | None = None,
 ) -> CalibrationProfile:
     x, y, z, qw, qx, qy, qz = pt.pq_from_transform(average)
     to_frame = (
@@ -418,6 +420,7 @@ def _profile_from_average(
             "outlier_count": observation_count - inlier_count,
             "max_residual_translation_mm": residuals["max_translation_mm"],
             "max_residual_rotation_deg": residuals["max_rotation_deg"],
+            "calibration_target": dict(calibration_target or {}),
         },
     )
 
@@ -479,6 +482,12 @@ def build_calibration_candidates(
             "Unsupported calibration observation schema: "
             f"{observations_report.get('schema_version')!r}"
         )
+    calibration_target = observations_report.get("target")
+    calibration_target_evidence = (
+        target_identity(calibration_target)
+        if isinstance(calibration_target, Mapping)
+        else {}
+    )
 
     target = _target_transform(target_to_reference)
     target_transform = _transform_from_quaternion_translation(
@@ -505,6 +514,16 @@ def build_calibration_candidates(
         )
 
     for sensor_name, observations in sorted(by_sensor.items()):
+        if isinstance(calibration_target, Mapping):
+            for observation in observations:
+                validate_target_identity(
+                    observation,
+                    calibration_target,
+                    label=(
+                        "Calibration observation "
+                        f"{observation.get('observation_id', '')}"
+                    ),
+                )
         sensor = dict(sensor_metadata.get(sensor_name, {}))
         sensor.setdefault("sensor_name", sensor_name)
         sensor.setdefault("sensor_type", observations[0].get("sensor_type"))
@@ -693,6 +712,7 @@ def build_calibration_candidates(
             inlier_count=inlier_count,
             sensor_folder=sensor_folder,
             mounting_mode=mounting_mode,
+            calibration_target=calibration_target_evidence,
         )
         profiles.append(profile_to_dict(profile))
         residuals_by_sensor.append(
@@ -715,6 +735,7 @@ def build_calibration_candidates(
         "generated_at": _generated_at(),
         "run_root": root.as_posix(),
         "source_observations": _relative(source_path, root),
+        "calibration_target": calibration_target_evidence,
         "target_to_reference": target,
         "residual_thresholds": {
             "max_translation_mm": max_translation_residual_mm,

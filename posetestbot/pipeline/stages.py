@@ -1009,9 +1009,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
     ),
     "calibration_target_import": PipelineStageSpec(
         id="calibration_target_import",
-        label="Import ArUco Grid Target",
+        label="Resolve Calibration Target",
         script="scripts/run_calibration_target_import.py",
-        description="Validate and import an ArUcoGridGen 1.0 JSON export.",
+        description=(
+            "Prefer the run-config target selection, otherwise import a legacy "
+            "ArUcoGridGen 1.0 or PoseGridGen 2.0 JSON fallback."
+        ),
         resources=("disk_io",),
         parameters=(
             PipelineParameter(
@@ -1019,7 +1022,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 flag="--source",
                 kind="path",
                 path_scope="input",
-                required=True,
             ),
             PipelineParameter(
                 name="aligned_to_template_base",

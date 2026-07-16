@@ -394,7 +394,17 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
             parent = str(placement.get("to", "template_base"))
             manager.add_transform("calibration_target", parent, matrix)
             matrix = manager.get_transform("calibration_target", parent)
-            geometry = {"kind": "calibration_target", "target_type": target.get("target_type"), "grid_size": target.get("grid_size"), "marker_length_mm": target.get("marker_length"), "marker_separation_mm": target.get("marker_separation"), "square_length_mm": target.get("square_length")}
+            geometry = {
+                "kind": "calibration_target",
+                "target_type": target.get("target_type"),
+                "target_id": target.get("target_id"),
+                "geometry_sha256": target.get("geometry_sha256"),
+                "target_bounds": target.get("target_bounds"),
+                "grid_size": target.get("grid_size"),
+                "marker_length_mm": target.get("marker_length"),
+                "marker_separation_mm": target.get("marker_separation"),
+                "square_length_mm": target.get("square_length"),
+            }
             entities.append(_entity("calibration_target", "calibration_target", "Calibration target", transform=_transform_dict(matrix, parent), status="planned", provenance={"source": target_path.as_posix()}, geometry=geometry))
         except (KeyError, OSError, ValueError, json.JSONDecodeError) as exc:
             entities.append(_entity("calibration_target", "calibration_target", "Calibration target", transform=None, status="unresolved", reason=str(exc), provenance={"source": target_path.as_posix()}, geometry={"kind": "calibration_target"}))

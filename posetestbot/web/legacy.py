@@ -310,6 +310,12 @@ def _run_config_from_payload(data: dict):
             data.get("sensors"),
             default_mounting_mode=mounting_mode,
         )
+    try:
+        calibration_target = load_run_config_for_run_root(run_root).get(
+            "calibration_target"
+        )
+    except FileNotFoundError:
+        calibration_target = None
     return create_run_config(
         run_root=run_root,
         run_name=data.get("run_name"),
@@ -320,6 +326,7 @@ def _run_config_from_payload(data: dict):
         object_folder=data.get("object_folder", "object_models"),
         selected_objects=data.get("selected_objects"),
         calibration_profiles=data.get("calibration_profiles") or None,
+        calibration_target=calibration_target,
         sequence_id=data.get("sequence", data.get("sequence_id", "real_full_capture_validation")),
         sequence_options=sequence_options,
         plan_only=_truthy(data.get("plan_only"), default=True),

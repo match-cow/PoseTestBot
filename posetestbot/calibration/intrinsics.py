@@ -11,7 +11,11 @@ from typing import Any, Mapping, Sequence
 import cv2
 import numpy as np
 
-from posetestbot.calibration.targets import opencv_grid_board
+from posetestbot.calibration.targets import (
+    opencv_grid_board,
+    target_identity,
+    validate_target_identity,
+)
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import CAM_K, CAMERA_DATA_JSON, DEPTH_SCALE, FRAME_METADATA_JSONL
 
@@ -240,6 +244,9 @@ def calibrate_intrinsic_profile(
     seed_distortion = np.asarray(factory["native"]["distortion"], dtype=float)
     image_size = tuple(int(item) for item in factory["resolution"])
     _dictionary, board = opencv_grid_board(target)
+    validate_target_identity(
+        detections.get("target"), target, label="ArUco detections"
+    )
 
     accepted_names: list[str] = []
     objects: list[np.ndarray] = []
@@ -339,6 +346,7 @@ def calibrate_intrinsic_profile(
             "seed": factory["profile_id"],
             "target_schema_version": target.get("schema_version"),
             "target_sha256": target_source.get("sha256") if isinstance(target_source, Mapping) else None,
+            "target": target_identity(target),
         },
         "quality": {
             "status": "accepted",

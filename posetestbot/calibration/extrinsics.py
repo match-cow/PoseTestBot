@@ -51,6 +51,7 @@ from posetestbot.calibration.solver import (
     _sensor_folder,
     _target_to_reference_estimate,
 )
+from posetestbot.calibration.targets import target_identity, validate_target_identity
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     CALIBRATION_OBSERVATIONS,
@@ -99,6 +100,7 @@ def _profile(
     inlier_count: int,
     fixed_transforms: list[Mapping[str, Any]],
     intrinsic_profile: Mapping[str, Any] | None = None,
+    calibration_target: Mapping[str, Any] | None = None,
 ) -> CalibrationProfile:
     x, y, z, qw, qx, qy, qz = pt.pq_from_transform(solution)
     if intrinsic_profile is None:
@@ -179,6 +181,7 @@ def _profile(
             ),
             "max_residual_translation_mm": residual_summary["max_translation_mm"],
             "max_residual_rotation_deg": residual_summary["max_rotation_deg"],
+            "calibration_target": dict(calibration_target or {}),
             **intrinsic_metadata,
         },
     )
@@ -297,6 +300,14 @@ def build_grid_extrinsic_solver(
     observation_report = _read_json(source_path)
     if observation_report.get("schema_version") != OBSERVATION_SCHEMA:
         raise ValueError("Unsupported calibration observation schema")
+    observation_target = observation_report.get("target")
+    calibration_target_evidence = target_identity(target)
+    if isinstance(observation_target, Mapping):
+        validate_target_identity(
+            observation_target,
+            target,
+            label="Calibration observations report",
+        )
     fixed = list(fixed_transforms or [])
     intrinsic_profiles_path = root / INTRINSIC_CALIBRATION_PROFILES
     intrinsic_profiles = (
@@ -315,6 +326,16 @@ def build_grid_extrinsic_solver(
     checks: list[dict[str, Any]] = []
     sensors = _sensor_by_name(observation_report)
     for sensor_name, observations in sorted(_observations_by_sensor(observation_report).items()):
+        if isinstance(observation_target, Mapping):
+            for observation in observations:
+                validate_target_identity(
+                    observation,
+                    target,
+                    label=(
+                        "Calibration observation "
+                        f"{observation.get('observation_id', '')}"
+                    ),
+                )
         sensor = dict(sensors.get(sensor_name, {}))
         sensor.setdefault("sensor_name", sensor_name)
         sensor.setdefault("sensor_type", observations[0].get("sensor_type"))
@@ -404,6 +425,7 @@ def build_grid_extrinsic_solver(
                 inlier_count=inlier_count,
                 fixed_transforms=fixed,
                 intrinsic_profile=selected_intrinsic,
+                calibration_target=calibration_target_evidence,
             )
             profiles.append(profile)
             solved[solve_mode] = solution
@@ -471,6 +493,7 @@ def build_grid_extrinsic_solver(
         "overall_status": overall_status,
         "mode": mode,
         "target": dict(target),
+        "calibration_target": calibration_target_evidence,
         "target_to_template_base": placement_record,
         "fixed_transforms": [dict(item) for item in fixed],
         "sensor_count": len(_observations_by_sensor(observation_report)),

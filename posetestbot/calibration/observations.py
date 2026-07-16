@@ -12,6 +12,8 @@ from posetestbot.calibration.profiles import sensor_identity_from_folder_name
 from posetestbot.calibration.targets import (
     DEFAULT_TARGET_SPEC,
     normalize_calibration_target_spec,
+    target_identity,
+    validate_target_identity,
 )
 from posetestbot.io.artifacts import (
     ARUCO_POSE_ESTIMATION,
@@ -242,6 +244,9 @@ def _observation(
     source_key, pose = _pose_source(frame, target_type=str(target["target_type"]))
     if pose is None or source_key is None:
         raise ValueError("frame does not contain a usable target pose estimation")
+    validate_target_identity(
+        pose.get("target"), target, label=f"Pose evidence for {frame_id}"
+    )
     return {
         "observation_id": f"{sensor['sensor_name']}:{frame_id}",
         "sensor_name": sensor["sensor_name"],
@@ -258,6 +263,7 @@ def _observation(
         "nearest_robot_delta_ns": frame.get("nearest_robot_delta_ns"),
         "robot_ee_pose": dict(frame["robot_ee_pose"]),
         "target_type": target["target_type"],
+        **target_identity(target),
         "target_pose_source": source_key,
         "target_to_camera": {
             "rotation_vector_rodrigues": _vector(pose.get("rvec")),

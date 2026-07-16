@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Navigate, useNavigate, useParams } from "react-router-dom"
-import { ListTree, Play, RefreshCw } from "lucide-react"
+import { Link, Navigate, useNavigate, useParams } from "react-router-dom"
+import { Grid3X3, ListTree, Play, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
@@ -73,6 +73,7 @@ export function WorkflowPage() {
 
     {current === "setup" ? <RunSetup /> : stages.isPending || overview.isPending ? <div className="grid grid-cols-2 gap-4"><Skeleton className="h-72" /><Skeleton className="h-72" /></div> : !overview.data?.config ? <EmptyState icon={ListTree} title="Configure the run first" description="Stages need a valid run_config.json. Setup defaults to real_full_capture_validation in plan-only mode." action={<Button onClick={() => navigate("/workflow/setup")}>Open setup</Button>} /> : <div className="space-y-4">
       {current === "capture" && <CaptureGate />}
+      {current === "calibration" && <Card className="border-primary/25"><CardContent className="flex items-center justify-between py-4"><div className="flex items-center gap-3"><Grid3X3 className="size-5 text-primary-strong" /><div><div className="font-semibold">Calibration target</div><div className="text-xs text-muted-foreground">{config.data?.config.calibration_target ? `${config.data.config.calibration_target.target_id} · ${config.data.config.calibration_target.placement.mode}` : "No immutable target selected for this run"}</div></div></div><Button variant="outline" asChild><Link to="/calibration-targets">Open targets</Link></Button></CardContent></Card>}
       <div className="grid grid-cols-2 gap-4">{selectedStages.map((stage) => <StageForm key={stage.id} stage={stage} artifactStatus={artifactStatus(stage.id)} />)}</div>
       {selectedStages.length === 0 && <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">No stages are registered for this phase.</CardContent></Card>}
     </div>}

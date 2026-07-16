@@ -8,9 +8,15 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from posetestbot.io.atomic import atomic_write_json
+from posetestbot.calibration.targets import (
+    load_calibration_target_spec,
+    target_identity,
+    validate_target_identity,
+)
 from posetestbot.io.artifacts import (
     ARUCO_COVERAGE_REPORT,
     ARUCO_POSE_ESTIMATION,
+    CALIBRATION_TARGET,
     PROCESSED_DIR,
     SYNCHRONIZED_DIR,
 )
@@ -126,6 +132,8 @@ def build_aruco_coverage_report(
         raise ValueError("min_valid_pose_ratio must be between 0 and 1")
 
     root = Path(run_root)
+    target_path = root / CALIBRATION_TARGET
+    target = load_calibration_target_spec(target_path) if target_path.is_file() else None
     paths = (
         [Path(path) for path in aruco_paths]
         if aruco_paths is not None
@@ -201,6 +209,11 @@ def build_aruco_coverage_report(
             motion = frame.get("motion")
             if isinstance(motion, str):
                 motion_names.add(motion)
+            pose = frame.get("aruco_pose_estimation")
+            if target is not None and isinstance(pose, Mapping):
+                validate_target_identity(
+                    pose.get("target"), target, label=f"ArUco coverage pose in {path}"
+                )
             coverage = _frame_coverage(frame, min_marker_count=min_marker_count)
             marker_count = int(coverage["marker_count"])
             marker_counts.append(marker_count)
@@ -275,6 +288,7 @@ def build_aruco_coverage_report(
         "schema_version": SCHEMA_VERSION,
         "generated_at": _generated_at(),
         "run_root": root.as_posix(),
+        "calibration_target": target_identity(target) if target is not None else None,
         "overall_status": _overall_status(checks),
         "min_marker_count": min_marker_count,
         "min_valid_pose_ratio": min_valid_pose_ratio,
