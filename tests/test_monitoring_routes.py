@@ -163,6 +163,65 @@ def test_offer_proxies_valid_sdp_to_ready_worker(
     assert seen == [(39876, {"type": "offer", "sdp": "v=0\r\noffer"})]
 
 
+def test_brightness_autocalibration_is_forwarded_to_camera_worker(
+    client,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    flask_client, runner = client
+    root = tmp_path / "monitor"
+    write_ready_status(root, port=39876)
+    runner.jobs["monitor-1"] = FakeJob("monitor-1", monitor_root=root)
+    seen: list[int] = []
+    brightness = {
+        "schema_version": "monitor_brightness.v1",
+        "supported": True,
+        "state": "queued",
+    }
+
+    def proxy(port: int):
+        seen.append(port)
+        return {"brightness": brightness}
+
+    monkeypatch.setattr(monitoring, "_proxy_brightness_autocalibration", proxy)
+
+    response = flask_client.post(
+        "/monitoring/webcam/monitor-1/brightness/autocalibrate",
+        json={},
+    )
+
+    assert response.status_code == 202
+    assert response.get_json() == {"brightness": brightness}
+    assert seen == [39876]
+
+
+def test_brightness_autocalibration_preserves_worker_rejection(
+    client,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    flask_client, runner = client
+    root = tmp_path / "monitor"
+    write_ready_status(root, port=39876)
+    runner.jobs["monitor-1"] = FakeJob("monitor-1", monitor_root=root)
+
+    def reject(_port: int):
+        raise monitoring.MonitorWorkerRequestError(
+            "Camera must be open.",
+            status_code=409,
+        )
+
+    monkeypatch.setattr(monitoring, "_proxy_brightness_autocalibration", reject)
+
+    response = flask_client.post(
+        "/monitoring/webcam/monitor-1/brightness/autocalibrate",
+        json={},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["output"] == "Camera must be open."
+
+
 @pytest.mark.parametrize(
     "payload",
     [None, [], {}, {"type": "answer", "sdp": "v=0"}, {"type": "offer", "sdp": ""}],

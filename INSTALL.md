@@ -63,6 +63,10 @@ bash scripts/install.sh --with-system-packages --with-blenderproc
 `--with-system-packages` installs common Ubuntu packages for local development,
 USB inspection, OpenCV runtime support, and build tooling. It does not install
 vendor camera SDKs or proprietary packages.
+The installed `v4l-utils` command is also used by the managed UGREEN monitor to
+discover the camera's brightness range before a browser-requested automatic
+brightness calibration; calibration remains unavailable if that control cannot
+be inspected.
 
 `--with-blenderproc` installs BlenderProc as a `uv` tool when the
 `blenderproc` executable is missing.

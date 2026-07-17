@@ -166,10 +166,37 @@ root when capture preflight reports existing raw data.
 
 ## Calibration
 
-The preferred workflow is the native **Calibration Targets** console page. It
-previews and fits a PoseGridGen ArUco board, generates an immutable bundle under
-`working_data/calibration_targets/<target_id>/`, and requires an explicit run
-selection and placement. Generation never selects a target automatically.
+The preferred operator path is **Workflow → Calibration**. One form selects
+exactly one geometry, one or more captured cameras, and one of two authoritative
+modes:
+
+- **Robot-mounted camera (eye-in-hand):** the target is stationary relative to
+  `template_base`; the primary result is `camera → robot_flange`.
+- **Static camera (eye-to-hand):** the target is attached to `robot_flange`;
+  the primary result is `camera → template_base`.
+
+**Run calibration** queues one CPU/disk parent job. It never opens cameras or
+commands the robot. Only selected captured camera folders are synchronized into
+an immutable derived attempt under
+`processed/calibration/<attempt_id>/`. The four displayed phases are Prepare
+data, Estimate target poses, Compare robot-camera solutions, and Validate and
+rank. Every PnP/extrinsic combination and failure remains available for review.
+
+The default **Auto compare — recommended** policy compares IPPE, ITERATIVE, and
+SQPNP using a common robust point mask and LM refinement, then compares Tsai,
+Park, Horaud, Andreff, Daniilidis, Shah, and Li robot-camera solutions with
+deterministic robust-closure outlier rejection and leave-one-pose-out
+validation. Passing requires at least six
+inliers, at most 10 mm mean translation residual, at most 5° mean rotation
+residual, and at most 25% outliers. Recommendations remain inactive until the
+operator accepts them; per-camera overrides and partial multi-camera promotion
+are supported.
+
+The **Calibration Targets** page previews and fits PoseGridGen ArUco boards and
+stores immutable bundles below
+`working_data/calibration_targets/<target_id>/`. Saved targets remain browsable
+and selectable when PoseGridGen generation is unavailable. Generation never
+selects a target automatically.
 
 Placement choices are unknown, identity-aligned to `template_base`, or the
 PoseGridGen board-to-base pose converted to PoseTestBot's millimetre/WXYZ frame
@@ -194,8 +221,8 @@ uv run python scripts/run_calibration_observations.py working_data/example_run \
   --target-spec calibration_target.json
 ```
 
-Solve unknown-target and aligned-known-target wrist methods side by side. Static
-cameras support only the known-target method:
+The stage-level commands remain available as advanced diagnostics and retain
+their existing behavior:
 
 ```bash
 uv run python scripts/run_calibration_solver.py working_data/example_run \
@@ -204,10 +231,11 @@ uv run python scripts/run_calibration_validation.py working_data/example_run \
   --select-profile realsense_123=PROFILE_ID
 ```
 
-When comparison emits two wrist candidates, one repeatable
-`--select-profile SENSOR=PROFILE_ID` choice per sensor is mandatory. Promotion
-to `calibration_profiles.json` is explicit and writes `calibration.v2` profiles
-with native/alpha=0 rectified projections and frame/provenance metadata:
+The intent-level promotion transaction mirrors accepted evidence into the
+canonical calibration artifacts, merges exactly one valid `calibration.v2`
+profile for each accepted camera, preserves unrelated profiles, and records
+attempt, operator, target, PnP, and extrinsic provenance. The diagnostic CLI
+promotion path remains explicit as well:
 
 ```bash
 uv run python scripts/run_calibration_validation.py working_data/example_run \
@@ -353,6 +381,8 @@ Important endpoints:
 - `POST /run-command`
 - `GET /sensors/status`
 - `GET /runtime/status`
+- `GET|POST /monitoring/webcam`
+- `POST /monitoring/webcam/<job_id>/brightness/autocalibrate`
 - `GET /calibration-targets/status`
 - `GET /calibration-targets/capabilities`
 - `POST /calibration-targets/fit`
@@ -360,6 +390,10 @@ Important endpoints:
 - `GET /calibration-targets/bundles`
 - `DELETE /calibration-targets/bundles/<target_id>`
 - `POST /calibration-targets/bundles/<target_id>/select`
+- `GET /calibration/setup`
+- `GET|POST /calibration/attempts`
+- `GET /calibration/attempts/<attempt_id>`
+- `POST /calibration/attempts/<attempt_id>/promote`
 - `POST /hardware/status`
 - `GET|POST /run-config`
 - `GET|POST /pipeline/preflight`

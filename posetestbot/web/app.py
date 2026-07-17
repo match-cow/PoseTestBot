@@ -9,6 +9,7 @@ from flask import Flask, send_from_directory
 
 from posetestbot.web.legacy import app as legacy_api
 from posetestbot.web.routes.monitoring import monitoring_bp
+from posetestbot.web.routes.calibration import calibration_bp
 from posetestbot.web.routes.calibration_targets import calibration_targets_bp
 from posetestbot.web.routes.overview import overview_bp
 from posetestbot.web.routes.pages import pages_bp
@@ -74,6 +75,7 @@ def create_app() -> Flask:
         )
 
     app.register_blueprint(pages_bp)
+    app.register_blueprint(calibration_bp)
     app.register_blueprint(calibration_targets_bp)
     app.register_blueprint(sensors_bp)
     app.register_blueprint(monitoring_bp)

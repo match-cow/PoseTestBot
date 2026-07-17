@@ -19,8 +19,9 @@ The required revision is
 `ad152e369e8d2746d0cf66cb1455f2371b0ec0f0`. A missing, dirty, mismatched, or
 wheel-only checkout disables generation. Existing `calibration_target.v1` and
 `calibration_target.v2` artifacts remain readable in that state. The status and
-the direct `/calibration-targets` route explain the concrete failure; navigation
-is shown only when generation is available.
+the direct `/calibration-targets` route explain the concrete failure. Navigation,
+saved-bundle browsing, downloads, and run selection remain available even when
+generation is disabled.
 
 ## Generate and select
 
@@ -35,6 +36,13 @@ Open **Calibration Targets** in the operator console:
    PDF. Generation does not change the active run.
 5. Choose a configured run, select the bundle, and declare one placement:
    `unknown`, `template_base_identity`, or `posegridgen_board_to_base`.
+
+The simplified **Workflow → Calibration** screen can also select any saved
+bundle directly for an immutable calculation attempt. Its two modes derive the
+target mounting per attempt: eye-in-hand estimates a target stationary relative
+to `template_base`, while eye-to-hand estimates a target attached to
+`robot_flange`. This does not require PoseGridGen to be available and does not
+initiate physical capture.
 
 `posegridgen_board_to_base` is available only when the source records that
 pose. Selection cross-checks PoseGridGen's matrix, translation, and quaternion,
@@ -56,14 +64,19 @@ working_data/calibration_targets/<opaque-uuid>/
 `calibration_target_bundle.v1` records the UUID, display name, creation time,
 pinned generator revision, configuration/geometry hashes, and fixed file paths,
 media types, sizes, and SHA-256 values. Generation stages every file and
-promotes the complete directory atomically. There is intentionally no deletion
-API.
+promotes the complete directory atomically. Confirmed deletion is allowed only
+for an inactive library bundle.
 
 Selection copies the unchanged bundle to
 `<run>/calibration_targets/<target_id>/`, writes the placement-aware root
 `<run>/calibration_target.json`, and adds `run_config.v1.calibration_target`
 hash/provenance fields. The bundle, root target, run config, and dataset
 manifest are promoted together with rollback on failure.
+
+Intent-level calculation snapshots the bundle below
+`<run>/processed/calibration/<attempt_id>/target_bundle/`. Prior attempts and
+raw capture data are never replaced. Only explicit recommendation acceptance
+copies the selected evidence and bundle into canonical run artifacts.
 
 `calibration_target.v2` makes the compensated `corners_mm` for every marker
 authoritative. The target frame is `aruco_grid`, its origin is the compensated
@@ -114,6 +127,18 @@ The scoped API surface is:
 - `DELETE /calibration-targets/bundles/<target_id>`
 - `POST /calibration-targets/bundles/<target_id>/select`
 - `GET /calibration-targets/bundles/<target_id>/download/<source|target|pdf>`
+
+The intent-level calculation façade consumes those saved bundles through:
+
+- `GET /calibration/setup?run_root=...`
+- `GET /calibration/attempts?run_root=...`
+- `POST /calibration/attempts`
+- `GET /calibration/attempts/<attempt_id>?run_root=...`
+- `POST /calibration/attempts/<attempt_id>/promote`
+
+Attempt creation records stable sensor keys and queues one `cpu`/`disk_io`
+parent job. Promotion is a separate queued transaction and requires passing
+recommendations or explicit passing candidate IDs.
 
 Request bodies are capped at 256 KiB. Generation queues `cpu` and `disk_io`;
 selection queues `disk_io`. Commands use fixed argument arrays and appear in

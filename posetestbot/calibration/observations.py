@@ -516,15 +516,22 @@ def build_calibration_observations(
     }
 
 
-def calibration_observations_path(run_root: str | Path) -> Path:
-    return Path(run_root) / CALIBRATION_OBSERVATIONS
+def calibration_observations_path(
+    run_root: str | Path,
+    *,
+    output_root: str | Path | None = None,
+) -> Path:
+    destination = Path(output_root) if output_root is not None else Path(run_root)
+    return destination / CALIBRATION_OBSERVATIONS
 
 
 def write_calibration_observations(
     run_root: str | Path,
     report: Mapping[str, Any],
+    *,
+    output_root: str | Path | None = None,
 ) -> Path:
-    path = calibration_observations_path(run_root)
+    path = calibration_observations_path(run_root, output_root=output_root)
     return atomic_write_json(path, dict(report))
 
 
@@ -533,6 +540,8 @@ def write_calibration_observations_with_manifest(
     *,
     min_marker_count: int = 4,
     min_observations: int = 6,
+    aruco_paths: list[str | Path] | None = None,
+    output_root: str | Path | None = None,
     target: Mapping[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     run_root_path = Path(run_root)
@@ -544,9 +553,14 @@ def write_calibration_observations_with_manifest(
             run_root_path,
             min_marker_count=min_marker_count,
             min_observations=min_observations,
+            aruco_paths=aruco_paths,
             target=target,
         )
-        path = write_calibration_observations(run_root_path, report)
+        path = write_calibration_observations(
+            run_root_path,
+            report,
+            output_root=output_root,
+        )
         upsert_stage(
             manifest,
             name="calibration_observations",

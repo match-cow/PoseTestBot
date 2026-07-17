@@ -258,10 +258,26 @@ class LiveServer:
 
 
 class SyntheticVideoTrack(VideoStreamTrack):
-    def __init__(self, on_frame) -> None:
+    def __init__(self, on_frame, on_brightness) -> None:
         super().__init__()
         self.frame_count = 0
         self.on_frame = on_frame
+        self.on_brightness = on_brightness
+        self.brightness = {
+            "schema_version": "monitor_brightness.v1",
+            "supported": True,
+            "state": "idle",
+            "target_luma": 118.0,
+            "tolerance": 6.0,
+            "measured_luma": None,
+            "control": {"minimum": 0, "maximum": 255, "step": 1, "default": 128, "value": 128},
+            "attempts": 0,
+            "max_attempts": 8,
+            "started_at": None,
+            "completed_at": None,
+            "message": "Ready to auto-calibrate brightness.",
+        }
+        self.on_brightness(dict(self.brightness))
         self.image = np.random.default_rng(42).integers(
             0,
             256,
@@ -285,12 +301,30 @@ class SyntheticVideoTrack(VideoStreamTrack):
             frame = bgr_frame_to_av(image, frame_index=self.frame_count, fps=30)
             self.frame_count += 1
             self.on_frame(self.frame_count)
+            if self.brightness["state"] == "queued":
+                self.brightness.update(
+                    state="succeeded",
+                    measured_luma=118.0,
+                    attempts=1,
+                    message="Synthetic brightness calibrated to 128 (luma 118.0).",
+                )
+                self.on_brightness(dict(self.brightness))
             return frame
         finally:
             self.recv_idle.set()
 
     async def wait_stopped(self) -> None:
         await self.recv_idle.wait()
+
+    def request_brightness_autocalibration(self) -> dict:
+        self.brightness.update(
+            state="queued",
+            measured_luma=None,
+            attempts=0,
+            message="Brightness auto-calibration queued.",
+        )
+        self.on_brightness(dict(self.brightness))
+        return dict(self.brightness)
 
 
 class StalledVideoTrack(VideoStreamTrack):
@@ -346,8 +380,11 @@ class SyntheticMonitorServer:
                     peer_count=peer_count,
                 )
 
+            def on_brightness(brightness: dict) -> None:
+                status.update(brightness=brightness)
+
             track = (
-                SyntheticVideoTrack(on_frame)
+                SyntheticVideoTrack(on_frame, on_brightness)
                 if self.emit_frames
                 else StalledVideoTrack()
             )
@@ -494,6 +531,14 @@ def test_sidebar_webcam_monitor_plays_synthetic_webrtc_without_jpegs(
         )
         assert video.evaluate("element => element.readyState >= 2 && element.videoWidth === 640")
         assert jpeg_requests == []
+
+        auto_brightness = page.get_by_role("button", name="Auto brightness")
+        expect(auto_brightness).to_be_enabled()
+        auto_brightness.click()
+        expect(page.locator('[data-testid="room-monitor-brightness-status"]')).to_contain_text(
+            "Synthetic brightness calibrated",
+            timeout=5_000,
+        )
 
         page.goto("about:blank")
         wait_for(

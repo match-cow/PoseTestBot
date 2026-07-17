@@ -45,6 +45,22 @@ def parse_args() -> argparse.Namespace:
         help="Recommended minimum usable observation count per sensor.",
     )
     parser.add_argument(
+        "--aruco-path",
+        action="append",
+        default=None,
+        help=(
+            "Explicit target-pose JSON path. Repeat to process a sensor subset; "
+            "omit to preserve run-wide discovery."
+        ),
+    )
+    parser.add_argument(
+        "--output-root",
+        help=(
+            "Alternate directory for calibration_observations.json. Omit to "
+            "preserve the canonical run-root output."
+        ),
+    )
+    parser.add_argument(
         "--target-spec",
         help=(
             "Optional JSON calibration target metadata. Relative paths are "
@@ -121,6 +137,7 @@ def main() -> None:
     report_args = {
         "min_marker_count": args.min_marker_count,
         "min_observations": args.min_observations,
+        "aruco_paths": args.aruco_path,
         "target": target,
     }
     if args.no_write:
@@ -129,6 +146,7 @@ def main() -> None:
     else:
         path, report = write_calibration_observations_with_manifest(
             Path(args.run_root),
+            output_root=args.output_root,
             **report_args,
         )
 

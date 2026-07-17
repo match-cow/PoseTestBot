@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pytest
+
+from posetestbot.calibration import attempts as attempt_module
+from posetestbot.calibration.attempts import (
+    create_calibration_attempt,
+    create_promotion_request,
+    promote_calibration_attempt,
+)
+from posetestbot.calibration.intrinsics import (
+    factory_intrinsic_profile,
+    load_intrinsic_profile_collection,
+    write_intrinsic_profile_collection,
+)
+from posetestbot.calibration.posegridgen import posegridgen_capabilities
+from posetestbot.calibration.profiles import (
+    SCHEMA_VERSION,
+    CalibrationProfile,
+    CalibrationQuality,
+    CalibrationStatus,
+    CalibrationTargetType,
+    RigidTransform,
+    TransformFrame,
+    load_profile_collection,
+    write_profile_collection,
+)
+from posetestbot.calibration.target_library import generate_target_bundle
+from posetestbot.io.artifacts import (
+    CALIBRATION_CANDIDATES,
+    CALIBRATION_OBSERVATIONS,
+    CALIBRATION_PROFILES,
+    CALIBRATION_PROFILES_SOLVED,
+    CALIBRATION_SOLVER_REPORT,
+    CALIBRATION_TARGET,
+    CALIBRATION_VALIDATION_REPORT,
+    DEPTH_DIR,
+    RGB_DIR,
+)
+from posetestbot.pipeline.run_config import (
+    create_run_config,
+    load_run_config_for_run_root,
+    sensor_configs_from_values,
+    write_run_config_with_manifest,
+)
+from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
+from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
+
+
+def _configuration() -> dict:
+    value = copy.deepcopy(posegridgen_capabilities()["defaults"])
+    value["page"]["orientation"] = "landscape"
+    value["board"].update({"rows": 2, "columns": 3, "marker_size_mm": 25.0})
+    value["annotations"] = {
+        "show_ruler": False,
+        "show_parameters": False,
+        "show_frame_legend": False,
+    }
+    return value
+
+
+def _write_capture_folder(path: Path) -> None:
+    image = np.zeros((8, 8), dtype=np.uint16)
+    for directory in (RGB_DIR, DEPTH_DIR):
+        target = path / directory / "1000.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(target.as_posix(), image)
+    write_legacy_camera_sidecars(
+        path,
+        CameraIntrinsics(
+            cam_k=(600.0, 0.0, 4.0, 0.0, 600.0, 4.0, 0.0, 0.0, 1.0),
+            width=8,
+            height=8,
+            distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
+            depth_scale_to_mm=1.0,
+        ),
+        include_distortion_in_cam_k=True,
+    )
+
+
+def _profile(
+    *,
+    profile_id: str,
+    sensor_type: SensorType,
+    sensor_id: str,
+    mounting_mode: MountingMode,
+    candidate_id: str,
+    translation: tuple[float, float, float],
+    status: CalibrationStatus = CalibrationStatus.NEEDS_VALIDATION,
+) -> CalibrationProfile:
+    intrinsics = CameraIntrinsics(
+        cam_k=(600.0, 0.0, 4.0, 0.0, 600.0, 4.0, 0.0, 0.0, 1.0),
+        width=8,
+        height=8,
+        distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
+        depth_scale_to_mm=1.0,
+    )
+    return CalibrationProfile(
+        schema_version=SCHEMA_VERSION,
+        profile_id=profile_id,
+        sensor_id=sensor_id,
+        sensor_type=sensor_type,
+        mounting_mode=mounting_mode,
+        rig_position="wrist" if mounting_mode == MountingMode.EYE_IN_HAND else "static",
+        intrinsics=intrinsics,
+        extrinsics=RigidTransform(
+            from_frame=TransformFrame.CAMERA,
+            to_frame=(
+                TransformFrame.ROBOT_FLANGE
+                if mounting_mode == MountingMode.EYE_IN_HAND
+                else TransformFrame.TEMPLATE_BASE
+            ),
+            rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+            translation_mm=translation,
+        ),
+        target_type=CalibrationTargetType.ARUCO_GRID,
+        method="attempt-test",
+        status=status,
+        quality=CalibrationQuality(
+            num_observations=8,
+            num_inliers=8,
+            mean_reprojection_error_px=0.2,
+            residual_translation_mm=0.5,
+            residual_rotation_deg=0.25,
+        ),
+        metadata={
+            "candidate_id": candidate_id,
+            "sensor_key": f"{sensor_type.value}:{sensor_id}",
+            "outlier_count": 0,
+        },
+    )
+
+
+def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected_camera(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    configured = sensor_configs_from_values(
+        [
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "1",
+                "display_name": "D435",
+                "mounting_mode": "static",
+            },
+            {
+                "sensor_type": "oak_d_pro",
+                "device_id": "2",
+                "display_name": "OAK",
+                "mounting_mode": "static",
+            },
+        ]
+    )
+    write_run_config_with_manifest(
+        run_root,
+        create_run_config(run_root=run_root, sensors=configured),
+    )
+    _write_capture_folder(run_root / "realsense_1")
+    _write_capture_folder(run_root / "luxonis_2")
+    (run_root / "raw_robot_ee_poses.json").write_text(
+        json.dumps(
+            {
+                "0": {
+                    "motion": "pose_0",
+                    "framename": 1000,
+                    "pose": {
+                        "X": 0.0,
+                        "Y": 0.0,
+                        "Z": 500.0,
+                        "A": 0.0,
+                        "B": 0.0,
+                        "C": 0.0,
+                    },
+                }
+            }
+        )
+    )
+    library = tmp_path / "library"
+    bundle = generate_target_bundle(
+        display_name="Promotion target",
+        configuration=_configuration(),
+        library_root=library,
+    )
+    monkeypatch.setattr(attempt_module, "default_target_library_root", lambda: library)
+    request_value = create_calibration_attempt(
+        run_root,
+        {
+            "mode": "eye_in_hand",
+            "sensor_keys": ["realsense_d435:1"],
+            "target_id": bundle["target_id"],
+        },
+    )
+    attempt_id = request_value["attempt_id"]
+    attempt_root = run_root / "processed" / "calibration" / attempt_id
+    candidate_id = "realsense_d435:1|IPPE|park"
+    candidate = _profile(
+        profile_id="new_d435_profile",
+        sensor_type=SensorType.REALSENSE_D435,
+        sensor_id="1",
+        mounting_mode=MountingMode.EYE_IN_HAND,
+        candidate_id=candidate_id,
+        translation=(10.0, 20.0, 30.0),
+    )
+    write_profile_collection([candidate], attempt_root / "candidate_profiles.json")
+    intrinsic = factory_intrinsic_profile(run_root / "realsense_1")
+    write_intrinsic_profile_collection(
+        [intrinsic], attempt_root / "intrinsic_calibration_profiles.json"
+    )
+    unrelated_intrinsic = factory_intrinsic_profile(run_root / "luxonis_2")
+    write_intrinsic_profile_collection(
+        [unrelated_intrinsic],
+        run_root / "intrinsic_calibration_profiles.json",
+    )
+    (attempt_root / CALIBRATION_OBSERVATIONS).write_text(
+        json.dumps({"schema_version": "calibration_observations.v1", "observations": []})
+    )
+    (attempt_root / "extrinsic_candidates.json").write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "candidate_id": candidate_id,
+                        "pnp_method": "IPPE",
+                        "extrinsic_method": "park",
+                        "status": "passing",
+                    }
+                ]
+            }
+        )
+    )
+    (attempt_root / "checks.json").write_text(json.dumps({"checks": []}))
+    (attempt_root / "ranking.json").write_text(
+        json.dumps(
+            {
+                "status": "partial",
+                "recommended_camera_count": 1,
+                "failed_camera_count": 1,
+                "results": [
+                    {
+                        "sensor_key": "realsense_d435:1",
+                        "recommended_candidate_id": candidate_id,
+                        "candidates": [
+                            {
+                                "candidate_id": candidate_id,
+                                "pnp_method": "IPPE",
+                                "extrinsic_method": "park",
+                                "status": "passing",
+                            }
+                        ],
+                    },
+                    {
+                        "sensor_key": "oak_d_pro:2",
+                        "recommended_candidate_id": None,
+                        "candidates": [],
+                    },
+                ],
+            }
+        )
+    )
+    progress = json.loads((attempt_root / "progress.json").read_text())
+    progress["status"] = "complete"
+    (attempt_root / "progress.json").write_text(json.dumps(progress))
+    unrelated = _profile(
+        profile_id="keep_oak_profile",
+        sensor_type=SensorType.OAK_D_PRO,
+        sensor_id="2",
+        mounting_mode=MountingMode.STATIC,
+        candidate_id="old-oak",
+        translation=(1.0, 2.0, 3.0),
+        status=CalibrationStatus.VALID,
+    )
+    write_profile_collection([unrelated], run_root / CALIBRATION_PROFILES)
+    create_promotion_request(
+        run_root,
+        attempt_id,
+        selections={"realsense_d435:1": candidate_id},
+        operator="test-operator",
+    )
+
+    result = promote_calibration_attempt(run_root, attempt_id)
+
+    assert result["status"] == "promoted"
+    profiles = load_profile_collection(run_root / CALIBRATION_PROFILES)
+    assert {profile.profile_id for profile in profiles} == {
+        "keep_oak_profile",
+        "new_d435_profile",
+    }
+    promoted = next(profile for profile in profiles if profile.profile_id == "new_d435_profile")
+    assert promoted.status == CalibrationStatus.VALID
+    assert promoted.operator == "test-operator"
+    assert promoted.metadata["promotion_attempt_id"] == attempt_id
+    assert promoted.metadata["promotion_solver_provenance"] == {
+        "solver_policy": "auto_compare",
+        "pnp_method": "IPPE",
+        "extrinsic_method": "park",
+    }
+    config = load_run_config_for_run_root(run_root)
+    sensors = {
+        (item["sensor_type"], item["device_id"]): item
+        for item in config["capture"]["sensors"]
+    }
+    assert sensors[("realsense_d435", "1")]["mounting_mode"] == "eye_in_hand"
+    assert sensors[("realsense_d435", "1")]["calibration_profile_id"] == (
+        "new_d435_profile"
+    )
+    assert sensors[("oak_d_pro", "2")]["calibration_profile_id"] is None
+    assert config["calibration_target"]["target_id"] == bundle["target_id"]
+    assert config["calibration_target"]["placement"] == {"mode": "unknown"}
+    intrinsic_profiles = load_intrinsic_profile_collection(
+        run_root / "intrinsic_calibration_profiles.json"
+    )
+    assert {item["sensor_id"] for item in intrinsic_profiles} == {"1", "2"}
+    assert (run_root / CALIBRATION_TARGET).is_file()
+    for filename in (
+        CALIBRATION_CANDIDATES,
+        CALIBRATION_SOLVER_REPORT,
+        CALIBRATION_PROFILES_SOLVED,
+        CALIBRATION_VALIDATION_REPORT,
+    ):
+        assert (run_root / filename).is_file()

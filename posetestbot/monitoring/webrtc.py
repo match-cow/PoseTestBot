@@ -32,7 +32,9 @@ from av import VideoFrame
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.manifest import utc_now_iso
 from posetestbot.sensors.v4l2_preview import (
+    V4L2IntegerControl,
     open_v4l2_capture,
+    read_v4l2_integer_control,
     select_usb_rgb_node,
 )
 
@@ -56,6 +58,10 @@ CAMERA_IDLE_RELEASE_S = 15.0
 # packet can still arrive, which looks in Chrome exactly like a connected peer
 # with advancing packets but zero complete or decoded frames.
 VP8_PACKET_MAX_BYTES = 1100
+BRIGHTNESS_TARGET_LUMA = 118.0
+BRIGHTNESS_LUMA_TOLERANCE = 6.0
+BRIGHTNESS_MAX_ADJUSTMENTS = 8
+BRIGHTNESS_SETTLE_FRAMES = 3
 
 
 def configure_vp8_packet_size(
@@ -213,6 +219,9 @@ class MonitorStatusWriter:
             "heartbeat_at": utc_now_iso(),
             "selected_node": None,
             "vp8_packet_max_bytes": VP8_PACKET_MAX_BYTES,
+            "brightness": unavailable_brightness_status(
+                "Camera must be open before brightness can be calibrated."
+            ),
             "error": None,
             "error_reason": None,
         }
@@ -313,6 +322,218 @@ def bgr_frame_to_av(frame: Any, *, frame_index: int, fps: int = 30) -> VideoFram
     return video_frame
 
 
+def measure_frame_luma(frame: Any) -> float:
+    """Measure mean luma inside the central 80% of a camera frame."""
+
+    normalized = normalize_bgr_frame(frame)
+    if normalized is None:
+        raise ValueError("Cannot measure an empty camera frame")
+    gray = cv2.cvtColor(normalized, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape[:2]
+    margin_y = height // 10
+    margin_x = width // 10
+    roi = gray[
+        margin_y : max(margin_y + 1, height - margin_y),
+        margin_x : max(margin_x + 1, width - margin_x),
+    ]
+    return round(float(cv2.mean(roi)[0]), 1)
+
+
+def unavailable_brightness_status(message: str) -> dict[str, Any]:
+    return {
+        "schema_version": "monitor_brightness.v1",
+        "supported": False,
+        "state": "unavailable",
+        "target_luma": BRIGHTNESS_TARGET_LUMA,
+        "tolerance": BRIGHTNESS_LUMA_TOLERANCE,
+        "measured_luma": None,
+        "control": None,
+        "attempts": 0,
+        "max_attempts": BRIGHTNESS_MAX_ADJUSTMENTS,
+        "started_at": None,
+        "completed_at": None,
+        "message": message,
+    }
+
+
+class BrightnessAutoCalibrator:
+    """Bounded frame-driven search over one V4L2 brightness control."""
+
+    def __init__(
+        self,
+        control: V4L2IntegerControl,
+        *,
+        set_value: Callable[[int], bool],
+        on_status: Callable[[dict[str, Any]], None] | None = None,
+        target_luma: float = BRIGHTNESS_TARGET_LUMA,
+        tolerance: float = BRIGHTNESS_LUMA_TOLERANCE,
+        max_adjustments: int = BRIGHTNESS_MAX_ADJUSTMENTS,
+        settle_frames: int = BRIGHTNESS_SETTLE_FRAMES,
+    ) -> None:
+        self.control = control
+        self._set_value = set_value
+        self._on_status = on_status
+        self.target_luma = float(target_luma)
+        self.tolerance = float(tolerance)
+        self.max_adjustments = max(1, int(max_adjustments))
+        self.settle_frames = max(0, int(settle_frames))
+        self._lock = threading.RLock()
+        self._current = self._quantize(control.value)
+        self._low = control.minimum
+        self._high = control.maximum
+        self._settle_remaining = 0
+        self._best: tuple[float, int, float] | None = None
+        self._status: dict[str, Any] = {
+            "schema_version": "monitor_brightness.v1",
+            "supported": True,
+            "state": "idle",
+            "target_luma": self.target_luma,
+            "tolerance": self.tolerance,
+            "measured_luma": None,
+            "control": {**control.as_dict(), "value": self._current},
+            "attempts": 0,
+            "max_attempts": self.max_adjustments,
+            "started_at": None,
+            "completed_at": None,
+            "message": "Ready to auto-calibrate brightness.",
+        }
+        self._publish()
+
+    def _quantize(self, value: float) -> int:
+        bounded = min(self.control.maximum, max(self.control.minimum, value))
+        steps = round((bounded - self.control.minimum) / self.control.step)
+        return int(self.control.minimum + steps * self.control.step)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                **self._status,
+                "control": dict(self._status["control"]),
+            }
+
+    def _publish(self) -> None:
+        if self._on_status is not None:
+            self._on_status(self.snapshot())
+
+    def request(self) -> dict[str, Any]:
+        with self._lock:
+            if self._status["state"] in {"queued", "running"}:
+                return self.snapshot()
+            self._low = self.control.minimum
+            self._high = self.control.maximum
+            self._settle_remaining = 0
+            self._best = None
+            self._status.update(
+                state="queued",
+                measured_luma=None,
+                attempts=0,
+                started_at=utc_now_iso(),
+                completed_at=None,
+                message="Brightness auto-calibration queued.",
+            )
+            self._publish()
+            return self.snapshot()
+
+    def process_frame(self, frame: Any) -> None:
+        with self._lock:
+            state = self._status["state"]
+            if state not in {"queued", "running"}:
+                return
+            if state == "queued":
+                self._status.update(
+                    state="running",
+                    message="Measuring monitor brightness…",
+                )
+                self._publish()
+            if self._settle_remaining > 0:
+                self._settle_remaining -= 1
+                return
+
+            luma = measure_frame_luma(frame)
+            difference = abs(luma - self.target_luma)
+            self._status["measured_luma"] = luma
+            if self._best is None or difference < self._best[0]:
+                self._best = (difference, self._current, luma)
+            if difference <= self.tolerance:
+                self._finish(
+                    f"Brightness calibrated to {self._current} (luma {luma:.1f})."
+                )
+                return
+
+            if luma < self.target_luma:
+                self._low = max(self._low, self._current + self.control.step)
+            else:
+                self._high = min(self._high, self._current - self.control.step)
+
+            attempts = int(self._status["attempts"])
+            if self._low > self._high or attempts >= self.max_adjustments:
+                self._finish_closest()
+                return
+            candidate = self._quantize((self._low + self._high) / 2)
+            if candidate == self._current:
+                self._finish_closest()
+                return
+            if not self._set_value(candidate):
+                self._fail(
+                    f"Camera rejected brightness value {candidate}."
+                )
+                return
+            self._current = candidate
+            self._status["attempts"] = attempts + 1
+            self._status["control"] = {
+                **self._status["control"],
+                "value": self._current,
+            }
+            self._status["message"] = (
+                f"Testing brightness {candidate}; waiting for the camera to settle."
+            )
+            self._settle_remaining = self.settle_frames
+            self._publish()
+
+    def _finish_closest(self) -> None:
+        if self._best is None:
+            self._fail("Brightness calibration ended before a frame was measured.")
+            return
+        _difference, best_value, best_luma = self._best
+        if best_value != self._current:
+            if not self._set_value(best_value):
+                self._fail(
+                    f"Camera rejected the closest brightness value {best_value}."
+                )
+                return
+            self._current = best_value
+            self._status["control"] = {
+                **self._status["control"],
+                "value": self._current,
+            }
+        self._status["measured_luma"] = best_luma
+        self._finish(
+            f"Selected closest brightness {best_value} (luma {best_luma:.1f})."
+        )
+
+    def _finish(self, message: str) -> None:
+        self._status.update(
+            state="succeeded",
+            completed_at=utc_now_iso(),
+            message=message,
+        )
+        self._publish()
+
+    def _fail(self, message: str) -> None:
+        self._status.update(
+            state="failed",
+            completed_at=utc_now_iso(),
+            message=message,
+        )
+        self._publish()
+
+    def cancel(self, message: str) -> None:
+        with self._lock:
+            if self._status["state"] not in {"queued", "running"}:
+                return
+            self._fail(message)
+
+
 class OpenCVVideoTrack(VideoStreamTrack):
     """Pull unbuffered camera frames and expose them as timestamped PyAV frames."""
 
@@ -325,6 +546,9 @@ class OpenCVVideoTrack(VideoStreamTrack):
         on_frame: Callable[[int], None] | None = None,
         on_capture_frame: Callable[[int], None] | None = None,
         on_error: Callable[[str], None] | None = None,
+        brightness_control: V4L2IntegerControl | None = None,
+        brightness_unavailable_reason: str | None = None,
+        on_brightness_status: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         super().__init__()
         self.capture = capture
@@ -337,6 +561,29 @@ class OpenCVVideoTrack(VideoStreamTrack):
         self._on_error = on_error
         self._recv_idle = asyncio.Event()
         self._recv_idle.set()
+        self._brightness = (
+            BrightnessAutoCalibrator(
+                brightness_control,
+                set_value=lambda value: bool(
+                    self.capture.set(cv2.CAP_PROP_BRIGHTNESS, float(value))
+                ),
+                on_status=on_brightness_status,
+            )
+            if brightness_control is not None
+            else None
+        )
+        self._brightness_unavailable_reason = brightness_unavailable_reason or (
+            "This camera does not expose an integer V4L2 brightness control."
+        )
+        if self._brightness is None and on_brightness_status is not None:
+            on_brightness_status(
+                unavailable_brightness_status(self._brightness_unavailable_reason)
+            )
+
+    def request_brightness_autocalibration(self) -> dict[str, Any]:
+        if self._brightness is None:
+            raise RuntimeError(self._brightness_unavailable_reason)
+        return self._brightness.request()
 
     def _read_frame(self) -> Any:
         failure_limit = max(10, self.fps * 5)
@@ -348,6 +595,8 @@ class OpenCVVideoTrack(VideoStreamTrack):
                 self._failure_count = 0
                 if self._on_capture_frame is not None:
                     self._on_capture_frame(self.frame_count + 1)
+                if self._brightness is not None:
+                    self._brightness.process_frame(frame)
                 return frame
             self._failure_count += 1
             if self._failure_count > failure_limit:
@@ -386,6 +635,10 @@ class OpenCVVideoTrack(VideoStreamTrack):
 
     def stop(self) -> None:
         if self.readyState == "live":
+            if self._brightness is not None:
+                self._brightness.cancel(
+                    "Camera closed before brightness calibration completed."
+                )
             super().stop()
             self.capture.release()
 
@@ -448,6 +701,10 @@ class MonitorWebRTCServer:
     async def start(self) -> int:
         app = web.Application(client_max_size=MAX_SDP_BYTES + 4096)
         app.router.add_post("/offer", self._offer_request)
+        app.router.add_post(
+            "/brightness/autocalibrate",
+            self._brightness_autocalibrate_request,
+        )
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
 
@@ -461,6 +718,32 @@ class MonitorWebRTCServer:
         await site.start()
         self._maintenance_task = asyncio.create_task(self._maintain())
         return int(sock.getsockname()[1])
+
+    async def _brightness_autocalibrate_request(
+        self,
+        _request: web.Request,
+    ) -> web.Response:
+        track = self.track
+        if track is None or track.readyState != "live":
+            return web.json_response(
+                {"error": "Open the room-monitor stream before calibrating brightness."},
+                status=409,
+            )
+        request_calibration = getattr(
+            track,
+            "request_brightness_autocalibration",
+            None,
+        )
+        if not callable(request_calibration):
+            return web.json_response(
+                {"error": "This monitor track does not support brightness calibration."},
+                status=409,
+            )
+        try:
+            brightness = request_calibration()
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        return web.json_response({"brightness": brightness}, status=202)
 
     async def _ensure_track(self) -> VideoStreamTrack:
         if self.track is not None and self.track.readyState == "live":
@@ -646,6 +929,9 @@ async def run_monitor_webrtc(
         "peer_connect_started_at": None,
         "peer_connected_at": None,
         "connected_since_monotonic": None,
+        "brightness": unavailable_brightness_status(
+            "Camera must be open before brightness can be calibrated."
+        ),
     }
 
     def on_capture_frame(frame_count: int) -> None:
@@ -668,6 +954,10 @@ async def run_monitor_webrtc(
 
     def on_camera_open_changed(camera_open: bool) -> None:
         runtime["camera_open"] = camera_open
+
+    def on_brightness_status(brightness: dict[str, Any]) -> None:
+        runtime["brightness"] = brightness
+        status.update(brightness=brightness)
 
     def on_peers_changed(peer_count: int, connected_count: int) -> None:
         now_iso = utc_now_iso()
@@ -717,6 +1007,7 @@ async def run_monitor_webrtc(
                 connected_peer_count=runtime["connected_peer_count"],
                 peer_connect_started_at=runtime["peer_connect_started_at"],
                 peer_connected_at=runtime["peer_connected_at"],
+                brightness=runtime["brightness"],
             )
             await asyncio.sleep(1)
 
@@ -731,6 +1022,21 @@ async def run_monitor_webrtc(
         def track_factory() -> OpenCVVideoTrack:
             capture_base = int(runtime["capture_frame_count"])
             media_base = int(runtime["media_frame_count"])
+            brightness_control: V4L2IntegerControl | None = None
+            brightness_unavailable_reason: str | None = None
+            try:
+                brightness_control = read_v4l2_integer_control(
+                    selection.path,
+                    "brightness",
+                )
+                if brightness_control is None:
+                    brightness_unavailable_reason = (
+                        "This camera does not expose an integer V4L2 brightness control."
+                    )
+            except Exception as exc:
+                brightness_unavailable_reason = (
+                    f"Could not inspect camera brightness: {type(exc).__name__}: {exc}"
+                )
             capture = open_v4l2_capture(
                 selection.path,
                 width=width,
@@ -748,6 +1054,9 @@ async def run_monitor_webrtc(
                         capture_base + count
                     ),
                     on_error=on_track_error,
+                    brightness_control=brightness_control,
+                    brightness_unavailable_reason=brightness_unavailable_reason,
+                    on_brightness_status=on_brightness_status,
                 )
             except Exception:
                 capture.release()

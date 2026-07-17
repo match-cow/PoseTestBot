@@ -967,24 +967,39 @@ def build_calibration_solver(
     }
 
 
-def calibration_solver_report_path(run_root: str | Path) -> Path:
-    return Path(run_root) / CALIBRATION_SOLVER_REPORT
+def calibration_solver_report_path(
+    run_root: str | Path,
+    *,
+    output_root: str | Path | None = None,
+) -> Path:
+    destination = Path(output_root) if output_root is not None else Path(run_root)
+    return destination / CALIBRATION_SOLVER_REPORT
 
 
-def calibration_profiles_solved_path(run_root: str | Path) -> Path:
-    return Path(run_root) / CALIBRATION_PROFILES_SOLVED
+def calibration_profiles_solved_path(
+    run_root: str | Path,
+    *,
+    output_root: str | Path | None = None,
+) -> Path:
+    destination = Path(output_root) if output_root is not None else Path(run_root)
+    return destination / CALIBRATION_PROFILES_SOLVED
 
 
 def write_calibration_solver(
     run_root: str | Path,
     report: Mapping[str, Any],
+    *,
+    output_root: str | Path | None = None,
 ) -> tuple[Path, Path]:
     root = Path(run_root)
-    report_path = calibration_solver_report_path(root)
+    report_path = calibration_solver_report_path(root, output_root=output_root)
     atomic_write_json(report_path, dict(report))
 
     profiles = [profile_from_dict(profile) for profile in report.get("profiles", [])]
-    profiles_path = calibration_profiles_solved_path(root)
+    profiles_path = calibration_profiles_solved_path(
+        root,
+        output_root=output_root,
+    )
     write_profile_collection(profiles, profiles_path)
     return report_path, profiles_path
 
@@ -1000,6 +1015,7 @@ def write_calibration_solver_with_manifest(
     max_rotation_residual_deg: float | None = DEFAULT_MAX_ROTATION_RESIDUAL_DEG,
     holdout_fraction: float = DEFAULT_HOLDOUT_FRACTION,
     compare_hand_eye_methods: bool = DEFAULT_COMPARE_HAND_EYE_METHODS,
+    output_root: str | Path | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     run_root_path = Path(run_root)
     manifest = load_or_create_run_manifest(run_root_path)
@@ -1017,7 +1033,11 @@ def write_calibration_solver_with_manifest(
             holdout_fraction=holdout_fraction,
             compare_hand_eye_methods=compare_hand_eye_methods,
         )
-        report_path, profiles_path = write_calibration_solver(run_root_path, report)
+        report_path, profiles_path = write_calibration_solver(
+            run_root_path,
+            report,
+            output_root=output_root,
+        )
         upsert_stage(
             manifest,
             name="calibration_solver",

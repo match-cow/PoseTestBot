@@ -48,7 +48,8 @@ PoseTestBot does not own:
   rewrite gates.
 - `posetestbot.sync`: non-destructive sync plus run-level quality reporting.
 - `posetestbot.calibration`: profile schema/migration, preflight, target
-  observations, candidate generation, solver, and validation/promotion.
+  observations, attempt-scoped planar PnP, two-geometry robot-camera solving,
+  deterministic ranking, and transactional validation/promotion.
 - `posetestbot.aruco`: calibration target coverage summaries.
 - `posetestbot.bop`: BOP writer and geometry helpers.
 - `posetestbot.io`: atomic artifact/directory promotion, artifact constants,
@@ -68,11 +69,23 @@ Scripts under `scripts/` should stay thin wrappers over importable modules.
 7. Transactionally create derived synchronized folders under
    `processed/synchronized/` and emit `sync_report.v2`.
 8. Write `sync_quality_report.json`.
-9. Generate calibration target outputs and calibration reports when required.
-10. Optionally prepare/render BlenderProc GT/mask artifacts.
-11. Transactionally export standard `bop/<split>/<scene_id>/` scenes, model
+9. Select captured cameras, a saved target, and eye-in-hand or eye-to-hand mode.
+10. Queue one non-hardware calibration parent job. It writes every calculation
+    below `processed/calibration/<attempt_id>/`, compares supported PnP and
+    robot-camera methods, and ranks passing results per camera.
+11. Explicitly accept recommendations or passing per-camera overrides. The
+    promotion transaction preserves unrelated profiles and updates canonical
+    calibration artifacts plus selected-camera mounting metadata.
+12. Optionally prepare/render BlenderProc GT/mask artifacts.
+13. Transactionally export standard `bop/<split>/<scene_id>/` scenes, model
     metadata, targets, root frame provenance, and `bop_export_manifest.v2`.
-12. Inspect gate status through Flask or CLI and inspect run files directly.
+14. Inspect gate status through Flask or CLI and inspect run files directly.
+
+The reusable synchronization, observation, and solver internals retain their
+run-wide defaults for existing CLIs/APIs, while also accepting explicit sensor
+or target-pose subsets and alternate derived output roots for attempt-scoped
+orchestration. Those alternate roots never require moving or deleting raw
+capture evidence.
 
 ## Artifact Contracts
 
@@ -105,6 +118,9 @@ Sensor folder artifacts:
 
 Calibration artifacts:
 
+- immutable `processed/calibration/<attempt_id>/request.json`, `progress.json`,
+  per-frame PnP candidates, extrinsic candidates, ranking/checks, candidate
+  profiles, and promotion evidence,
 - `calibration_preflight_report.json`
 - `calibration_observations.json`
 - `calibration_candidates.json`

@@ -12,7 +12,11 @@ from aiortc.codecs import vpx as aiortc_vpx
 from posetestbot.monitoring import smoke
 from posetestbot.monitoring import webrtc
 from posetestbot.sensors import v4l2_preview
-from posetestbot.sensors.v4l2_preview import V4L2NodeCandidate, V4L2PreviewSelection
+from posetestbot.sensors.v4l2_preview import (
+    V4L2IntegerControl,
+    V4L2NodeCandidate,
+    V4L2PreviewSelection,
+)
 
 
 def test_monitor_command_uses_fixed_webrtc_capture_defaults(tmp_path: Path) -> None:
@@ -99,6 +103,38 @@ def test_bgr_frame_conversion_assigns_90khz_timestamps() -> None:
     assert first.time_base == Fraction(1, 90_000)
     assert second.pts == 3_000
     assert second.time_base == Fraction(1, 90_000)
+
+
+def test_brightness_autocalibrator_converges_with_bounded_camera_updates() -> None:
+    current = {"value": 0}
+    statuses: list[dict] = []
+    calibrator = webrtc.BrightnessAutoCalibrator(
+        V4L2IntegerControl(
+            name="brightness",
+            minimum=0,
+            maximum=255,
+            step=1,
+            default=128,
+            value=0,
+        ),
+        set_value=lambda value: current.update(value=value) is None,
+        on_status=statuses.append,
+        settle_frames=1,
+    )
+
+    assert calibrator.request()["state"] == "queued"
+    for _ in range(50):
+        image = np.full((30, 40, 3), current["value"], dtype=np.uint8)
+        calibrator.process_frame(image)
+        if calibrator.snapshot()["state"] == "succeeded":
+            break
+
+    result = calibrator.snapshot()
+    assert result["state"] == "succeeded"
+    assert abs(result["measured_luma"] - webrtc.BRIGHTNESS_TARGET_LUMA) <= 6
+    assert result["attempts"] <= webrtc.BRIGHTNESS_MAX_ADJUSTMENTS
+    assert result["control"]["value"] == current["value"]
+    assert statuses[-1]["state"] == "succeeded"
 
 
 def test_vp8_packetization_leaves_tailscale_mtu_headroom(monkeypatch) -> None:

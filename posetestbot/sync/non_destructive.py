@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from posetestbot.io.atomic import atomic_write_json, atomic_write_text, replace_directory
 from posetestbot.io.artifacts import (
@@ -575,16 +575,46 @@ def sync_result_artifacts(result: SyncResult) -> dict[str, str]:
 def synchronize_run(
     run_root: str | Path,
     *,
+    sensor_folders: Sequence[str | Path] | None = None,
     output_root: str | Path | None = None,
     sync_delta: int | float | Mapping[str, Any] | None = None,
     timestamp_source: str = "host_received",
     copy_files: bool = True,
 ) -> list[SyncResult]:
+    """Synchronize discovered sensors or an explicit contained subset.
+
+    Omitting ``sensor_folders`` preserves the original run-wide behavior.
+    Supplying it lets intent-level orchestration reuse the stage without
+    allowing an unselected or out-of-run folder to enter the calculation.
+    """
+
     run_path = Path(run_root)
     results = []
+    if sensor_folders is None:
+        selected = [
+            run_path / str(sensor_record["folder"])
+            for sensor_record in discover_sensor_records(run_path)
+        ]
+    else:
+        selected = []
+        seen: set[Path] = set()
+        for value in sensor_folders:
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                candidate = run_path / candidate
+            resolved = candidate.resolve()
+            try:
+                resolved.relative_to(run_path.resolve())
+            except ValueError as exc:
+                raise ValueError(
+                    f"Explicit sensor folder must remain below the run root: {value}"
+                ) from exc
+            if resolved in seen:
+                raise ValueError(f"Explicit sensor folder is duplicated: {value}")
+            seen.add(resolved)
+            selected.append(resolved)
 
-    for sensor_record in discover_sensor_records(run_path):
-        sensor_folder = run_path / str(sensor_record["folder"])
+    for sensor_folder in selected:
         results.append(
             synchronize_sensor_folder(
                 sensor_folder,

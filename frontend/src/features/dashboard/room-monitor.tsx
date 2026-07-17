@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Radio, RefreshCw } from "lucide-react"
+import { Radio, RefreshCw, SunMedium } from "lucide-react"
 import { toast } from "sonner"
 
 import { StatusBadge } from "@/components/status-badge"
@@ -24,6 +24,22 @@ interface MonitorStatus {
   selected_node: { path?: string } | null
   error: string | null
   error_reason: string | null
+  brightness?: BrightnessStatus
+}
+
+interface BrightnessStatus {
+  schema_version: "monitor_brightness.v1"
+  supported: boolean
+  state: "unavailable" | "idle" | "queued" | "running" | "succeeded" | "failed"
+  target_luma: number
+  tolerance: number
+  measured_luma: number | null
+  control: { minimum: number; maximum: number; step: number; default: number; value: number } | null
+  attempts: number
+  max_attempts: number
+  started_at: string | null
+  completed_at: string | null
+  message: string
 }
 
 interface MonitorPayload {
@@ -92,13 +108,26 @@ export function RoomMonitor() {
       const connected = connection.jobId === (currentJob?.id ?? null)
         && connection.status === "connected"
         && currentJob?.status === "running"
-      return connected ? 5_000 : 1_000
+      const brightnessState = query.state.data?.webrtc_status?.brightness?.state
+      const calibrating = brightnessState === "queued" || brightnessState === "running"
+      return connected && !calibrating ? 5_000 : 1_000
     },
   })
   const startMonitor = useMutation({
     mutationFn: () => api<MonitorPayload>("/monitoring/webcam", { method: "POST", body: "{}" }),
     onSuccess: (data) => queryClient.setQueryData(["monitor"], data),
     onError: (error) => toast.error("Room monitor could not start", { description: errorMessage(error) }),
+  })
+  const calibrateBrightness = useMutation({
+    mutationFn: (currentJobId: string) => api<{ brightness: BrightnessStatus }>(
+      `/monitoring/webcam/${currentJobId}/brightness/autocalibrate`,
+      { method: "POST", body: "{}" },
+    ),
+    onSuccess: ({ brightness }) => queryClient.setQueryData<MonitorPayload>(["monitor"], (current) => {
+      if (!current?.webrtc_status) return current
+      return { ...current, webrtc_status: { ...current.webrtc_status, brightness } }
+    }),
+    onError: (error) => toast.error("Brightness could not be calibrated", { description: errorMessage(error) }),
   })
 
   const jobId = monitor.data?.job?.id ?? null
@@ -302,6 +331,10 @@ export function RoomMonitor() {
       ?? connection.error
       ?? (connectionStatus === "receiving" ? "WebRTC connected; waiting for the first camera frame…" : null)
       ?? (connectionStatus === "failed" ? "WebRTC connection failed" : "Waiting for room camera…")
+  const brightness = monitor.data?.webrtc_status?.brightness
+  const brightnessActive = brightness?.state === "queued" || brightness?.state === "running"
+  const brightnessReady = connectionStatus === "connected" && brightness?.supported === true
+  const brightnessMessage = brightness?.message ?? "Brightness control is available after the camera opens."
 
   return (
     <Card className="col-span-4 overflow-hidden">
@@ -320,7 +353,25 @@ export function RoomMonitor() {
           />
           {connectionStatus !== "connected" && <div data-testid="room-monitor-message" className="absolute inset-0 grid place-items-center bg-muted/80 text-xs text-muted-foreground">{message}</div>}
         </div>
-        <div className="mt-3 flex items-center justify-between"><StatusBadge status={displayStatus} /><Button size="sm" variant="ghost" onClick={retry} disabled={startMonitor.isPending}><RefreshCw />{connectionStatus === "connected" ? "Reconnect" : "Retry"}</Button></div>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <StatusBadge status={displayStatus} />
+            <div data-testid="room-monitor-brightness-status" className="mt-1 max-w-xl truncate text-[11px] text-muted-foreground" title={brightnessMessage}>{brightnessMessage}</div>
+          </div>
+          <div className="flex items-center gap-1">
+            <Button
+              data-testid="room-monitor-auto-brightness"
+              size="sm"
+              variant="outline"
+              onClick={() => jobId && calibrateBrightness.mutate(jobId)}
+              disabled={!jobId || !brightnessReady || brightnessActive || calibrateBrightness.isPending}
+            >
+              <SunMedium className={brightnessActive ? "animate-pulse" : ""} />
+              {brightnessActive || calibrateBrightness.isPending ? "Calibrating…" : "Auto brightness"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={retry} disabled={startMonitor.isPending}><RefreshCw />{connectionStatus === "connected" ? "Reconnect" : "Retry"}</Button>
+          </div>
+        </div>
       </CardContent>
     </Card>
   )

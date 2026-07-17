@@ -32,6 +32,15 @@ def parse_args() -> argparse.Namespace:
         help="Derived sync output root. Defaults to <run-root>/processed/synchronized.",
     )
     parser.add_argument(
+        "--sensor-folder",
+        action="append",
+        default=None,
+        help=(
+            "Explicit run-contained raw sensor folder. Repeat to synchronize a "
+            "subset; omit to preserve run-wide discovery."
+        ),
+    )
+    parser.add_argument(
         "--sync-delta",
         default=None,
         help="Sync delta in ms, or a JSON file mapping sensor types to ms.",
@@ -73,6 +82,7 @@ def main() -> None:
 
     results = synchronize_run(
         run_root,
+        sensor_folders=args.sensor_folder,
         output_root=args.output_root,
         sync_delta=sync_delta,
         timestamp_source=args.timestamp_source,
@@ -115,4 +125,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

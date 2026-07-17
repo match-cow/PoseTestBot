@@ -152,3 +152,34 @@ def test_compare_and_selection_options_are_repeatable_api_contracts(
     assert validation.command.count("--select-profile") == 2
     assert "realsense_1=unknown" in validation.command
     assert "--promote" in validation.command
+
+
+def test_advanced_sync_and_observation_stages_accept_explicit_subsets(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    sync = build_pipeline_job(
+        stage_id="sync_run",
+        run_root=run_root,
+        options={
+            "sensor_folder": ["realsense_1", "luxonis_2"],
+            "output_root": "processed/calibration/attempt/synchronized",
+        },
+    )
+    observations = build_pipeline_job(
+        stage_id="calibration_observations",
+        run_root=run_root,
+        options={
+            "aruco_path": [
+                "processed/calibration/attempt/synchronized/realsense_1/aruco_pose_estimation.json"
+            ],
+            "output_root": "processed/calibration/attempt",
+        },
+    )
+
+    assert sync.command.count("--sensor-folder") == 2
+    assert "realsense_1" in sync.command
+    assert "luxonis_2" in sync.command
+    assert "--output-root" in sync.command
+    assert observations.command.count("--aruco-path") == 1
+    assert "--output-root" in observations.command

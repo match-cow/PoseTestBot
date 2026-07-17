@@ -425,16 +425,148 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     expect(page).to_have_url(f"{console_server.url}/#/dashboard")
 
 
-def test_calibration_target_unavailable_hides_nav_but_direct_route_explains_setup(
+def test_calibration_target_unavailable_keeps_saved_library_navigation(
     console_server, page
 ) -> None:
     install_common_mocks(page, generator_available=False)
+    page.route("**/calibration-targets/bundles?**", lambda route: fulfill_json(route, {
+        "schema_version": "calibration_target_library.v1",
+        "run_root": RUN_ROOT,
+        "bundles": [],
+    }))
     page.goto(console_server.url, wait_until="networkidle")
 
-    expect(page.get_by_role("link", name="Calibration Targets")).to_have_count(0)
+    expect(page.get_by_role("link", name="Calibration Targets")).to_be_visible()
     page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
-    expect(page.get_by_text("Calibration target generation is unavailable")).to_be_visible()
+    expect(page.get_by_text("Target generation is unavailable")).to_be_visible()
+    expect(page.get_by_text("Saved target library")).to_be_visible()
     expect(page.get_by_text("git submodule update --init third_party/PoseGridGen")).to_be_visible()
+
+
+def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_state(
+    console_server, page
+) -> None:
+    requests: list[dict] = []
+    promoted = {"value": False}
+    install_common_mocks(page)
+    setup = {
+        "schema_version": "calibration_setup.v1",
+        "run_root": RUN_ROOT,
+        "cameras": [
+            {"sensor_key": "realsense_d435:wrist-1", "sensor_name": "realsense_wrist-1", "display_name": "Wrist RGB-D", "sensor_type": "realsense_d435", "device_id": "wrist-1"},
+            {"sensor_key": "oak_d_pro:static-1", "sensor_name": "luxonis_static-1", "display_name": "Static OAK-D", "sensor_type": "oak_d_pro", "device_id": "static-1"},
+        ],
+        "unavailable_cameras": [],
+        "saved_targets": [
+            {"target_id": "5f09f41c-dd91-44ef-a048-1f43fc990e17", "display_name": "Lab board", "valid": True},
+            {"target_id": "9ab5ff1c-60f6-46b1-823d-2a912d5d4e3f", "display_name": "Alternate board", "valid": True},
+        ],
+        "modes": [
+            {"id": "eye_in_hand", "label": "Robot-mounted camera (eye-in-hand)", "primary_transform": "camera → robot_flange", "target_mounting": "stationary relative to template_base"},
+            {"id": "eye_to_hand", "label": "Static camera (eye-to-hand)", "primary_transform": "camera → template_base", "target_mounting": "rigidly attached to robot_flange"},
+        ],
+        "solver": {"default_pnp_methods": ["IPPE", "ITERATIVE", "SQPNP"], "default_extrinsic_methods": ["tsai", "park", "horaud", "andreff", "daniilidis", "shah", "li"]},
+        "latest_attempt": None,
+    }
+    page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
+
+    def create_handler(route) -> None:
+        requests.append({"path": "/calibration/attempts", "body": route.request.post_data_json})
+        fulfill_json(route, {"attempt_id": "a" * 32, "job_id": "calculation-1", "status": "queued"}, status=202)
+
+    page.route("**/calibration/attempts", create_handler)
+    transform = {
+        "from": "camera",
+        "to": "robot_flange",
+        "matrix": [[1, 0, 0, 10], [0, 1, 0, 20], [0, 0, 1, 30], [0, 0, 0, 1]],
+        "rotation_quaternion_wxyz": [1, 0, 0, 0],
+        "translation_mm": [10, 20, 30],
+    }
+    recommended = {
+        "candidate_id": "realsense_d435:wrist-1|IPPE|park",
+        "profile_id": "wrist_ippe_park",
+        "pnp_method": "IPPE",
+        "extrinsic_method": "park",
+        "algorithms": ["IPPE", "park"],
+        "status": "passing",
+        "validation_state": "passed",
+        "recommended": True,
+        "score": 0.12,
+        "observation_count": 10,
+        "inlier_count": 9,
+        "outlier_count": 1,
+        "outlier_ratio": 0.1,
+        "mean_reprojection_error_px": 0.25,
+        "primary_transform": transform,
+        "companion_transform": {**transform, "from": "aruco_grid", "to": "template_base"},
+        "held_out_residuals": {"mean_translation_mm": 0.8, "median_translation_mm": 0.7, "mean_rotation_deg": 0.3, "median_rotation_deg": 0.2},
+    }
+    override = {**recommended, "candidate_id": "realsense_d435:wrist-1|SQPNP|tsai", "profile_id": "wrist_sqpnp_tsai", "pnp_method": "SQPNP", "extrinsic_method": "tsai", "recommended": False, "score": 0.2}
+    failed = {
+        "candidate_id": "oak_d_pro:static-1|ITERATIVE|li", "pnp_method": "ITERATIVE", "extrinsic_method": "li", "algorithms": ["ITERATIVE", "li"], "status": "error", "validation_state": "failed", "score": None, "observation_count": 3, "inlier_count": 0, "outlier_count": 3, "outlier_ratio": 1, "error": "leave-one-pose-out validation requires at least four poses",
+    }
+
+    def attempt_payload() -> dict:
+        return {
+            "schema_version": "calibration_attempt.v1",
+            "attempt_id": "a" * 32,
+            "request": {"mode": "eye_in_hand", "sensor_keys": ["realsense_d435:wrist-1", "oak_d_pro:static-1"], "target_id": setup["saved_targets"][0]["target_id"], "solver_policy": "auto_compare"},
+            "progress": {"status": "complete", "message": "Calibration calculations are complete and awaiting review.", "phases": [
+                {"id": "prepare_data", "label": "Prepare data", "status": "complete"},
+                {"id": "estimate_target_poses", "label": "Estimate target poses", "status": "complete"},
+                {"id": "compare_robot_camera_solutions", "label": "Compare robot-camera solutions", "status": "complete"},
+                {"id": "validate_and_rank", "label": "Validate and rank", "status": "complete"},
+            ]},
+            "results": {"status": "partial", "recommended_camera_count": 1, "failed_camera_count": 1, "results": [
+                {**setup["cameras"][0], "status": "passing", "recommended_candidate_id": recommended["candidate_id"], "recommendation": recommended, "candidates": [recommended, override]},
+                {**setup["cameras"][1], "status": "failed", "recommended_candidate_id": None, "recommendation": None, "candidates": [failed]},
+            ]},
+            "promotion": ({"status": "promoted", "promoted_profile_ids": ["wrist_sqpnp_tsai"]} if promoted["value"] else None),
+        }
+
+    page.route("**/calibration/attempts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?**", lambda route: fulfill_json(route, attempt_payload()))
+
+    def promote_handler(route) -> None:
+        requests.append({"path": "/calibration/promote", "body": route.request.post_data_json})
+        promoted["value"] = True
+        fulfill_json(route, {"attempt_id": "a" * 32, "job_id": "promotion-1", "status": "queued", "selections": route.request.post_data_json["candidate_ids"]}, status=202)
+
+    page.route("**/calibration/attempts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/promote", promote_handler)
+    page.goto(f"{console_server.url}/#/workflow/calibration", wait_until="networkidle")
+
+    expect(page.get_by_test_id("calibration-workflow")).to_be_visible()
+    expect(page.locator('input[name="calibration-mode"]')).to_have_count(2)
+    expect(page.get_by_text("Robot-mounted camera (eye-in-hand)")).to_be_visible()
+    expect(page.get_by_text("Static camera (eye-to-hand)")).to_be_visible()
+    expect(page.locator("[data-stage-id]")).to_have_count(0)
+    expect(page.get_by_text("Auto compare — recommended")).to_be_visible()
+    page.locator('input[value="eye_to_hand"]').check()
+    expect(page.locator('input[value="eye_to_hand"]')).to_be_checked()
+    page.locator('input[value="eye_in_hand"]').check()
+    camera_choices = page.get_by_role("checkbox")
+    camera_choices.nth(1).click()
+    expect(camera_choices.nth(1)).not_to_be_checked()
+    camera_choices.nth(1).click()
+    page.get_by_role("combobox", name="Saved calibration target").click()
+    page.get_by_role("option", name="Alternate board").click()
+    expect(page.get_by_role("button", name="Run calibration")).to_be_enabled()
+    page.get_by_role("button", name="Run calibration").click()
+    expect(page.get_by_text("Calibration queued")).to_be_visible()
+    assert requests[0]["body"]["mode"] == "eye_in_hand"
+    assert requests[0]["body"]["sensor_keys"] == ["realsense_d435:wrist-1", "oak_d_pro:static-1"]
+    assert requests[0]["body"]["target_id"] == "9ab5ff1c-60f6-46b1-823d-2a912d5d4e3f"
+
+    expect(page.get_by_text("Prepare data")).to_be_visible()
+    expect(page.get_by_test_id("calibration-results")).to_be_visible()
+    expect(page.get_by_text("camera → robot_flange").last).to_be_visible()
+    expect(page.get_by_text("Every attempted candidate and failure").first).to_be_visible()
+    page.get_by_label("Candidate override").click()
+    page.get_by_role("option", name="SQPNP + tsai · score 0.2000").click()
+    page.get_by_role("button", name="Accept recommendations").click()
+    expect(page.get_by_text("Calibration acceptance queued")).to_be_visible()
+    assert requests[-1]["body"]["candidate_ids"] == {"realsense_d435:wrist-1": override["candidate_id"]}
+    expect(page.get_by_role("button", name="Recommendations saved")).to_be_visible()
+    expect(page.get_by_text("Saved 1 camera profile(s).")).to_be_visible()
 
 
 def test_calibration_target_preview_fit_generate_download_select_and_run_switch(

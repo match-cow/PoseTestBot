@@ -632,6 +632,21 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         resources=("disk_io",),
         parameters=(
             PipelineParameter(
+                name="aruco_path",
+                flag="--aruco-path",
+                kind="path",
+                path_scope="run",
+                multiple=True,
+                help="Repeat to process an explicit synchronized sensor subset.",
+            ),
+            PipelineParameter(
+                name="output_root",
+                flag="--output-root",
+                kind="path",
+                path_scope="output",
+                help="Alternate derived observation output root.",
+            ),
+            PipelineParameter(
                 name="min_marker_count",
                 flag="--min-marker-count",
                 kind="int",
@@ -868,11 +883,19 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         label="Non-destructive Sync",
         script="scripts/sync_run_non_destructive.py",
         description=(
-            "Synchronize all raw sensor folders into processed/synchronized "
-            "without modifying raw captures."
+            "Synchronize all or an explicit subset of raw sensor folders into "
+            "a derived output root without modifying raw captures."
         ),
         resources=("disk_io",),
         parameters=(
+            PipelineParameter(
+                name="sensor_folder",
+                flag="--sensor-folder",
+                kind="path",
+                path_scope="run",
+                multiple=True,
+                help="Repeat to synchronize an explicit raw sensor subset.",
+            ),
             PipelineParameter(
                 name="output_root",
                 flag="--output-root",

@@ -14,6 +14,12 @@ and metric reporting belong in a separate consumer repo.
   a tool-generated update is impossible.
 - Browser UI regressions should use Playwright tests. Keep Playwright in the dev
   dependency group, and install browser binaries only when explicitly requested.
+- Production frontend builds and localhost-only Playwright regressions are
+  standing-authorized outside the sandbox when sandbox stream-descriptor or
+  loopback-socket restrictions prevent them. Keep those commands scoped to
+  `bun run build` in `frontend/` and this repository's Playwright pytest files.
+  This authorization does not include dependency or browser installation,
+  external network services, camera or robot access, or physical capture.
 - Keep `INSTALL.md` and `scripts/install.sh` current when dependency lists,
   SDK/runtime expectations, setup commands, or validation checks change.
 - Prefer running or checking `scripts/install.sh` before adding ad hoc setup
@@ -115,6 +121,11 @@ Do not reintroduce downstream estimator/evaluator behavior here:
   `calibration_solver_report.json`, `calibration_profiles_solved.json`,
   `calibration_validation_report.json`, and promoted
   `calibration_profiles.json` (`calibration.v2`; v1 remains loadable).
+- Intent-level calibration attempts live under
+  `processed/calibration/<attempt_id>/` and retain `request.json`,
+  `progress.json`, `pnp_candidates.json`, `extrinsic_candidates.json`,
+  `ranking.json`, `checks.json`, `candidate_profiles.json`, the selected target
+  bundle, and explicit promotion evidence.
 - BlenderProc render plan artifact: `blenderproc_render_plan.json`.
 - BOP export artifacts: `bop/bop_export_manifest.json`,
   `bop/posetestbot_bop_frame_map.json`, `bop/test_targets_bop19.json`,

@@ -10,6 +10,7 @@ import numpy as np
 from posetestbot.sensors.previews import build_preview_command
 from posetestbot.sensors.v4l2_preview import (
     V4L2NodeCandidate,
+    parse_v4l2_integer_control,
     parse_v4l2_pixel_formats,
     select_best_rgb_node,
     select_usb_rgb_node,
@@ -38,6 +39,24 @@ def test_parse_v4l2_pixel_formats_accepts_bracketed_and_pixel_format_forms() -> 
     """
 
     assert parse_v4l2_pixel_formats(text) == ("MJPG", "YUYV")
+
+
+def test_parse_v4l2_integer_control_reads_signed_brightness_range() -> None:
+    control = parse_v4l2_integer_control(
+        """
+                     brightness 0x00980900 (int)    : min=-64 max=64 step=1 default=0 value=-12
+                       contrast 0x00980901 (int)    : min=0 max=100 step=1 default=50 value=50
+        """,
+        "brightness",
+    )
+
+    assert control is not None
+    assert control.name == "brightness"
+    assert control.minimum == -64
+    assert control.maximum == 64
+    assert control.step == 1
+    assert control.default == 0
+    assert control.value == -12
 
 
 def test_select_best_rgb_node_prefers_realsense_color_interface() -> None:

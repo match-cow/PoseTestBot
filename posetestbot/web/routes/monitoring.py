@@ -218,6 +218,53 @@ def _proxy_webrtc_offer(port: int, payload: Mapping[str, str]) -> dict[str, Any]
     return answer
 
 
+class MonitorWorkerRequestError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int = 503) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _proxy_brightness_autocalibration(port: int) -> dict[str, Any]:
+    upstream = urllib.request.Request(
+        f"http://127.0.0.1:{port}/brightness/autocalibrate",
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(upstream, timeout=5) as response:
+            response_body = response.read(64 * 1024)
+    except urllib.error.HTTPError as exc:
+        try:
+            error_payload = json.loads(exc.read(64 * 1024))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            error_payload = {}
+        message = (
+            error_payload.get("error")
+            if isinstance(error_payload, dict)
+            else None
+        )
+        raise MonitorWorkerRequestError(
+            str(message or f"Monitor worker rejected brightness calibration ({exc.code})."),
+            status_code=exc.code if 400 <= exc.code < 500 else 503,
+        ) from exc
+    except (OSError, TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        raise MonitorWorkerRequestError(
+            f"Monitor brightness request failed: {exc}"
+        ) from exc
+    try:
+        payload = json.loads(response_body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MonitorWorkerRequestError(
+            "Monitor brightness request returned malformed JSON."
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("brightness"), dict):
+        raise MonitorWorkerRequestError(
+            "Monitor brightness request returned an invalid response."
+        )
+    return payload
+
+
 @monitoring_bp.get("/monitoring/webcam")
 def get_monitor_webcam():
     active = _active_monitor_job()
@@ -263,6 +310,43 @@ def start_monitor_webcam():
     except ResourceBusyError as exc:
         return jsonify({"output": str(exc)}), 409
     return jsonify(_monitor_payload(job)), 202
+
+
+@monitoring_bp.post(
+    "/monitoring/webcam/<job_id>/brightness/autocalibrate"
+)
+def autocalibrate_monitor_brightness(job_id: str):
+    try:
+        job = job_runner.get(job_id)
+    except KeyError:
+        return jsonify({"output": "Unknown monitor job"}), 404
+    if not job.parameters.get("monitor_webrtc"):
+        return jsonify({"output": "Unknown monitor job"}), 404
+    if job.status in TERMINAL_STATUSES:
+        return jsonify({"output": "Monitor job is terminal"}), 409
+    if job.status != "running":
+        return jsonify({"output": "Monitor worker is not running"}), 503
+
+    status = _private_monitor_status(job)
+    healthy, reason = _monitor_health(job, status)
+    if not healthy:
+        _schedule_monitor_replacement(job, reason or "Monitor worker is unhealthy.")
+        return jsonify({"output": reason or "Monitor worker is unhealthy"}), 503
+    port = status.get("signaling_port")
+    if (
+        status.get("schema_version") != MONITOR_STATUS_SCHEMA
+        or status.get("signaling_ready") is not True
+        or not isinstance(port, int)
+        or isinstance(port, bool)
+        or not 1 <= port <= 65535
+    ):
+        return jsonify({"output": "Monitor signaling is not ready"}), 503
+
+    try:
+        payload = _proxy_brightness_autocalibration(port)
+    except MonitorWorkerRequestError as exc:
+        return jsonify({"output": str(exc)}), exc.status_code
+    return jsonify(payload), 202
 
 
 @monitoring_bp.post("/monitoring/webcam/<job_id>/webrtc/offer")

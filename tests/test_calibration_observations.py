@@ -311,6 +311,35 @@ def test_write_calibration_observations_updates_manifest(tmp_path: Path) -> None
     assert stage["artifacts"][CALIBRATION_OBSERVATIONS] == CALIBRATION_OBSERVATIONS
 
 
+def test_observation_stage_accepts_explicit_sensor_paths_and_output_root(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    selected_path = write_aruco_fixture(run_root)
+    unselected_path = (
+        run_root
+        / "processed"
+        / "synchronized"
+        / "luxonis_other"
+        / ARUCO_POSE_ESTIMATION
+    )
+    unselected_path.parent.mkdir(parents=True)
+    unselected_path.write_text(selected_path.read_text())
+    output_root = run_root / "processed" / "calibration" / "attempt-1"
+
+    path, report = write_calibration_observations_with_manifest(
+        run_root,
+        min_observations=1,
+        aruco_paths=[selected_path],
+        output_root=output_root,
+    )
+
+    assert path == output_root / CALIBRATION_OBSERVATIONS
+    assert report["sensor_count"] == 1
+    assert report["sensors"][0]["sensor_name"] == "realsense_123"
+    assert not (run_root / CALIBRATION_OBSERVATIONS).exists()
+
+
 def test_calibration_observations_cli_writes_report(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     write_aruco_fixture(run_root)

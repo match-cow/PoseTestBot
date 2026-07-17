@@ -297,6 +297,33 @@ def test_write_calibration_solver_updates_manifest_and_profiles(
     assert stage["artifacts"][CALIBRATION_PROFILES_SOLVED] == CALIBRATION_PROFILES_SOLVED
 
 
+def test_solver_stage_accepts_explicit_observations_and_output_root(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    observations_path = write_observations_fixture(
+        run_root,
+        observation_count=2,
+        mounting_mode="static",
+    )
+    output_root = run_root / "processed" / "calibration" / "attempt-1"
+
+    report_path, profiles_path, report = write_calibration_solver_with_manifest(
+        run_root,
+        observations_path=observations_path,
+        output_root=output_root,
+        min_observations=2,
+        target_to_reference=IDENTITY_TARGET_TO_REFERENCE,
+        max_translation_residual_mm=None,
+        max_rotation_residual_deg=None,
+    )
+
+    assert report["profile_count"] == 1
+    assert report_path == output_root / CALIBRATION_SOLVER_REPORT
+    assert profiles_path == output_root / CALIBRATION_PROFILES_SOLVED
+    assert not (run_root / CALIBRATION_SOLVER_REPORT).exists()
+
+
 def test_calibration_solver_cli_writes_report(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     write_observations_fixture(run_root, observation_count=2, mounting_mode="static")

@@ -1,7 +1,6 @@
 import { useState } from "react"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
 import { Activity, Bot, Boxes, ChevronDown, FlaskConical, Gauge, Github, Grid3X3, ListChecks, Moon, Plus, Sun, Workflow } from "lucide-react"
-import { useQuery } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -12,19 +11,17 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { useOperator } from "@/providers/operator-provider"
 import { useTheme } from "@/providers/theme-provider"
 import { cn } from "@/lib/utils"
-import { api } from "@/lib/api"
 
 const navigation = [
   { to: "/dashboard", label: "Dashboard", icon: Gauge },
   { to: "/devices", label: "Devices", icon: Bot },
   { to: "/cell", label: "Cell", icon: Boxes },
-  { to: "/calibration-targets", label: "Calibration Targets", icon: Grid3X3, requiresGenerator: true },
+  { to: "/calibration-targets", label: "Calibration Targets", icon: Grid3X3 },
   { to: "/workflow/setup", label: "Workflow", icon: Workflow, match: "/workflow" },
   { to: "/jobs", label: "Jobs", icon: ListChecks },
 ]
 
 export function AppShell() {
-  const targetStatus = useQuery({ queryKey: ["calibration-targets", "status"], queryFn: () => api<{ generation_available: boolean }>("/calibration-targets/status"), staleTime: 30_000 })
   const { bootstrap, runs, selectedRun, selectRun } = useOperator()
   const { theme, setTheme } = useTheme()
   const location = useLocation()
@@ -48,7 +45,7 @@ export function AppShell() {
             <div><div className="font-display text-[17px] font-semibold tracking-tight">PoseTestBot</div><div className="text-[9px] font-bold uppercase tracking-[0.18em] text-sidebar-foreground/50">Operator console</div></div>
           </Link>
           <nav className="mt-9 space-y-1" aria-label="Primary navigation">
-            {navigation.filter((item) => !item.requiresGenerator || targetStatus.data?.generation_available).map(({ to, label, icon: Icon, match }) => {
+            {navigation.map(({ to, label, icon: Icon, match }) => {
               const active = match ? location.pathname.startsWith(match) : location.pathname === to
               return <NavLink key={to} to={to} className={cn("group flex items-center gap-3 rounded-[8px] border border-transparent px-3 py-2.5 text-[13px] font-semibold text-sidebar-foreground/65 transition-colors duration-150 hover:bg-secondary hover:text-sidebar-foreground", active && "border-primary/55 bg-sidebar-accent text-sidebar-foreground")}><Icon className={cn("size-[17px]", active && "text-primary-strong")} />{label}</NavLink>
             })}

@@ -51,6 +51,19 @@ class V4L2PreviewSelection:
         }
 
 
+@dataclass(frozen=True)
+class V4L2IntegerControl:
+    name: str
+    minimum: int
+    maximum: int
+    step: int
+    default: int
+    value: int
+
+    def as_dict(self) -> dict[str, int | str]:
+        return asdict(self)
+
+
 def parse_v4l2_pixel_formats(text: str) -> tuple[str, ...]:
     formats = {
         match.group("format").upper()
@@ -60,6 +73,63 @@ def parse_v4l2_pixel_formats(text: str) -> tuple[str, ...]:
         )
     }
     return tuple(sorted(formats))
+
+
+def parse_v4l2_integer_control(
+    text: str,
+    control_name: str,
+) -> V4L2IntegerControl | None:
+    """Parse one integer control from ``v4l2-ctl --list-ctrls`` output."""
+
+    expected = control_name.strip()
+    for line in text.splitlines():
+        match = re.match(
+            r"^\s*(?P<name>[a-zA-Z0-9_]+)\s+0x[0-9a-fA-F]+\s+\(int\)\s*:\s*(?P<values>.*)$",
+            line,
+        )
+        if match is None or match.group("name") != expected:
+            continue
+        values = {
+            key: int(value)
+            for key, value in re.findall(
+                r"\b(min|max|step|default|value)=(-?\d+)",
+                match.group("values"),
+            )
+        }
+        required = {"min", "max", "step", "default", "value"}
+        if not required.issubset(values):
+            raise ValueError(f"Malformed V4L2 integer control line: {line.strip()}")
+        if values["min"] > values["max"] or values["step"] <= 0:
+            raise ValueError(f"Invalid V4L2 integer control range: {line.strip()}")
+        return V4L2IntegerControl(
+            name=expected,
+            minimum=values["min"],
+            maximum=values["max"],
+            step=values["step"],
+            default=values["default"],
+            value=values["value"],
+        )
+    return None
+
+
+def read_v4l2_integer_control(
+    path: str | Path,
+    control_name: str,
+) -> V4L2IntegerControl | None:
+    result = subprocess.run(
+        ["v4l2-ctl", "--list-ctrls", "-d", Path(path).as_posix()],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            f"Could not read V4L2 controls for {Path(path).as_posix()}: {message}"
+        )
+    return parse_v4l2_integer_control(result.stdout, control_name)
 
 
 def list_v4l2_pixel_formats(path: str | Path) -> tuple[str, ...]:

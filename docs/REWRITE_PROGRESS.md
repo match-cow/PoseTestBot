@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-16
+Last updated: 2026-07-17
 
 PoseTestBot has been refocused as an acquisition, calibration,
 synchronization, and BOP dataset export repository. The BOP dataset export is
@@ -30,6 +30,36 @@ Out of scope in this repository:
 - metric report/export dashboards.
 
 ## Completed In This Acquisition-Only Pass
+
+- Replaced the generic calibration-stage card grid with a purpose-built,
+  acquisition-only two-mode workflow:
+  - exactly two authoritative modes cover robot-mounted cameras observing a
+    stationary target and static cameras observing a flange-mounted target,
+  - the façade exposes setup, immutable history, attempt detail, and explicit
+    promotion endpoints while queueing one CPU/disk parent job and never
+    initiating capture,
+  - attempt preparation synchronizes only selected captured sensor folders and
+    reuses compatible intrinsics or captured factory sidecars under
+    `processed/calibration/<attempt_id>/`, preserving raw and prior evidence,
+  - reusable synchronization, observation, and solver stage internals now
+    accept explicit subsets and alternate derived output roots while their
+    existing run-wide CLI/API defaults remain unchanged,
+  - planar IPPE/ITERATIVE/SQPNP share a robust point mask, use LM refinement,
+    retain IPPE alternatives, and reject non-finite or non-cheiral hypotheses,
+  - both geometries recover camera and companion target transforms across
+    Tsai, Park, Horaud, Andreff, Daniilidis, Shah, and Li, with deterministic
+    robust-closure outlier rejection, leave-one-pose-out validation, and stable
+    score/tie ranking,
+  - results expose transforms, matrices, quaternions, translations, counts,
+    reprojection and held-out residuals, every candidate/failure, passing
+    overrides, and partial multi-camera acceptance,
+  - promotion transactionally mirrors canonical evidence, merges one valid
+    profile per accepted camera, preserves unrelated profiles, records full
+    solver/operator/attempt provenance, and updates selected-camera mounting
+    metadata,
+  - saved target browsing and selection remain available when PoseGridGen
+    generation is unavailable; stage-level APIs and CLIs remain advanced
+    diagnostics.
 
 - Integrated the pinned PoseGridGen calibration-target workflow:
   - upgraded the project contract and lock to Python `>=3.12,<3.13`, Pydantic
@@ -286,6 +316,12 @@ Out of scope in this repository:
   ownership, `monitor_webrtc.v2` heartbeats and frame/peer health, idle release,
   timed peer cleanup, automatic stale-worker replacement, and a configurable
   local STUN binding responder for numeric Chrome ICE candidates.
+- Added browser-triggered UGREEN monitor brightness auto-calibration without a
+  second camera owner or blocking Flask hardware handler. The managed monitor
+  worker reads the signed V4L2 brightness range, runs a bounded central-frame
+  luma search while streaming, publishes `monitor_brightness.v1` progress and
+  the selected value, and exposes a guarded Auto brightness control with
+  synthetic WebRTC Playwright coverage.
 - Added OAK-D Pro 640×480/6 fps RGB preview through a non-blocking, one-frame
   DepthAI v3 queue while retaining aligned 720p RGB-D snapshots. RealSense and
   OAK preview reuse now rejects stale heartbeat artifacts.

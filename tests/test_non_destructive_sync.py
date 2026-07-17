@@ -24,6 +24,7 @@ from posetestbot.io.artifacts import (
 from posetestbot.sync.non_destructive import (
     resolve_frame_timestamp,
     resolve_sync_delta_ms,
+    synchronize_run,
     synchronize_sensor_folder,
 )
 
@@ -306,6 +307,29 @@ def test_sync_run_cli_processes_all_discovered_sensors(tmp_path: Path) -> None:
         / "luxonis_abc"
         / MATCH_ROBOT_EE_POSES
     ).exists()
+
+
+def test_synchronize_run_accepts_only_an_explicit_subset_and_output_root(
+    tmp_path: Path,
+) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+    shutil.copytree(sensor_folder, run_root / "luxonis_abc")
+    output_root = run_root / "processed" / "calibration" / "attempt" / "sync"
+
+    results = synchronize_run(
+        run_root,
+        sensor_folders=[sensor_folder.relative_to(run_root)],
+        output_root=output_root,
+        sync_delta=0,
+    )
+
+    assert [Path(item.sensor_folder).name for item in results] == [
+        "realsense_123"
+    ]
+    assert (output_root / "realsense_123" / MATCH_ROBOT_EE_POSES).is_file()
+    assert not (output_root / "luxonis_abc").exists()
+    with pytest.raises(ValueError, match="remain below the run root"):
+        synchronize_run(run_root, sensor_folders=[tmp_path / "outside"])
 
 
 def test_invalid_filename_timestamp_is_reported_as_missing() -> None:
