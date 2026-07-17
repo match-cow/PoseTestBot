@@ -111,9 +111,12 @@ The scoped API surface is:
 - `POST /calibration-targets/preview`
 - `GET /calibration-targets/bundles`
 - `POST /calibration-targets/generate`
+- `DELETE /calibration-targets/bundles/<target_id>`
 - `POST /calibration-targets/bundles/<target_id>/select`
 - `GET /calibration-targets/bundles/<target_id>/download/<source|target|pdf>`
 
 Request bodies are capped at 256 KiB. Generation queues `cpu` and `disk_io`;
 selection queues `disk_io`. Commands use fixed argument arrays and appear in
-the existing Jobs page. No generic filesystem download endpoint is provided.
+the existing Jobs page. Deletion requires `confirm: true`, atomically removes
+the library bundle, and rejects the target active for the selected run. No
+generic filesystem download endpoint is provided.

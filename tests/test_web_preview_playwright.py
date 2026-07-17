@@ -477,6 +477,10 @@ def test_sidebar_webcam_monitor_plays_synthetic_webrtc_without_jpegs(
 
     try:
         page.goto(server.url, wait_until="domcontentloaded")
+        expect(page.get_by_role("heading", name="Test cell monitor")).to_be_visible()
+        expect(
+            page.get_by_text("UGREEN safety overview · WebRTC video", exact=True)
+        ).to_have_count(0)
         video = page.locator('[data-testid="room-monitor-video"]')
         expect(video).to_have_attribute("data-connection-state", "connected", timeout=15_000)
         expect(video).to_be_visible()

@@ -20,6 +20,7 @@ from posetestbot.calibration.posegridgen import (
 )
 from posetestbot.calibration.target_library import (
     CalibrationTargetConflict,
+    delete_target_bundle,
     generate_target_bundle,
     replacement_blockers,
     select_target_bundle,
@@ -441,3 +442,65 @@ def test_generation_failure_leaves_no_partial_bundle(
 
     assert not (tmp_path / target_id).exists()
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_bundle_deletion_protects_active_target_and_is_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = tmp_path / "library"
+    active = generate_target_bundle(
+        display_name="active target",
+        configuration=aruco_configuration(),
+        library_root=library,
+    )
+    run = tmp_path / "run"
+    write_run_config_with_manifest(run, create_run_config(run_root=run))
+    select_target_bundle(
+        run_root=run,
+        target_id=active["target_id"],
+        placement_mode="unknown",
+        library_root=library,
+    )
+
+    with pytest.raises(CalibrationTargetConflict) as captured:
+        delete_target_bundle(
+            target_id=active["target_id"],
+            library_root=library,
+            run_root=run,
+        )
+    assert captured.value.blockers == [RUN_CONFIG]
+    assert (library / active["target_id"]).is_dir()
+
+    removable = generate_target_bundle(
+        display_name="remove me",
+        configuration=aruco_configuration(),
+        library_root=library,
+    )
+    removable_path = library / removable["target_id"]
+    original_remove = target_library._remove_path
+
+    def fail_before_removal(_path: Path) -> None:
+        raise OSError("injected delete failure")
+
+    monkeypatch.setattr(target_library, "_remove_path", fail_before_removal)
+    with pytest.raises(OSError, match="injected delete failure"):
+        delete_target_bundle(
+            target_id=removable["target_id"],
+            library_root=library,
+            run_root=run,
+        )
+    validate_target_bundle(removable_path, library_root=library)
+    assert not list(library.glob(".*.delete"))
+
+    monkeypatch.setattr(target_library, "_remove_path", original_remove)
+    result = delete_target_bundle(
+        target_id=removable["target_id"],
+        library_root=library,
+        run_root=run,
+    )
+    assert result == {
+        "status": "deleted",
+        "target_id": removable["target_id"],
+        "display_name": "remove me",
+    }
+    assert not removable_path.exists()

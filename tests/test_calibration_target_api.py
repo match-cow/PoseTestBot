@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from posetestbot.calibration.posegridgen import posegridgen_capabilities
-from posetestbot.calibration.target_library import generate_target_bundle, select_target_bundle
+from posetestbot.calibration.target_library import (
+    generate_target_bundle,
+    select_target_bundle,
+)
 from posetestbot.io.artifacts import ARUCO_DETECTIONS
 from posetestbot.pipeline.run_config import create_run_config, write_run_config_with_manifest
 from posetestbot.web.app import create_app
@@ -182,6 +185,54 @@ def test_bundle_listing_downloads_and_traversal_rejection(target_client) -> None
     ).status_code == 404
     assert client.get("/calibration-targets/bundles/../download/pdf").status_code in {400, 404}
     assert client.get("/artifacts").status_code == 404
+
+
+def test_bundle_delete_requires_confirmation_and_removes_library_target(
+    target_client,
+) -> None:
+    client, _runner, run, bundle = target_client
+    endpoint = f"/calibration-targets/bundles/{bundle['target_id']}"
+
+    unconfirmed = client.delete(endpoint, json={"run_root": run.as_posix()})
+    assert unconfirmed.status_code == 400
+    assert "confirm must be true" in unconfirmed.get_json()["output"]
+    assert Path(bundle["bundle_path"]).is_dir()
+
+    deleted = client.delete(
+        endpoint,
+        json={"run_root": run.as_posix(), "confirm": True},
+    )
+    assert deleted.status_code == 200
+    assert deleted.get_json() == {
+        "status": "deleted",
+        "target_id": bundle["target_id"],
+        "display_name": "API target",
+    }
+    assert not Path(bundle["bundle_path"]).exists()
+    listing = client.get(
+        "/calibration-targets/bundles", query_string={"run_root": run.as_posix()}
+    )
+    assert listing.get_json()["bundles"] == []
+
+
+def test_bundle_delete_rejects_target_active_for_selected_run(target_client) -> None:
+    client, _runner, run, bundle = target_client
+    select_target_bundle(
+        run_root=run,
+        target_id=bundle["target_id"],
+        placement_mode="unknown",
+        library_root=Path(bundle["bundle_path"]).parent,
+    )
+
+    response = client.delete(
+        f"/calibration-targets/bundles/{bundle['target_id']}",
+        json={"run_root": run.as_posix(), "confirm": True},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["blockers"] == ["run_config.json"]
+    assert "active for the selected run" in response.get_json()["output"]
+    assert Path(bundle["bundle_path"]).is_dir()
 
 
 def test_selection_conflict_returns_concrete_blocker_paths(target_client) -> None:

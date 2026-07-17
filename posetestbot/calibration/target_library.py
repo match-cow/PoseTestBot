@@ -350,6 +350,54 @@ def list_target_bundles(
     return result
 
 
+def delete_target_bundle(
+    *,
+    target_id: str,
+    library_root: str | Path | None = None,
+    run_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Atomically remove one library bundle while protecting the active target."""
+
+    target_uuid = _validate_target_id(target_id)
+    library = Path(library_root or default_target_library_root())
+    bundle_path = library / target_uuid
+    bundle = validate_target_bundle(bundle_path, library_root=library)
+    if run_root is not None:
+        config = load_run_config_for_run_root(run_root)
+        selection = config.get("calibration_target")
+        if isinstance(selection, Mapping) and selection.get("target_id") == target_uuid:
+            raise CalibrationTargetConflict(
+                "The calibration target is active for the selected run; select a different "
+                "target before deleting it from the library.",
+                blockers=[RUN_CONFIG],
+            )
+
+    tombstone = library / f".{target_uuid}.{uuid.uuid4().hex}.delete"
+    os.replace(bundle_path, tombstone)
+    try:
+        _remove_path(tombstone)
+    except Exception:
+        # Restore only when deletion failed before altering the bundle. A partially
+        # removed directory remains hidden instead of reappearing as a valid target.
+        try:
+            validate_target_bundle(
+                tombstone,
+                library_root=library,
+                allow_staging=True,
+            )
+        except (OSError, ValueError):
+            pass
+        else:
+            if not bundle_path.exists():
+                os.replace(tombstone, bundle_path)
+        raise
+    return {
+        "status": "deleted",
+        "target_id": target_uuid,
+        "display_name": bundle["display_name"],
+    }
+
+
 def replacement_blockers(run_root: str | Path) -> list[str]:
     root = Path(run_root)
     blockers = []

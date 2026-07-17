@@ -402,6 +402,7 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     requests: list[dict] = []
     library_urls: list[str] = []
     blocked = {"value": True}
+    deleted = {"value": False}
     selected_runs: set[str] = set()
     target_id = "5f09f41c-dd91-44ef-a048-1f43fc990e17"
     old_run = "/tmp/posetestbot-console/old-run"
@@ -449,7 +450,7 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
         return {
             "schema_version": "calibration_target_library.v1",
             "run_root": run_root,
-            "bundles": [{
+            "bundles": [] if deleted["value"] else [{
                 "target_id": target_id,
                 "display_name": "Anisotropic calibration board",
                 "created_at": "2026-07-16T12:00:00Z",
@@ -514,6 +515,18 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
         fulfill_json(route, {"job_id": "select-1", "job": {"id": "select-1", "status": "queued"}}, status=202)
 
     page.route(f"**/calibration-targets/bundles/{target_id}/select", select_handler)
+
+    def delete_handler(route) -> None:
+        body = route.request.post_data_json
+        requests.append({"path": "/calibration-targets/delete", "body": body})
+        deleted["value"] = True
+        fulfill_json(route, {
+            "status": "deleted",
+            "target_id": target_id,
+            "display_name": "Anisotropic calibration board",
+        })
+
+    page.route(f"**/calibration-targets/bundles/{target_id}", delete_handler)
     page.route(
         f"**/calibration-targets/bundles/{target_id}/download/pdf",
         lambda route: route.fulfill(
@@ -564,12 +577,22 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     selection = [item["body"] for item in requests if item["path"] == "/calibration-targets/select"][-1]
     assert selection == {"run_root": RUN_ROOT, "placement": "posegridgen_board_to_base"}
     expect(page.get_by_text(f"Active for {RUN_ROOT}")).to_be_visible()
+    expect(page.get_by_role("button", name="Delete Anisotropic calibration board")).to_be_disabled()
 
     page.get_by_role("combobox", name="Selected run").click()
     page.get_by_role("option", name="old-run · sync_aruco").click()
     expect(page.get_by_text(f"Active for {old_run}")).to_have_count(0)
     expect(page.get_by_role("button", name="Select for run")).to_be_visible()
     assert any("old-run" in url for url in library_urls)
+
+    page.get_by_role("button", name="Delete Anisotropic calibration board").click()
+    expect(page.get_by_role("heading", name="Delete Anisotropic calibration board?")).to_be_visible()
+    assert not any(item["path"] == "/calibration-targets/delete" for item in requests)
+    page.get_by_role("button", name="Confirm delete").click()
+    expect(page.get_by_text("Calibration target deleted")).to_be_visible()
+    expect(page.get_by_role("heading", name="Anisotropic calibration board")).to_have_count(0)
+    deletion = next(item["body"] for item in requests if item["path"] == "/calibration-targets/delete")
+    assert deletion == {"run_root": old_run, "confirm": True}
 
 
 def cell_scene_payload(*, objectless: bool = False) -> dict:

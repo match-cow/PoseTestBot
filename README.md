@@ -357,7 +357,9 @@ Important endpoints:
 - `GET /calibration-targets/capabilities`
 - `POST /calibration-targets/fit`
 - `POST /calibration-targets/preview`
-- `GET|POST /calibration-targets/bundles...`
+- `GET /calibration-targets/bundles`
+- `DELETE /calibration-targets/bundles/<target_id>`
+- `POST /calibration-targets/bundles/<target_id>/select`
 - `POST /hardware/status`
 - `GET|POST /run-config`
 - `GET|POST /pipeline/preflight`

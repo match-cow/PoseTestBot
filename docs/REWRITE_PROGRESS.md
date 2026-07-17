@@ -49,8 +49,8 @@ Out of scope in this repository:
   - added queued generation/selection jobs, scoped Flask APIs, run/calibration
     preflight checks, exact Cell bounds, and selected-target workflow context,
   - added a native lazy React page for form editing, fit, debounced preview,
-    generation, downloads, placement selection, run switching, and unavailable
-    source-checkout guidance,
+    generation, downloads, confirmed library deletion, placement selection,
+    run switching, and unavailable source-checkout guidance,
   - updated the installer, operator documentation, committed web build, unit/API
     coverage, and mocked Playwright coverage without accessing lab hardware.
 

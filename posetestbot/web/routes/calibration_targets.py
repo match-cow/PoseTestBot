@@ -21,6 +21,7 @@ from posetestbot.calibration.target_library import (
     PLACEMENT_MODES,
     _FILE_CONTRACT,
     default_target_library_root,
+    delete_target_bundle,
     list_target_bundles,
     replacement_blockers,
     validate_bundle_placement,
@@ -132,6 +133,29 @@ def calibration_target_bundles():
             "bundles": bundles,
         }
     )
+
+
+@calibration_targets_bp.delete("/calibration-targets/bundles/<target_id>")
+def calibration_target_delete(target_id: str):
+    try:
+        value = _request_json()
+        if value.get("confirm") is not True:
+            raise ValueError("confirm must be true to delete a calibration target")
+        run_root = value.get("run_root")
+        if not run_root:
+            raise ValueError("run_root is required")
+        result = delete_target_bundle(
+            target_id=target_id,
+            library_root=default_target_library_root(),
+            run_root=run_root,
+        )
+    except CalibrationTargetConflict as exc:
+        return jsonify({"output": str(exc), "blockers": exc.blockers}), 409
+    except FileNotFoundError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"output": str(exc)}), 400
+    return jsonify(result)
 
 
 @calibration_targets_bp.post("/calibration-targets/generate")
