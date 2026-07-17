@@ -364,6 +364,47 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     ]
 
 
+def test_dashboard_quick_robot_controls_use_configured_target(console_server, page) -> None:
+    commands: list[dict] = []
+    install_common_mocks(page)
+
+    def command_handler(route) -> None:
+        commands.append(route.request.post_data_json)
+        fulfill_json(
+            route,
+            {"job_id": f"dashboard-robot-{len(commands)}", "status": "queued"},
+            status=202,
+        )
+
+    page.route("**/run-command", command_handler)
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+
+    controls = page.get_by_test_id("iiwa-quick-controls")
+    expect(controls.get_by_role("button", name="Start IIWA")).to_be_visible()
+    expect(controls.get_by_role("button", name="Stop IIWA")).to_be_visible()
+    expect(page.get_by_label("Robot IP")).to_have_count(0)
+    expect(page.get_by_label("Command port")).to_have_count(0)
+
+    controls.get_by_role("button", name="Start IIWA").click()
+    dialog = page.get_by_role("dialog")
+    expect(dialog).to_contain_text("172.31.1.147:30300")
+    expect(dialog.get_by_role("button", name="Queue start")).to_be_disabled()
+    dialog.get_by_text("I confirm this is the intended lab IIWA target.").click()
+    dialog.get_by_role("button", name="Queue start").click()
+    expect(page.get_by_text("IIWA start queued")).to_be_visible()
+
+    controls.get_by_role("button", name="Stop IIWA").click()
+    expect(dialog.get_by_role("button", name="Queue stop")).to_be_disabled()
+    dialog.get_by_text("I confirm this is the intended lab IIWA target.").click()
+    dialog.get_by_role("button", name="Queue stop").click()
+    expect(page.get_by_text("IIWA stop queued")).to_be_visible()
+
+    assert commands == [
+        {"command": "start_iiwa", "robot_ip": "172.31.1.147", "robot_port": 30300},
+        {"command": "stop_iiwa", "robot_ip": "172.31.1.147", "robot_port": 30300},
+    ]
+
+
 def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> None:
     install_common_mocks(page)
     canceled: list[str] = []

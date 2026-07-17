@@ -1,11 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useState } from "react"
 import { Link } from "react-router-dom"
-import { AlertTriangle, ArrowRight, Bot, Camera, CheckCircle2, CircleDot, Cpu, Play, RefreshCw, Route, ShieldCheck, Square } from "lucide-react"
+import { AlertTriangle, ArrowRight, Bot, Camera, CheckCircle2, CircleDot, Cpu, Play, Power, RefreshCw, Route, ShieldCheck, Square } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, query } from "@/lib/api"
 import type { CaptureState, Job, Overview, SensorStatus } from "@/lib/contracts"
@@ -22,6 +26,57 @@ function SummaryCard({ icon: Icon, label, value, status, detail }: { icon: typeo
         <div className="mt-1 font-display text-lg font-semibold">{value}</div>
         <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{detail}</p>
       </CardContent>
+    </Card>
+  )
+}
+
+type IiwaCommand = "start_iiwa" | "stop_iiwa"
+
+function IiwaQuickControls({ ready }: { ready: boolean }) {
+  const { robotTarget } = useOperator()
+  const queryClient = useQueryClient()
+  const [command, setCommand] = useState<IiwaCommand | null>(null)
+  const [targetConfirmed, setTargetConfirmed] = useState(false)
+  const robotCommand = useMutation({
+    mutationFn: (nextCommand: IiwaCommand) => api<{ job_id: string }>("/run-command", {
+      method: "POST",
+      body: JSON.stringify({ command: nextCommand, robot_ip: robotTarget.ip, robot_port: robotTarget.port }),
+    }),
+    onSuccess: (data, nextCommand) => {
+      toast.success(nextCommand === "start_iiwa" ? "IIWA start queued" : "IIWA stop queued", { description: `Job ${data.job_id}` })
+      setCommand(null)
+      setTargetConfirmed(false)
+      queryClient.invalidateQueries({ queryKey: ["jobs"] })
+    },
+    onError: (error) => toast.error("Robot command was not queued", { description: errorMessage(error) }),
+  })
+  const openCommand = (nextCommand: IiwaCommand) => {
+    setTargetConfirmed(false)
+    setCommand(nextCommand)
+  }
+  const setDialogOpen = (open: boolean) => {
+    if (open) return
+    setCommand(null)
+    setTargetConfirmed(false)
+  }
+
+  return (
+    <Card data-testid="iiwa-quick-controls">
+      <CardContent className="pt-5">
+        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Bot className="size-4 text-primary-strong" /></div><StatusBadge status={ready ? "ready" : "warning"} /></div>
+        <div className="mt-5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Robot control</div>
+        <div className="mt-1 font-display text-lg font-semibold">Lab IIWA</div>
+        <p className="mt-1 text-xs text-muted-foreground">Quick commands use the configured lab target and require confirmation.</p>
+        <div className="mt-4 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start_iiwa")} disabled={robotCommand.isPending}><Power />Start IIWA</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop_iiwa")} disabled={robotCommand.isPending}><Square />Stop IIWA</Button></div>
+      </CardContent>
+      <Dialog open={command !== null} onOpenChange={setDialogOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Confirm IIWA {command === "stop_iiwa" ? "stop" : "start"}</DialogTitle><DialogDescription>{command === "stop_iiwa" ? "Stopping" : "Starting"} sends a command to the configured lab robot target.</DialogDescription></DialogHeader>
+          <div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{robotTarget.ip}:{robotTarget.port}</div></div>
+          <Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox checked={targetConfirmed} onCheckedChange={(value) => setTargetConfirmed(value === true)} /><span>I confirm this is the intended lab IIWA target.</span></Label>
+          <DialogFooter><Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button><Button variant={command === "stop_iiwa" ? "destructive" : "default"} disabled={!targetConfirmed || robotCommand.isPending || command === null} onClick={() => command && robotCommand.mutate(command)}>{command === "stop_iiwa" ? <Square /> : <Power />}{robotCommand.isPending ? "Queueing…" : command === "stop_iiwa" ? "Queue stop" : "Queue start"}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }
@@ -75,7 +130,7 @@ export function DashboardPage() {
         {overview.isPending || sensors.isPending ? Array.from({ length: 4 }).map((_, index) => <Skeleton className="h-40" key={index} />) : <>
           <SummaryCard icon={ShieldCheck} label="Run preflight" value={titleCase(preflight?.status ?? "pending")} status={preflight?.status} detail={preflight?.status === "complete" ? "Artifact-backed checks are present." : "Run or refresh preflight before execution."} />
           <SummaryCard icon={Camera} label="Sensors" value={`${sensors.data?.total_connected ?? 0} connected`} status={sensors.data?.all_expected_connected ? "connected" : "warning"} detail="RealSense, OAK-D Pro, and ZED discovery." />
-          <SummaryCard icon={Bot} label="Robot profile" value="Lab IIWA" status={robot.isSuccess ? "ready" : "warning"} detail="Read-only status; no command was sent." />
+          <IiwaQuickControls ready={robot.isSuccess} />
           <SummaryCard icon={Cpu} label="Optional runtimes" value={`${availableRuntimes}/${runtimeItems.length} available`} status={availableRuntimes === runtimeItems.length ? "ready" : "warning"} detail="BlenderProc and Stereolabs SDK visibility." />
         </>}
       </div>
