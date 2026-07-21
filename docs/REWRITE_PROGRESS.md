@@ -47,6 +47,10 @@ operator-run acceptance.
   Stop available without motion-start gates.
 - Made live-preview capability explicit and disabled unsupported ZED preview
   controls before a doomed background job can be queued.
+- Reduced the iiwa calibration capture profile to 60% of requested Cartesian
+  speed (8–45 mm/s), lowered repositioning and central orientation speeds,
+  applied 3% acceleration/jerk limits to every motion, and added a 1.5-second
+  vibration dwell after every leg.
 - Verified the pinned PoseGridGen and PoseTemplateCreator checkouts and
   packaged pose-template/backend/UI contents.
 

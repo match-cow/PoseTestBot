@@ -96,9 +96,23 @@ installed Sunrise.OS Javadoc is authoritative for the available `linRel`
 overload and must be checked during Workbench compilation.
 
 The receiver's `cartesian_velocity_m_s` is converted to Sunrise millimetres per
-second and clamped to 20–80 mm/s for raster and relative motions. The UDP stop
-message is read only while waiting for another start command. It cannot
-interrupt active motion and is not a safety control.
+second, reduced to 60% for this calibration program, and clamped to 8–45 mm/s
+for raster and relative motions. Repositioning PTP motions use 8% relative
+joint velocity. All PTP, raster `LIN`, and orientation `LIN_REL` motions use 3%
+relative joint-acceleration and joint-jerk limits to soften starting and
+braking. Because a Cartesian translation limit alone does not suitably limit a
+zero-translation orientation move, every central dither also uses an explicit
+4% relative joint-velocity limit.
+
+The program preserves exact stops instead of blending between commissioned
+waypoints, then waits 1.5 seconds after every motion leg so residual cell or
+camera-rig vibration can decay before the next direction change. It transmits
+settled robot-pose samples after each dwell so stable camera frames retain
+synchronization candidates. These limits do not replace the reduced pendant
+override and T1 checks required during commissioning.
+
+The UDP stop message is read only while waiting for another start command. It
+cannot interrupt active motion and is not a safety control.
 
 ## Plot Contract and Regeneration
 

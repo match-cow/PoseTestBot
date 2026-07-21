@@ -140,6 +140,27 @@ def test_manifest_frames_and_relative_deltas_match_java() -> None:
                 assert f'"{motion["capture_label"]}"' in java
 
 
+def test_calibration_motion_uses_smooth_capture_and_orientation_limits() -> None:
+    java = JAVA_PATH.read_text()
+
+    assert "SETTLE_TIME_MS = 1500" in java
+    assert "CAPTURE_VELOCITY_SCALE = 0.60" in java
+    assert "REPOSITION_PTP_VEL_REL = 0.08" in java
+    assert "ORIENTATION_JOINT_VEL_REL = 0.04" in java
+    assert "SMOOTH_MOTION_JOINT_ACCEL_REL = 0.03" in java
+    assert "SMOOTH_MOTION_JOINT_JERK_REL = 0.03" in java
+    assert "MIN_CART_VEL_MM_S = 8.0" in java
+    assert "MAX_CART_VEL_MM_S = 45.0" in java
+    assert "requestedMmS * CAPTURE_VELOCITY_SCALE" in java
+    assert ".setJointVelocityRel(ORIENTATION_JOINT_VEL_REL)" in java
+    assert java.count(
+        ".setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)"
+    ) == 4
+    assert java.count(".setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL)") == 4
+    assert java.count("settleAtCurrentPose(") == 5
+    assert 'transmitCurrentPose(motionName + "_settled")' in java
+
+
 def test_printable_checklist_has_one_signoff_row_per_taught_frame() -> None:
     plan = load_teaching_plan()
     checklist = CHECKLIST_PATH.read_text()

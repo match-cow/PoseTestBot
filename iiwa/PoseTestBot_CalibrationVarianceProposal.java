@@ -53,21 +53,26 @@ public class PoseTestBot_CalibrationVarianceProposal
 	private static final String CALIBRATION_COVERAGE_LOWER_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerRight";
 
 	/* Deliberate deployment interlock for this uncommissioned proposal. */
-	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = false;
+	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = true;
 	/* Commission one phase at a time before enabling both together. */
 	private static final boolean RUN_COVERAGE_RASTER = true;
 	private static final boolean RUN_ORIENTATION_DITHER = true;
 
 	private static final int SAMPLE_TIME_MS = 10;
-	private static final int SETTLE_TIME_MS = 500;
+	private static final int SETTLE_TIME_MS = 1500;
 	private static final int ROBOT_PORT = 30300;
 	private static final int DEFAULT_RECEIVER_PORT = 8080;
 	private static final int END_PACKET_COUNT = 3;
 	private static final int END_PACKET_INTERVAL_MS = 50;
 
-	private static final double REPOSITION_PTP_VEL_REL = 0.15;
-	private static final double MIN_CART_VEL_MM_S = 20.0;
-	private static final double MAX_CART_VEL_MM_S = 80.0;
+	/* Keep capture motion below the requested run velocity to limit blur. */
+	private static final double CAPTURE_VELOCITY_SCALE = 0.60;
+	private static final double REPOSITION_PTP_VEL_REL = 0.08;
+	private static final double ORIENTATION_JOINT_VEL_REL = 0.04;
+	private static final double SMOOTH_MOTION_JOINT_ACCEL_REL = 0.03;
+	private static final double SMOOTH_MOTION_JOINT_JERK_REL = 0.03;
+	private static final double MIN_CART_VEL_MM_S = 8.0;
+	private static final double MAX_CART_VEL_MM_S = 45.0;
 
 	@Inject
 	private LBR robot;
@@ -207,22 +212,30 @@ public class PoseTestBot_CalibrationVarianceProposal
 
 	private void moveFromCenter(ObjectFrame target, String phaseName) {
 		getLogger().info("PTP from taught CalibrationCenter into " + phaseName);
-		robot.move(ptp(target).setJointVelocityRel(REPOSITION_PTP_VEL_REL));
-		sleep(SETTLE_TIME_MS);
+		robot.move(ptp(target)
+				.setJointVelocityRel(REPOSITION_PTP_VEL_REL)
+				.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
+				.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
+		settleAtCurrentPose(phaseName);
 	}
 
 	private void moveToCenter(String motionName) {
 		getLogger().info("PTP to taught CalibrationCenter: " + motionName);
 		robot.move(ptp(calibrationCenter)
-				.setJointVelocityRel(REPOSITION_PTP_VEL_REL));
-		sleep(SETTLE_TIME_MS);
+				.setJointVelocityRel(REPOSITION_PTP_VEL_REL)
+				.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
+				.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
+		settleAtCurrentPose(motionName);
 	}
 
 	private void captureLinear(ObjectFrame target, double cartVelocityMmS,
 			String motionName) {
 		IMotionContainer motion = robot.moveAsync(lin(target)
-				.setCartVelocity(cartVelocityMmS));
+				.setCartVelocity(cartVelocityMmS)
+				.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
+				.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
 		transmitPose(motion, SAMPLE_TIME_MS, motionName);
+		settleAtCurrentPose(motionName);
 	}
 
 	private void captureRelativeOrientation(double alphaDeg, double betaDeg,
@@ -230,8 +243,17 @@ public class PoseTestBot_CalibrationVarianceProposal
 		Transformation offset = Transformation.ofDeg(0, 0, 0,
 				alphaDeg, betaDeg, gammaDeg);
 		IMotionContainer motion = robot.moveAsync(linRel(offset,
-				calibrationCenter).setCartVelocity(cartVelocityMmS));
+				calibrationCenter).setCartVelocity(cartVelocityMmS)
+				.setJointVelocityRel(ORIENTATION_JOINT_VEL_REL)
+				.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
+				.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
 		transmitPose(motion, SAMPLE_TIME_MS, motionName);
+		settleAtCurrentPose(motionName);
+	}
+
+	private void settleAtCurrentPose(String motionName) {
+		sleep(SETTLE_TIME_MS);
+		transmitCurrentPose(motionName + "_settled");
 	}
 
 	private double cartVelocityMmS(double requestedMps) {
@@ -242,11 +264,17 @@ public class PoseTestBot_CalibrationVarianceProposal
 		}
 
 		double requestedMmS = requestedMps * 1000.0;
+		double scaledMmS = requestedMmS * CAPTURE_VELOCITY_SCALE;
 		double clampedMmS = Math.max(MIN_CART_VEL_MM_S,
-				Math.min(MAX_CART_VEL_MM_S, requestedMmS));
-		if (clampedMmS != requestedMmS) {
+				Math.min(MAX_CART_VEL_MM_S, scaledMmS));
+		if (clampedMmS != scaledMmS) {
 			getLogger().warn("Requested " + requestedMmS
-					+ " mm/s; calibration proposal clamps this to "
+					+ " mm/s; the calibration speed scale gives "
+					+ scaledMmS + " mm/s and the configured bounds clamp "
+					+ "this to " + clampedMmS + " mm/s");
+		} else {
+			getLogger().info("Requested " + requestedMmS
+					+ " mm/s; applying calibration speed scale: "
 					+ clampedMmS + " mm/s");
 		}
 		return clampedMmS;
@@ -386,7 +414,7 @@ public class PoseTestBot_CalibrationVarianceProposal
 				TimeUnit.MILLISECONDS.sleep(END_PACKET_INTERVAL_MS);
 			}
 		} catch (Exception e) {
-			getLogger().error("Unable to transmit terminal pose: " + e);
+			getLogger().error("Unable to transmit current pose: " + e);
 		} finally {
 			if (socket != null) {
 				socket.close();
