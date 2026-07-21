@@ -24,14 +24,6 @@ from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, Sensor
 from posetestbot.web.app import create_app
 
 
-IDENTITY = [
-    [1.0, 0.0, 0.0, 25.0],
-    [0.0, 1.0, 0.0, 30.0],
-    [0.0, 0.0, 1.0, 0.0],
-    [0.0, 0.0, 0.0, 1.0],
-]
-
-
 def profile(sensor_id: str, mounting: MountingMode) -> CalibrationProfile:
     return CalibrationProfile(
         schema_version=SCHEMA_VERSION,
@@ -56,19 +48,12 @@ def profile(sensor_id: str, mounting: MountingMode) -> CalibrationProfile:
     )
 
 
-def make_scene_run(tmp_path: Path, *, objectless: bool = False) -> tuple[Path, Path]:
-    objects = tmp_path / "objects"
-    objects.mkdir()
-    (objects / "objects.json").write_text(json.dumps({"cube": IDENTITY}))
-    (objects / "cube.ply").write_text("ply\nformat ascii 1.0\nelement vertex 0\nend_header\n")
-    (objects / "cube.png").write_bytes(b"texture")
+def make_scene_run(tmp_path: Path) -> Path:
     profiles_path = tmp_path / "profiles.json"
     write_profile_collection([profile("111", MountingMode.EYE_IN_HAND), profile("222", MountingMode.STATIC)], profiles_path)
     run_root = tmp_path / "run"
     config = create_run_config(
         run_root=run_root,
-        object_folder=objects.as_posix(),
-        selected_objects=[] if objectless else ["cube"],
         calibration_profiles=profiles_path.as_posix(),
         sensors=(
             sensor_config_from_token("realsense:111:eye_in_hand:Wrist camera"),
@@ -95,11 +80,11 @@ def make_scene_run(tmp_path: Path, *, objectless: bool = False) -> tuple[Path, P
         "marker_separation": 50,
         "placement": {"from": "aruco_grid", "to": "template_base", "rotation_quaternion_wxyz": [1, 0, 0, 0], "translation_mm": [5, 6, 7]},
     }))
-    return run_root, objects
+    return run_root
 
 
-def test_scene_composes_frames_objects_sensors_and_exact_timelines(tmp_path: Path) -> None:
-    run_root, _objects = make_scene_run(tmp_path)
+def test_scene_composes_frames_sensors_and_exact_timelines(tmp_path: Path) -> None:
+    run_root = make_scene_run(tmp_path)
     scene = build_cell_scene(run_root)
     entities = {entity["id"]: entity for entity in scene["entities"]}
 
@@ -109,7 +94,8 @@ def test_scene_composes_frames_objects_sensors_and_exact_timelines(tmp_path: Pat
     assert entities["tcp"]["transform"]["parent_frame"] == "robot_flange"
     assert entities["camera:realsense_111"]["transform"]["parent_frame"] == "robot_flange"
     assert entities["camera:realsense_222"]["transform"]["parent_frame"] == "template_base"
-    assert entities["object:cube"]["geometry"]["mesh_url"].startswith("/ui/cell-assets/cube/mesh")
+    assert not any(entity["type"] == "object" for entity in scene["entities"])
+    assert scene["object_selection"]["dataset_mode"] == "objectless"
     assert entities["calibration_target"]["transform"]["translation_mm"] == [5.0, 6.0, 7.0]
     assert len(scene["timelines"]) == 2
     assert [pose["index"] for pose in scene["trajectory_preview"]] == [0, 1, 2]
@@ -123,15 +109,14 @@ def test_scene_composes_frames_objects_sensors_and_exact_timelines(tmp_path: Pat
 
 
 def test_scene_marks_mismatched_bop_export_provenance_stale(tmp_path: Path) -> None:
-    run_root, _objects = make_scene_run(tmp_path)
+    run_root = make_scene_run(tmp_path)
     manifest_path = run_root / BOP_DIR / BOP_EXPORT_MANIFEST
     manifest_path.parent.mkdir()
     manifest_path.write_text(
         json.dumps(
             {
                 "schema_version": "bop_export_manifest.v2",
-                "selected_objects": [],
-                "registry_provenance": {"source_sha256": "old-registry"},
+                "dataset_mode": "pose_template",
             }
         )
     )
@@ -140,8 +125,7 @@ def test_scene_marks_mismatched_bop_export_provenance_stale(tmp_path: Path) -> N
 
     provenance = scene["object_selection"]["bop_export"]
     assert provenance["status"] == "stale"
-    assert provenance["selection_matches"] is False
-    assert provenance["registry_matches"] is False
+    assert provenance["dataset_mode_matches"] is False
     assert any(
         warning["code"] == "stale_bop_export_provenance"
         for warning in scene["warnings"]
@@ -149,7 +133,7 @@ def test_scene_marks_mismatched_bop_export_provenance_stale(tmp_path: Path) -> N
 
 
 def test_scene_marks_missing_calibration_and_supports_raw_fallback(tmp_path: Path) -> None:
-    run_root, _objects = make_scene_run(tmp_path)
+    run_root = make_scene_run(tmp_path)
     for path in (run_root / "processed").rglob("match_robot_ee_poses.json"):
         path.unlink()
     (run_root / "raw_robot_ee_poses.json").write_text(json.dumps({"0": {"motion": "raw", "pose": {"X": 9, "Y": 8, "Z": 7, "A": 0, "B": 0, "C": 0}}}))
@@ -165,17 +149,15 @@ def test_scene_marks_missing_calibration_and_supports_raw_fallback(tmp_path: Pat
 
 
 def test_cell_apis_assets_and_objectless_state(tmp_path: Path, monkeypatch) -> None:
-    run_root, _objects = make_scene_run(tmp_path, objectless=True)
+    run_root = make_scene_run(tmp_path)
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
     monkeypatch.setenv("POSETESTBOT_WEB_INPUT_ROOTS", tmp_path.as_posix())
     client = create_app().test_client()
 
-    registry = client.get("/ui/object-registry", query_string={"run_root": run_root}).get_json()
     scene = client.get("/ui/cell-scene", query_string={"run_root": run_root}).get_json()
     rejected = client.get(f"/ui/cell-assets/cube/mesh?run_root={run_root.as_posix()}")
     timeline = client.get("/ui/cell-scene/timeline", query_string={"run_root": run_root, "timeline_id": scene["default_timeline_id"], "offset": 0, "limit": 2})
 
-    assert registry["objectless"] is True
     assert scene["object_selection"]["objectless"] is True
     assert not any(entity["type"] == "object" for entity in scene["entities"])
     assert rejected.status_code == 404
@@ -183,18 +165,12 @@ def test_cell_apis_assets_and_objectless_state(tmp_path: Path, monkeypatch) -> N
     assert len(timeline.get_json()["poses"]) == 2
 
 
-def test_cell_asset_routes_serve_only_selected_registered_files(tmp_path: Path, monkeypatch) -> None:
-    run_root, _objects = make_scene_run(tmp_path)
+def test_retired_cell_registry_asset_route_is_absent(tmp_path: Path, monkeypatch) -> None:
+    run_root = make_scene_run(tmp_path)
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
     monkeypatch.setenv("POSETESTBOT_WEB_INPUT_ROOTS", tmp_path.as_posix())
     client = create_app().test_client()
 
-    mesh = client.get(f"/ui/cell-assets/cube/mesh?run_root={run_root.as_posix()}")
-    texture = client.get(f"/ui/cell-assets/cube/texture?run_root={run_root.as_posix()}")
-    unknown = client.get(f"/ui/cell-assets/missing/mesh?run_root={run_root.as_posix()}")
+    response = client.get(f"/ui/cell-assets/cube/mesh?run_root={run_root.as_posix()}")
 
-    assert mesh.status_code == 200
-    assert mesh.headers["Cache-Control"]
-    assert texture.status_code == 200
-    assert texture.mimetype == "image/png"
-    assert unknown.status_code == 404
+    assert response.status_code == 404

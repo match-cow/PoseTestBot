@@ -439,7 +439,6 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
             "resolution": "720p",
             "fps": 6,
             "velocity": 0.2,
-            "object_folder": "object_models",
             "sensors": [
                 {
                     "sensor_type": "realsense",
@@ -632,12 +631,12 @@ def test_web_pipeline_input_path_must_use_run_or_input_roots(tmp_path: Path) -> 
         json={
             "run_root": (tmp_path / "scoped-input-run").as_posix(),
             "stage": "bop_export",
-            "options": {"object_folder": "/etc"},
+            "options": {"calibration_profiles": "/etc/profiles.json"},
         },
     )
 
     assert response.status_code == 400
-    assert "object_folder" in response.get_json()["output"]
+    assert "calibration_profiles" in response.get_json()["output"]
 
 
 def test_sensor_snapshot_submission_queues_camera_job(monkeypatch, tmp_path: Path) -> None:

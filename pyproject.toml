@@ -47,7 +47,6 @@ exclude = [
     "build*",
     "frontend*",
     "iiwa*",
-    "object_models*",
     "output*",
     "scripts*",
     "tests*",

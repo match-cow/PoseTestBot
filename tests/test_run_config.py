@@ -30,7 +30,9 @@ def test_default_run_config_uses_real_robot_and_lab_sensors(tmp_path: Path) -> N
     assert data["schema_version"] == SCHEMA_VERSION
     assert data["robot_profile"]["mode"] == "real"
     assert data["robot_profile"]["robot_ip"] == "172.31.1.147"
-    assert data["object_folder"] == "object_models"
+    assert data["dataset_mode"] == "objectless"
+    assert "object_folder" not in data
+    assert "selected_objects" not in data
     assert data["pipeline"]["sequence_id"] == "real_full_capture_validation"
     assert data["pipeline"]["plan_only"] is True
     assert data["frames"]["robot_pose"] == {
@@ -131,11 +133,6 @@ def test_sensor_config_token_rejects_unknown_type() -> None:
         sensor_config_from_token("webcam:0")
 
 
-def test_run_config_rejects_empty_object_folder(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="object_folder"):
-        create_run_config(run_root=tmp_path / "run-object", object_folder="")
-
-
 def test_run_config_loads_from_run_root_and_builds_sequence_job(
     tmp_path: Path,
 ) -> None:
@@ -176,7 +173,7 @@ def test_run_config_v1_remains_loadable_and_v2_pose_template_avoids_legacy_flags
     loaded = load_run_config_for_run_root(legacy_root)
 
     assert loaded["schema_version"] == "run_config.v1"
-    assert "dataset_mode" not in loaded
+    assert loaded["dataset_mode"] == "objectless"
 
     template = create_run_config(
         run_root=tmp_path / "template",
@@ -218,10 +215,6 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
 ) -> None:
     run_root = tmp_path / "run-cli"
     repo_root = Path(__file__).resolve().parents[1]
-    object_folder = tmp_path / "custom_object_models"
-    object_folder.mkdir()
-    (object_folder / "objects.json").write_text("{}\n")
-
     result = subprocess.run(
         [
             "uv",
@@ -231,8 +224,6 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
             run_root.as_posix(),
             "--sensor",
             "realsense:123:static:Cell RealSense",
-            "--object-folder",
-            object_folder.as_posix(),
             "--sequence",
             "sync_aruco",
             "--sequence-options-json",
@@ -260,7 +251,8 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
             "sensor_type": "realsense_d435",
         }
     ]
-    assert config["object_folder"] == object_folder.as_posix()
+    assert config["dataset_mode"] == "objectless"
+    assert "object_folder" not in config
     assert config["pipeline"]["options"] == {"aruco": {"save_images": True}}
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(stage for stage in manifest["stages"] if stage["name"] == "run_config")

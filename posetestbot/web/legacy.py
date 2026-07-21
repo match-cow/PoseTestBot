@@ -311,11 +311,15 @@ def _run_config_from_payload(data: dict):
             default_mounting_mode=mounting_mode,
         )
     try:
-        calibration_target = load_run_config_for_run_root(run_root).get(
-            "calibration_target"
-        )
+        existing_config = load_run_config_for_run_root(run_root)
+        calibration_target = existing_config.get("calibration_target")
+        dataset_mode = existing_config.get("dataset_mode", "objectless")
+        pose_template = existing_config.get("pose_template")
     except FileNotFoundError:
         calibration_target = None
+        dataset_mode = "objectless"
+        pose_template = None
+    requested_dataset_mode = data.get("dataset_mode", dataset_mode)
     return create_run_config(
         run_root=run_root,
         run_name=data.get("run_name"),
@@ -323,8 +327,8 @@ def _run_config_from_payload(data: dict):
         fps=int(data.get("fps", 6)),
         velocity_m_s=float(data.get("velocity", data.get("velocity_m_s", 0.2))),
         sensors=sensors,
-        object_folder=data.get("object_folder", "object_models"),
-        selected_objects=data.get("selected_objects"),
+        dataset_mode=requested_dataset_mode,
+        pose_template=(pose_template if requested_dataset_mode == "pose_template" else None),
         calibration_profiles=data.get("calibration_profiles") or None,
         calibration_target=calibration_target,
         sequence_id=data.get("sequence", data.get("sequence_id", "real_full_capture_validation")),

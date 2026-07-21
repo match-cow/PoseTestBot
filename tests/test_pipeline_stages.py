@@ -31,7 +31,6 @@ def test_bop_export_stage_builds_dataset_export_command(tmp_path: Path) -> None:
         run_root=tmp_path / "run",
         options={
             "input_folder": "processed/synchronized",
-            "object_folder": "object_models",
             "write_multiview_targets": True,
             "write_coco_annotations": True,
         },

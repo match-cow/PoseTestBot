@@ -38,7 +38,7 @@ def write_json(path: Path, value: dict) -> None:
         json.dump(value, f, indent=2)
 
 
-def create_blenderproc_prepare_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+def create_blenderproc_prepare_fixture(tmp_path: Path) -> tuple[Path, Path]:
     run_root = tmp_path / "run-1"
     sensor_folder = run_root / "processed" / "synchronized" / "realsense_123"
     sensor_folder.mkdir(parents=True)
@@ -60,29 +60,6 @@ def create_blenderproc_prepare_fixture(tmp_path: Path) -> tuple[Path, Path, Path
         },
     )
 
-    object_folder = tmp_path / "objects"
-    object_folder.mkdir()
-    write_json(
-        object_folder / "objects.json",
-        {
-            "cube": [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ]
-        },
-    )
-    (object_folder / "cube.ply").write_text(
-        "ply\n"
-        "format ascii 1.0\n"
-        "element vertex 0\n"
-        "property float x\n"
-        "property float y\n"
-        "property float z\n"
-        "end_header\n"
-    )
-
     camera_transforms = tmp_path / "camera_ee_transform.json"
     write_json(
         camera_transforms,
@@ -93,13 +70,13 @@ def create_blenderproc_prepare_fixture(tmp_path: Path) -> tuple[Path, Path, Path
             }
         },
     )
-    return run_root, object_folder, camera_transforms
+    return run_root, camera_transforms
 
 
 def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
     tmp_path: Path,
 ) -> None:
-    run_root, object_folder, camera_transforms = create_blenderproc_prepare_fixture(
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(
         tmp_path
     )
     repo_root = Path(__file__).resolve().parents[1]
@@ -109,8 +86,6 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
             str(run_root),
-            "--object-folder",
-            str(object_folder),
             "--camera-transformations",
             str(camera_transforms),
         ],
@@ -125,9 +100,8 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
     blenderproc_folder = (
         run_root / "processed" / "synchronized" / "realsense_123" / "blenderproc"
     )
-    assert (blenderproc_folder / "objects" / "cube.ply").exists()
-    assert (blenderproc_folder / "objects" / "cube.npy").exists()
-    assert (blenderproc_folder / "objects.json").exists()
+    assert json.loads((blenderproc_folder / "objects.json").read_text())["instances"] == []
+    assert list((blenderproc_folder / "objects").iterdir()) == []
     np.testing.assert_allclose(
         np.load(blenderproc_folder / "camera_matrix.npy"),
         np.array([[50.0, 0.0, 40.0], [0.0, 50.0, 40.0], [0.0, 0.0, 1.0]]),
@@ -150,7 +124,7 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
 
 
 def test_blenderproc_prepare_prefers_rectified_sensor_tree(tmp_path: Path) -> None:
-    run_root, object_folder, camera_transforms = create_blenderproc_prepare_fixture(
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(
         tmp_path
     )
     synchronized = run_root / "processed" / "synchronized" / "realsense_123"
@@ -163,8 +137,6 @@ def test_blenderproc_prepare_prefers_rectified_sensor_tree(tmp_path: Path) -> No
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
             str(run_root),
-            "--object-folder",
-            str(object_folder),
             "--camera-transformations",
             str(camera_transforms),
         ],
@@ -181,7 +153,7 @@ def test_blenderproc_prepare_prefers_rectified_sensor_tree(tmp_path: Path) -> No
 def test_blenderproc_prepare_stage_accepts_calibration_profiles(
     tmp_path: Path,
 ) -> None:
-    run_root, object_folder, _ = create_blenderproc_prepare_fixture(tmp_path)
+    run_root, _ = create_blenderproc_prepare_fixture(tmp_path)
     calibration_profiles = tmp_path / "calibration_profiles.json"
     write_profile_collection(
         [
@@ -216,8 +188,6 @@ def test_blenderproc_prepare_stage_accepts_calibration_profiles(
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
             str(run_root),
-            "--object-folder",
-            str(object_folder),
             "--calibration-profiles",
             str(calibration_profiles),
         ],
@@ -254,7 +224,7 @@ def test_blenderproc_prepare_stage_accepts_calibration_profiles(
 def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
     tmp_path: Path,
 ) -> None:
-    run_root, object_folder, _ = create_blenderproc_prepare_fixture(tmp_path)
+    run_root, _ = create_blenderproc_prepare_fixture(tmp_path)
     sensor_folder = run_root / "processed" / "synchronized" / "realsense_123"
     write_json(
         sensor_folder / MATCH_ROBOT_EE_POSES,
@@ -317,8 +287,6 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
             str(run_root),
-            "--object-folder",
-            str(object_folder),
             "--calibration-profiles",
             str(calibration_profiles),
         ],
@@ -345,7 +313,7 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
 def test_blenderproc_prepare_failure_preserves_all_existing_outputs(
     tmp_path: Path,
 ) -> None:
-    run_root, object_folder, camera_transforms = create_blenderproc_prepare_fixture(
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(
         tmp_path
     )
     synchronized = run_root / "processed" / "synchronized"
@@ -361,7 +329,6 @@ def test_blenderproc_prepare_failure_preserves_all_existing_outputs(
     with pytest.raises(FileNotFoundError, match="matched robot poses"):
         prepare_sensor_folders(
             input_folder=synchronized,
-            object_folder=object_folder,
             camera_transformations=transforms,
         )
 
@@ -371,7 +338,7 @@ def test_blenderproc_prepare_failure_preserves_all_existing_outputs(
 
 
 def test_blenderproc_prepare_objectless_clears_stale_models(tmp_path: Path) -> None:
-    run_root, object_folder, camera_transforms = create_blenderproc_prepare_fixture(tmp_path)
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(tmp_path)
     sensor = run_root / "processed" / "synchronized" / "realsense_123"
     stale = sensor / "blenderproc" / "objects"
     stale.mkdir(parents=True)
@@ -379,13 +346,11 @@ def test_blenderproc_prepare_objectless_clears_stale_models(tmp_path: Path) -> N
 
     prepared = prepare_sensor_folders(
         input_folder=run_root / "processed" / "synchronized",
-        object_folder=object_folder,
         camera_transformations=load_camera_transformations(camera_transforms),
-        selected_objects=[],
     )
 
     output = prepared[0].output_folder
     assert prepared[0].object_count == 0
-    assert json.loads((output / "objects.json").read_text()) == {}
+    assert json.loads((output / "objects.json").read_text())["instances"] == []
     assert list((output / "objects").iterdir()) == []
     assert (output / "camera_poses.npy").is_file()

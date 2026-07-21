@@ -22,15 +22,14 @@ from posetestbot.pipeline.sequences import (
     build_sequence_plan,
 )
 from posetestbot.pipeline.stages import PipelineStageSpec
-from posetestbot.objects.registry import load_object_registry
 from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
 LEGACY_SCHEMA_VERSION = "run_config.v1"
 SCHEMA_VERSION = "run_config.v2"
-DATASET_MODES = {"objectless", "pose_template", "legacy_registry"}
+DATASET_MODES = {"objectless", "pose_template"}
 CALIBRATION_PROFILE_OPTION_STAGES = ("blenderproc_prepare", "bop_export")
-OBJECT_SELECTION_OPTION_STAGES = (
+DATASET_MODE_OPTION_STAGES = (
     "blenderproc_prepare",
     "blenderproc_render",
     "bop_export",
@@ -150,8 +149,6 @@ class PoseTestBotRunConfig:
     robot_profile: RobotProfile
     capture: CaptureRunConfig
     frames: RunFramesConfig = field(default_factory=RunFramesConfig)
-    object_folder: str = "object_models"
-    selected_objects: tuple[str, ...] = ()
     dataset_mode: str = "objectless"
     pose_template: Mapping[str, Any] | None = None
     calibration_profiles: str | None = None
@@ -166,8 +163,6 @@ class PoseTestBotRunConfig:
             "robot_profile": asdict(self.robot_profile),
             "capture": self.capture.to_dict(),
             "frames": self.frames.to_dict(),
-            "object_folder": self.object_folder,
-            "selected_objects": list(self.selected_objects),
             "calibration_profiles": self.calibration_profiles,
             "calibration_target": (
                 dict(self.calibration_target) if self.calibration_target is not None else None
@@ -411,8 +406,6 @@ def create_run_config(
     fps: int = 6,
     velocity_m_s: float = 0.2,
     sensors: tuple[SensorRunConfig, ...] | None = None,
-    object_folder: str = "object_models",
-    selected_objects: tuple[str, ...] | list[str] | None = None,
     dataset_mode: str | None = None,
     pose_template: Mapping[str, Any] | None = None,
     calibration_profiles: str | None = None,
@@ -423,20 +416,10 @@ def create_run_config(
     fixed_transforms: tuple[FixedFrameTransform, ...] = (),
 ) -> PoseTestBotRunConfig:
     run_root_path = Path(run_root)
-    if not str(object_folder).strip():
-        raise ValueError("Run config object_folder must not be empty")
     sensor_configs = sensors if sensors is not None else default_lab_sensors()
-    registry = load_object_registry(object_folder)
-    selection = (
-        registry.valid_names
-        if selected_objects is None
-        else registry.validate_selection(selected_objects)
-    )
-    inferred_mode = dataset_mode or ("legacy_registry" if selection else "objectless")
+    inferred_mode = dataset_mode or "objectless"
     if inferred_mode not in DATASET_MODES:
         raise ValueError("dataset_mode must be one of: " + ", ".join(sorted(DATASET_MODES)))
-    if inferred_mode == "pose_template":
-        selection = ()
     config = PoseTestBotRunConfig(
         schema_version=SCHEMA_VERSION,
         run_name=run_name or run_root_path.name,
@@ -451,8 +434,6 @@ def create_run_config(
             sensors=tuple(sensor_configs),
         ),
         frames=RunFramesConfig(fixed_transforms=fixed_transforms),
-        object_folder=object_folder,
-        selected_objects=selection,
         dataset_mode=inferred_mode,
         pose_template=dict(pose_template) if pose_template is not None else None,
         calibration_profiles=calibration_profiles,
@@ -493,6 +474,12 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             f"{LEGACY_SCHEMA_VERSION!r}"
         )
     if schema == SCHEMA_VERSION:
+        retired_fields = sorted({"object_folder", "selected_objects"} & value.keys())
+        if retired_fields:
+            raise ValueError(
+                "Run config contains retired legacy object-registry fields: "
+                + ", ".join(retired_fields)
+            )
         dataset_mode = value.get("dataset_mode")
         if dataset_mode not in DATASET_MODES:
             raise ValueError(
@@ -522,8 +509,6 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         raise ValueError("Run config capture.fps must be positive")
     if not str(capture.get("resolution", "")).strip():
         raise ValueError("Run config capture.resolution must not be empty")
-    if not str(value.get("object_folder", "")).strip():
-        raise ValueError("Run config object_folder must not be empty")
     calibration_target = value.get("calibration_target")
     if calibration_target is not None:
         if not isinstance(calibration_target, Mapping):
@@ -568,18 +553,7 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             "posegridgen_board_to_base",
         }:
             raise ValueError("Run config calibration_target placement mode is invalid")
-    selected_objects = value.get("selected_objects")
-    if not isinstance(selected_objects, list) or any(
-        not isinstance(name, str) or not name for name in selected_objects
-    ):
-        raise ValueError("Run config selected_objects must be a list of non-empty names")
-    if len(set(selected_objects)) != len(selected_objects):
-        raise ValueError("Run config selected_objects must not contain duplicates")
     if schema == SCHEMA_VERSION:
-        if value["dataset_mode"] in {"objectless", "pose_template"} and selected_objects:
-            raise ValueError(
-                "Run config selected_objects must be empty for objectless or pose_template mode"
-            )
         if value["dataset_mode"] == "objectless" and value.get("pose_template") is not None:
             raise ValueError("Objectless run config cannot reference a pose template")
         if value["dataset_mode"] != "pose_template" and value.get("pose_template") is not None:
@@ -697,28 +671,11 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
                 ),
             }
         )
-    if "selected_objects" not in value:
-        registry = load_object_registry(str(value.get("object_folder", "object_models")))
-        value["selected_objects"] = list(registry.valid_names)
-        warnings = value.setdefault("warnings", [])
-        if not isinstance(warnings, list):
-            raise ValueError("Run config warnings must be a list")
-        warnings.append(
-            {
-                "code": "legacy_object_selection_inferred",
-                "message": (
-                    "Run config omitted selected_objects; all currently valid registry "
-                    "objects were selected. Rewrite the config to snapshot this selection."
-                ),
-            }
-        )
     value.setdefault("calibration_target", None)
     if value.get("schema_version") == SCHEMA_VERSION:
         value.setdefault("pose_template", None)
     validate_run_config(value)
-    if value.get("dataset_mode", "legacy_registry") == "legacy_registry":
-        registry = load_object_registry(str(value["object_folder"]))
-        registry.validate_selection(value["selected_objects"])
+    value.setdefault("dataset_mode", "objectless")
     return value
 
 
@@ -759,22 +716,12 @@ def _sequence_options_with_run_config_defaults(
             group_options.setdefault("calibration_profiles", calibration_profiles)
             options[group_name] = group_options
 
-    selected_objects = list(config.get("selected_objects", []))
-    object_folder = str(config.get("object_folder", "object_models"))
-    for group_name in OBJECT_SELECTION_OPTION_STAGES:
+    for group_name in DATASET_MODE_OPTION_STAGES:
         if group_name not in available_groups:
             continue
         group_options = dict(options.get(group_name, {}))
-        # Either explicit key is a stage override; otherwise inject the snapshot.
-        if "object_name" not in group_options and "objectless" not in group_options:
-            if config.get("dataset_mode") == "pose_template":
-                pass
-            elif selected_objects:
-                group_options["object_name"] = selected_objects
-            else:
-                group_options["objectless"] = True
-        if group_name in {"blenderproc_prepare", "bop_export"}:
-            group_options.setdefault("object_folder", object_folder)
+        if "objectless" not in group_options and config.get("dataset_mode") == "objectless":
+            group_options["objectless"] = True
         options[group_name] = group_options
     return options
 

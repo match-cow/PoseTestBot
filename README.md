@@ -89,7 +89,7 @@ Defaults:
 
 - real lab robot profile,
 - current lab sensor list,
-- `object_models` as the object registry,
+- objectless dataset mode until an immutable pose template is selected,
 - `real_full_capture_validation` as the saved sequence,
 - `plan_only=true`.
 
@@ -98,11 +98,9 @@ New run configs also make the robot stream frames explicit:
 can describe flange-to-TCP or template-base-to-physical-base transforms. Older
 real-profile configs without frame metadata remain readable and receive a
 `legacy_frames_inferred` warning; fake-profile configs are rejected.
-Object inclusion is an explicit snapshot too. New configs select every valid
-registry entry by default; repeat `--object-name NAME` for a subset, or use
-`--objectless` for a camera-only RGB-D run. BOP IDs come from the complete
-alphabetically sorted registry, so subset IDs can contain gaps. Legacy configs
-infer all currently valid objects with a compatibility warning.
+New runs are objectless by default. Object-bearing runs use the Pose Templates
+page or pose-template CLIs to select an immutable bundle, resolve its physical
+instances, and retain stable catalog UUID and BOP `obj_id` provenance.
 For the managed pose-template workflow, create the run with
 `--dataset-mode pose_template`, then select and confirm an immutable template
 in the console's **Workflow → Ground Truth** phase. See
@@ -268,8 +266,7 @@ Export BOP dataset structure:
 
 ```bash
 uv run python scripts/run_bop_export_stage.py working_data/example_run \
-  --calibration-profiles working_data/example_run/calibration_profiles.json \
-  --object-folder object_models
+  --calibration-profiles working_data/example_run/calibration_profiles.json
 ```
 
 The transactional export emits `bop_export_manifest.v3` and uses standard
@@ -351,8 +348,8 @@ The web server intentionally defaults to unauthenticated `0.0.0.0` for the
 trusted lab LAN and still exposes deliberate real-robot controls. Do not expose
 it to an untrusted network. Web run paths are confined to `working_data` by
 default; add path-list entries with `POSETESTBOT_WEB_RUN_ROOTS`. Read-only
-external inputs default to `object_models` and `scripts/default_data`; extend
-them with `POSETESTBOT_WEB_INPUT_ROOTS`. Symlink escapes and output paths outside
+external inputs default to `scripts/default_data`; extend them with
+`POSETESTBOT_WEB_INPUT_ROOTS`. Symlink escapes and output paths outside
 the selected run are rejected. Installed deployments may set
 `POSETESTBOT_APP_ROOT`; otherwise a source checkout is detected automatically
 and an installed command uses its current working directory. CLI tools continue
@@ -360,9 +357,9 @@ to accept explicit paths.
 
 The bundled console has desktop routes for Dashboard, Devices, Cell,
 Calibration Targets, Pose Templates, Workflow, and Jobs. The read-only Cell
-page renders the HRI template,
-base/flange/TCP proxies, calibrated cameras, selected PLY objects, calibration
-target, and exact recorded trajectories in right-handed Z-up millimetres.
+page renders the HRI template, base/flange/TCP proxies, calibrated cameras,
+pose-template instances, calibration target, and exact recorded trajectories
+in right-handed Z-up millimetres.
 Missing frame edges remain visibly unresolved, and a component/provenance list
 remains available without WebGL. It remembers the selected run, system/light/dark theme,
 and manual IIWA target in the browser. Physical capture remains separate from

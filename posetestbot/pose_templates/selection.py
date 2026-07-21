@@ -174,7 +174,8 @@ def select_pose_template(
             config = json.load(handle)
         config["schema_version"] = "run_config.v2"
         config["dataset_mode"] = "pose_template"
-        config["selected_objects"] = []
+        config.pop("object_folder", None)
+        config.pop("selected_objects", None)
         config["pose_template"] = {
             "template_uuid": source["template_uuid"],
             "selection_artifact": POSE_TEMPLATE_SELECTION,

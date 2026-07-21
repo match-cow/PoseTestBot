@@ -18,7 +18,6 @@ from pytransform3d.transform_manager import TransformManager
 
 from posetestbot.io.atomic import atomic_write_json, replace_directories
 from posetestbot.io.artifacts import CAM_K, MATCH_ROBOT_EE_POSES
-from posetestbot.objects.registry import load_object_registry
 
 SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
@@ -189,26 +188,10 @@ def _camera_poses(
     return np.asarray(poses, dtype=float)
 
 
-def _object_transforms(
-    object_folder: Path, selected_objects: list[str] | tuple[str, ...] | None
-) -> dict[str, np.ndarray]:
-    registry = load_object_registry(object_folder)
-    names = registry.valid_names if selected_objects is None else selected_objects
-    transforms: dict[str, np.ndarray] = {}
-    for entry in registry.selected_entries(names):
-        assert entry.object_to_template is not None
-        transform_metres = entry.object_to_template.copy()
-        transform_metres[:3, 3] *= 0.001
-        transforms[entry.name] = transform_metres
-    return transforms
-
-
 def _prepare_sensor(
     *,
     sensor_folder: Path,
     staging: Path,
-    object_folder: Path,
-    object_transforms: Mapping[str, np.ndarray],
     camera_transform: Mapping[str, object],
     object_instances: Mapping[str, Any] | None = None,
     run_root: Path | None = None,
@@ -218,13 +201,7 @@ def _prepare_sensor(
     camera_poses = _camera_poses(robot_poses, camera_transform)
     objects_output = staging / "objects"
     objects_output.mkdir(parents=True)
-    if object_instances is None:
-        raw_objects = json.loads((object_folder / "objects.json").read_text())
-        atomic_write_json(
-            staging / "objects.json",
-            {name: raw_objects[name] for name in object_transforms},
-        )
-    else:
+    if object_instances is not None:
         if run_root is None:
             raise ValueError("run_root is required with object_instances")
         prepared_instances = []
@@ -273,44 +250,40 @@ def _prepare_sensor(
                 "instances": prepared_instances,
             },
         )
+    else:
+        atomic_write_json(
+            staging / "objects.json",
+            {
+                "schema_version": "blenderproc_object_instances.v1",
+                "template_uuid": None,
+                "bundle_sha256": None,
+                "instances": [],
+            },
+        )
     np.save(staging / "camera_matrix.npy", camera_matrix)
     np.save(staging / "dist_coefficients.npy", distortion)
     np.save(staging / "camera_poses.npy", camera_poses)
-    if object_instances is None:
-        for name, transform in object_transforms.items():
-            shutil.copy2(object_folder / f"{name}.ply", objects_output / f"{name}.ply")
-            texture = object_folder / f"{name}.png"
-            if texture.is_file():
-                shutil.copy2(texture, objects_output / texture.name)
-            np.save(objects_output / f"{name}.npy", transform)
     if np.load(staging / "camera_poses.npy").shape != (len(robot_poses), 4, 4):
         raise ValueError(f"Prepared camera pose count is invalid for {sensor_folder.name}")
     return PreparedSensor(
         sensor_name=sensor_folder.name,
         output_folder=sensor_folder,
         frame_count=len(robot_poses),
-        object_count=(
-            len(object_transforms)
-            if object_instances is None
-            else len(object_instances["instances"])
-        ),
+        object_count=len(object_instances["instances"]) if object_instances else 0,
     )
 
 
 def prepare_sensor_folders(
     *,
     input_folder: str | Path,
-    object_folder: str | Path,
     camera_transformations: Mapping[str, object],
     subdir: str = "blenderproc",
-    selected_objects: list[str] | tuple[str, ...] | None = None,
     object_instances: Mapping[str, Any] | None = None,
     run_root: str | Path | None = None,
 ) -> list[PreparedSensor]:
     """Prepare every sensor in staging and promote only after all validate."""
 
     input_path = Path(input_folder)
-    object_path = Path(object_folder)
     validate_subdir(subdir)
     if not input_path.is_dir():
         raise FileNotFoundError(f"Synchronized input folder not found: {input_path}")
@@ -322,9 +295,6 @@ def prepare_sensor_folders(
             raise ValueError("object_instances schema must be object_instances.v1")
         if not isinstance(object_instances.get("instances"), list):
             raise ValueError("object_instances instances must be a list")
-        object_transforms: dict[str, np.ndarray] = {}
-    else:
-        object_transforms = _object_transforms(object_path, selected_objects)
     staged: list[tuple[Path, Path]] = []
     prepared: list[PreparedSensor] = []
     try:
@@ -336,8 +306,6 @@ def prepare_sensor_folders(
                 _prepare_sensor(
                     sensor_folder=sensor_folder,
                     staging=staging,
-                    object_folder=object_path,
-                    object_transforms=object_transforms,
                     camera_transform=camera_transform_for_sensor(
                         camera_transformations, sensor_folder.name
                     ),

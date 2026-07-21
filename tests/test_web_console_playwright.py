@@ -76,7 +76,7 @@ def fulfill_json(route, value: object, *, status: int = 200) -> None:
 
 def run_config(*, plan_only: bool = True) -> dict:
     return {
-        "schema_version": "run_config.v1",
+        "schema_version": "run_config.v2",
         "run_name": "new-run",
         "run_root": RUN_ROOT,
         "robot_profile": {
@@ -90,7 +90,8 @@ def run_config(*, plan_only: bool = True) -> dict:
             "velocity_m_s": 0.2,
             "sensors": [],
         },
-        "object_folder": "object_models",
+        "dataset_mode": "objectless",
+        "pose_template": None,
         "calibration_profiles": None,
         "pipeline": {
             "sequence_id": "real_full_capture_validation",
@@ -997,7 +998,13 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
             {"index": 0, "frame_index": 0, "frame_id": "000000.png", "timestamp_ns": 1, "motion": "arc", "transform": identity},
             {"index": 1, "frame_index": 1, "frame_id": "000001.png", "timestamp_ns": 2, "motion": "arc", "transform": {**identity, "translation_mm": [10, 20, 30]}},
         ],
-        "object_selection": {"selected_objects": [] if objectless else ["cube"], "objectless": objectless, "registry": {"valid_count": 1}},
+        "object_selection": {
+            "objectless": objectless,
+            "dataset_mode": "objectless" if objectless else "pose_template",
+            "instance_count": 0 if objectless else 1,
+            "pose_template": None if objectless else {"template_uuid": "test-template"},
+            "bop_export": {"status": "not_exported"},
+        },
     }
 
 
@@ -1029,7 +1036,7 @@ def test_cell_webgl_fallback_and_objectless_state(console_server, page) -> None:
 
     expect(page.get_by_test_id("cell-webgl-fallback")).to_be_visible()
     expect(page.get_by_text("WebGL is unavailable")).to_be_visible()
-    expect(page.get_by_text("Explicit objectless RGB-D run")).to_be_visible()
+    expect(page.get_by_text("Objectless RGB-D run")).to_be_visible()
     expect(page.get_by_text("Robot flange", exact=True)).to_be_visible()
 
 

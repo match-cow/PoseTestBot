@@ -186,9 +186,7 @@ export interface RunConfig {
       [key: string]: JsonValue
     }>
   }
-  object_folder: string
-  selected_objects: string[]
-  dataset_mode?: "objectless" | "pose_template" | "legacy_registry"
+  dataset_mode: "objectless" | "pose_template"
   pose_template?: {
     template_uuid: string
     selection_artifact: "pose_template_selection.json"
@@ -316,9 +314,10 @@ export interface CellScene {
   default_timeline_id: string | null
   trajectory_preview: CellPose[]
   object_selection: {
-    selected_objects: string[]
     objectless: boolean
-    registry: Record<string, JsonValue>
+    dataset_mode: "objectless" | "pose_template"
+    instance_count: number
+    pose_template: Record<string, JsonValue> | null
     bop_export: Record<string, JsonValue>
   }
 }
@@ -332,23 +331,6 @@ export interface CellTimelinePage {
   next_offset: number | null
   previous_offset: number | null
   poses: CellPose[]
-}
-
-export interface ObjectRegistryPayload {
-  schema_version: "object_registry.v1"
-  run_root: string
-  object_folder: string
-  selected_objects: string[]
-  missing_selected_objects: string[]
-  objectless: boolean
-  entries: Array<{
-    name: string
-    obj_id: number
-    valid: boolean
-    errors: string[]
-    selected: boolean
-    texture_filename: string | null
-  }>
 }
 
 export interface PreflightSummary {

@@ -57,30 +57,10 @@ def parse_args() -> argparse.Namespace:
         help="Default mounting mode for --sensor entries and lab defaults.",
     )
     parser.add_argument(
-        "--object-folder",
-        default="object_models",
-        help="Object registry folder for preparation and BOP export stages.",
-    )
-    selection = parser.add_mutually_exclusive_group()
-    selection.add_argument(
-        "--object-name",
-        action="append",
-        default=None,
-        help="Registry object to include. May be repeated; defaults to all valid objects.",
-    )
-    parser.add_argument(
         "--dataset-mode",
-        choices=("objectless", "pose_template", "legacy_registry"),
-        default=None,
-        help=(
-            "Explicit run dataset mode. Existing --object-name behavior maps to "
-            "legacy_registry; use pose_template before selecting Ground Truth."
-        ),
-    )
-    selection.add_argument(
-        "--objectless",
-        action="store_true",
-        help="Snapshot an explicit objectless RGB-D run.",
+        choices=("objectless", "pose_template"),
+        default="objectless",
+        help="Create an objectless run or one awaiting pose-template selection.",
     )
     parser.add_argument(
         "--calibration-profiles",
@@ -161,8 +141,6 @@ def main() -> None:
         fps=args.fps,
         velocity_m_s=args.velocity,
         sensors=sensors,
-        object_folder=args.object_folder,
-        selected_objects=[] if args.objectless else args.object_name,
         dataset_mode=args.dataset_mode,
         calibration_profiles=args.calibration_profiles,
         sequence_id=args.sequence,

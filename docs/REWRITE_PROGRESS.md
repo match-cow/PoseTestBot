@@ -53,6 +53,9 @@ operator-run acceptance.
   vibration dwell after every leg.
 - Verified the pinned PoseGridGen and PoseTemplateCreator checkouts and
   packaged pose-template/backend/UI contents.
+- Retired the static object registry, bundled sample models, legacy run-setup
+  selector, Cell registry preview/assets, and BlenderProc/BOP fallback paths;
+  object-bearing runs now flow only through immutable pose-template bundles.
 
 Validation completed without camera or robot access:
 

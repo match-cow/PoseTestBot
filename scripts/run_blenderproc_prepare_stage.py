@@ -48,16 +48,6 @@ def parse_args() -> argparse.Namespace:
         help="Folder containing synchronized sensor folders. Defaults to <run_root>/processed/synchronized.",
     )
     parser.add_argument(
-        "--object-folder",
-        default="object_models",
-        help="Folder containing objects.json and object model files.",
-    )
-    selection = parser.add_mutually_exclusive_group()
-    selection.add_argument(
-        "--object-name", action="append", default=None,
-        help="Registry object to prepare. May be repeated; defaults to all valid objects.",
-    )
-    selection.add_argument(
         "--objectless", action="store_true",
         help="Prepare camera inputs with explicit empty object metadata.",
     )
@@ -117,19 +107,15 @@ def camera_transformations_from_calibration_profiles(
 def run_prepare(
     *,
     input_folder: Path,
-    object_folder: Path,
     camera_transformations: dict[str, object],
     subdir: str,
-    selected_objects: list[str] | None = None,
     object_instances: dict | None = None,
     run_root: Path | None = None,
 ) -> dict[str, Path]:
     prepared = prepare_sensor_folders(
         input_folder=input_folder,
-        object_folder=object_folder,
         camera_transformations=camera_transformations,
         subdir=subdir,
-        selected_objects=selected_objects,
         object_instances=object_instances,
         run_root=run_root,
     )
@@ -140,7 +126,6 @@ def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
     input_folder = synchronized_input_folder(run_root, args.input_folder)
-    object_folder = Path(args.object_folder)
     camera_transformations_path = Path(args.camera_transformations)
     calibration_profiles = Path(args.calibration_profiles) if args.calibration_profiles else None
 
@@ -155,7 +140,11 @@ def main() -> None:
             run_config = load_run_config_for_run_root(run_root)
         except FileNotFoundError:
             run_config = None
-        if run_config is not None and run_config.get("dataset_mode") == "pose_template":
+        if (
+            not args.objectless
+            and run_config is not None
+            and run_config.get("dataset_mode") == "pose_template"
+        ):
             object_instances = prepare_object_instances(run_root)
             stage_artifacts[OBJECT_INSTANCES] = run_root / OBJECT_INSTANCES
         if calibration_profiles is not None:
@@ -171,10 +160,8 @@ def main() -> None:
 
         prepared_artifacts = run_prepare(
             input_folder=input_folder,
-            object_folder=object_folder,
             camera_transformations=camera_transformations,
             subdir=args.subdir,
-            selected_objects=[] if args.objectless else args.object_name,
             object_instances=object_instances,
             run_root=run_root,
         )

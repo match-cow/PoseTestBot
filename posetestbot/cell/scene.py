@@ -28,7 +28,6 @@ from posetestbot.io.artifacts import (
     RAW_ROBOT_EE_POSES,
     SYNCHRONIZED_DIR,
 )
-from posetestbot.objects.registry import load_object_registry
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.pose_templates.selection import load_pose_template_selection
 
@@ -239,18 +238,15 @@ def _profiles(run_root: Path, config: Mapping[str, Any], warnings: list[dict[str
 
 def _bop_export_provenance(
     run_root: Path,
-    selected_objects: set[str],
-    registry_provenance: Mapping[str, Any],
     warnings: list[dict[str, str]],
+    dataset_mode: str,
     pose_template_selection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     path = run_root / BOP_DIR / BOP_EXPORT_MANIFEST
     provenance: dict[str, Any] = {
         "status": "not_exported",
         "manifest_path": path.as_posix(),
-        "exported_selected_objects": None,
-        "selection_matches": None,
-        "registry_matches": None,
+        "dataset_mode_matches": None,
     }
     if not path.is_file():
         return provenance
@@ -282,41 +278,19 @@ def _bop_export_provenance(
                     }
                 )
             return provenance
-        exported = manifest.get("selected_objects")
-        if not isinstance(exported, list) or any(
-            not isinstance(name, str) for name in exported
-        ):
-            raise ValueError("BOP export manifest has no valid selected_objects snapshot")
-        exported_registry = manifest.get("registry_provenance")
-        exported_sha = (
-            exported_registry.get("source_sha256")
-            if isinstance(exported_registry, Mapping)
-            else None
-        )
-        current_sha = registry_provenance.get("source_sha256")
-        selection_matches = set(exported) == selected_objects
-        registry_matches = bool(exported_sha) and exported_sha == current_sha
+        matches = manifest.get("dataset_mode") == dataset_mode == "objectless"
         provenance.update(
             {
-                "status": (
-                    "current" if selection_matches and registry_matches else "stale"
-                ),
+                "status": "current" if matches else "stale",
                 "manifest_schema_version": manifest.get("schema_version"),
-                "exported_selected_objects": exported,
-                "selection_matches": selection_matches,
-                "registry_matches": registry_matches,
-                "exported_registry_sha256": exported_sha,
-                "current_registry_sha256": current_sha,
+                "dataset_mode_matches": matches,
             }
         )
         if provenance["status"] == "stale":
             warnings.append(
                 {
                     "code": "stale_bop_export_provenance",
-                    "message": (
-                        "The BOP export object snapshot does not match the current "
-                        "run selection or object registry; re-export before dataset use."
-                    ),
+                    "message": "The BOP export dataset mode does not match this objectless run.",
                 }
             )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -401,8 +375,7 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
     if config.get("dataset_mode") == "pose_template":
         try:
             pose_selection = load_pose_template_selection(root)
-            selected = {str(item["name"]) for item in pose_selection["instances"]}
-            registry_provenance = {
+            template_provenance = {
                 "schema_version": "pose_template_selection.v1",
                 "template_uuid": pose_selection["template_uuid"],
                 "bundle_sha256": pose_selection["bundle_sha256"],
@@ -434,31 +407,18 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                             "instance_uuid": instance_uuid,
                             "catalog_uuid": item["catalog_uuid"],
                             "obj_id": item["obj_id"],
-                            **registry_provenance,
+                            **template_provenance,
                         },
                         geometry=geometry,
                     )
                 )
         except (OSError, ValueError) as exc:
-            selected = set()
-            registry_provenance = {"schema_version": "pose_template_selection.v1"}
+            template_provenance = {"schema_version": "pose_template_selection.v1"}
             warnings.append(
                 {"code": "invalid_pose_template_selection", "message": str(exc)}
             )
     else:
-        registry = load_object_registry(config["object_folder"])
-        registry_provenance = registry.provenance()
-        selected = set(registry.validate_selection(config.get("selected_objects", [])))
-        for entry in registry.entries:
-            if entry.name not in selected:
-                continue
-            if not entry.valid or entry.object_to_template is None:
-                entities.append(_entity(f"object:{entry.name}", "object", entry.name, transform=None, status="unresolved", reason="; ".join(entry.errors), provenance={"obj_id": entry.obj_id}, geometry={"kind": "mesh"}))
-                continue
-            manager.add_transform(f"object:{entry.name}", "template_base", entry.object_to_template)
-            object_to_template = manager.get_transform(f"object:{entry.name}", "template_base")
-            geometry = {"kind": "mesh", "obj_id": entry.obj_id, "mesh_url": f"/ui/cell-assets/{entry.name}/mesh?run_root={encoded_root}", "texture_url": f"/ui/cell-assets/{entry.name}/texture?run_root={encoded_root}" if entry.texture_path else None}
-            entities.append(_entity(f"object:{entry.name}", "object", entry.name, transform=_transform_dict(object_to_template, "template_base"), status="planned", provenance={"obj_id": entry.obj_id, **registry_provenance}, geometry=geometry))
+        template_provenance = None
 
     target_path = root / CALIBRATION_TARGET
     if target_path.is_file():
@@ -488,7 +448,7 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
 
     timeline_meta = [_timeline_metadata(item, default=index == 0) for index, item in enumerate(timelines)]
     bop_export_provenance = _bop_export_provenance(
-        root, selected, registry_provenance, warnings, pose_selection
+        root, warnings, str(config.get("dataset_mode", "objectless")), pose_selection
     )
     return {
         "schema_version": SCENE_SCHEMA_VERSION,
@@ -500,11 +460,10 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
         "default_timeline_id": timeline_meta[0]["id"] if timeline_meta else None,
         "trajectory_preview": _preview(timelines[0]["poses"]) if timelines else [],
         "object_selection": {
-            "selected_objects": sorted(selected),
             "objectless": config.get("dataset_mode") == "objectless",
-            "dataset_mode": config.get("dataset_mode", "legacy_registry"),
-            "pose_template": registry_provenance if pose_selection is not None else None,
-            "registry": registry_provenance,
+            "dataset_mode": config.get("dataset_mode", "objectless"),
+            "instance_count": len(pose_selection["instances"]) if pose_selection is not None else 0,
+            "pose_template": template_provenance if pose_selection is not None else None,
             "bop_export": bop_export_provenance,
         },
     }

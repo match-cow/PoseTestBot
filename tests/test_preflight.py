@@ -62,14 +62,14 @@ def write_config(
     *,
     plan_only: bool = False,
     options: dict | None = None,
-    selected_objects: list[str] | None = None,
+    dataset_mode: str = "objectless",
 ) -> None:
     config = create_run_config(
         run_root=run_root,
         sequence_id="sync_to_bop_dry_run",
         sequence_options=options or {},
         plan_only=plan_only,
-        selected_objects=selected_objects,
+        dataset_mode=dataset_mode,
     )
     write_run_config(run_root, config)
 
@@ -105,6 +105,7 @@ def test_preflight_errors_when_non_dry_run_blenderproc_is_missing(tmp_path: Path
         run_root,
         plan_only=False,
         options={"blenderproc_render": {"dry_run": False}},
+        dataset_mode="pose_template",
     )
 
     report = build_run_preflight(
@@ -135,7 +136,6 @@ def test_preflight_does_not_require_blenderproc_for_objectless_render(
         run_root,
         plan_only=False,
         options={"blenderproc_render": {"dry_run": False}},
-        selected_objects=[],
     )
 
     report = build_run_preflight(
@@ -198,6 +198,6 @@ def test_run_preflight_queue_summary_tracks_missing_ready_and_stale(tmp_path: Pa
     assert ready["queue_blocker"] is None
 
     stale_config = dict(config)
-    stale_config["object_folder"] = "other_models"
+    stale_config["dataset_mode"] = "pose_template"
     stale = run_preflight_queue_summary(run_root, stale_config)
     assert stale["queue_blocker"] == "stale_preflight"

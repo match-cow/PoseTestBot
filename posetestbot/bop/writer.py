@@ -38,7 +38,6 @@ from posetestbot.io.artifacts import (
     MODELS_DIR,
     RGB_DIR,
 )
-from posetestbot.objects.registry import load_object_registry
 
 SCHEMA_VERSION = "bop_export_manifest.v3"
 FRAME_MAP_SCHEMA_VERSION = "posetestbot_bop_frame_map.v2"
@@ -208,60 +207,6 @@ def model_geometry_info(
             "source_sha256": source_sha256,
         },
     }
-
-
-def copy_bop_models(
-    output_root: str | Path,
-    object_folder: str | Path,
-    *,
-    geometry_cache: Mapping[str, object] | None = None,
-    selected_objects: list[str] | tuple[str, ...] | None = None,
-) -> list[BopObjectModel]:
-    output_root = Path(output_root)
-    object_folder = Path(object_folder)
-    registry = load_object_registry(object_folder)
-    selected = registry.selected_entries(
-        registry.valid_names if selected_objects is None else selected_objects
-    )
-    object_name_to_id = {entry.name: entry.obj_id for entry in selected}
-    models_folder = output_root / MODELS_DIR
-    models_folder.mkdir(parents=True, exist_ok=True)
-
-    models_info: dict[str, dict[str, object]] = {}
-    models: list[BopObjectModel] = []
-    for object_name, obj_id in object_name_to_id.items():
-        source_path = object_folder / f"{object_name}.ply"
-        try:
-            source_path.resolve().relative_to(object_folder.resolve())
-        except ValueError as exc:
-            raise ValueError(f"Object model escapes registry folder: {source_path}") from exc
-        if not source_path.is_file():
-            raise FileNotFoundError(f"Missing object model: {source_path}")
-        destination = models_folder / f"obj_{obj_id:06d}.ply"
-        shutil.copy2(source_path, destination)
-        cached = geometry_cache.get(str(obj_id)) if geometry_cache else None
-        cached_geometry = (
-            cached
-            if isinstance(cached, Mapping)
-            and cached.get("source_name") == object_name
-            else None
-        )
-        models_info[str(obj_id)] = {
-            "source_name": object_name,
-            "source_path": source_path.as_posix(),
-            **model_geometry_info(source_path, cached_geometry),
-        }
-        models.append(
-            BopObjectModel(
-                object_name=object_name,
-                obj_id=obj_id,
-                source_path=source_path.as_posix(),
-                bop_path=destination.relative_to(output_root).as_posix(),
-            )
-        )
-
-    _write_json(models_folder / "models_info.json", models_info)
-    return models
 
 
 def copy_bop_instance_models(
@@ -1340,10 +1285,8 @@ def write_bop_export_manifest(
     frame_map_path: str | Path | None = None,
     dataset_info_path: str | Path | None = None,
     validation: Mapping[str, object] | None = None,
-    selected_objects: list[str] | tuple[str, ...] | None = None,
     stable_id_mapping: Mapping[str, int] | None = None,
-    registry_provenance: Mapping[str, object] | None = None,
-    dataset_mode: str = "legacy_registry",
+    dataset_mode: str = "objectless",
     pose_template_provenance: Mapping[str, object] | None = None,
     instance_map_path: str | Path | None = None,
     pose_template_path: str | Path | None = None,
@@ -1383,16 +1326,10 @@ def write_bop_export_manifest(
                 profile_to_dict(profile) for profile in calibration_profiles or []
             ],
             "object_models": [asdict(model) for model in object_models or []],
-            "selected_objects": list(selected_objects or []),
-            "objectless": selected_objects is not None and len(selected_objects) == 0,
+            "objectless": dataset_mode == "objectless",
             "dataset_mode": dataset_mode,
             "pose_template": dict(pose_template_provenance or {}),
             "stable_id_mapping": dict(stable_id_mapping or {}),
-            "registry_provenance": dict(registry_provenance or {}),
-            "registry_validation": {
-                "valid_count": (registry_provenance or {}).get("valid_count", 0),
-                "invalid_count": (registry_provenance or {}).get("invalid_count", 0),
-            },
             "targets_path": artifact_path(targets_path),
             "multiview_targets_path": artifact_path(multiview_targets_path),
             "coco_annotations_path": artifact_path(coco_annotations_path),

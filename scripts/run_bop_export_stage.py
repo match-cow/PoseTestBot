@@ -10,7 +10,6 @@ import uuid
 from pathlib import Path
 
 from posetestbot.bop.writer import (
-    copy_bop_models,
     copy_bop_instance_models,
     export_sensor_scene_to_bop,
     targets_filename,
@@ -52,7 +51,6 @@ from posetestbot.io.manifest import (
     utc_now_iso,
     write_run_manifest,
 )
-from posetestbot.objects.registry import load_object_registry
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.pose_templates.selection import (
     load_pose_template_selection,
@@ -80,19 +78,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--split", default="test", help="BOP split folder name.")
     parser.add_argument(
-        "--object-folder",
-        default="object_models",
-        help=(
-            "Object registry folder containing objects.json and .ply models. "
-            "Defaults to object_models; pass --no-model-export to skip."
-        ),
-    )
-    selection = parser.add_mutually_exclusive_group()
-    selection.add_argument(
-        "--object-name", action="append", default=None,
-        help="Registry object to export. May be repeated; defaults to all valid objects.",
-    )
-    selection.add_argument(
         "--objectless", action="store_true",
         help="Export RGB-D and camera metadata with explicitly empty object data.",
     )
@@ -173,7 +158,6 @@ def main() -> None:
     run_root = Path(args.run_root)
     input_folder = default_input_folder(run_root, args.input_folder)
     output_folder = default_output_folder(run_root, args.output_folder)
-    object_folder = Path(args.object_folder)
     calibration_profiles_path = (
         Path(args.calibration_profiles) if args.calibration_profiles else None
     )
@@ -208,26 +192,17 @@ def main() -> None:
         dataset_mode = (
             str(run_config.get("dataset_mode"))
             if run_config is not None
-            else ("objectless" if args.objectless else "legacy_registry")
+            else "objectless"
         )
+        if args.objectless:
+            dataset_mode = "objectless"
         template_mode = dataset_mode == "pose_template" and not args.objectless
+        objectless_mode = dataset_mode == "objectless"
         selection = load_pose_template_selection(run_root) if template_mode else None
         object_instances = prepare_object_instances(run_root) if template_mode else None
-        registry = None if template_mode else load_object_registry(object_folder)
-        selected_objects = (
-            sorted({str(item["name"]) for item in object_instances["instances"]})
-            if object_instances is not None
-            else list(
-                registry.validate_selection(
-                    [] if args.objectless else (
-                        args.object_name if args.object_name is not None else registry.valid_names
-                    )
-                )
-            )
-        )
         object_name_to_id = None
         object_models = []
-        if args.objectless:
+        if objectless_mode:
             object_name_to_id = {}
         if not args.no_model_export:
             object_name_to_id = (
@@ -236,7 +211,7 @@ def main() -> None:
                     for item in object_instances["instances"]
                 }
                 if object_instances is not None
-                else {name: registry.id_mapping[name] for name in selected_objects}
+                else {}
             )
             geometry_cache = None
             previous_models_info = output_folder / MODELS_DIR / "models_info.json"
@@ -253,13 +228,6 @@ def main() -> None:
                     run_root,
                     object_instances,
                     geometry_cache=geometry_cache,
-                )
-            elif selected_objects:
-                object_models = copy_bop_models(
-                    staging_folder,
-                    object_folder,
-                    geometry_cache=geometry_cache,
-                    selected_objects=selected_objects,
                 )
         exports = []
         for offset, sensor_folder in enumerate(sensor_folders):
@@ -290,7 +258,7 @@ def main() -> None:
         targets_path = None
         multiview_targets_path = None
         coco_annotations_path = None
-        if (not args.no_model_export or args.objectless) and args.split == "test":
+        if (not args.no_model_export or objectless_mode) and args.split == "test":
             targets_path = write_bop_targets(staging_folder, exports, split=args.split)
         if args.write_multiview_targets:
             multiview_targets_path = write_bop_multiview_targets(
@@ -339,24 +307,13 @@ def main() -> None:
             frame_map_path=frame_map_path,
             dataset_info_path=dataset_info_path,
             validation=validation,
-            selected_objects=selected_objects,
             stable_id_mapping=(
-                registry.id_mapping
-                if registry is not None
-                else {
+                {
                     str(item["catalog_uuid"]): int(item["obj_id"])
                     for item in object_instances["instances"]
                 }
-            ),
-            registry_provenance=(
-                registry.provenance()
-                if registry is not None
-                else {
-                    "schema_version": "object_instances.v1",
-                    "valid_count": len(object_instances["instances"]),
-                    "invalid_count": 0,
-                    "template_uuid": object_instances["template_uuid"],
-                }
+                if object_instances is not None
+                else {}
             ),
             dataset_mode=dataset_mode,
             pose_template_provenance=(

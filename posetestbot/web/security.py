@@ -14,7 +14,7 @@ from posetestbot.pipeline.stages import get_pipeline_stage
 from posetestbot.web.paths import APP_ROOT
 
 DEFAULT_RUN_ROOT = APP_ROOT / "working_data"
-DEFAULT_INPUT_ROOTS = (APP_ROOT / "object_models", APP_ROOT / "scripts" / "default_data")
+DEFAULT_INPUT_ROOTS = (APP_ROOT / "scripts" / "default_data",)
 TRUE_STRINGS = {"1", "true", "yes", "on"}
 FALSE_STRINGS = {"0", "false", "no", "off"}
 BOOLEAN_FIELDS = {
@@ -43,7 +43,6 @@ RUN_PATH_FIELDS = {"candidates", "observations", "profiles", "run_config"}
 OUTPUT_PATH_FIELDS = {"output_profiles"}
 INPUT_PATH_FIELDS = {
     "calibration_profiles",
-    "object_folder",
     "target",
     "target_spec",
     "target_to_reference",

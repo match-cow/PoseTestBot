@@ -1161,16 +1161,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="input_folder", flag="--input-folder", kind="path", path_scope="run"
             ),
             PipelineParameter(
-                name="object_folder",
-                flag="--object-folder",
-                kind="path",
-                path_scope="input",
-                default="object_models",
-            ),
-            PipelineParameter(
-                name="object_name", flag="--object-name", multiple=True
-            ),
-            PipelineParameter(
                 name="objectless", flag="--objectless", kind="bool", default=False
             ),
             PipelineParameter(
@@ -1210,9 +1200,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             PipelineParameter(name="subdir", flag="--subdir"),
             PipelineParameter(name="blenderproc", flag="--blenderproc"),
             PipelineParameter(
-                name="object_name", flag="--object-name", multiple=True
-            ),
-            PipelineParameter(
                 name="objectless", flag="--objectless", kind="bool", default=False
             ),
             PipelineParameter(
@@ -1238,16 +1225,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="output_folder", flag="--output-folder", kind="path", path_scope="output"
             ),
             PipelineParameter(name="split", flag="--split"),
-            PipelineParameter(
-                name="object_folder",
-                flag="--object-folder",
-                kind="path",
-                path_scope="input",
-                default="object_models",
-            ),
-            PipelineParameter(
-                name="object_name", flag="--object-name", multiple=True
-            ),
             PipelineParameter(
                 name="objectless", flag="--objectless", kind="bool", default=False
             ),

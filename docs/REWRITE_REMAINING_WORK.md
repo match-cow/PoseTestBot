@@ -196,9 +196,10 @@ These tasks are useful but do not replace the real-data gates.
 - [ ] Decide and document a compatibility sunset for `web_interface.py` and
   the direct single-sensor `scripts/sync_non_destructive.py` CLI. Do not remove
   either while external use is unknown.
-- [ ] Decide when legacy `run_config.v1`, calibration v1, object-registry, and
-  historical BOP/sync readers can be retired. Until a data migration policy
-  exists, they remain supported readers rather than dead code.
+- [ ] Decide when legacy `run_config.v1`, calibration v1, and historical
+  BOP/sync readers can be retired. Until a data migration policy exists, they
+  remain supported readers rather than dead code. The object-registry path was
+  retired on 2026-07-21; object-bearing runs now require pose-template bundles.
 - [ ] Reduce the lazy Cell production chunk (about 932 kB minified in the
   2026-07-21 build) if operator load time or deployment limits justify it.
   Preserve the WebGL-free fallback and add a bundle-size assertion before
