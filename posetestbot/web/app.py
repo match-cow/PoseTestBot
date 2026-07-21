@@ -13,6 +13,7 @@ from posetestbot.web.routes.calibration import calibration_bp
 from posetestbot.web.routes.calibration_targets import calibration_targets_bp
 from posetestbot.web.routes.overview import overview_bp
 from posetestbot.web.routes.pages import pages_bp
+from posetestbot.web.routes.pose_templates import pose_templates_bp
 from posetestbot.web.routes.sensors import sensors_bp
 from posetestbot.web.routes.ui import ui_bp
 from posetestbot.web.security import install_request_security
@@ -77,6 +78,7 @@ def create_app() -> Flask:
     app.register_blueprint(pages_bp)
     app.register_blueprint(calibration_bp)
     app.register_blueprint(calibration_targets_bp)
+    app.register_blueprint(pose_templates_bp)
     app.register_blueprint(sensors_bp)
     app.register_blueprint(monitoring_bp)
     app.register_blueprint(overview_bp)

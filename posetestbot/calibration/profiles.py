@@ -646,38 +646,6 @@ def select_valid_profile_for_sensor(
     )
 
 
-def select_eye_in_hand_profile_for_sensor(
-    profiles: Iterable[CalibrationProfile], sensor_name: str
-) -> CalibrationProfile:
-    return select_profile_for_sensor(
-        profiles, sensor_name, mounting_mode=MountingMode.EYE_IN_HAND
-    )
-
-
-def legacy_camera_ee_transform_from_profile(profile: CalibrationProfile) -> dict[str, list[float]]:
-    profile.validate()
-    if profile.mounting_mode != MountingMode.EYE_IN_HAND:
-        raise ValueError(
-            f"Profile {profile.profile_id!r} is {profile.mounting_mode.value}, "
-            "not eye_in_hand"
-        )
-    return {
-        "quaternion": list(profile.extrinsics.rotation_quaternion_wxyz),
-        "position": list(profile.extrinsics.translation_mm),
-    }
-
-
-def legacy_camera_ee_transform_map_from_profiles(
-    profiles: Iterable[CalibrationProfile], sensor_names: Iterable[str]
-) -> dict[str, dict[str, list[float]]]:
-    profile_list = list(profiles)
-    transform_map = {}
-    for sensor_name in sensor_names:
-        profile = select_eye_in_hand_profile_for_sensor(profile_list, sensor_name)
-        transform_map[sensor_name] = legacy_camera_ee_transform_from_profile(profile)
-    return transform_map
-
-
 def blenderproc_camera_transform_from_profile(
     profile: CalibrationProfile,
 ) -> dict[str, object]:
@@ -703,10 +671,3 @@ def blenderproc_camera_transform_map_from_profiles(
         profile = select_valid_profile_for_sensor(profile_list, sensor_name)
         transform_map[sensor_name] = blenderproc_camera_transform_from_profile(profile)
     return transform_map
-
-
-def write_legacy_camera_ee_transform_map(
-    transform_map: Mapping[str, Mapping[str, object]], path: str | Path
-) -> Path:
-    path = Path(path)
-    return atomic_write_json(path, transform_map)

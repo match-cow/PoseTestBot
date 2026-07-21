@@ -19,6 +19,7 @@ from posetestbot.io.artifacts import (
     CALIBRATION_DIR,
     CALIBRATION_PROFILES,
     DERIVED_CAMERA_EE_TRANSFORM,
+    OBJECT_INSTANCES,
     PROCESSED_DIR,
     SYNCHRONIZED_DIR,
 )
@@ -27,6 +28,8 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
+from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pose_templates.selection import prepare_object_instances
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -118,6 +121,8 @@ def run_prepare(
     camera_transformations: dict[str, object],
     subdir: str,
     selected_objects: list[str] | None = None,
+    object_instances: dict | None = None,
+    run_root: Path | None = None,
 ) -> dict[str, Path]:
     prepared = prepare_sensor_folders(
         input_folder=input_folder,
@@ -125,6 +130,8 @@ def run_prepare(
         camera_transformations=camera_transformations,
         subdir=subdir,
         selected_objects=selected_objects,
+        object_instances=object_instances,
+        run_root=run_root,
     )
     return {f"{item.sensor_name}:{subdir}": item.output_folder for item in prepared}
 
@@ -143,6 +150,14 @@ def main() -> None:
 
     try:
         stage_artifacts: dict[str, Path] = {}
+        object_instances = None
+        try:
+            run_config = load_run_config_for_run_root(run_root)
+        except FileNotFoundError:
+            run_config = None
+        if run_config is not None and run_config.get("dataset_mode") == "pose_template":
+            object_instances = prepare_object_instances(run_root)
+            stage_artifacts[OBJECT_INSTANCES] = run_root / OBJECT_INSTANCES
         if calibration_profiles is not None:
             camera_transformations = camera_transformations_from_calibration_profiles(
                 input_folder=input_folder,
@@ -160,6 +175,8 @@ def main() -> None:
             camera_transformations=camera_transformations,
             subdir=args.subdir,
             selected_objects=[] if args.objectless else args.object_name,
+            object_instances=object_instances,
+            run_root=run_root,
         )
         if calibration_profiles is not None:
             transform_path = write_camera_transformations(

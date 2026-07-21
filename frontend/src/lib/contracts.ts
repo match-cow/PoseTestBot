@@ -56,6 +56,7 @@ export interface SensorDevice {
   effective_display_name?: string
   alias?: string
   connected?: boolean
+  live_rgb_preview_supported?: boolean
   inverted?: boolean
   mounting_mode?: string
   metadata?: Record<string, JsonValue>
@@ -187,6 +188,13 @@ export interface RunConfig {
   }
   object_folder: string
   selected_objects: string[]
+  dataset_mode?: "objectless" | "pose_template" | "legacy_registry"
+  pose_template?: {
+    template_uuid: string
+    selection_artifact: "pose_template_selection.json"
+    bundle_sha256: string
+    placement_confirmed: boolean
+  } | null
   calibration_profiles: string | null
   calibration_target: {
     target_id: string
@@ -203,6 +211,60 @@ export interface RunConfig {
     plan_only: boolean
     options: Record<string, JsonValue>
   }
+}
+
+export interface PoseTemplateSourceStatus {
+  status: "available" | "missing" | "dirty" | "revision_mismatch" | "unavailable"
+  available: boolean
+  checkout: string
+  required_revision: string
+  revision: string | null
+  reason: string | null
+  capabilities?: {
+    formats: string[]
+    limits: { cad_bytes: number; batch_bytes: number; faces: number; contour_vertices: number; instances: number }
+  }
+}
+
+export interface CatalogObject {
+  catalog_uuid: string
+  obj_id: number
+  name: string
+  description: string | null
+  source_filename: string
+  source_format: string
+  state: "active" | "archived"
+  extraction: { vertices: number; faces: number; bounds_mm: number[][]; watertight: boolean }
+  assets: Record<string, { path: string; sha256: string; media_type?: string }>
+}
+
+export interface PoseTemplateInstanceDraft {
+  instance_uuid: string
+  catalog_uuid: string
+  pose: { x_mm: number; y_mm: number; z_mm: number; roll_deg: number; pitch_deg: number; yaw_deg: number }
+}
+
+export interface PoseTemplateBundle {
+  template_uuid: string
+  display_name: string
+  description: string | null
+  created_at: string
+  bundle_sha256: string
+  archive: { state: "active" | "archived" }
+  instances: Array<{ instance_uuid: string; catalog: { name: string; obj_id: number } }>
+}
+
+export interface PoseTemplatePreview {
+  schema_version: "pose_template_preview.v1"
+  valid: boolean
+  configuration_sha256: string
+  page?: { width_mm: number; height_mm: number }
+  instances: Array<{
+    instance_uuid: string
+    catalog: { name: string; obj_id: number }
+    compensated_contours: Array<Array<{ x_mm: number; y_mm: number }>>
+  }>
+  errors: Array<{ instance_uuid?: string; code: string; message: string }>
 }
 
 export interface CellTransform {

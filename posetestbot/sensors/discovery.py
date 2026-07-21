@@ -333,11 +333,3 @@ def discover_zed_2i() -> list[SensorDeviceInfo]:
             )
         )
     return devices
-
-
-def discover_all() -> list[SensorDeviceInfo]:
-    return [
-        *discover_realsense_d435(),
-        *discover_oak_d_pro(),
-        *discover_zed_2i(),
-    ]

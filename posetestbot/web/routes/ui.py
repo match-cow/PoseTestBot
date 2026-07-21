@@ -14,6 +14,7 @@ from posetestbot.io.artifacts import RUN_CONFIG
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.cell.scene import build_cell_scene, cell_timeline_page
 from posetestbot.objects.registry import load_object_registry
+from posetestbot.pose_templates.selection import load_pose_template_selection
 from posetestbot.web.security import (
     DEFAULT_RUN_ROOT,
     resolve_web_run_root,
@@ -261,4 +262,37 @@ def ui_cell_asset(object_name: str, asset_kind: str):
         # Registry loading already proves resolved containment and regular-file status.
         return send_file(path, mimetype=mimetype, conditional=True, max_age=3600)
     except (FileNotFoundError, OSError, ValueError) as exc:
+        return jsonify({"output": str(exc)}), 400
+
+
+@ui_bp.get("/ui/cell-pose-template-assets/<instance_uuid>/<asset_kind>")
+def ui_cell_pose_template_asset(instance_uuid: str, asset_kind: str):
+    try:
+        run_root = _requested_run_root()
+        selection = load_pose_template_selection(run_root)
+        item = next(
+            (
+                entry
+                for entry in selection["instances"]
+                if entry["instance_uuid"] == instance_uuid
+            ),
+            None,
+        )
+        if item is None:
+            return jsonify({"output": "Unknown selected template instance"}), 404
+        key = "canonical_ply" if asset_kind == "mesh" else "texture"
+        if key not in item["assets"]:
+            return jsonify({"output": "Unknown or unavailable instance asset"}), 404
+        snapshot = run_root / selection["bundle_snapshot"]
+        path = snapshot / item["assets"][key]["path"]
+        path.resolve(strict=True).relative_to(snapshot.resolve())
+        return send_file(
+            path,
+            mimetype="image/png" if key == "texture" else "application/octet-stream",
+            conditional=True,
+            max_age=3600,
+        )
+    except FileNotFoundError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except (OSError, ValueError) as exc:
         return jsonify({"output": str(exc)}), 400

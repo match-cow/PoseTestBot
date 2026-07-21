@@ -9,7 +9,7 @@ import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 import numpy as np
 from pytransform3d import rotations as pr
@@ -210,33 +210,90 @@ def _prepare_sensor(
     object_folder: Path,
     object_transforms: Mapping[str, np.ndarray],
     camera_transform: Mapping[str, object],
+    object_instances: Mapping[str, Any] | None = None,
+    run_root: Path | None = None,
 ) -> PreparedSensor:
     camera_matrix, distortion = read_camera_parameters(sensor_folder)
     robot_poses = _ordered_robot_poses(sensor_folder)
     camera_poses = _camera_poses(robot_poses, camera_transform)
     objects_output = staging / "objects"
     objects_output.mkdir(parents=True)
-    raw_objects = json.loads((object_folder / "objects.json").read_text())
-    atomic_write_json(
-        staging / "objects.json",
-        {name: raw_objects[name] for name in object_transforms},
-    )
+    if object_instances is None:
+        raw_objects = json.loads((object_folder / "objects.json").read_text())
+        atomic_write_json(
+            staging / "objects.json",
+            {name: raw_objects[name] for name in object_transforms},
+        )
+    else:
+        if run_root is None:
+            raise ValueError("run_root is required with object_instances")
+        prepared_instances = []
+        for item in object_instances["instances"]:
+            instance_uuid = str(item["instance_uuid"])
+            source = run_root / str(item["canonical_ply"])
+            try:
+                source.resolve(strict=True).relative_to(run_root.resolve())
+            except (FileNotFoundError, ValueError) as exc:
+                raise ValueError(f"Instance mesh escapes run root: {source}") from exc
+            mesh_name = f"{instance_uuid}.ply"
+            transform_name = f"{instance_uuid}.npy"
+            shutil.copy2(source, objects_output / mesh_name)
+            matrix = np.asarray(item["template_base_from_object"]["matrix"], dtype=float)
+            if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+                raise ValueError(f"Invalid instance transform: {instance_uuid}")
+            transform_metres = matrix.copy()
+            transform_metres[:3, 3] *= 0.001
+            np.save(objects_output / transform_name, transform_metres)
+            texture_name = None
+            if item.get("texture"):
+                texture_source = run_root / str(item["texture"])
+                try:
+                    texture_source.resolve(strict=True).relative_to(run_root.resolve())
+                except (FileNotFoundError, ValueError) as exc:
+                    raise ValueError(f"Instance texture escapes run root: {texture_source}") from exc
+                texture_name = f"{instance_uuid}.png"
+                shutil.copy2(texture_source, objects_output / texture_name)
+            prepared_instances.append(
+                {
+                    "instance_uuid": instance_uuid,
+                    "catalog_uuid": item["catalog_uuid"],
+                    "obj_id": int(item["obj_id"]),
+                    "name": item["name"],
+                    "mesh": mesh_name,
+                    "transform": transform_name,
+                    "texture": texture_name,
+                }
+            )
+        atomic_write_json(
+            staging / "objects.json",
+            {
+                "schema_version": "blenderproc_object_instances.v1",
+                "template_uuid": object_instances["template_uuid"],
+                "bundle_sha256": object_instances["bundle_sha256"],
+                "instances": prepared_instances,
+            },
+        )
     np.save(staging / "camera_matrix.npy", camera_matrix)
     np.save(staging / "dist_coefficients.npy", distortion)
     np.save(staging / "camera_poses.npy", camera_poses)
-    for name, transform in object_transforms.items():
-        shutil.copy2(object_folder / f"{name}.ply", objects_output / f"{name}.ply")
-        texture = object_folder / f"{name}.png"
-        if texture.is_file():
-            shutil.copy2(texture, objects_output / texture.name)
-        np.save(objects_output / f"{name}.npy", transform)
+    if object_instances is None:
+        for name, transform in object_transforms.items():
+            shutil.copy2(object_folder / f"{name}.ply", objects_output / f"{name}.ply")
+            texture = object_folder / f"{name}.png"
+            if texture.is_file():
+                shutil.copy2(texture, objects_output / texture.name)
+            np.save(objects_output / f"{name}.npy", transform)
     if np.load(staging / "camera_poses.npy").shape != (len(robot_poses), 4, 4):
         raise ValueError(f"Prepared camera pose count is invalid for {sensor_folder.name}")
     return PreparedSensor(
         sensor_name=sensor_folder.name,
         output_folder=sensor_folder,
         frame_count=len(robot_poses),
-        object_count=len(object_transforms),
+        object_count=(
+            len(object_transforms)
+            if object_instances is None
+            else len(object_instances["instances"])
+        ),
     )
 
 
@@ -247,6 +304,8 @@ def prepare_sensor_folders(
     camera_transformations: Mapping[str, object],
     subdir: str = "blenderproc",
     selected_objects: list[str] | tuple[str, ...] | None = None,
+    object_instances: Mapping[str, Any] | None = None,
+    run_root: str | Path | None = None,
 ) -> list[PreparedSensor]:
     """Prepare every sensor in staging and promote only after all validate."""
 
@@ -258,7 +317,14 @@ def prepare_sensor_folders(
     sensors = [path for path in sorted(input_path.iterdir()) if path.is_dir()]
     if not sensors:
         raise FileNotFoundError(f"No synchronized sensor folders in {input_path}")
-    object_transforms = _object_transforms(object_path, selected_objects)
+    if object_instances is not None:
+        if object_instances.get("schema_version") != "object_instances.v1":
+            raise ValueError("object_instances schema must be object_instances.v1")
+        if not isinstance(object_instances.get("instances"), list):
+            raise ValueError("object_instances instances must be a list")
+        object_transforms: dict[str, np.ndarray] = {}
+    else:
+        object_transforms = _object_transforms(object_path, selected_objects)
     staged: list[tuple[Path, Path]] = []
     prepared: list[PreparedSensor] = []
     try:
@@ -275,6 +341,8 @@ def prepare_sensor_folders(
                     camera_transform=camera_transform_for_sensor(
                         camera_transformations, sensor_folder.name
                     ),
+                    object_instances=object_instances,
+                    run_root=Path(run_root).resolve() if run_root is not None else None,
                 )
             )
         replace_directories(staged)

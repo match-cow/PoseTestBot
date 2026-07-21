@@ -897,6 +897,10 @@ def test_three_live_realsense_previews_keep_lower_lab_sensors_reachable(
     zed_card = sensor_card(page, ZED_SENSOR)
     zed_card.scroll_into_view_if_needed()
     expect(zed_card).to_be_visible()
+    expect(zed_card.locator('[data-testid="sensor-preview-toggle"]')).to_be_disabled()
+    expect(zed_card.locator('[data-testid="sensor-preview-toggle"]')).to_contain_text(
+        "Unavailable"
+    )
 
 
 def test_oak_preview_toggle_keeps_full_devices_page_reachable(

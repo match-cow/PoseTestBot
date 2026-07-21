@@ -142,7 +142,7 @@ def test_bop_export_stage_writes_scene_and_manifest(tmp_path: Path) -> None:
     bop_manifest = json.loads(
         (run_root / BOP_DIR / BOP_EXPORT_MANIFEST).read_text()
     )
-    assert bop_manifest["schema_version"] == "bop_export_manifest.v2"
+    assert bop_manifest["schema_version"] == "bop_export_manifest.v3"
     assert bop_manifest["format"] == "bop-scenewise"
     assert bop_manifest["exports"][0]["rgb_count"] == 2
     assert bop_manifest["validation"]["status"] == "ok"

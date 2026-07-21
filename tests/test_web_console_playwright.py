@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import trimesh
 from werkzeug.serving import make_server
 
 pytest.importorskip("playwright.sync_api")
@@ -13,6 +14,8 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import expect, sync_playwright
 
 from posetestbot.web.app import create_app
+from posetestbot.pose_templates.catalog import import_catalog_object
+from posetestbot.web.routes import pose_templates as pose_template_routes
 
 
 RUN_ROOT = "/tmp/posetestbot-console/new-run"
@@ -278,6 +281,192 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("padding", "0px")
 
 
+def pose_template_source(*, available: bool) -> dict:
+    return {
+        "status": "available" if available else "missing",
+        "available": available,
+        "checkout": "/repo/third_party/PoseTemplateCreator",
+        "required_revision": "450747bfee0e50b76f72ab38e1d0d04643124e02",
+        "revision": "450747bfee0e50b76f72ab38e1d0d04643124e02" if available else None,
+        "reason": None if available else "PoseTemplateCreator checkout is missing",
+        "capabilities": {
+            "formats": ["ply", "stl", "obj"],
+            "limits": {"cad_bytes": 52428800, "batch_bytes": 104857600, "faces": 1000000, "contour_vertices": 10000, "instances": 20},
+        },
+    }
+
+
+def pose_template_catalog() -> dict:
+    return {
+        "schema_version": "object_catalog.v1",
+        "objects": [{
+            "catalog_uuid": "11111111-1111-4111-8111-111111111111",
+            "obj_id": 7,
+            "name": "Clamp",
+            "description": "Textured fixture",
+            "source_filename": "clamp.stl",
+            "source_format": "stl",
+            "state": "active",
+            "extraction": {"vertices": 8, "faces": 12, "bounds_mm": [[-5, -5, -5], [5, 5, 5]], "watertight": True},
+            "assets": {
+                "source": {"path": "objects/1/source.stl", "sha256": "a" * 64},
+                "canonical_ply": {"path": "objects/1/canonical.ply", "sha256": "b" * 64},
+                "texture": {"path": "objects/1/texture.png", "sha256": "c" * 64},
+            },
+        }],
+    }
+
+
+def pose_template_library() -> dict:
+    return {
+        "schema_version": "pose_template_library.v1",
+        "templates": [{
+            "template_uuid": "22222222-2222-4222-8222-222222222222",
+            "display_name": "Clamp pair",
+            "description": "fixture",
+            "created_at": "2026-07-20T10:00:00Z",
+            "bundle_sha256": "d" * 64,
+            "archive": {"state": "active"},
+            "instances": [{"instance_uuid": "33333333-3333-4333-8333-333333333333", "catalog": {"name": "Clamp", "obj_id": 7}}],
+        }],
+    }
+
+
+def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console_server, page) -> None:
+    install_common_mocks(page)
+    page.add_init_script("Object.defineProperty(Crypto.prototype, 'randomUUID', { value: undefined, configurable: true })")
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    requests: list[dict] = []
+    catalog_requests = {"count": 0}
+    availability = {"available": True}
+    page.route("**/pose-templates/status", lambda route: fulfill_json(route, pose_template_source(available=availability["available"])))
+    def catalog_handler(route) -> None:
+        catalog_requests["count"] += 1
+        fulfill_json(route, pose_template_catalog())
+    page.route("**/pose-templates/catalog", catalog_handler)
+    page.route("**/pose-templates/library", lambda route: fulfill_json(route, pose_template_library()))
+
+    def preview_handler(route) -> None:
+        if route.request.method == "POST":
+            requests.append({"path": "/pose-templates/preview", "body": route.request.post_data_json})
+            fulfill_json(route, {"job_id": "preview-job", "request_id": "a" * 32}, status=202)
+        else:
+            fulfill_json(route, {
+                "schema_version": "pose_template_preview.v1",
+                "valid": True,
+                "configuration_sha256": "e" * 64,
+                "page": {"width_mm": 420, "height_mm": 297},
+                "instances": [{"instance_uuid": "browser-instance", "catalog": {"name": "Clamp", "obj_id": 7}, "compensated_contours": [[{"x_mm": 30, "y_mm": 30}, {"x_mm": 40, "y_mm": 30}, {"x_mm": 40, "y_mm": 40}, {"x_mm": 30, "y_mm": 30}]]}],
+                "errors": [],
+            })
+    page.route("**/pose-templates/preview**", preview_handler)
+    page.route("**/pose-templates/generate", lambda route: (requests.append({"path": "/pose-templates/generate", "body": route.request.post_data_json}), fulfill_json(route, {"job_id": "generate-job"}, status=202))[1])
+    page.route("**/pose-templates/catalog/*/archive", lambda route: (requests.append({"path": "/catalog/archive", "body": {}}), fulfill_json(route, {"state": "archived"}))[1])
+    page.route("**/pose-templates/library/*/clone", lambda route: (requests.append({"path": "/library/clone", "body": {}}), fulfill_json(route, {"job_id": "clone-job"}, status=202))[1])
+    page.route("**/pose-templates/catalog/upload", lambda route: (requests.append({"path": "/catalog/upload", "body": route.request.post_data or ""}), fulfill_json(route, {"job_id": "upload-job"}, status=202))[1])
+    page.route("**/jobs/upload-job", lambda route: fulfill_json(route, {"job": {"id": "upload-job", "status": "succeeded", "message": None, "tail": []}}))
+
+    page.goto(f"{console_server.url}/#/pose-templates", wait_until="networkidle")
+    expect(page.get_by_test_id("pose-templates-page")).to_be_visible()
+    expect(page.get_by_role("link", name="Pose Templates")).to_be_visible()
+    expect(page.get_by_text("Clamp", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Import legacy")).to_have_count(0)
+    expect(page.get_by_label("X print %")).to_have_value("100")
+    expect(page.get_by_label("Y print %")).to_have_value("100")
+    assert page.get_by_test_id("pose-template-preview-canvas").evaluate("element => getComputedStyle(element).backgroundColor") != "rgb(255, 255, 255)"
+    page.get_by_role("button", name="Add instance").click()
+    expect(page.get_by_label("Clamp x_mm")).to_be_visible()
+    assert page_errors == []
+    page.get_by_label("Clamp z_mm").fill("2.5")
+    page.get_by_label("X print %").fill("101")
+    expect(page.get_by_role("button", name="Generate immutable version")).to_be_enabled()
+    page.get_by_role("button", name="Generate immutable version").click()
+    expect(page.get_by_text("Immutable template generation queued")).to_be_visible()
+    assert requests[-1]["body"]["configuration"]["instances"][0]["pose"]["z_mm"] == 2.5
+    page.get_by_role("button", name="Archive").first.click()
+    page.get_by_role("button", name="Clone").click()
+    page.locator('input[accept="image/png,.png"]').set_input_files({"name": "clamp.png", "mimeType": "image/png", "buffer": b"png"})
+    with page.expect_response("**/pose-templates/catalog"):
+        page.locator('input[accept=".ply,.stl,.obj"]').set_input_files({"name": "new-clamp.stl", "mimeType": "application/octet-stream", "buffer": b"solid clamp"})
+    expect(page.get_by_text("Object added to catalog")).to_be_visible()
+    assert catalog_requests["count"] > 1
+    assert {item["path"] for item in requests} >= {"/pose-templates/generate", "/catalog/archive", "/library/clone", "/catalog/upload"}
+    generation = next(item for item in reversed(requests) if item["path"] == "/pose-templates/generate")
+    assert generation["body"]["configuration"]["print_compensation"]["x_scale"] == 1.01
+
+    availability["available"] = False
+    page.reload(wait_until="networkidle")
+    expect(page.get_by_text("PoseTemplateCreator checkout is missing")).to_be_visible()
+    expect(page.get_by_text("bash scripts/install.sh --with-posetemplatecreator")).to_be_visible()
+    expect(page.get_by_text("Clamp", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Upload CAD")).to_be_disabled()
+
+
+def test_pose_templates_add_instance_with_real_catalog_and_preview(
+    console_server, page, tmp_path: Path, monkeypatch
+) -> None:
+    working = tmp_path / "working"
+    monkeypatch.setenv("POSETESTBOT_WORKING_DATA_ROOT", working.as_posix())
+    monkeypatch.setattr(
+        pose_template_routes,
+        "REQUEST_ROOT",
+        working / "jobs" / "pose_template_requests",
+    )
+    cad = tmp_path / "browser-box.stl"
+    cad.write_bytes(trimesh.creation.box(extents=(20, 10, 10)).export(file_type="stl"))
+    import_catalog_object(
+        name="Browser box",
+        cad_path=cad,
+        catalog_root=working / "object_catalog",
+    )
+
+    install_common_mocks(page)
+    page.add_init_script("Object.defineProperty(Crypto.prototype, 'randomUUID', { value: undefined, configurable: true })")
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.goto(f"{console_server.url}/#/pose-templates", wait_until="networkidle")
+
+    expect(page.get_by_text("Browser box", exact=True)).to_be_visible()
+    page.get_by_role("button", name="Add instance").click()
+    expect(page.get_by_label("Browser box x_mm")).to_have_count(1)
+    page.get_by_role("button", name="Add instance").click()
+    expect(page.get_by_label("Browser box x_mm")).to_have_count(2)
+    page.get_by_role("button", name="Remove instance").first.click()
+    expect(page.get_by_label("Browser box x_mm")).to_have_count(1)
+    expect(page.get_by_text("All contours fit the printable work area.")).to_be_visible(timeout=15_000)
+    expect(page.get_by_role("button", name="Generate immutable version")).to_be_enabled()
+    assert page_errors == []
+
+
+def test_ground_truth_workflow_selection_and_full_placement(console_server, page) -> None:
+    install_common_mocks(page)
+    submitted: list[dict] = []
+    page.route("**/pose-templates/library", lambda route: fulfill_json(route, pose_template_library()))
+
+    def selection_handler(route) -> None:
+        if route.request.method == "POST":
+            submitted.append(route.request.post_data_json)
+            fulfill_json(route, {"job_id": "selection-job"}, status=202)
+        else:
+            fulfill_json(route, {"selection": None, "replacement_blockers": [], "ready": False})
+    page.route("**/pose-templates/runs/selection**", selection_handler)
+    page.goto(f"{console_server.url}/#/workflow/ground-truth", wait_until="networkidle")
+    expect(page.get_by_test_id("ground-truth-workflow")).to_be_visible()
+    page.get_by_role("combobox", name="Immutable template").click()
+    page.get_by_role("option", name="Clamp pair · 1 instance").click()
+    page.get_by_label("Template placement X mm").fill("12")
+    page.get_by_label("Template placement Z mm").fill("34")
+    page.get_by_label("Template placement Yaw °").fill("90")
+    page.get_by_label("I confirm this measured physical placement").click()
+    page.get_by_role("button", name="Select for run").click()
+    expect(page.get_by_text("Ground Truth selection queued")).to_be_visible()
+    assert submitted[0]["confirmed"] is True
+    assert submitted[0]["template_uuid"] == "22222222-2222-4222-8222-222222222222"
+    assert submitted[0]["placement"]["matrix"][0][3] == 12
+    assert submitted[0]["placement"]["matrix"][2][3] == 34
+
+
 def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, page) -> None:
     requests: list[dict] = []
     preflight_state = {"blocker": "missing_preflight"}
@@ -348,6 +537,11 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     expect(page.get_by_role("dialog")).to_contain_text("172.31.1.200:30301")
     expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
     page.get_by_text("I confirm this is the intended lab IIWA target.").click()
+    expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
+    page.get_by_text("I authorize motion of the real lab IIWA for this start.").click()
+    expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
+    page.get_by_text("I confirm the capture cameras and pose receiver are ready.").click()
+    expect(page.get_by_role("button", name="Queue start")).to_be_enabled()
     page.get_by_role("button", name="Queue start").click()
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
 
@@ -359,7 +553,13 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     expect(page.get_by_text("IIWA stop queued")).to_be_visible()
 
     assert commands == [
-        {"command": "start_iiwa", "robot_ip": "172.31.1.200", "robot_port": 30301},
+        {
+            "command": "start_iiwa",
+            "robot_ip": "172.31.1.200",
+            "robot_port": 30301,
+            "allow_real_robot": True,
+            "allow_cameras": True,
+        },
         {"command": "stop_iiwa", "robot_ip": "172.31.1.200", "robot_port": 30301},
     ]
 
@@ -390,6 +590,11 @@ def test_dashboard_quick_robot_controls_use_configured_target(console_server, pa
     expect(dialog).to_contain_text("172.31.1.147:30300")
     expect(dialog.get_by_role("button", name="Queue start")).to_be_disabled()
     dialog.get_by_text("I confirm this is the intended lab IIWA target.").click()
+    expect(dialog.get_by_role("button", name="Queue start")).to_be_disabled()
+    dialog.get_by_text("I authorize motion of the real lab IIWA for this start.").click()
+    expect(dialog.get_by_role("button", name="Queue start")).to_be_disabled()
+    dialog.get_by_text("I confirm the capture cameras and pose receiver are ready.").click()
+    expect(dialog.get_by_role("button", name="Queue start")).to_be_enabled()
     dialog.get_by_role("button", name="Queue start").click()
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
 
@@ -400,7 +605,13 @@ def test_dashboard_quick_robot_controls_use_configured_target(console_server, pa
     expect(page.get_by_text("IIWA stop queued")).to_be_visible()
 
     assert commands == [
-        {"command": "start_iiwa", "robot_ip": "172.31.1.147", "robot_port": 30300},
+        {
+            "command": "start_iiwa",
+            "robot_ip": "172.31.1.147",
+            "robot_port": 30300,
+            "allow_real_robot": True,
+            "allow_cameras": True,
+        },
         {"command": "stop_iiwa", "robot_ip": "172.31.1.147", "robot_port": 30300},
     ]
 

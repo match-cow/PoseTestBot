@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,7 +21,10 @@ from posetestbot.io.artifacts import (
     FRAME_METADATA_JSONL,
     HARDWARE_STATUS_REPORT,
     MODELS_DIR,
+    OBJECT_INSTANCES,
     PIPELINE_SEQUENCE_PLAN,
+    POSE_TEMPLATE_SELECTION,
+    PROCESSED_DIR,
     REWRITE_GATE_REPORT,
     REWRITE_STATUS_REPORT,
     RGB_DIR,
@@ -349,9 +353,13 @@ def _bop_export_readiness_checks(
     exports: list[Mapping[str, Any]] = []
     scene_images: dict[int, set[int]] = {}
     scene_objects: dict[tuple[int, int], set[int]] = {}
+    scene_annotation_ids: dict[tuple[int, int], list[int]] = {}
     scene_sensors: dict[int, str] = {}
     seen_scene_ids: set[int] = set()
     objectless = False
+    template_selection: dict[str, Any] | None = None
+    template_object_instances: dict[str, Any] | None = None
+    template_instance_map: dict[str, Any] | None = None
     if bop_export is not None:
         objectless = bop_export.get("objectless") is True
         raw_exports = bop_export.get("exports")
@@ -362,8 +370,9 @@ def _bop_export_readiness_checks(
         validation_ok = (
             isinstance(validation, Mapping) and validation.get("status") == "ok"
         )
+        export_schema = bop_export.get("schema_version")
         ok = (
-            bop_export.get("schema_version") == "bop_export_manifest.v2"
+            export_schema in {"bop_export_manifest.v2", "bop_export_manifest.v3"}
             and bop_export.get("format") == "bop-scenewise"
             and len(exports) > 0
             and validation_ok
@@ -373,10 +382,10 @@ def _bop_export_readiness_checks(
             path=bop_manifest_path,
             ok=ok,
             message=(
-                "bop_export_manifest.json is a validated BOP-scenewise v2 export."
+                f"bop_export_manifest.json is a validated BOP-scenewise {export_schema} export."
                 if ok
                 else (
-                    "bop_export_manifest.json must be v2, BOP-scenewise, contain "
+                    "bop_export_manifest.json must be v2/v3, BOP-scenewise, contain "
                     "scenes, and record successful validation."
                 )
             ),
@@ -388,6 +397,75 @@ def _bop_export_readiness_checks(
             },
         )
     checks.append(check)
+
+    if bop_export is not None and bop_export.get("dataset_mode") == "pose_template":
+        pose_template_path = bop_root / "posetestbot_pose_template.json"
+        instance_map_path = bop_root / "posetestbot_instance_map.json"
+        pose_template, pose_error = _load_json_object(pose_template_path)
+        instance_map, instance_error = _load_json_object(instance_map_path)
+        template_selection, selection_error = _load_json_object(
+            root / POSE_TEMPLATE_SELECTION
+        )
+        template_object_instances, objects_error = _load_json_object(
+            root / OBJECT_INSTANCES
+        )
+        template_instance_map = instance_map
+        template_summary = bop_export.get("pose_template")
+        template_ok = (
+            pose_template is not None
+            and pose_template.get("schema_version") == "posetestbot_pose_template.v1"
+            and isinstance(template_summary, Mapping)
+            and pose_template.get("template_uuid") == template_summary.get("template_uuid")
+            and pose_template.get("bundle_sha256") == template_summary.get("bundle_sha256")
+            and template_selection is not None
+            and template_selection.get("schema_version") == "pose_template_selection.v1"
+            and template_selection.get("placement_confirmed") is True
+            and pose_template.get("template_uuid") == template_selection.get("template_uuid")
+            and pose_template.get("bundle_sha256") == template_selection.get("bundle_sha256")
+            and pose_template.get("configuration_sha256")
+            == template_selection.get("configuration_sha256")
+            and pose_template.get("template_base_from_pose_template")
+            == template_selection.get("template_base_from_pose_template")
+            and template_object_instances is not None
+            and template_object_instances.get("schema_version") == "object_instances.v1"
+            and template_object_instances.get("template_uuid")
+            == template_selection.get("template_uuid")
+            and template_object_instances.get("bundle_sha256")
+            == template_selection.get("bundle_sha256")
+        )
+        instances = instance_map.get("instances") if instance_map is not None else None
+        instance_ok = (
+            instance_map is not None
+            and instance_map.get("schema_version") == "posetestbot_bop_instance_map.v1"
+            and isinstance(instances, list)
+        )
+        checks.extend(
+            [
+                _check(
+                    name="bop_pose_template_provenance",
+                    path=pose_template_path,
+                    ok=template_ok,
+                    message=(
+                        "Pose-template selection and BOP manifest provenance agree."
+                        if template_ok
+                        else (
+                            "Pose-template provenance is missing or inconsistent: "
+                            f"bop={pose_error}, selection={selection_error}, objects={objects_error}."
+                        )
+                    ),
+                ),
+                _check(
+                    name="bop_instance_map",
+                    path=instance_map_path,
+                    ok=instance_ok,
+                    message=(
+                        "BOP GT instance-map sidecar is present."
+                        if instance_ok
+                        else f"BOP GT instance-map sidecar is invalid: {instance_error}."
+                    ),
+                ),
+            ]
+        )
 
     for index, export in enumerate(exports):
         scene_value = export.get("scene_folder")
@@ -464,18 +542,22 @@ def _bop_export_readiness_checks(
         if scene_gt is not None:
             for image_id, annotations in scene_gt.items():
                 object_ids = set()
+                annotation_ids: list[int] = []
                 if isinstance(annotations, list):
                     for annotation in annotations:
                         if not isinstance(annotation, Mapping):
                             ok = False
                             continue
                         try:
-                            object_ids.add(int(annotation["obj_id"]))
+                            annotation_obj_id = int(annotation["obj_id"])
+                            object_ids.add(annotation_obj_id)
+                            annotation_ids.append(annotation_obj_id)
                         except (KeyError, TypeError, ValueError):
                             ok = False
                 else:
                     ok = False
                 scene_objects[(scene_id, int(image_id))] = object_ids
+                scene_annotation_ids[(scene_id, int(image_id))] = annotation_ids
         if objectless and (
             any(scene_objects.get((scene_id, image_id), set()) for image_id in image_ids)
             or (scene_folder / "mask").exists()
@@ -668,6 +750,137 @@ def _bop_export_readiness_checks(
             details={"objectless": True, "model_count": 0},
         )
     checks.append(check)
+
+    if template_selection is not None and template_object_instances is not None:
+        selection_path = root / POSE_TEMPLATE_SELECTION
+        object_rows = template_object_instances.get("instances")
+        map_rows = template_instance_map.get("instances") if template_instance_map else None
+        selection_digest_ok = (
+            selection_path.is_file()
+            and template_object_instances.get("selection_sha256")
+            == hashlib.sha256(selection_path.read_bytes()).hexdigest()
+        )
+        object_by_uuid = {
+            str(item.get("instance_uuid")): item
+            for item in object_rows or []
+            if isinstance(item, Mapping)
+        } if isinstance(object_rows, list) else {}
+        expected_gt_keys = {
+            (scene_id, image_id, gt_id)
+            for (scene_id, image_id), ids in scene_annotation_ids.items()
+            for gt_id in range(len(ids))
+        }
+        mapped_gt_keys: set[tuple[int, int, int]] = set()
+        mapping_ok = isinstance(map_rows, list) and bool(object_by_uuid)
+        if isinstance(map_rows, list):
+            for row in map_rows:
+                if not isinstance(row, Mapping):
+                    mapping_ok = False
+                    continue
+                try:
+                    key = (int(row["scene_id"]), int(row["im_id"]), int(row["gt_id"]))
+                    obj_id = int(row["obj_id"])
+                    instance = object_by_uuid[str(row["instance_uuid"])]
+                    annotation_obj_id = scene_annotation_ids[(key[0], key[1])][key[2]]
+                except (KeyError, IndexError, TypeError, ValueError):
+                    mapping_ok = False
+                    continue
+                mapped_gt_keys.add(key)
+                if (
+                    obj_id != annotation_obj_id
+                    or int(instance.get("obj_id", -1)) != obj_id
+                    or instance.get("catalog_uuid") != row.get("catalog_uuid")
+                ):
+                    mapping_ok = False
+            mapping_ok = mapping_ok and mapped_gt_keys == expected_gt_keys
+
+        render_ok = True
+        render_details: dict[str, str] = {}
+        expected_render_instances: set[tuple[str, str, int]] = set()
+        for item in object_by_uuid.values():
+            try:
+                expected_render_instances.add(
+                    (str(item["instance_uuid"]), str(item["catalog_uuid"]), int(item["obj_id"]))
+                )
+            except (KeyError, TypeError, ValueError):
+                render_ok = False
+        for sensor_name in scene_sensors.values():
+            candidates = [
+                root / PROCESSED_DIR / "rectified" / sensor_name / "blenderproc" / "output"
+                / "posetestbot_render_instances.json",
+                root / PROCESSED_DIR / "synchronized" / sensor_name / "blenderproc" / "output"
+                / "posetestbot_render_instances.json",
+            ]
+            sidecar_path = next((path for path in candidates if path.is_file()), candidates[-1])
+            sidecar, sidecar_error = _load_json_object(sidecar_path)
+            rows = sidecar.get("instances") if sidecar else None
+            actual: set[tuple[str, str, int]] = set()
+            if isinstance(rows, list):
+                for item in rows:
+                    if not isinstance(item, Mapping):
+                        render_ok = False
+                        continue
+                    try:
+                        actual.add(
+                            (
+                                str(item["instance_uuid"]),
+                                str(item["catalog_uuid"]),
+                                int(item["obj_id"]),
+                            )
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        render_ok = False
+            sensor_ok = (
+                sidecar is not None
+                and sidecar.get("schema_version") == "posetestbot_render_instances.v1"
+                and sidecar.get("blenderproc_version") == "2.8.0"
+                and sidecar.get("identity_contract")
+                == "bop_gt_index_matches_loaded_instance_order.v1"
+                and actual == expected_render_instances
+            )
+            render_ok = render_ok and sensor_ok
+            render_details[sensor_name] = "ok" if sensor_ok else str(sidecar_error or "mismatch")
+
+        geometry_ok = isinstance(models_info, Mapping)
+        if isinstance(models_info, Mapping):
+            geometry_by_obj: dict[int, str] = {}
+            for item in object_by_uuid.values():
+                try:
+                    obj_id = int(item["obj_id"])
+                except (KeyError, TypeError, ValueError):
+                    geometry_ok = False
+                    continue
+                digest = str(item.get("canonical_ply_sha256", ""))
+                if obj_id in geometry_by_obj and geometry_by_obj[obj_id] != digest:
+                    geometry_ok = False
+                geometry_by_obj[obj_id] = digest
+            for obj_id, digest in geometry_by_obj.items():
+                model = models_info.get(str(obj_id))
+                geometry = model.get("posetestbot_geometry") if isinstance(model, Mapping) else None
+                if not isinstance(geometry, Mapping) or geometry.get("source_sha256") != digest:
+                    geometry_ok = False
+        evidence_ok = selection_digest_ok and mapping_ok and render_ok and geometry_ok
+        checks.append(
+            _check(
+                name="bop_pose_template_evidence_agreement",
+                path=root / OBJECT_INSTANCES,
+                ok=evidence_ok,
+                message=(
+                    "Selection, geometry, rendered identities, BOP GT indices, and instance provenance agree."
+                    if evidence_ok
+                    else "Pose-template selection, geometry, rendering, and BOP instance evidence disagree."
+                ),
+                details={
+                    "selection_digest_ok": selection_digest_ok,
+                    "geometry_ok": geometry_ok,
+                    "mapping_ok": mapping_ok,
+                    "render_ok": render_ok,
+                    "render_sensors": render_details,
+                    "expected_gt_count": len(expected_gt_keys),
+                    "mapped_gt_count": len(mapped_gt_keys),
+                },
+            )
+        )
 
     if require_targets and bop_export is not None:
         profile_statuses = {

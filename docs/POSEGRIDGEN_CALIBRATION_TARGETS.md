@@ -69,8 +69,8 @@ for an inactive library bundle.
 
 Selection copies the unchanged bundle to
 `<run>/calibration_targets/<target_id>/`, writes the placement-aware root
-`<run>/calibration_target.json`, and adds `run_config.v1.calibration_target`
-hash/provenance fields. The bundle, root target, run config, and dataset
+`<run>/calibration_target.json`, and adds calibration-target hash/provenance
+fields to the run config. The bundle, root target, run config, and dataset
 manifest are promoted together with rollback on failure.
 
 Intent-level calculation snapshots the bundle below

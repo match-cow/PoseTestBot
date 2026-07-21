@@ -154,6 +154,31 @@ def test_preflight_does_not_require_blenderproc_for_objectless_render(
     assert report["overall_status"] == "warning"
 
 
+def test_preflight_blocks_pose_template_gt_without_confirmed_selection(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "template-run"
+    config = create_run_config(
+        run_root=run_root,
+        sequence_id="sync_to_bop_dry_run",
+        dataset_mode="pose_template",
+        plan_only=True,
+    )
+    write_run_config(run_root, config)
+
+    report = build_run_preflight(
+        run_root,
+        include_sensor_status=False,
+        collect_robot=fake_robot_status,
+        collect_sensors=fake_sensor_status,
+        collect_runtimes=lambda: runtime_status(blenderproc_available=False),
+    )
+
+    check = next(item for item in report["checks"] if item["name"] == "pose_template_selection")
+    assert check["status"] == "error"
+    assert "requires a valid confirmed pose template" in check["message"]
+
+
 def test_run_preflight_queue_summary_tracks_missing_ready_and_stale(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     config = create_run_config(run_root=run_root).to_dict()

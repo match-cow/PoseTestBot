@@ -1,10 +1,25 @@
 import blenderproc as bproc  # isort:skip
 
 import argparse
+import importlib.metadata
 import json
 import os
 
 import numpy as np
+
+
+SUPPORTED_BLENDERPROC_VERSION = "2.8.0"
+
+
+def validated_blenderproc_version(*, pose_template):
+    """Reject unqualified renderer versions before producing GT evidence."""
+    version = importlib.metadata.version("blenderproc")
+    if pose_template and version != SUPPORTED_BLENDERPROC_VERSION:
+        raise RuntimeError(
+            "Pose-template instance GT is validated only with BlenderProc "
+            f"{SUPPORTED_BLENDERPROC_VERSION}; found {version}"
+        )
+    return version
 
 
 def parse_arguments():
@@ -23,7 +38,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def load_object(object_dir, object_name):
+def load_object(object_dir, object_name, *, obj_id=None, instance_uuid=None, mesh=None, transform=None):
     """
     Loads a 3D object from a PLY file and sets its initial pose and scale.
 
@@ -34,8 +49,8 @@ def load_object(object_dir, object_name):
     Returns:
         bproc.types.MeshObject: The loaded object.
     """
-    object_path = os.path.join(object_dir, f"{object_name}.ply")
-    obj2template_path = os.path.join(object_dir, f"{object_name}.npy")
+    object_path = os.path.join(object_dir, mesh or f"{object_name}.ply")
+    obj2template_path = os.path.join(object_dir, transform or f"{object_name}.npy")
 
     print(f"Loading object: {object_name}")
     print(f"Object Path: {object_path}")
@@ -51,7 +66,9 @@ def load_object(object_dir, object_name):
     object2template = np.load(obj2template_path)
     obj.set_local2world_mat(object2template)
     obj.set_scale([0.001, 0.001, 0.001])
-    obj.set_cp("category_id", object_name)
+    obj.set_cp("category_id", obj_id if obj_id is not None else object_name)
+    if instance_uuid is not None:
+        obj.set_cp("posetestbot_instance_uuid", instance_uuid)
     return obj
 
 
@@ -66,9 +83,22 @@ def load_objects(objects_dir, objects_json):
     Returns:
         list: A list of loaded bproc.types.MeshObject objects.
     """
-    objects_list = [
-        load_object(objects_dir, object_name) for object_name in objects_json.keys()
-    ]
+    if objects_json.get("schema_version") == "blenderproc_object_instances.v1":
+        objects_list = [
+            load_object(
+                objects_dir,
+                item["name"],
+                obj_id=int(item["obj_id"]),
+                instance_uuid=item["instance_uuid"],
+                mesh=item["mesh"],
+                transform=item["transform"],
+            )
+            for item in objects_json["instances"]
+        ]
+    else:
+        objects_list = [
+            load_object(objects_dir, object_name) for object_name in objects_json.keys()
+        ]
     return objects_list
 
 
@@ -109,7 +139,7 @@ def setup_camera(
         bproc.camera.add_camera_pose(cam2world)
 
 
-def render_and_write(output_dir, objects_list):
+def render_and_write(output_dir, objects_list, instance_records=None, *, blenderproc_version=None):
     """
     Renders the scene and writes the output to BOP format.
 
@@ -130,6 +160,46 @@ def render_and_write(output_dir, objects_list):
         annotation_unit="mm",
         frames_per_chunk=999999,
     )
+    if instance_records is not None:
+        scene_dir = os.path.join(output_dir, "train_pbr", "000000")
+        with open(os.path.join(scene_dir, "scene_gt.json"), "r") as handle:
+            scene_gt = json.load(handle)
+        frames = {}
+        for image_id, annotations in scene_gt.items():
+            if len(annotations) != len(instance_records):
+                raise RuntimeError(
+                    f"BlenderProc {blenderproc_version} wrote {len(annotations)} GT "
+                    f"annotations for {len(instance_records)} loaded instances in frame {image_id}"
+                )
+            frame_instances = []
+            for gt_id, (annotation, instance) in enumerate(zip(annotations, instance_records)):
+                if int(annotation["obj_id"]) != int(instance["obj_id"]):
+                    raise RuntimeError(
+                        "BlenderProc BOP annotation order does not preserve the validated "
+                        f"instance order in frame {image_id}, GT index {gt_id}"
+                    )
+                frame_instances.append(
+                    {
+                        "gt_id": gt_id,
+                        "obj_id": int(instance["obj_id"]),
+                        "instance_uuid": instance["instance_uuid"],
+                        "catalog_uuid": instance["catalog_uuid"],
+                    }
+                )
+            frames[str(image_id)] = frame_instances
+        with open(os.path.join(scene_dir, "posetestbot_render_instances.json"), "w") as handle:
+            json.dump(
+                {
+                    "schema_version": "posetestbot_render_instances.v1",
+                    "blenderproc_version": blenderproc_version,
+                    "supported_blenderproc_version": SUPPORTED_BLENDERPROC_VERSION,
+                    "identity_contract": "bop_gt_index_matches_loaded_instance_order.v1",
+                    "instances": instance_records,
+                    "frames": frames,
+                },
+                handle,
+                sort_keys=True,
+            )
 
 
 def main():
@@ -146,13 +216,27 @@ def main():
     with open(objects_json_path, "r") as f:
         objects_json = json.load(f)
 
+    instance_records = (
+        objects_json["instances"]
+        if objects_json.get("schema_version") == "blenderproc_object_instances.v1"
+        else None
+    )
+    blenderproc_version = validated_blenderproc_version(
+        pose_template=instance_records is not None
+    )
+
     objects_dir = os.path.join(args.output_dir, "objects")
     objects_list = load_objects(objects_dir, objects_json)
 
     setup_light()
     setup_camera(args.camera_matrix, args.poses_file)
 
-    render_and_write(args.output_dir, objects_list)
+    render_and_write(
+        args.output_dir,
+        objects_list,
+        instance_records,
+        blenderproc_version=blenderproc_version,
+    )
 
 
 if __name__ == "__main__":

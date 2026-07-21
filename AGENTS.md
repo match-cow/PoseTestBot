@@ -32,7 +32,8 @@ and metric reporting belong in a separate consumer repo.
 - Preserve raw capture data. Synchronization/export work should create derived
   artifacts, usually under `processed/`, rather than renaming or deleting the
   only copy of frames.
-- Keep progress current in `docs/REWRITE_PROGRESS.md`.
+- Keep completed status current in `docs/REWRITE_PROGRESS.md` and unfinished
+  work in `docs/REWRITE_REMAINING_WORK.md`.
 
 ## Current Lab Hardware
 
@@ -86,8 +87,10 @@ Keep or extend these areas:
 - `scripts/run_aruco_stage.py` and `posetestbot.aruco.coverage` as calibration
   target support.
 - BlenderProc preparation/render planning for optional dataset GT/masks.
+- `posetestbot.pose_templates.*` catalog, exact slicing, immutable bundle,
+  run-selection, and object-instance preparation contracts.
 - `scripts/run_bop_export_stage.py` and `posetestbot.bop.writer`.
-- Flask transition APIs for jobs, capture status, hardware/sensor/runtime
+- Flask operator APIs for jobs, capture status, hardware/sensor/runtime
   status, run config, preflight, calibration, sync quality, and pipeline
   sequence submission.
 
@@ -127,9 +130,13 @@ Do not reintroduce downstream estimator/evaluator behavior here:
   `ranking.json`, `checks.json`, `candidate_profiles.json`, the selected target
   bundle, and explicit promotion evidence.
 - BlenderProc render plan artifact: `blenderproc_render_plan.json`.
+- Pose-template artifacts: global `object_catalog/object_catalog.json`, global
+  immutable `pose_templates/<uuid>/pose_template_bundle.json`, run-owned
+  `pose_template_selection.json`, and `object_instances.json`.
 - BOP export artifacts: `bop/bop_export_manifest.json`,
   `bop/posetestbot_bop_frame_map.json`, `bop/test_targets_bop19.json`,
-  `bop/models/models_info.json`, optional
+  `bop/models/models_info.json`, pose-template
+  `bop/posetestbot_pose_template.json` and `bop/posetestbot_instance_map.json`, optional
   `bop/posetestbot_multiview_targets.json`, and optional
   `bop/posetestbot_coco_annotations.json`.
 

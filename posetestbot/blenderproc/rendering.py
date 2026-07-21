@@ -185,6 +185,23 @@ def validate_render_output(output: str | Path, *, expected_frame_count: int) -> 
                 f"BlenderProc {folder_name} files do not match GT annotations: "
                 f"expected {sorted(expected_masks)}, got {sorted(actual)}"
             )
+    instance_sidecar = scene / "posetestbot_render_instances.json"
+    prepared_instances = scene.parent.parent / "objects.json"
+    if prepared_instances.is_file():
+        prepared = _read_json_mapping(prepared_instances)
+        if prepared.get("schema_version") == "blenderproc_object_instances.v1":
+            rendered = _read_json_mapping(instance_sidecar)
+            if rendered.get("schema_version") != "posetestbot_render_instances.v1":
+                raise ValueError("Rendered instance identity sidecar has the wrong schema")
+            if rendered.get("instances") != prepared.get("instances"):
+                raise ValueError("Rendered instance identity does not match prepared objects")
+            if rendered.get("blenderproc_version") != "2.8.0":
+                raise ValueError("Rendered pose-template GT was not produced by BlenderProc 2.8.0")
+            if rendered.get("identity_contract") != "bop_gt_index_matches_loaded_instance_order.v1":
+                raise ValueError("Rendered instance identity contract is missing or unsupported")
+            frames = rendered.get("frames")
+            if not isinstance(frames, Mapping) or set(frames) != expected_json_ids:
+                raise ValueError("Rendered instance identity does not cover every output frame")
 
 
 def _workspace_command(job: RenderJob, workspace: Path) -> list[str]:

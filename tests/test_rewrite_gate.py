@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -149,6 +150,108 @@ def test_bop_export_readiness_accepts_consistent_objectless_dataset(tmp_path: Pa
     report = build_bop_export_readiness_gate_report(run_root)
 
     assert report["overall_status"] == "ready"
+
+
+def test_bop_export_readiness_requires_matching_pose_template_instance_evidence(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "template-bop"
+    populate_bop_export(run_root)
+    template_uuid = "11111111-1111-4111-8111-111111111111"
+    instance_uuid = "22222222-2222-4222-8222-222222222222"
+    catalog_uuid = "33333333-3333-4333-8333-333333333333"
+    matrix = {"matrix": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
+    selection = {
+        "schema_version": "pose_template_selection.v1",
+        "template_uuid": template_uuid,
+        "bundle_sha256": "a" * 64,
+        "configuration_sha256": "b" * 64,
+        "placement_confirmed": True,
+        "template_base_from_pose_template": matrix,
+    }
+    write_json(run_root / "pose_template_selection.json", selection)
+    selection_sha = hashlib.sha256(
+        (run_root / "pose_template_selection.json").read_bytes()
+    ).hexdigest()
+    object_instances = {
+        "schema_version": "object_instances.v1",
+        "template_uuid": template_uuid,
+        "bundle_sha256": "a" * 64,
+        "selection_sha256": selection_sha,
+        "instances": [{
+            "instance_uuid": instance_uuid,
+            "catalog_uuid": catalog_uuid,
+            "obj_id": 1,
+            "canonical_ply_sha256": "c" * 64,
+        }],
+    }
+    write_json(run_root / "object_instances.json", object_instances)
+    pose_sidecar = {
+        "schema_version": "posetestbot_pose_template.v1",
+        "template_uuid": template_uuid,
+        "bundle_sha256": "a" * 64,
+        "configuration_sha256": "b" * 64,
+        "template_base_from_pose_template": matrix,
+    }
+    write_json(run_root / BOP_DIR / "posetestbot_pose_template.json", pose_sidecar)
+    write_json(
+        run_root / BOP_DIR / "posetestbot_instance_map.json",
+        {
+            "schema_version": "posetestbot_bop_instance_map.v1",
+            "instances": [{
+                "scene_id": 1,
+                "im_id": 0,
+                "gt_id": 0,
+                "obj_id": 1,
+                "instance_uuid": instance_uuid,
+                "catalog_uuid": catalog_uuid,
+            }],
+        },
+    )
+    write_json(
+        run_root / "processed" / "synchronized" / "realsense_123" / "blenderproc"
+        / "output" / "posetestbot_render_instances.json",
+        {
+            "schema_version": "posetestbot_render_instances.v1",
+            "blenderproc_version": "2.8.0",
+            "identity_contract": "bop_gt_index_matches_loaded_instance_order.v1",
+            "instances": [{
+                "instance_uuid": instance_uuid,
+                "catalog_uuid": catalog_uuid,
+                "obj_id": 1,
+            }],
+        },
+    )
+    models_info = json.loads(
+        (run_root / BOP_DIR / "models" / "models_info.json").read_text()
+    )
+    models_info["1"]["posetestbot_geometry"] = {"source_sha256": "c" * 64}
+    write_json(run_root / BOP_DIR / "models" / "models_info.json", models_info)
+    manifest_path = run_root / BOP_DIR / BOP_EXPORT_MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    manifest.update({
+        "schema_version": "bop_export_manifest.v3",
+        "dataset_mode": "pose_template",
+        "pose_template": {
+            "template_uuid": template_uuid,
+            "bundle_sha256": "a" * 64,
+        },
+    })
+    write_json(manifest_path, manifest)
+
+    report = build_bop_export_readiness_gate_report(run_root)
+
+    assert report["overall_status"] == "ready"
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["bop_pose_template_evidence_agreement"]["status"] == "ready"
+
+    instance_map = json.loads(
+        (run_root / BOP_DIR / "posetestbot_instance_map.json").read_text()
+    )
+    instance_map["instances"][0]["instance_uuid"] = "44444444-4444-4444-8444-444444444444"
+    write_json(run_root / BOP_DIR / "posetestbot_instance_map.json", instance_map)
+    blocked = build_bop_export_readiness_gate_report(run_root)
+    assert blocked["overall_status"] == "blocked"
 
 
 def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> None:

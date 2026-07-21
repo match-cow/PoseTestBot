@@ -26,6 +26,9 @@ def test_sensor_adapter_registry_lists_supported_capture_scripts() -> None:
     assert adapters["realsense_d435"]["supported_resolutions"] == ["720p"]
     assert adapters["zed_2i"]["supported_resolutions"] == ["720p", "360p"]
     assert adapters["oak_d_pro"]["sdk_module"] == "depthai"
+    assert adapters["realsense_d435"]["live_rgb_preview_supported"] is True
+    assert adapters["oak_d_pro"]["live_rgb_preview_supported"] is True
+    assert adapters["zed_2i"]["live_rgb_preview_supported"] is False
 
 
 def test_sensor_registry_builds_folder_names_and_uv_capture_commands() -> None:

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from posetestbot.bop.writer import (
     copy_bop_models,
+    copy_bop_instance_models,
     export_sensor_scene_to_bop,
     targets_filename,
     validate_bop_dataset,
@@ -18,7 +19,9 @@ from posetestbot.bop.writer import (
     write_bop_dataset_info,
     write_bop_export_manifest,
     write_bop_frame_map,
+    write_bop_instance_map,
     write_bop_multiview_targets,
+    write_bop_pose_template,
     write_bop_targets,
 )
 from posetestbot.calibration.profiles import (
@@ -31,11 +34,14 @@ from posetestbot.io.artifacts import (
     BOP_COCO_ANNOTATIONS,
     BOP_EXPORT_MANIFEST,
     BOP_FRAME_MAP_JSON,
+    BOP_INSTANCE_MAP,
     BOP_MULTIVIEW_TARGETS,
+    BOP_POSE_TEMPLATE,
     BOP_TARGETS_BOP19,
     CALIBRATION_PROFILES,
     DEPTH_DIR,
     MODELS_DIR,
+    OBJECT_INSTANCES,
     PROCESSED_DIR,
     RGB_DIR,
     SYNCHRONIZED_DIR,
@@ -47,6 +53,11 @@ from posetestbot.io.manifest import (
     write_run_manifest,
 )
 from posetestbot.objects.registry import load_object_registry
+from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pose_templates.selection import (
+    load_pose_template_selection,
+    prepare_object_instances,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -190,11 +201,27 @@ def main() -> None:
 
         staging_folder.parent.mkdir(parents=True, exist_ok=True)
         staging_folder.mkdir(parents=False, exist_ok=False)
-        registry = load_object_registry(object_folder)
-        selected_objects = list(
-            registry.validate_selection(
-                [] if args.objectless else (
-                    args.object_name if args.object_name is not None else registry.valid_names
+        try:
+            run_config = load_run_config_for_run_root(run_root)
+        except FileNotFoundError:
+            run_config = None
+        dataset_mode = (
+            str(run_config.get("dataset_mode"))
+            if run_config is not None
+            else ("objectless" if args.objectless else "legacy_registry")
+        )
+        template_mode = dataset_mode == "pose_template" and not args.objectless
+        selection = load_pose_template_selection(run_root) if template_mode else None
+        object_instances = prepare_object_instances(run_root) if template_mode else None
+        registry = None if template_mode else load_object_registry(object_folder)
+        selected_objects = (
+            sorted({str(item["name"]) for item in object_instances["instances"]})
+            if object_instances is not None
+            else list(
+                registry.validate_selection(
+                    [] if args.objectless else (
+                        args.object_name if args.object_name is not None else registry.valid_names
+                    )
                 )
             )
         )
@@ -203,9 +230,14 @@ def main() -> None:
         if args.objectless:
             object_name_to_id = {}
         if not args.no_model_export:
-            object_name_to_id = {
-                name: registry.id_mapping[name] for name in selected_objects
-            }
+            object_name_to_id = (
+                {
+                    str(item["instance_uuid"]): int(item["obj_id"])
+                    for item in object_instances["instances"]
+                }
+                if object_instances is not None
+                else {name: registry.id_mapping[name] for name in selected_objects}
+            )
             geometry_cache = None
             previous_models_info = output_folder / MODELS_DIR / "models_info.json"
             if previous_models_info.is_file():
@@ -215,7 +247,14 @@ def main() -> None:
                     loaded_cache = None
                 if isinstance(loaded_cache, dict):
                     geometry_cache = loaded_cache
-            if selected_objects:
+            if object_instances is not None:
+                object_models = copy_bop_instance_models(
+                    staging_folder,
+                    run_root,
+                    object_instances,
+                    geometry_cache=geometry_cache,
+                )
+            elif selected_objects:
                 object_models = copy_bop_models(
                     staging_folder,
                     object_folder,
@@ -240,6 +279,11 @@ def main() -> None:
                     overwrite=False,
                     calibration_profile=calibration_profile,
                     object_name_to_id=object_name_to_id,
+                    template_instances=(
+                        object_instances["instances"]
+                        if object_instances is not None
+                        else None
+                    ),
                 )
             )
 
@@ -263,6 +307,14 @@ def main() -> None:
             )
 
         frame_map_path = write_bop_frame_map(staging_folder, exports)
+        instance_map_path = (
+            write_bop_instance_map(staging_folder, exports) if template_mode else None
+        )
+        pose_template_path = (
+            write_bop_pose_template(staging_folder, selection)
+            if selection is not None
+            else None
+        )
         dataset_info_path = write_bop_dataset_info(
             staging_folder,
             exports,
@@ -288,8 +340,37 @@ def main() -> None:
             dataset_info_path=dataset_info_path,
             validation=validation,
             selected_objects=selected_objects,
-            stable_id_mapping=registry.id_mapping,
-            registry_provenance=registry.provenance(),
+            stable_id_mapping=(
+                registry.id_mapping
+                if registry is not None
+                else {
+                    str(item["catalog_uuid"]): int(item["obj_id"])
+                    for item in object_instances["instances"]
+                }
+            ),
+            registry_provenance=(
+                registry.provenance()
+                if registry is not None
+                else {
+                    "schema_version": "object_instances.v1",
+                    "valid_count": len(object_instances["instances"]),
+                    "invalid_count": 0,
+                    "template_uuid": object_instances["template_uuid"],
+                }
+            ),
+            dataset_mode=dataset_mode,
+            pose_template_provenance=(
+                {
+                    "template_uuid": selection["template_uuid"],
+                    "bundle_sha256": selection["bundle_sha256"],
+                    "configuration_sha256": selection["configuration_sha256"],
+                    "instance_count": len(selection["instances"]),
+                }
+                if selection is not None
+                else None
+            ),
+            instance_map_path=instance_map_path,
+            pose_template_path=pose_template_path,
         )
         replace_directory(staging_folder, output_folder)
 
@@ -301,6 +382,10 @@ def main() -> None:
         }
         if object_models:
             artifacts[MODELS_DIR] = output_folder / MODELS_DIR
+        if object_instances is not None:
+            artifacts[OBJECT_INSTANCES] = run_root / OBJECT_INSTANCES
+            artifacts[BOP_INSTANCE_MAP] = output_folder / BOP_INSTANCE_MAP
+            artifacts[BOP_POSE_TEMPLATE] = output_folder / BOP_POSE_TEMPLATE
         if calibration_profiles_path is not None:
             artifacts[CALIBRATION_PROFILES] = calibration_profiles_path
         for export in exports:

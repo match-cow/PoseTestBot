@@ -25,6 +25,7 @@ from posetestbot.sensors.previews import (
     resolve_preview_image,
     stop_preview,
 )
+from posetestbot.sensors.registry import get_sensor_adapter
 from posetestbot.sensors.snapshots import (
     build_snapshot_command,
     load_snapshot_manifest,
@@ -302,6 +303,9 @@ def _preview_submission(
     jpeg_quality: int,
 ) -> Any:
     key = _sensor_key(spec)
+    adapter = get_sensor_adapter(str(spec.get("sensor_type", "")))
+    if not adapter.live_rgb_preview_supported:
+        raise ValueError(f"Live RGB preview is not supported for {adapter.display_name}.")
     preview_root = preview_stream_root()
     command = build_preview_command(
         preview_root=preview_root,

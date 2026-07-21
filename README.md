@@ -27,6 +27,8 @@ project.
   legacy ArUcoGridGen import, split marker detection/pose solving,
   optional RealSense color intrinsic calibration, explicit hand-eye/known-grid
   extrinsic solving, selection-gated promotion, and derived RGB-D rectification.
+- Pinned PoseTemplateCreator CAD catalog, exact full-pose slicing, immutable
+  printable pose templates, run placement, and per-instance object GT.
 - BlenderProc preparation/render planning for optional GT and masks.
 - BOP dataset export, model metadata, targets, frame maps, and optional
   multiview/COCO sidecars.
@@ -37,7 +39,7 @@ project.
 Install the Python 3.12 dependencies and initialize the pinned target generator:
 
 ```bash
-bash scripts/install.sh --with-posegridgen
+bash scripts/install.sh --with-posegridgen --with-posetemplatecreator
 ```
 
 Run Python entry points through `uv`:
@@ -101,6 +103,10 @@ registry entry by default; repeat `--object-name NAME` for a subset, or use
 `--objectless` for a camera-only RGB-D run. BOP IDs come from the complete
 alphabetically sorted registry, so subset IDs can contain gaps. Legacy configs
 infer all currently valid objects with a compatibility warning.
+For the managed pose-template workflow, create the run with
+`--dataset-mode pose_template`, then select and confirm an immutable template
+in the console's **Workflow → Ground Truth** phase. See
+[`docs/POSETEMPLATECREATOR_OBJECT_GT.md`](docs/POSETEMPLATECREATOR_OBJECT_GT.md).
 For example, a measured flange-to-TCP edge can be recorded at creation time:
 
 ```bash
@@ -266,13 +272,15 @@ uv run python scripts/run_bop_export_stage.py working_data/example_run \
   --object-folder object_models
 ```
 
-The transactional export emits `bop_export_manifest.v2` and uses standard
+The transactional export emits `bop_export_manifest.v3` and uses standard
 BOP-scenewise paths:
 
 ```text
 bop/
 ├── dataset_info.json
 ├── posetestbot_bop_frame_map.json
+├── posetestbot_pose_template.json       # pose-template runs
+├── posetestbot_instance_map.json        # pose-template runs
 ├── models/
 └── <split>/<scene_id>/
     ├── rgb/
@@ -300,6 +308,11 @@ The export preserves:
 - `models/obj_XXXXXX.ply`,
 - `models/models_info.json`,
 - `test_targets_bop19.json`.
+
+Pose-template runs load every physical instance independently in BlenderProc
+2.8.0. Duplicate instances share one stable numeric `obj_id` and one exported
+model, while their masks and `scene_gt` rows retain distinct immutable instance
+UUIDs in PoseTestBot sidecars.
 
 ## Pipeline Sequences
 
@@ -345,8 +358,9 @@ the selected run are rejected. Installed deployments may set
 and an installed command uses its current working directory. CLI tools continue
 to accept explicit paths.
 
-The bundled console has desktop routes for Dashboard, Devices, Cell, Workflow,
-and Jobs. The read-only Cell page renders the HRI template,
+The bundled console has desktop routes for Dashboard, Devices, Cell,
+Calibration Targets, Pose Templates, Workflow, and Jobs. The read-only Cell
+page renders the HRI template,
 base/flange/TCP proxies, calibrated cameras, selected PLY objects, calibration
 target, and exact recorded trajectories in right-handed Z-up millimetres.
 Missing frame edges remain visibly unresolved, and a component/provenance list
@@ -356,6 +370,9 @@ ordinary stage forms: current preflight evidence is required, camera previews
 are stopped first, and two fresh acknowledgements send `allow_cameras` and
 `allow_real_robot` together in that one request. A non-plan-only capture
 sequence is rejected by `/pipeline/run-config`; use Advanced Capture instead.
+Manual **Start IIWA** controls also require a fresh target confirmation plus
+both execution acknowledgements; **Stop IIWA** remains available without
+motion-start gates.
 
 The checked-in `posetestbot/web/static/ui/` build is what Flask and installed
 wheels serve, so Bun is not a runtime dependency. Frontend development uses the
@@ -377,6 +394,8 @@ Important endpoints:
 
 - `GET /ui/bootstrap`
 - `GET /ui/runs`
+- `GET /ui/cell-scene`
+- `GET /ui/cell-scene/timeline`
 - `GET /robot/status`
 - `POST /run-command`
 - `GET /sensors/status`
@@ -394,6 +413,13 @@ Important endpoints:
 - `GET|POST /calibration/attempts`
 - `GET /calibration/attempts/<attempt_id>`
 - `POST /calibration/attempts/<attempt_id>/promote`
+- `GET /pose-templates/status`
+- `GET /pose-templates/catalog`
+- `POST /pose-templates/catalog/upload`
+- `POST /pose-templates/preview`
+- `POST /pose-templates/generate`
+- `GET /pose-templates/library`
+- `GET|POST /pose-templates/runs/selection`
 - `POST /hardware/status`
 - `GET|POST /run-config`
 - `GET|POST /pipeline/preflight`
@@ -420,7 +446,8 @@ uv run python scripts/run_rewrite_status.py working_data/example_run --write
 ## Removed Legacy Entry Points
 
 The destructive multi-camera sync/capture wrappers, `realsense_multi.py`, the
-shell BlenderProc wrapper/preparation script, ROI generators, and superseded
+duplicate `main.py` web launcher, legacy `aruco_pose_estimation.py`, shell
+BlenderProc wrapper/preparation script, ROI generators, and superseded
 transform scripts were removed. Use the supported replacements:
 
 - capture: `run_capture_plan_stage.py`, `run_capture_plan_preflight.py`, and
@@ -441,3 +468,6 @@ UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 git diff --check
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 ```
+
+The single source of truth for unfinished rewrite work is
+[`docs/REWRITE_REMAINING_WORK.md`](docs/REWRITE_REMAINING_WORK.md).

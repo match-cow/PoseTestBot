@@ -238,6 +238,8 @@ def test_start_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
             "command": "start_iiwa",
             "robot_ip": "172.31.1.150",
             "robot_port": 30305,
+            "allow_real_robot": True,
+            "allow_cameras": True,
         },
     )
 
@@ -257,6 +259,47 @@ def test_start_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
     ]
     assert fake_runner.submitted[0]["parameters"]["robot_ip"] == "172.31.1.150"
     assert fake_runner.submitted[0]["parameters"]["robot_port"] == 30305
+    assert fake_runner.submitted[0]["parameters"]["allow_real_robot"] is True
+    assert fake_runner.submitted[0]["parameters"]["allow_cameras"] is True
+
+
+def test_start_iiwa_command_requires_both_execution_gates(monkeypatch) -> None:
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            raise AssertionError("ungated robot start should not queue a job")
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    client = app.test_client()
+
+    missing_both = client.post(
+        "/run-command",
+        json={"command": "start_iiwa"},
+    )
+    missing_camera_gate = client.post(
+        "/run-command",
+        json={"command": "start_iiwa", "allow_real_robot": True},
+    )
+    false_string = client.post(
+        "/run-command",
+        json={
+            "command": "start_iiwa",
+            "allow_real_robot": "true",
+            "allow_cameras": "false",
+        },
+    )
+
+    assert missing_both.status_code == 400
+    assert missing_camera_gate.status_code == 400
+    assert false_string.status_code == 400
+    assert missing_both.get_json()["output"] == (
+        "start_iiwa requires allow_real_robot=true and allow_cameras=true"
+    )
+    assert fake_runner.submitted == []
 
 
 def test_stop_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
@@ -758,6 +801,45 @@ def test_sensor_preview_submission_queues_one_job_per_selected_sensor(
         "python",
         "scripts/stream_sensor_rgb_preview.py",
     ]
+
+
+def test_sensor_preview_rejects_family_without_live_preview(monkeypatch) -> None:
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def list(self):
+            return []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            raise AssertionError("unsupported preview should not queue a job")
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_sensors, "job_runner", fake_runner)
+    client = app.test_client()
+
+    response = client.post(
+        "/sensors/previews",
+        json={
+            "sensors": [
+                {
+                    "sensor_type": "zed_2i",
+                    "device_id": "zed-001",
+                    "display_name": "ZED 2i",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["errors"] == [
+        {
+            "sensor_key": "zed_2i:zed-001",
+            "error": "Live RGB preview is not supported for Stereolabs ZED 2i.",
+        }
+    ]
+    assert fake_runner.submitted == []
 
 
 def test_sensor_status_keeps_preview_claimed_oak_visible(monkeypatch) -> None:

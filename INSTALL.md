@@ -11,7 +11,7 @@ physical lab iiwa; normal setup and validation never execute capture automatical
 From the repository root:
 
 ```bash
-bash scripts/install.sh --with-posegridgen
+bash scripts/install.sh --with-posegridgen --with-posetemplatecreator
 ```
 
 This safe project bootstrap:
@@ -19,6 +19,7 @@ This safe project bootstrap:
 - ensures `uv` is available,
 - runs `uv sync --all-groups`,
 - initializes and verifies the exact, clean PoseGridGen source submodule,
+- initializes and verifies the exact, clean PoseTemplateCreator source submodule,
 - checks required Python imports,
 - checks optional acquisition runtimes,
 - lists registered sensor adapters without opening hardware,
@@ -44,6 +45,11 @@ Omit `--with-posegridgen` when this checkout only needs to consume existing
 reported unavailable, while calibration readers and the bundled UI continue
 to work.
 
+Omit `--with-posetemplatecreator` when this checkout only needs to browse
+existing catalog entries, immutable pose-template bundles, and run selections.
+New CAD inspection, exact slicing, preview, and PDF generation are disabled
+until the pinned checkout is available.
+
 Use check-only mode to inspect an already configured environment without
 installing or syncing:
 
@@ -68,8 +74,8 @@ discover the camera's brightness range before a browser-requested automatic
 brightness calibration; calibration remains unavailable if that control cannot
 be inspected.
 
-`--with-blenderproc` installs BlenderProc as a `uv` tool when the
-`blenderproc` executable is missing.
+`--with-blenderproc` installs the validated BlenderProc 2.8.0 as a `uv` tool
+when the `blenderproc` executable is missing.
 
 `--with-playwright-browsers` installs Chromium for Playwright browser UI tests
 after the uv environment has been synchronized. Keep this opt-in on lab hosts
@@ -117,7 +123,8 @@ the installer:
 
 ```bash
 bash scripts/install.sh --with-posegridgen
-bash scripts/install.sh --check-only --with-posegridgen
+bash scripts/install.sh --check-only \
+  --with-posegridgen --with-posetemplatecreator
 ```
 
 The required revision is
@@ -131,6 +138,26 @@ Use the operator console's **Calibration Targets** page to preview, fit, and
 generate immutable source/spec/PDF bundles, then select one for a configured
 run. The complete artifact and placement contract is documented in
 [`docs/POSEGRIDGEN_CALIBRATION_TARGETS.md`](docs/POSEGRIDGEN_CALIBRATION_TARGETS.md).
+
+### PoseTemplateCreator Object Ground Truth
+
+Managed object inspection and printable pose-template generation use the
+source checkout at `third_party/PoseTemplateCreator`:
+
+```bash
+bash scripts/install.sh --with-posetemplatecreator
+bash scripts/install.sh --check-only --with-posetemplatecreator
+```
+
+The required revision is
+`450747bfee0e50b76f72ab38e1d0d04643124e02`. PoseTestBot refuses generation
+when the checkout is missing, dirty, or at another revision. It privately loads
+only the upstream constants, models, secure mesh parser, exact contour slicer,
+scene, and PDF renderer; the upstream FastAPI server and React application are
+never imported or embedded. Existing immutable bundles remain readable when
+the optional checkout is unavailable. The operator and artifact workflow is
+documented in
+[`docs/POSETEMPLATECREATOR_OBJECT_GT.md`](docs/POSETEMPLATECREATOR_OBJECT_GT.md).
 
 ### RealSense D435
 
@@ -177,6 +204,8 @@ uv run python scripts/sensor_status.py --expected zed_2i=1 --check-expected
 BlenderProc is only needed for non-dry-run optional GT/mask rendering. Dry-run
 render planning and ordinary acquisition checks do not require it.
 Explicit objectless render plans also skip BlenderProc completely.
+Pose-template duplicate-instance GT is validated with BlenderProc 2.8.0. The
+renderer rejects other versions before producing derived GT evidence.
 
 Install through the PoseTestBot installer:
 
@@ -319,6 +348,12 @@ git diff --check
   `git submodule update --init --checkout third_party/PoseGridGen`, confirm the
   checkout is clean at the pinned revision, then run
   `bash scripts/install.sh --check-only --with-posegridgen`.
+- Pose-template inspection or generation is unavailable: run
+  `git submodule update --init --checkout third_party/PoseTemplateCreator`,
+  confirm the checkout is clean at the pinned revision, then run
+  `bash scripts/install.sh --check-only --with-posetemplatecreator`. Existing
+  immutable catalogs, bundles, and run selections remain readable without the
+  source checkout.
 - Room-monitor signaling is unavailable: inspect
   `GET /jobs?include_services=1`, confirm the managed `monitor-webrtc:ugreen`
   service is running, and inspect its `monitor_webrtc.v2` error reason. Allow

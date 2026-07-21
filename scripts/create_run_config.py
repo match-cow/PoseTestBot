@@ -68,6 +68,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Registry object to include. May be repeated; defaults to all valid objects.",
     )
+    parser.add_argument(
+        "--dataset-mode",
+        choices=("objectless", "pose_template", "legacy_registry"),
+        default=None,
+        help=(
+            "Explicit run dataset mode. Existing --object-name behavior maps to "
+            "legacy_registry; use pose_template before selecting Ground Truth."
+        ),
+    )
     selection.add_argument(
         "--objectless",
         action="store_true",
@@ -154,6 +163,7 @@ def main() -> None:
         sensors=sensors,
         object_folder=args.object_folder,
         selected_objects=[] if args.objectless else args.object_name,
+        dataset_mode=args.dataset_mode,
         calibration_profiles=args.calibration_profiles,
         sequence_id=args.sequence,
         sequence_options=sequence_options,

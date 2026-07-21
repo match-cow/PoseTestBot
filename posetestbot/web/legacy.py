@@ -528,6 +528,20 @@ def run_command():
         return jsonify({'output': 'Unknown command'}), 404
     try:
         command_args, command_parameters = _robot_control_command_args(command, data)
+        if command == "start_iiwa":
+            allow_real_robot = _truthy(data.get("allow_real_robot"), default=False)
+            allow_cameras = _truthy(data.get("allow_cameras"), default=False)
+            if not allow_real_robot or not allow_cameras:
+                raise ValueError(
+                    "start_iiwa requires allow_real_robot=true and "
+                    "allow_cameras=true"
+                )
+            command_parameters.update(
+                {
+                    "allow_real_robot": True,
+                    "allow_cameras": True,
+                }
+            )
     except ValueError as exc:
         return jsonify({'output': str(exc)}), 400
     command_array = list(spec["command"]) + command_args

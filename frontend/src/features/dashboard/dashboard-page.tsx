@@ -37,27 +37,35 @@ function IiwaQuickControls({ ready }: { ready: boolean }) {
   const queryClient = useQueryClient()
   const [command, setCommand] = useState<IiwaCommand | null>(null)
   const [targetConfirmed, setTargetConfirmed] = useState(false)
+  const [realRobotAuthorized, setRealRobotAuthorized] = useState(false)
+  const [camerasReady, setCamerasReady] = useState(false)
   const robotCommand = useMutation({
     mutationFn: (nextCommand: IiwaCommand) => api<{ job_id: string }>("/run-command", {
       method: "POST",
-      body: JSON.stringify({ command: nextCommand, robot_ip: robotTarget.ip, robot_port: robotTarget.port }),
+      body: JSON.stringify({ command: nextCommand, robot_ip: robotTarget.ip, robot_port: robotTarget.port, ...(nextCommand === "start_iiwa" ? { allow_real_robot: true, allow_cameras: true } : {}) }),
     }),
     onSuccess: (data, nextCommand) => {
       toast.success(nextCommand === "start_iiwa" ? "IIWA start queued" : "IIWA stop queued", { description: `Job ${data.job_id}` })
       setCommand(null)
       setTargetConfirmed(false)
+      setRealRobotAuthorized(false)
+      setCamerasReady(false)
       queryClient.invalidateQueries({ queryKey: ["jobs"] })
     },
     onError: (error) => toast.error("Robot command was not queued", { description: errorMessage(error) }),
   })
   const openCommand = (nextCommand: IiwaCommand) => {
     setTargetConfirmed(false)
+    setRealRobotAuthorized(false)
+    setCamerasReady(false)
     setCommand(nextCommand)
   }
   const setDialogOpen = (open: boolean) => {
     if (open) return
     setCommand(null)
     setTargetConfirmed(false)
+    setRealRobotAuthorized(false)
+    setCamerasReady(false)
   }
 
   return (
@@ -74,7 +82,8 @@ function IiwaQuickControls({ ready }: { ready: boolean }) {
           <DialogHeader><DialogTitle>Confirm IIWA {command === "stop_iiwa" ? "stop" : "start"}</DialogTitle><DialogDescription>{command === "stop_iiwa" ? "Stopping" : "Starting"} sends a command to the configured lab robot target.</DialogDescription></DialogHeader>
           <div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{robotTarget.ip}:{robotTarget.port}</div></div>
           <Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox checked={targetConfirmed} onCheckedChange={(value) => setTargetConfirmed(value === true)} /><span>I confirm this is the intended lab IIWA target.</span></Label>
-          <DialogFooter><Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button><Button variant={command === "stop_iiwa" ? "destructive" : "default"} disabled={!targetConfirmed || robotCommand.isPending || command === null} onClick={() => command && robotCommand.mutate(command)}>{command === "stop_iiwa" ? <Square /> : <Power />}{robotCommand.isPending ? "Queueing…" : command === "stop_iiwa" ? "Queue stop" : "Queue start"}</Button></DialogFooter>
+          {command === "start_iiwa" && <><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox checked={realRobotAuthorized} onCheckedChange={(value) => setRealRobotAuthorized(value === true)} /><span>I authorize motion of the real lab IIWA for this start.</span></Label><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox checked={camerasReady} onCheckedChange={(value) => setCamerasReady(value === true)} /><span>I confirm the capture cameras and pose receiver are ready.</span></Label></>}
+          <DialogFooter><Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button><Button variant={command === "stop_iiwa" ? "destructive" : "default"} disabled={!targetConfirmed || (command === "start_iiwa" && (!realRobotAuthorized || !camerasReady)) || robotCommand.isPending || command === null} onClick={() => command && robotCommand.mutate(command)}>{command === "stop_iiwa" ? <Square /> : <Power />}{robotCommand.isPending ? "Queueing…" : command === "stop_iiwa" ? "Queue stop" : "Queue start"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </Card>

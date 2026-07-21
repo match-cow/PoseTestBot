@@ -14,6 +14,7 @@ import { useOperator } from "@/providers/operator-provider"
 import { CalibrationWorkflow } from "@/features/workflow/calibration-workflow"
 import { CaptureGate } from "@/features/workflow/capture-gate"
 import { RunSetup } from "@/features/workflow/run-setup"
+import { GroundTruthWorkflow } from "@/features/workflow/ground-truth-workflow"
 import { StageForm } from "@/features/workflow/stage-form"
 
 const phases = [
@@ -22,6 +23,7 @@ const phases = [
   { id: "capture", label: "Capture" },
   { id: "sync", label: "Sync" },
   { id: "calibration", label: "Calibration" },
+  { id: "ground-truth", label: "Ground Truth" },
   { id: "bop-export", label: "BOP Export" },
 ]
 
@@ -70,11 +72,11 @@ export function WorkflowPage() {
   return <div className="space-y-6">
     <PageHeader eyebrow="Acquisition pipeline" title="Workflow" description="Artifact-backed phases, friendly stage controls, and a single deliberate path to physical capture." actions={<><Button variant="outline" onClick={refreshEvidence} disabled={overview.isFetching || config.isFetching || stages.isFetching}><RefreshCw className={overview.isFetching || config.isFetching || stages.isFetching ? "animate-spin" : ""} />Refresh evidence</Button>{config.data?.config.pipeline.plan_only && <Button onClick={() => queueConfig.mutate()} disabled={queueConfig.isPending}><Play />{queueConfig.isPending ? "Queueing…" : "Queue configured plan"}</Button>}</>} />
     {config.data?.config && !config.data.config.pipeline.plan_only && <div className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm"><strong>Execution config detected.</strong> Non-plan-only capture sequences cannot be queued from run config. Use Advanced Capture on the Capture phase.</div>}
-    <Tabs value={current} onValueChange={(value) => navigate(`/workflow/${value}`)}><TabsList className="grid h-auto w-full grid-cols-6">{phases.map((item) => <TabsTrigger key={item.id} value={item.id} className="py-2.5">{item.label}</TabsTrigger>)}</TabsList></Tabs>
+    <Tabs value={current} onValueChange={(value) => navigate(`/workflow/${value}`)}><TabsList className="grid h-auto w-full grid-cols-7">{phases.map((item) => <TabsTrigger key={item.id} value={item.id} className="py-2.5">{item.label}</TabsTrigger>)}</TabsList></Tabs>
 
     {current === "setup" ? <RunSetup /> : stages.isPending || overview.isPending ? <div className="grid grid-cols-2 gap-4"><Skeleton className="h-72" /><Skeleton className="h-72" /></div> : !overview.data?.config ? <EmptyState icon={ListTree} title="Configure the run first" description="Stages need a valid run_config.json. Setup defaults to real_full_capture_validation in plan-only mode." action={<Button onClick={() => navigate("/workflow/setup")}>Open setup</Button>} /> : <div className="space-y-4">
       {current === "capture" && <CaptureGate />}
-      {current === "calibration" ? <CalibrationWorkflow /> : <>
+      {current === "calibration" ? <CalibrationWorkflow /> : current === "ground-truth" ? <GroundTruthWorkflow /> : <>
         <div className="grid grid-cols-2 gap-4">{selectedStages.map((stage) => <StageForm key={stage.id} stage={stage} artifactStatus={artifactStatus(stage.id)} />)}</div>
         {selectedStages.length === 0 && <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">No stages are registered for this phase.</CardContent></Card>}
       </>}

@@ -30,6 +30,7 @@ from posetestbot.io.artifacts import (
 )
 from posetestbot.objects.registry import load_object_registry
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pose_templates.selection import load_pose_template_selection
 
 SCENE_SCHEMA_VERSION = "cell_scene.v1"
 TIMELINE_SCHEMA_VERSION = "cell_timeline.v1"
@@ -241,6 +242,7 @@ def _bop_export_provenance(
     selected_objects: set[str],
     registry_provenance: Mapping[str, Any],
     warnings: list[dict[str, str]],
+    pose_template_selection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     path = run_root / BOP_DIR / BOP_EXPORT_MANIFEST
     provenance: dict[str, Any] = {
@@ -254,6 +256,32 @@ def _bop_export_provenance(
         return provenance
     try:
         manifest = _read_mapping(path)
+        if pose_template_selection is not None:
+            exported_template = manifest.get("pose_template")
+            matches = (
+                manifest.get("dataset_mode") == "pose_template"
+                and isinstance(exported_template, Mapping)
+                and exported_template.get("template_uuid")
+                == pose_template_selection.get("template_uuid")
+                and exported_template.get("bundle_sha256")
+                == pose_template_selection.get("bundle_sha256")
+            )
+            provenance.update(
+                {
+                    "status": "current" if matches else "stale",
+                    "manifest_schema_version": manifest.get("schema_version"),
+                    "pose_template_matches": matches,
+                    "template_uuid": pose_template_selection.get("template_uuid"),
+                }
+            )
+            if not matches:
+                warnings.append(
+                    {
+                        "code": "stale_bop_pose_template_provenance",
+                        "message": "The BOP export does not match the selected immutable pose template.",
+                    }
+                )
+            return provenance
         exported = manifest.get("selected_objects")
         if not isinstance(exported, list) or any(
             not isinstance(name, str) for name in exported
@@ -368,20 +396,69 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
         except (KeyError, ValueError) as exc:
             entities.append(_entity(f"camera:{key}", "camera", label, transform=None, status="unresolved", reason=f"No valid calibration profile: {exc}", provenance={"source": "calibration_profiles"}, geometry={"kind": "camera_frustum"}))
 
-    registry = load_object_registry(config["object_folder"])
-    registry_provenance = registry.provenance()
-    selected = set(registry.validate_selection(config.get("selected_objects", [])))
     encoded_root = quote(root.as_posix(), safe="")
-    for entry in registry.entries:
-        if entry.name not in selected:
-            continue
-        if not entry.valid or entry.object_to_template is None:
-            entities.append(_entity(f"object:{entry.name}", "object", entry.name, transform=None, status="unresolved", reason="; ".join(entry.errors), provenance={"obj_id": entry.obj_id}, geometry={"kind": "mesh"}))
-            continue
-        manager.add_transform(f"object:{entry.name}", "template_base", entry.object_to_template)
-        object_to_template = manager.get_transform(f"object:{entry.name}", "template_base")
-        geometry = {"kind": "mesh", "obj_id": entry.obj_id, "mesh_url": f"/ui/cell-assets/{entry.name}/mesh?run_root={encoded_root}", "texture_url": f"/ui/cell-assets/{entry.name}/texture?run_root={encoded_root}" if entry.texture_path else None}
-        entities.append(_entity(f"object:{entry.name}", "object", entry.name, transform=_transform_dict(object_to_template, "template_base"), status="planned", provenance={"obj_id": entry.obj_id, **registry_provenance}, geometry=geometry))
+    pose_selection = None
+    if config.get("dataset_mode") == "pose_template":
+        try:
+            pose_selection = load_pose_template_selection(root)
+            selected = {str(item["name"]) for item in pose_selection["instances"]}
+            registry_provenance = {
+                "schema_version": "pose_template_selection.v1",
+                "template_uuid": pose_selection["template_uuid"],
+                "bundle_sha256": pose_selection["bundle_sha256"],
+                "instance_count": len(pose_selection["instances"]),
+            }
+            for item in pose_selection["instances"]:
+                instance_uuid = item["instance_uuid"]
+                transform = np.asarray(
+                    item["template_base_from_object"]["matrix"], dtype=float
+                )
+                geometry = {
+                    "kind": "mesh",
+                    "obj_id": item["obj_id"],
+                    "mesh_url": f"/ui/cell-pose-template-assets/{instance_uuid}/mesh?run_root={encoded_root}",
+                    "texture_url": (
+                        f"/ui/cell-pose-template-assets/{instance_uuid}/texture?run_root={encoded_root}"
+                        if "texture" in item["assets"]
+                        else None
+                    ),
+                }
+                entities.append(
+                    _entity(
+                        f"object:{instance_uuid}",
+                        "object",
+                        item["name"],
+                        transform=_transform_dict(transform, "template_base"),
+                        status="planned",
+                        provenance={
+                            "instance_uuid": instance_uuid,
+                            "catalog_uuid": item["catalog_uuid"],
+                            "obj_id": item["obj_id"],
+                            **registry_provenance,
+                        },
+                        geometry=geometry,
+                    )
+                )
+        except (OSError, ValueError) as exc:
+            selected = set()
+            registry_provenance = {"schema_version": "pose_template_selection.v1"}
+            warnings.append(
+                {"code": "invalid_pose_template_selection", "message": str(exc)}
+            )
+    else:
+        registry = load_object_registry(config["object_folder"])
+        registry_provenance = registry.provenance()
+        selected = set(registry.validate_selection(config.get("selected_objects", [])))
+        for entry in registry.entries:
+            if entry.name not in selected:
+                continue
+            if not entry.valid or entry.object_to_template is None:
+                entities.append(_entity(f"object:{entry.name}", "object", entry.name, transform=None, status="unresolved", reason="; ".join(entry.errors), provenance={"obj_id": entry.obj_id}, geometry={"kind": "mesh"}))
+                continue
+            manager.add_transform(f"object:{entry.name}", "template_base", entry.object_to_template)
+            object_to_template = manager.get_transform(f"object:{entry.name}", "template_base")
+            geometry = {"kind": "mesh", "obj_id": entry.obj_id, "mesh_url": f"/ui/cell-assets/{entry.name}/mesh?run_root={encoded_root}", "texture_url": f"/ui/cell-assets/{entry.name}/texture?run_root={encoded_root}" if entry.texture_path else None}
+            entities.append(_entity(f"object:{entry.name}", "object", entry.name, transform=_transform_dict(object_to_template, "template_base"), status="planned", provenance={"obj_id": entry.obj_id, **registry_provenance}, geometry=geometry))
 
     target_path = root / CALIBRATION_TARGET
     if target_path.is_file():
@@ -411,7 +488,7 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
 
     timeline_meta = [_timeline_metadata(item, default=index == 0) for index, item in enumerate(timelines)]
     bop_export_provenance = _bop_export_provenance(
-        root, selected, registry_provenance, warnings
+        root, selected, registry_provenance, warnings, pose_selection
     )
     return {
         "schema_version": SCENE_SCHEMA_VERSION,
@@ -423,8 +500,10 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
         "default_timeline_id": timeline_meta[0]["id"] if timeline_meta else None,
         "trajectory_preview": _preview(timelines[0]["poses"]) if timelines else [],
         "object_selection": {
-            "selected_objects": list(config.get("selected_objects", [])),
-            "objectless": not bool(config.get("selected_objects", [])),
+            "selected_objects": sorted(selected),
+            "objectless": config.get("dataset_mode") == "objectless",
+            "dataset_mode": config.get("dataset_mode", "legacy_registry"),
+            "pose_template": registry_provenance if pose_selection is not None else None,
             "registry": registry_provenance,
             "bop_export": bop_export_provenance,
         },

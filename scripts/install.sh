@@ -7,6 +7,7 @@ WITH_BLENDERPROC=false
 WITH_PLAYWRIGHT_BROWSERS=false
 WITH_WEB_BUILD=false
 WITH_POSEGRIDGEN=false
+WITH_POSETEMPLATECREATOR=false
 SKIP_RUNTIME_CHECKS=false
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -27,6 +28,8 @@ Options:
                            Install Chromium for Playwright browser UI tests.
   --with-web-build         Reinstall locked Bun packages and rebuild the bundled UI.
   --with-posegridgen       Initialize and verify the pinned PoseGridGen submodule.
+  --with-posetemplatecreator
+                           Initialize and verify the pinned PoseTemplateCreator submodule.
   --skip-runtime-checks    Skip runtime and sensor adapter verification.
   -h, --help               Show this help text.
 
@@ -94,6 +97,9 @@ parse_args() {
         ;;
       --with-posegridgen)
         WITH_POSEGRIDGEN=true
+        ;;
+      --with-posetemplatecreator)
+        WITH_POSETEMPLATECREATOR=true
         ;;
       --skip-runtime-checks)
         SKIP_RUNTIME_CHECKS=true
@@ -216,6 +222,26 @@ install_posegridgen() {
   log "PoseGridGen checkout is clean and pinned to ${revision}."
 }
 
+install_posetemplatecreator() {
+  if [[ "${WITH_POSETEMPLATECREATOR}" != true ]]; then
+    return 0
+  fi
+  command_exists git || die "git is required for --with-posetemplatecreator."
+  local checkout="${REPO_ROOT}/third_party/PoseTemplateCreator"
+  local revision="450747bfee0e50b76f72ab38e1d0d04643124e02"
+  if [[ "${CHECK_ONLY}" != true ]]; then
+    log "Initializing the pinned PoseTemplateCreator source checkout."
+    run git submodule update --init --checkout third_party/PoseTemplateCreator
+  fi
+  [[ -d "${checkout}" ]] || die "PoseTemplateCreator checkout is missing; rerun without --check-only."
+  [[ -f "${checkout}/backend/mesh.py" ]] || die "PoseTemplateCreator backend files are missing."
+  local actual_revision
+  actual_revision="$(git -C "${checkout}" rev-parse HEAD)"
+  [[ "${actual_revision}" == "${revision}" ]] || die "PoseTemplateCreator is at ${actual_revision}; required ${revision}."
+  [[ -z "$(git -C "${checkout}" status --porcelain --untracked-files=all)" ]] || die "PoseTemplateCreator checkout is dirty."
+  log "PoseTemplateCreator checkout is clean and pinned to ${revision}."
+}
+
 install_blenderproc() {
   if [[ "${WITH_BLENDERPROC}" != true ]]; then
     return 0
@@ -234,7 +260,7 @@ install_blenderproc() {
   fi
 
   log "Installing BlenderProc as a uv tool."
-  run uv tool install blenderproc
+  run uv tool install blenderproc==2.8.0
   export PATH="${HOME}/.local/bin:${PATH}"
   command_exists blenderproc || warn "BlenderProc was installed but is not on PATH; check uv's tool install output."
 }
@@ -275,6 +301,7 @@ verify_web_console() {
   compgen -G "${ui_root}/assets/*.css" >/dev/null || die "Bundled web UI has no CSS asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/cell-page-*.js" >/dev/null || die "Bundled web UI has no lazy Cell asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/calibration-targets-page-*.js" >/dev/null || die "Bundled web UI has no lazy Calibration Targets asset. Run scripts/install.sh --with-web-build."
+  compgen -G "${ui_root}/assets/pose-templates-page-*.js" >/dev/null || die "Bundled web UI has no lazy Pose Templates asset. Run scripts/install.sh --with-web-build."
   [[ -f "${cell_asset}" ]] || die "Bundled Cell template is missing ${cell_asset}."
   log "Bundled operator-console assets are present."
 }
@@ -361,6 +388,18 @@ print(f"PoseGridGen renderer OK ({status['"'"'revision'"'"']})")
 '
   fi
 
+  if [[ "${WITH_POSETEMPLATECREATOR}" == true ]]; then
+    log "Checking the pinned PoseTemplateCreator backend capabilities."
+    uv_python -c '
+from posetestbot.pose_templates.adapter import posetemplatecreator_status
+
+status = posetemplatecreator_status()
+if not status["available"]:
+    raise SystemExit(status.get("reason") or "PoseTemplateCreator is unavailable")
+print(f"PoseTemplateCreator OK ({status['"'"'revision'"'"']})")
+'
+  fi
+
   log "Checking acquisition runtime visibility."
   uv_python scripts/runtime_status.py --json
 
@@ -386,6 +425,7 @@ main() {
   configure_uv_cache
   ensure_uv
   install_posegridgen
+  install_posetemplatecreator
   install_system_packages
   sync_python_environment
   build_web_console

@@ -21,6 +21,7 @@ class SensorAdapterSpec:
     capture_script: str
     folder_prefix: str
     supported_resolutions: tuple[str, ...]
+    live_rgb_preview_supported: bool = False
     default_resolution: str = "720p"
     mounting_modes: tuple[MountingMode, ...] = (
         MountingMode.EYE_IN_HAND,
@@ -47,6 +48,7 @@ SENSOR_ADAPTERS: dict[SensorType, SensorAdapterSpec] = {
         capture_script="scripts/capture_realsense_720p.py",
         folder_prefix="realsense",
         supported_resolutions=("720p",),
+        live_rgb_preview_supported=True,
         notes=(
             "Depth is aligned to color by the capture script.",
             "Current capture script is 720p-only.",
@@ -59,6 +61,7 @@ SENSOR_ADAPTERS: dict[SensorType, SensorAdapterSpec] = {
         capture_script="scripts/capture_luxonis_720p.py",
         folder_prefix="luxonis",
         supported_resolutions=("720p",),
+        live_rgb_preview_supported=True,
         notes=(
             "DepthAI stereo depth is aligned to RGB by the capture script.",
             "Current capture script is 720p-only.",

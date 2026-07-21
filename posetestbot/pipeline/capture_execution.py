@@ -718,8 +718,8 @@ def run_capture_execution(
         if late_commands:
             names = ", ".join(str(command.get("name")) for command in late_commands)
             raise RuntimeError(
-                "Capture execution does not yet support commands that start "
-                f"after the pose receiver: {names}."
+                "Capture execution requires the pose receiver to be the final "
+                f"startup command; later commands violate the plan contract: {names}."
             )
 
         for index, command in enumerate(commands):

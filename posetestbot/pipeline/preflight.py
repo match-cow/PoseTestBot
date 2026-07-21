@@ -22,6 +22,7 @@ from posetestbot.pipeline.run_config import (
 from posetestbot.robot.status import collect_robot_status
 from posetestbot.runtime.status import collect_runtime_status
 from posetestbot.sensors.status import collect_sensor_status
+from posetestbot.pose_templates.selection import load_pose_template_selection
 
 SCHEMA_VERSION = "run_preflight.v1"
 STAGE_RUNTIME_REQUIREMENTS = {
@@ -325,6 +326,38 @@ def build_run_preflight(
                     "calibration_target_selection",
                     "error",
                     f"Selected calibration target is invalid: {type(exc).__name__}: {exc}",
+                )
+            )
+
+    template_dependent = any(
+        step.stage_id in {"blenderproc_prepare", "blenderproc_render", "bop_export"}
+        for step in plan.steps
+    )
+    if config.get("dataset_mode") == "pose_template" and template_dependent:
+        try:
+            pose_selection = load_pose_template_selection(run_root_path)
+            if not pose_selection.get("placement_confirmed"):
+                raise ValueError(
+                    "template_base_from_pose_template placement is not operator-confirmed"
+                )
+            checks.append(
+                _check(
+                    "pose_template_selection",
+                    "ok",
+                    "Immutable pose-template selection, snapshot hashes, placement, and instances agree.",
+                    details={
+                        "template_uuid": pose_selection["template_uuid"],
+                        "instance_count": len(pose_selection["instances"]),
+                        "bundle_sha256": pose_selection["bundle_sha256"],
+                    },
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                _check(
+                    "pose_template_selection",
+                    "error",
+                    f"Objectful Ground Truth requires a valid confirmed pose template: {exc}",
                 )
             )
 

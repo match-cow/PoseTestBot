@@ -27,7 +27,9 @@ from posetestbot.io.artifacts import (
     BOP_DATASET_INFO,
     BOP_EXPORT_MANIFEST,
     BOP_FRAME_MAP_JSON,
+    BOP_INSTANCE_MAP,
     BOP_MULTIVIEW_TARGETS,
+    BOP_POSE_TEMPLATE,
     BOP_TARGETS_BOP19,
     CAM_K,
     DEPTH_DIR,
@@ -38,7 +40,7 @@ from posetestbot.io.artifacts import (
 )
 from posetestbot.objects.registry import load_object_registry
 
-SCHEMA_VERSION = "bop_export_manifest.v2"
+SCHEMA_VERSION = "bop_export_manifest.v3"
 FRAME_MAP_SCHEMA_VERSION = "posetestbot_bop_frame_map.v2"
 DATASET_INFO_SCHEMA_VERSION = "posetestbot_bop_dataset_info.v1"
 SAFE_OBJECT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
@@ -56,6 +58,7 @@ class BopSceneExport:
     calibration_profile_id: str | None = None
     targets: list[dict] | None = None
     frame_map: dict[str, dict[str, str | int]] = field(default_factory=dict)
+    instance_map: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -112,14 +115,6 @@ def _frame_pairs(sensor_folder: Path) -> list[tuple[Path, Path]]:
 
 def _write_json(path: Path, value: object) -> Path:
     return atomic_write_json(path, value)
-
-
-def object_registry_from_folder(object_folder: str | Path) -> dict[str, int]:
-    registry = load_object_registry(object_folder)
-    invalid = [entry.name for entry in registry.entries if not entry.valid]
-    if invalid:
-        raise ValueError("Invalid object registry entries: " + ", ".join(invalid))
-    return registry.id_mapping
 
 
 def mesh_vertices(path: Path) -> np.ndarray:
@@ -267,6 +262,64 @@ def copy_bop_models(
 
     _write_json(models_folder / "models_info.json", models_info)
     return models
+
+
+def copy_bop_instance_models(
+    output_root: str | Path,
+    run_root: str | Path,
+    object_instances: Mapping[str, object],
+    *,
+    geometry_cache: Mapping[str, object] | None = None,
+) -> list[BopObjectModel]:
+    """Export one canonical model for each stable obj_id, never per instance."""
+    output = Path(output_root)
+    run = Path(run_root).resolve()
+    instances = object_instances.get("instances")
+    if not isinstance(instances, list):
+        raise ValueError("object_instances instances must be a list")
+    by_id: dict[int, Mapping[str, object]] = {}
+    for item in instances:
+        if not isinstance(item, Mapping):
+            raise ValueError("object_instances entries must be objects")
+        obj_id = int(item["obj_id"])
+        if obj_id <= 0:
+            raise ValueError("object_instances obj_id must be positive")
+        previous = by_id.get(obj_id)
+        if previous is not None and previous.get("canonical_ply_sha256") != item.get(
+            "canonical_ply_sha256"
+        ):
+            raise ValueError(f"Instances sharing obj_id {obj_id} use different geometry")
+        by_id.setdefault(obj_id, item)
+    models_dir = output / MODELS_DIR
+    models_dir.mkdir(parents=True, exist_ok=True)
+    info: dict[str, dict[str, object]] = {}
+    result: list[BopObjectModel] = []
+    for obj_id, item in sorted(by_id.items()):
+        source = run / str(item["canonical_ply"])
+        try:
+            source.resolve(strict=True).relative_to(run)
+        except (FileNotFoundError, ValueError) as exc:
+            raise ValueError(f"Object instance model escapes run root: {source}") from exc
+        destination = models_dir / f"obj_{obj_id:06d}.ply"
+        shutil.copy2(source, destination)
+        cached = geometry_cache.get(str(obj_id)) if geometry_cache else None
+        geometry = model_geometry_info(source, cached if isinstance(cached, Mapping) else None)
+        info[str(obj_id)] = {
+            "source_name": item["name"],
+            "catalog_uuid": item["catalog_uuid"],
+            "source_path": str(item["canonical_ply"]),
+            **geometry,
+        }
+        result.append(
+            BopObjectModel(
+                object_name=str(item["name"]),
+                obj_id=obj_id,
+                source_path=source.as_posix(),
+                bop_path=destination.relative_to(output).as_posix(),
+            )
+        )
+    _write_json(models_dir / "models_info.json", info)
+    return result
 
 
 def _load_json_if_present(path: Path) -> object | None:
@@ -501,15 +554,6 @@ def validate_scene_gt(
                     raise ValueError(f"scene_gt annotation {key} must be finite")
 
 
-def copy_optional_tree(source: Path, destination: Path) -> Path | None:
-    if not source.is_dir():
-        return None
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(source, destination)
-    return destination
-
-
 def copy_scene_masks(
     source: Path,
     destination: Path,
@@ -598,6 +642,7 @@ def export_sensor_scene_to_bop(
     overwrite: bool = False,
     calibration_profile: CalibrationProfile | None = None,
     object_name_to_id: Mapping[str, int] | None = None,
+    template_instances: list[Mapping[str, object]] | None = None,
 ) -> BopSceneExport:
     sensor_folder = Path(sensor_folder)
     output_root = Path(output_root)
@@ -689,6 +734,64 @@ def export_sensor_scene_to_bop(
         frame_pairs,
     )
     targets = targets_from_scene_gt(scene_gt, scene_id=scene_id)
+    instance_map: list[dict] = []
+    if template_instances is not None:
+        rendered_identity = load_blenderproc_scene_json(
+            sensor_folder, "posetestbot_render_instances.json"
+        )
+        if rendered_identity is None:
+            raise FileNotFoundError(
+                "Pose-template BOP export requires posetestbot_render_instances.json"
+            )
+        if (
+            rendered_identity.get("schema_version") != "posetestbot_render_instances.v1"
+            or rendered_identity.get("blenderproc_version") != "2.8.0"
+            or rendered_identity.get("identity_contract")
+            != "bop_gt_index_matches_loaded_instance_order.v1"
+        ):
+            raise ValueError("Rendered pose-template instance identity evidence is unsupported")
+        rendered_instances = rendered_identity.get("instances")
+        expected_instances = [
+            {
+                "instance_uuid": item["instance_uuid"],
+                "catalog_uuid": item["catalog_uuid"],
+                "obj_id": int(item["obj_id"]),
+                "name": item["name"],
+                "mesh": f"{item['instance_uuid']}.ply",
+                "transform": f"{item['instance_uuid']}.npy",
+                "texture": (
+                    f"{item['instance_uuid']}.png" if item.get("texture") else None
+                ),
+            }
+            for item in template_instances
+        ]
+        if rendered_instances != expected_instances:
+            raise ValueError("Rendered instance list does not match object_instances.v1")
+        identity_frames = rendered_identity.get("frames")
+        if not isinstance(identity_frames, Mapping) or set(identity_frames) != set(scene_gt):
+            raise ValueError("Rendered instance identity frames do not match scene_gt")
+        for image_id, annotations in sorted(scene_gt.items(), key=lambda item: int(item[0])):
+            identities = identity_frames.get(image_id)
+            if not isinstance(identities, list) or len(identities) != len(annotations):
+                raise ValueError(f"Rendered identity count does not match scene_gt frame {image_id}")
+            for gt_index, (annotation, identity) in enumerate(zip(annotations, identities)):
+                if not isinstance(identity, Mapping) or int(identity.get("gt_id", -1)) != gt_index:
+                    raise ValueError(f"Invalid rendered GT identity at frame {image_id}, index {gt_index}")
+                obj_id = int(annotation["obj_id"])
+                if int(identity.get("obj_id", -1)) != obj_id:
+                    raise ValueError(
+                        f"Rendered identity obj_id does not match scene_gt frame {image_id}, index {gt_index}"
+                    )
+                instance_map.append(
+                    {
+                        "scene_id": scene_id,
+                        "im_id": int(image_id),
+                        "gt_id": gt_index,
+                        "obj_id": obj_id,
+                        "instance_uuid": identity["instance_uuid"],
+                        "catalog_uuid": identity["catalog_uuid"],
+                    }
+                )
 
     artifacts = {
         "scene_camera": _write_json(scene_folder / "scene_camera.json", scene_camera),
@@ -726,6 +829,7 @@ def export_sensor_scene_to_bop(
         ),
         targets=targets,
         frame_map=frame_map,
+        instance_map=instance_map,
     )
 
 
@@ -854,6 +958,39 @@ def write_bop_frame_map(
     return _write_json(
         output_root / BOP_FRAME_MAP_JSON,
         {"schema_version": FRAME_MAP_SCHEMA_VERSION, "scenes": scenes},
+    )
+
+
+def write_bop_instance_map(output_root: str | Path, exports: list[BopSceneExport]) -> Path:
+    return _write_json(
+        Path(output_root) / BOP_INSTANCE_MAP,
+        {
+            "schema_version": "posetestbot_bop_instance_map.v1",
+            "instances": [item for export in exports for item in export.instance_map],
+        },
+    )
+
+
+def write_bop_pose_template(
+    output_root: str | Path,
+    selection: Mapping[str, object],
+) -> Path:
+    return _write_json(
+        Path(output_root) / BOP_POSE_TEMPLATE,
+        {
+            "schema_version": "posetestbot_pose_template.v1",
+            "template_uuid": selection["template_uuid"],
+            "bundle_sha256": selection["bundle_sha256"],
+            "configuration_sha256": selection["configuration_sha256"],
+            "template_base_from_pose_template": selection[
+                "template_base_from_pose_template"
+            ],
+            "print_compensation": selection["print_compensation"],
+            "source": selection["source"],
+            "catalog_snapshot": selection["catalog_snapshot"],
+            "operator": selection["operator"],
+            "selected_at": selection["selected_at"],
+        },
     )
 
 
@@ -1206,6 +1343,10 @@ def write_bop_export_manifest(
     selected_objects: list[str] | tuple[str, ...] | None = None,
     stable_id_mapping: Mapping[str, int] | None = None,
     registry_provenance: Mapping[str, object] | None = None,
+    dataset_mode: str = "legacy_registry",
+    pose_template_provenance: Mapping[str, object] | None = None,
+    instance_map_path: str | Path | None = None,
+    pose_template_path: str | Path | None = None,
 ) -> Path:
     output_root = Path(output_root)
     manifest_path = output_root / BOP_EXPORT_MANIFEST
@@ -1223,6 +1364,7 @@ def write_bop_export_manifest(
     for export in exports:
         data = asdict(export)
         data.pop("frame_map", None)
+        data.pop("instance_map", None)
         export_entries.append(data)
     _write_json(
         manifest_path,
@@ -1243,6 +1385,8 @@ def write_bop_export_manifest(
             "object_models": [asdict(model) for model in object_models or []],
             "selected_objects": list(selected_objects or []),
             "objectless": selected_objects is not None and len(selected_objects) == 0,
+            "dataset_mode": dataset_mode,
+            "pose_template": dict(pose_template_provenance or {}),
             "stable_id_mapping": dict(stable_id_mapping or {}),
             "registry_provenance": dict(registry_provenance or {}),
             "registry_validation": {
@@ -1253,6 +1397,8 @@ def write_bop_export_manifest(
             "multiview_targets_path": artifact_path(multiview_targets_path),
             "coco_annotations_path": artifact_path(coco_annotations_path),
             "frame_map_path": artifact_path(frame_map_path),
+            "instance_map_path": artifact_path(instance_map_path),
+            "pose_template_path": artifact_path(pose_template_path),
             "dataset_info_path": artifact_path(dataset_info_path),
             "validation": dict(validation or {}),
         },

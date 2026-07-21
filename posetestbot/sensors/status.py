@@ -96,6 +96,9 @@ def sensor_device_to_dict(
         "alias": alias,
         "effective_display_name": effective_display_name,
         "connected": device.connected,
+        "live_rgb_preview_supported": SENSOR_ADAPTERS[
+            device.sensor_type
+        ].live_rgb_preview_supported,
         "metadata": dict(device.metadata),
     }
     if alias_record.get("mounting_mode") not in {None, ""}:

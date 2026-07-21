@@ -162,6 +162,34 @@ def test_run_config_loads_from_run_root_and_builds_sequence_job(
     assert job.parameters["options"] == {"aruco": {"save_images": True}}
 
 
+def test_run_config_v1_remains_loadable_and_v2_pose_template_avoids_legacy_flags(
+    tmp_path: Path,
+) -> None:
+    legacy_root = tmp_path / "legacy"
+    legacy = create_run_config(run_root=legacy_root).to_dict()
+    legacy["schema_version"] = "run_config.v1"
+    legacy.pop("dataset_mode")
+    legacy.pop("pose_template")
+    legacy_root.mkdir()
+    (legacy_root / RUN_CONFIG).write_text(json.dumps(legacy))
+
+    loaded = load_run_config_for_run_root(legacy_root)
+
+    assert loaded["schema_version"] == "run_config.v1"
+    assert "dataset_mode" not in loaded
+
+    template = create_run_config(
+        run_root=tmp_path / "template",
+        sequence_id="sync_to_bop_dry_run",
+        dataset_mode="pose_template",
+    ).to_dict()
+    plan = sequence_plan_from_run_config(template)
+    for stage_id in ("blenderproc_prepare", "blenderproc_render", "bop_export"):
+        step = next(item for item in plan.steps if item.stage_id == stage_id)
+        assert step.options.get("objectless") is not True
+        assert "object_name" not in step.options
+
+
 def test_run_config_calibration_profiles_flow_to_calibrated_sequence(
     tmp_path: Path,
 ) -> None:

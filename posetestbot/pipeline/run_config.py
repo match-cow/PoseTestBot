@@ -26,7 +26,9 @@ from posetestbot.objects.registry import load_object_registry
 from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
-SCHEMA_VERSION = "run_config.v1"
+LEGACY_SCHEMA_VERSION = "run_config.v1"
+SCHEMA_VERSION = "run_config.v2"
+DATASET_MODES = {"objectless", "pose_template", "legacy_registry"}
 CALIBRATION_PROFILE_OPTION_STAGES = ("blenderproc_prepare", "bop_export")
 OBJECT_SELECTION_OPTION_STAGES = (
     "blenderproc_prepare",
@@ -150,12 +152,14 @@ class PoseTestBotRunConfig:
     frames: RunFramesConfig = field(default_factory=RunFramesConfig)
     object_folder: str = "object_models"
     selected_objects: tuple[str, ...] = ()
+    dataset_mode: str = "objectless"
+    pose_template: Mapping[str, Any] | None = None
     calibration_profiles: str | None = None
     calibration_target: Mapping[str, Any] | None = None
     pipeline: PipelineRunConfig = field(default_factory=PipelineRunConfig)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": self.schema_version,
             "run_name": self.run_name,
             "run_root": self.run_root,
@@ -170,6 +174,12 @@ class PoseTestBotRunConfig:
             ),
             "pipeline": self.pipeline.to_dict(),
         }
+        if self.schema_version == SCHEMA_VERSION:
+            result["dataset_mode"] = self.dataset_mode
+            result["pose_template"] = (
+                dict(self.pose_template) if self.pose_template is not None else None
+            )
+        return result
 
 
 def normalize_sensor_type(value: str) -> SensorType:
@@ -403,6 +413,8 @@ def create_run_config(
     sensors: tuple[SensorRunConfig, ...] | None = None,
     object_folder: str = "object_models",
     selected_objects: tuple[str, ...] | list[str] | None = None,
+    dataset_mode: str | None = None,
+    pose_template: Mapping[str, Any] | None = None,
     calibration_profiles: str | None = None,
     calibration_target: Mapping[str, Any] | None = None,
     sequence_id: str = "real_full_capture_validation",
@@ -420,6 +432,11 @@ def create_run_config(
         if selected_objects is None
         else registry.validate_selection(selected_objects)
     )
+    inferred_mode = dataset_mode or ("legacy_registry" if selection else "objectless")
+    if inferred_mode not in DATASET_MODES:
+        raise ValueError("dataset_mode must be one of: " + ", ".join(sorted(DATASET_MODES)))
+    if inferred_mode == "pose_template":
+        selection = ()
     config = PoseTestBotRunConfig(
         schema_version=SCHEMA_VERSION,
         run_name=run_name or run_root_path.name,
@@ -436,6 +453,8 @@ def create_run_config(
         frames=RunFramesConfig(fixed_transforms=fixed_transforms),
         object_folder=object_folder,
         selected_objects=selection,
+        dataset_mode=inferred_mode,
+        pose_template=dict(pose_template) if pose_template is not None else None,
         calibration_profiles=calibration_profiles,
         calibration_target=(
             dict(calibration_target) if calibration_target is not None else None
@@ -467,8 +486,28 @@ def fixed_transform_from_mapping(value: Mapping[str, Any]) -> FixedFrameTransfor
 
 
 def validate_run_config(value: Mapping[str, Any]) -> None:
-    if value.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError(f"Run config schema_version must be {SCHEMA_VERSION!r}")
+    schema = value.get("schema_version")
+    if schema not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}:
+        raise ValueError(
+            f"Run config schema_version must be {SCHEMA_VERSION!r} or "
+            f"{LEGACY_SCHEMA_VERSION!r}"
+        )
+    if schema == SCHEMA_VERSION:
+        dataset_mode = value.get("dataset_mode")
+        if dataset_mode not in DATASET_MODES:
+            raise ValueError(
+                "Run config dataset_mode must be one of: "
+                + ", ".join(sorted(DATASET_MODES))
+            )
+        pose_template = value.get("pose_template")
+        if pose_template is not None:
+            if not isinstance(pose_template, Mapping):
+                raise ValueError("Run config pose_template must be an object or null")
+            if pose_template.get("selection_artifact") != "pose_template_selection.json":
+                raise ValueError(
+                    "Run config pose_template.selection_artifact must be "
+                    "pose_template_selection.json"
+                )
 
     robot = value.get("robot_profile")
     if not isinstance(robot, Mapping):
@@ -536,6 +575,15 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         raise ValueError("Run config selected_objects must be a list of non-empty names")
     if len(set(selected_objects)) != len(selected_objects):
         raise ValueError("Run config selected_objects must not contain duplicates")
+    if schema == SCHEMA_VERSION:
+        if value["dataset_mode"] in {"objectless", "pose_template"} and selected_objects:
+            raise ValueError(
+                "Run config selected_objects must be empty for objectless or pose_template mode"
+            )
+        if value["dataset_mode"] == "objectless" and value.get("pose_template") is not None:
+            raise ValueError("Objectless run config cannot reference a pose template")
+        if value["dataset_mode"] != "pose_template" and value.get("pose_template") is not None:
+            raise ValueError("Only pose_template dataset mode may reference a pose template")
 
     frames = value.get("frames")
     if frames is not None:
@@ -665,9 +713,12 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
             }
         )
     value.setdefault("calibration_target", None)
+    if value.get("schema_version") == SCHEMA_VERSION:
+        value.setdefault("pose_template", None)
     validate_run_config(value)
-    registry = load_object_registry(str(value["object_folder"]))
-    registry.validate_selection(value["selected_objects"])
+    if value.get("dataset_mode", "legacy_registry") == "legacy_registry":
+        registry = load_object_registry(str(value["object_folder"]))
+        registry.validate_selection(value["selected_objects"])
     return value
 
 
@@ -716,7 +767,9 @@ def _sequence_options_with_run_config_defaults(
         group_options = dict(options.get(group_name, {}))
         # Either explicit key is a stage override; otherwise inject the snapshot.
         if "object_name" not in group_options and "objectless" not in group_options:
-            if selected_objects:
+            if config.get("dataset_mode") == "pose_template":
+                pass
+            elif selected_objects:
                 group_options["object_name"] = selected_objects
             else:
                 group_options["objectless"] = True
