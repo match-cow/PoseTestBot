@@ -12,7 +12,11 @@ from flask import Blueprint, jsonify, request, send_file
 from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
 from posetestbot.io.artifacts import RUN_CONFIG
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
-from posetestbot.cell.scene import build_cell_scene, cell_timeline_page
+from posetestbot.cell.scene import (
+    build_cell_scene,
+    cell_calibration_target_pdf_path,
+    cell_timeline_page,
+)
 from posetestbot.pose_templates.selection import load_pose_template_selection
 from posetestbot.web.security import (
     DEFAULT_RUN_ROOT,
@@ -183,6 +187,21 @@ def ui_cell_timeline():
         return jsonify(payload)
     except KeyError as exc:
         return jsonify({"output": str(exc)}), 404
+    except FileNotFoundError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except (OSError, ValueError) as exc:
+        return jsonify({"output": str(exc)}), 400
+
+
+@ui_bp.get("/ui/cell-calibration-target-pdf")
+def ui_cell_calibration_target_pdf():
+    try:
+        return send_file(
+            cell_calibration_target_pdf_path(_requested_run_root()),
+            mimetype="application/pdf",
+            conditional=True,
+            max_age=3600,
+        )
     except FileNotFoundError as exc:
         return jsonify({"output": str(exc)}), 404
     except (OSError, ValueError) as exc:

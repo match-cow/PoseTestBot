@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-21
+Last updated: 2026-07-22
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -31,6 +31,15 @@ The active gates are:
 - `rewrite_full_capture.v1`
 - `rewrite_calibration_validation.v1`
 - `rewrite_bop_export_readiness.v1`
+
+The Cell view now composes the run's actual context surface: exact compensated
+pose-template footprint contours for object-bearing runs, the selected or
+latest run-local calibration-attempt board for calibration runs, and the
+packaged HRI sheet only as a fallback. Promoted board placement is recovered
+from calibration-profile companion transforms; boards without promoted
+placement remain visibly marked as reference overlays. Optional robot-base and
+TCP frames are reported as not configured instead of unresolved, while cameras
+still fail closed when this run has no matching promoted profile.
 
 Historical run `working_data/hot_full_capture_fixed_20260710_1351` passes the
 full-capture gate at 10/10 for three RealSense cameras. The current five-sensor

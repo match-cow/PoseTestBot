@@ -335,7 +335,7 @@ export interface CellEntity {
   id: string
   type: string
   label: string
-  status: "planned" | "recorded" | "unresolved"
+  status: "planned" | "recorded" | "reference" | "not_configured" | "unresolved"
   transform: CellTransform | null
   unresolved_reason: string | null
   geometry: Record<string, JsonValue>

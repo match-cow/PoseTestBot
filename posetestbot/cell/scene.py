@@ -36,6 +36,9 @@ SCENE_SCHEMA_VERSION = "cell_scene.v1"
 TIMELINE_SCHEMA_VERSION = "cell_timeline.v1"
 MAX_TIMELINE_PAGE = 2_000
 MAX_PREVIEW_POSES = 200
+CALIBRATION_ATTEMPT_DIRECTORY = Path("processed") / "calibration"
+POSE_TEMPLATE_BUNDLE = "pose_template_bundle.json"
+POSE_TEMPLATE_PREVIEW = "pose_template_preview.json"
 
 
 def _matrix(quaternion: Any, translation: Any) -> np.ndarray:
@@ -568,6 +571,187 @@ def _sensor_key(sensor: Mapping[str, Any]) -> str:
     return f"{family}_{sensor.get('device_id', 'unknown')}"
 
 
+def _configured_fixed_frames(config: Mapping[str, Any]) -> set[str]:
+    return {
+        str(item.get("from"))
+        for item in config.get("frames", {}).get("fixed_transforms", [])
+        if isinstance(item, Mapping)
+    }
+
+
+def _calibration_attempt_target(run_root: Path) -> dict[str, Any] | None:
+    """Return the newest run-local attempt target without treating it as promoted."""
+
+    attempts_root = run_root / CALIBRATION_ATTEMPT_DIRECTORY
+    if not attempts_root.is_dir():
+        return None
+    candidates: list[dict[str, Any]] = []
+    for attempt_root in attempts_root.iterdir():
+        request_path = attempt_root / "request.json"
+        progress_path = attempt_root / "progress.json"
+        target_path = attempt_root / "target_bundle" / CALIBRATION_TARGET
+        if not (
+            attempt_root.is_dir()
+            and request_path.is_file()
+            and progress_path.is_file()
+            and target_path.is_file()
+        ):
+            continue
+        try:
+            request_value = _read_mapping(request_path)
+            progress = _read_mapping(progress_path)
+            target = _read_mapping(target_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if request_value.get("attempt_id") != attempt_root.name:
+            continue
+        candidates.append(
+            {
+                "sort_key": str(request_value.get("created_at") or ""),
+                "target": target,
+                "target_path": target_path,
+                "pdf_path": attempt_root / "target_bundle" / "calibration_target.pdf",
+                "provenance": {
+                    "source": target_path.as_posix(),
+                    "selection_source": "latest_run_calibration_attempt",
+                    "attempt_id": attempt_root.name,
+                    "attempt_status": progress.get("status"),
+                    "placement_state": request_value.get("target_mounting", {}).get(
+                        "state"
+                    ),
+                },
+            }
+        )
+    return max(candidates, key=lambda item: item["sort_key"], default=None)
+
+
+def _calibration_target_context(
+    run_root: Path, config: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    target_path = run_root / CALIBRATION_TARGET
+    configured = config.get("calibration_target")
+    if target_path.is_file():
+        target = _read_mapping(target_path)
+        pdf_path = None
+        provenance: dict[str, Any] = {
+            "source": target_path.as_posix(),
+            "selection_source": "promoted_run_artifact",
+        }
+        placement = target.get("placement")
+        if isinstance(configured, Mapping):
+            bundle_path = Path(str(configured.get("bundle_path", "")))
+            if not bundle_path.is_absolute() and ".." not in bundle_path.parts:
+                candidate = run_root / bundle_path / "calibration_target.pdf"
+                if candidate.is_file():
+                    pdf_path = candidate
+            configured_placement = configured.get("placement")
+            if not isinstance(placement, Mapping) and isinstance(
+                configured_placement, Mapping
+            ):
+                transform = configured_placement.get("transform")
+                if isinstance(transform, Mapping):
+                    placement = transform
+            provenance["target_id"] = configured.get("target_id")
+        return {
+            "target": target,
+            "target_path": target_path,
+            "pdf_path": pdf_path,
+            "placement": placement,
+            "provenance": provenance,
+        }
+    return _calibration_attempt_target(run_root)
+
+
+def cell_calibration_target_pdf_path(run_root: str | Path) -> Path:
+    root = Path(run_root)
+    config = load_run_config_for_run_root(root)
+    context = _calibration_target_context(root, config)
+    if context is None or not isinstance(context.get("pdf_path"), Path):
+        raise FileNotFoundError("No calibration-target PDF is available for this run")
+    path = context["pdf_path"]
+    if not path.is_file():
+        raise FileNotFoundError("No calibration-target PDF is available for this run")
+    path.resolve(strict=True).relative_to(root.resolve())
+    return path
+
+
+def _profile_target_placement(
+    profiles: list[CalibrationProfile], target: Mapping[str, Any]
+) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None]:
+    target_id = target.get("target_id")
+    for profile in sorted(profiles, key=lambda item: item.profile_id):
+        if target_id and profile.metadata.get("target_id") != target_id:
+            continue
+        companion = profile.metadata.get("companion_transform")
+        if not isinstance(companion, Mapping):
+            continue
+        if companion.get("from") != "aruco_grid":
+            continue
+        return companion, {
+            "placement_source": "promoted_calibration_profile_companion",
+            "placement_profile_id": profile.profile_id,
+        }
+    return None, None
+
+
+def _target_geometry(target: Mapping[str, Any], *, pdf_url: str | None) -> dict[str, Any]:
+    board = target.get("posegridgen", {}).get("configuration", {}).get("board", {})
+    marker_length = target.get("marker_length") or board.get("marker_size_mm")
+    marker_separation = target.get("marker_separation") or board.get("separation_mm")
+    markers = target.get("markers")
+    return {
+        "kind": "calibration_target",
+        "target_type": target.get("target_type"),
+        "target_id": target.get("target_id"),
+        "display_name": target.get("display_name"),
+        "geometry_sha256": target.get("geometry_sha256"),
+        "target_bounds": target.get("target_bounds"),
+        "grid_size": target.get("grid_size"),
+        "marker_length_mm": marker_length,
+        "marker_separation_mm": marker_separation,
+        "square_length_mm": target.get("square_length"),
+        "markers": list(markers) if isinstance(markers, list) else [],
+        "pdf_url": pdf_url,
+    }
+
+
+def _pose_template_footprint(
+    run_root: Path, selection: Mapping[str, Any]
+) -> dict[str, Any]:
+    snapshot = run_root / str(selection["bundle_snapshot"])
+    bundle = _read_mapping(snapshot / POSE_TEMPLATE_BUNDLE)
+    preview = _read_mapping(snapshot / POSE_TEMPLATE_PREVIEW)
+    configuration = bundle.get("configuration")
+    if not isinstance(configuration, Mapping):
+        raise ValueError("Pose-template bundle has no printable configuration")
+    page = preview.get("page")
+    instances = preview.get("instances")
+    if not isinstance(page, Mapping) or not isinstance(instances, list):
+        raise ValueError("Pose-template bundle has no exact printable preview")
+    contours = []
+    for item in instances:
+        if not isinstance(item, Mapping):
+            continue
+        item_contours = item.get("compensated_contours")
+        if not isinstance(item_contours, list):
+            continue
+        contours.append(
+            {
+                "instance_uuid": item.get("instance_uuid"),
+                "contours": item_contours,
+            }
+        )
+    return {
+        "kind": "pose_template_footprint",
+        "display_name": bundle.get("display_name"),
+        "page": dict(page),
+        "page_configuration": dict(configuration.get("page", {})),
+        "contours": contours,
+        "template_uuid": selection.get("template_uuid"),
+        "bundle_sha256": selection.get("bundle_sha256"),
+    }
+
+
 def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
     root = Path(run_root)
     config = load_run_config_for_run_root(root)
@@ -598,23 +782,9 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
             provenance={"source": "run_config.frames.dataset_reference_frame"},
             geometry={"kind": "axes", "size_mm": 100},
         ),
-        _entity(
-            "hri_template",
-            "template",
-            "HRI cell template",
-            transform=_identity("template_base"),
-            status="planned",
-            provenance={"source": "packaged_hri_template"},
-            geometry={
-                "kind": "svg_plane",
-                "width_mm": 420,
-                "height_mm": 297,
-                "asset_url": "/assets/cell/template_HRI_LBR_all_center_v2.svg",
-                "mapping": "center=template_base;right=+X;down=+Y",
-            },
-        ),
     ]
 
+    configured_fixed_frames = _configured_fixed_frames(config)
     for frame, label, kind in (
         ("physical_robot_base", "Physical robot base", "robot_base"),
         ("tcp", "Robot TCP", "tcp"),
@@ -629,8 +799,14 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                     kind,
                     label,
                     transform=None,
-                    status="unresolved",
-                    reason=f"No fixed transform resolves {frame} to {parent}",
+                    status=(
+                        "unresolved" if frame in configured_fixed_frames else "not_configured"
+                    ),
+                    reason=(
+                        f"No fixed transform resolves {frame} to {parent}"
+                        if frame in configured_fixed_frames
+                        else None
+                    ),
                     provenance={"source": "run_config.frames.fixed_transforms"},
                     geometry={"kind": kind},
                 )
@@ -675,6 +851,7 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
     )
 
     profiles, profile_path = _profiles(root, config, warnings)
+    selected_profiles: list[CalibrationProfile] = []
     for sensor in config.get("capture", {}).get("sensors", []):
         if not isinstance(sensor, Mapping) or sensor.get("enabled", True) is not True:
             continue
@@ -682,6 +859,7 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
         label = str(sensor.get("display_name") or key)
         try:
             profile = _profile_for_sensor(profiles, sensor, key)
+            selected_profiles.append(profile)
             parent = (
                 "robot_flange"
                 if profile.mounting_mode.value == "eye_in_hand"
@@ -740,6 +918,7 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
 
     encoded_root = quote(root.as_posix(), safe="")
     pose_selection = None
+    has_context_surface = False
     if config.get("dataset_mode") == "pose_template":
         try:
             pose_selection = load_pose_template_selection(root)
@@ -749,6 +928,32 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                 "bundle_sha256": pose_selection["bundle_sha256"],
                 "instance_count": len(pose_selection["instances"]),
             }
+            footprint = _pose_template_footprint(root, pose_selection)
+            footprint_transform = np.asarray(
+                pose_selection["template_base_from_pose_template"]["matrix"],
+                dtype=float,
+            )
+            entities.append(
+                _entity(
+                    "pose_template_footprint",
+                    "template",
+                    str(footprint.get("display_name") or "Object footprint template"),
+                    transform=_transform_dict(footprint_transform, "template_base"),
+                    status="planned",
+                    provenance={
+                        **template_provenance,
+                        "source": (
+                            root / str(pose_selection["bundle_snapshot"])
+                            / POSE_TEMPLATE_PREVIEW
+                        ).as_posix(),
+                        "placement_confirmed": pose_selection.get(
+                            "placement_confirmed"
+                        ),
+                    },
+                    geometry=footprint,
+                )
+            )
+            has_context_surface = True
             for item in pose_selection["instances"]:
                 instance_uuid = item["instance_uuid"]
                 transform = np.asarray(
@@ -788,41 +993,73 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
     else:
         template_provenance = None
 
-    target_path = root / CALIBRATION_TARGET
-    if target_path.is_file():
+    try:
+        target_context = _calibration_target_context(root, config)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        target_context = None
+        entities.append(
+            _entity(
+                "calibration_target",
+                "calibration_target",
+                "Calibration target",
+                transform=None,
+                status="unresolved",
+                reason=str(exc),
+                provenance={"source": (root / CALIBRATION_TARGET).as_posix()},
+                geometry={"kind": "calibration_target"},
+            )
+        )
+    if target_context is not None:
         try:
-            target = _read_mapping(target_path)
-            placement = target.get("placement")
+            target = target_context["target"]
+            placement = target_context.get("placement")
+            placement_provenance = None
             if not isinstance(placement, Mapping):
-                raise ValueError("Calibration target has no known placement")
+                placement, placement_provenance = _profile_target_placement(
+                    selected_profiles, target
+                )
+            placement_known = isinstance(placement, Mapping)
+            if not placement_known:
+                placement = {
+                    "rotation_quaternion_wxyz": [1, 0, 0, 0],
+                    "translation_mm": [0, 0, 0],
+                    "to": "template_base",
+                }
             matrix = _matrix(
                 placement["rotation_quaternion_wxyz"], placement["translation_mm"]
             )
             parent = str(placement.get("to", "template_base"))
             manager.add_transform("calibration_target", parent, matrix)
             matrix = manager.get_transform("calibration_target", parent)
-            geometry = {
-                "kind": "calibration_target",
-                "target_type": target.get("target_type"),
-                "target_id": target.get("target_id"),
-                "geometry_sha256": target.get("geometry_sha256"),
-                "target_bounds": target.get("target_bounds"),
-                "grid_size": target.get("grid_size"),
-                "marker_length_mm": target.get("marker_length"),
-                "marker_separation_mm": target.get("marker_separation"),
-                "square_length_mm": target.get("square_length"),
-            }
+            pdf_path = target_context.get("pdf_path")
+            geometry = _target_geometry(
+                target,
+                pdf_url=(
+                    f"/ui/cell-calibration-target-pdf?run_root={encoded_root}"
+                    if isinstance(pdf_path, Path) and pdf_path.is_file()
+                    else None
+                ),
+            )
+            geometry["placement_known"] = placement_known
+            label = str(target.get("display_name") or "Calibration target")
+            if not placement_known:
+                label += " (reference placement)"
             entities.append(
                 _entity(
                     "calibration_target",
                     "calibration_target",
-                    "Calibration target",
+                    label,
                     transform=_transform_dict(matrix, parent),
-                    status="planned",
-                    provenance={"source": target_path.as_posix()},
+                    status="planned" if placement_known else "reference",
+                    provenance={
+                        **target_context["provenance"],
+                        **(placement_provenance or {}),
+                        "placement_known": placement_known,
+                    },
                     geometry=geometry,
                 )
             )
+            has_context_surface = True
         except (KeyError, OSError, ValueError, json.JSONDecodeError) as exc:
             entities.append(
                 _entity(
@@ -832,10 +1069,29 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                     transform=None,
                     status="unresolved",
                     reason=str(exc),
-                    provenance={"source": target_path.as_posix()},
+                    provenance=dict(target_context["provenance"]),
                     geometry={"kind": "calibration_target"},
                 )
             )
+
+    if not has_context_surface:
+        entities.append(
+            _entity(
+                "hri_template",
+                "template",
+                "HRI cell template",
+                transform=_identity("template_base"),
+                status="reference",
+                provenance={"source": "packaged_hri_template"},
+                geometry={
+                    "kind": "svg_plane",
+                    "width_mm": 420,
+                    "height_mm": 297,
+                    "asset_url": "/assets/cell/template_HRI_LBR_all_center_v2.svg",
+                    "mapping": "center=template_base;right=+X;down=+Y",
+                },
+            )
+        )
 
     timeline_meta = [
         _timeline_metadata(item, default=index == 0)

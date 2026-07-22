@@ -2,7 +2,7 @@ import { Component, Suspense, useEffect, useMemo, useRef, useState } from "react
 import { Canvas, type ThreeEvent, useLoader, useThree } from "@react-three/fiber"
 import { OrbitControls, useTexture } from "@react-three/drei"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { BufferGeometry, Color, Float32BufferAttribute, Line, LineBasicMaterial, LineSegments, Quaternion, Vector3 } from "three"
+import { BufferGeometry, Color, DoubleSide, Float32BufferAttribute, Line, LineBasicMaterial, LineSegments, Quaternion, Shape, Vector3 } from "three"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js"
 import { AlertTriangle, Box, Camera, CirclePause, CirclePlay, Crosshair, Eye, EyeOff, Focus, RotateCcw, Route, ScanLine } from "lucide-react"
 import { PageHeader } from "@/components/page-header"
@@ -41,6 +41,7 @@ function transformProps(transform: CellTransform) {
 function statusColor(status: CellEntity["status"]) {
   if (status === "unresolved") return "#ef4444"
   if (status === "recorded") return "#22c55e"
+  if (status === "reference") return "#f59e0b"
   return "#38bdf8"
 }
 
@@ -78,6 +79,7 @@ function SelectionDetails({ entity }: { entity: CellEntity | null }) {
   const solverLabel = solver?.pnp_method || solver?.extrinsic_method
     ? [solver.pnp_method, solver.extrinsic_method].filter(Boolean).join(" + ")
     : null
+  const pdfUrl = typeof entity.geometry.pdf_url === "string" ? entity.geometry.pdf_url : null
   return <div className="space-y-4 text-xs">
     <div className="flex items-center justify-between gap-2"><span className="text-sm font-semibold">{entity.label}</span><StatusBadge status={entity.status} /></div>
     <div><span className="text-muted-foreground">Type</span><div>{titleCase(entity.type)}</div></div>
@@ -87,6 +89,8 @@ function SelectionDetails({ entity }: { entity: CellEntity | null }) {
       <Detail label="Frame" value={`${entity.id} → ${entity.transform.parent_frame ?? "root"}`} />
       <Detail label="Translation mm" value={vector(entity.transform.translation_mm, 3)} />
       <Detail label="Quaternion WXYZ" value={vector(entity.transform.rotation_quaternion_wxyz, 7)} />
+      {entity.geometry.placement_known === false && <div className="rounded border border-amber-500/30 bg-amber-500/8 p-2 text-amber-700 dark:text-amber-300">Shown at the reference origin because no physical board placement was promoted for this run.</div>}
+      {pdfUrl && <a className="inline-flex text-primary underline underline-offset-4" href={pdfUrl} target="_blank" rel="noreferrer">Open exact calibration-target PDF</a>}
     </div>}
     {calibration && <div data-testid="cell-calibration-evidence" className="space-y-4 rounded border border-success/30 p-3">
       <div className="flex items-center justify-between gap-2"><div><div className="font-semibold">Calibration extrinsic</div><div className="mt-1 font-mono text-[10px]" data-testid="cell-calibration-transform-frames">{calibration.extrinsics.from} → {calibration.extrinsics.to}</div></div><StatusBadge status={calibration.status} /></div>
@@ -195,15 +199,69 @@ function TemplatePlane({ url, onSelect }: { url: string; onSelect: () => void })
 
 function TargetGeometry({ entity, color, onSelect }: { entity: CellEntity; color: string; onSelect: () => void }) {
   const grid = entity.geometry.grid_size as number[] | undefined
-  const bounds = entity.geometry.target_bounds as { width_mm?: number; height_mm?: number } | undefined
+  const bounds = entity.geometry.target_bounds as { width_mm?: number; height_mm?: number; x_mm?: number; y_mm?: number } | undefined
   const marker = Number(entity.geometry.marker_length_mm || entity.geometry.square_length_mm || 40)
   const gap = Number(entity.geometry.marker_separation_mm || marker)
   const width = Number(bounds?.width_mm) || (grid ? marker + Math.max(0, grid[0] - 1) * gap : 200)
   const height = Number(bounds?.height_mm) || (grid ? marker + Math.max(0, grid[1] - 1) * gap : 150)
-  return <mesh position={[width / 2, height / 2, 1]} onClick={(event) => selectEvent(event, onSelect)}>
-    <boxGeometry args={[width, height, 2]} />
-    <meshStandardMaterial color={color} transparent opacity={0.55} />
-  </mesh>
+  const x = Number(bounds?.x_mm) || 0
+  const y = Number(bounds?.y_mm) || 0
+  const markers = Array.isArray(entity.geometry.markers) ? entity.geometry.markers : []
+  return <group onClick={(event) => selectEvent(event, onSelect)}>
+    <mesh position={[x + width / 2, y + height / 2, 0]} receiveShadow>
+      <boxGeometry args={[width + 8, height + 8, 2]} />
+      <meshStandardMaterial color="#f8fafc" roughness={0.9} />
+    </mesh>
+    {markers.map((raw, index) => {
+      const item = raw as { corners_mm?: number[][] }
+      const corners = item.corners_mm ?? []
+      const xs = corners.map((point) => Number(point[0])).filter(Number.isFinite)
+      const ys = corners.map((point) => Number(point[1])).filter(Number.isFinite)
+      if (!xs.length || !ys.length) return null
+      const minX = Math.min(...xs); const maxX = Math.max(...xs)
+      const minY = Math.min(...ys); const maxY = Math.max(...ys)
+      return <mesh key={index} position={[(minX + maxX) / 2, (minY + maxY) / 2, 1.2]}>
+        <boxGeometry args={[maxX - minX, maxY - minY, 0.8]} />
+        <meshBasicMaterial color="#020617" />
+      </mesh>
+    })}
+    {!markers.length && <mesh position={[x + width / 2, y + height / 2, 1.2]}>
+      <boxGeometry args={[width, height, 0.8]} />
+      <meshStandardMaterial color={color} transparent opacity={0.45} />
+    </mesh>}
+  </group>
+}
+
+function PoseTemplateFootprint({ entity, onSelect }: { entity: CellEntity; onSelect: () => void }) {
+  const page = entity.geometry.page as { width_mm?: number; height_mm?: number } | undefined
+  const pageConfiguration = entity.geometry.page_configuration as { origin_from_lower_left_mm?: number[] } | undefined
+  const width = Number(page?.width_mm || 420)
+  const height = Number(page?.height_mm || 297)
+  const origin = pageConfiguration?.origin_from_lower_left_mm ?? [15, 15]
+  const contourGeometry = entity.geometry.contours
+  const shapes = useMemo(() => (Array.isArray(contourGeometry) ? contourGeometry : []).flatMap((raw) => {
+    const item = raw as { instance_uuid?: string; contours?: Array<Array<{ x_mm?: number; y_mm?: number }>> }
+    return (item.contours ?? []).flatMap((points, index) => {
+      const finite = points.map((point) => [Number(point.x_mm), Number(point.y_mm)] as const).filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y))
+      if (finite.length < 3) return []
+      const shape = new Shape()
+      shape.moveTo(finite[0][0], finite[0][1])
+      finite.slice(1).forEach(([x, y]) => shape.lineTo(x, y))
+      shape.closePath()
+      return [{ key: `${item.instance_uuid ?? "instance"}-${index}`, shape }]
+    })
+  }), [contourGeometry])
+  return <group onClick={(event) => selectEvent(event, onSelect)}>
+    <mesh position={[width / 2 - Number(origin[0] || 0), height / 2 - Number(origin[1] || 0), -0.5]} receiveShadow>
+      <boxGeometry args={[width, height, 1]} />
+      <meshStandardMaterial color="#f8fafc" roughness={0.95} />
+    </mesh>
+    {shapes.map(({ key, shape }) => <mesh key={key} position={[0, 0, 0.2]}>
+      <shapeGeometry args={[shape]} />
+      <meshBasicMaterial color="#a3b51d" transparent opacity={0.48} side={DoubleSide} />
+    </mesh>)}
+    <mesh position={[0, 0, 0.8]}><circleGeometry args={[3, 24]} /><meshBasicMaterial color="#2374d8" side={DoubleSide} /></mesh>
+  </group>
 }
 
 function EntityVisual({ entity, onSelect }: { entity: CellEntity; onSelect: () => void }) {
@@ -214,6 +272,7 @@ function EntityVisual({ entity, onSelect }: { entity: CellEntity; onSelect: () =
   if (kind === "mesh") return <MeshBoundary fallback={<mesh onClick={(event) => selectEvent(event, onSelect)}><boxGeometry args={[30, 30, 30]} /><meshStandardMaterial color="#f59e0b" wireframe /></mesh>}><Suspense fallback={null}><PlyMesh entity={entity} onSelect={onSelect} /></Suspense></MeshBoundary>
   if (kind === "camera_frustum") return <Frustum color={color} onSelect={onSelect} geometry={entity.geometry} />
   if (kind === "calibration_target") return <TargetGeometry entity={entity} color={color} onSelect={onSelect} />
+  if (kind === "pose_template_footprint") return <PoseTemplateFootprint entity={entity} onSelect={onSelect} />
   if (kind === "robot_base") return <mesh position={[0, 0, 45]} onClick={(event) => selectEvent(event, onSelect)}><cylinderGeometry args={[85, 105, 90, 32]} /><meshStandardMaterial color={color} roughness={0.55} /></mesh>
   if (kind === "flange_proxy") return <mesh onClick={(event) => selectEvent(event, onSelect)}><cylinderGeometry args={[42, 42, 30, 24]} /><meshStandardMaterial color={color} /></mesh>
   if (kind === "tcp") return <group onClick={(event) => selectEvent(event, onSelect)}><axesHelper args={[70]} /><mesh position={[0, 0, 25]}><cylinderGeometry args={[8, 3, 50, 12]} /><meshStandardMaterial color={color} /></mesh></group>
@@ -327,10 +386,14 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
 
   const toggleLayer = (layer: string) => setVisible((current) => { const next = new Set(current); if (next.has(layer)) next.delete(layer); else next.add(layer); return next })
   const unresolved = scene.entities.filter((entity) => entity.status === "unresolved")
+  const unresolvedCameras = unresolved.filter((entity) => entity.type === "camera")
+  const otherIssues = scene.warnings.filter((warning) => warning.code !== "missing_calibration_profiles")
+    .map((warning) => warning.message)
+    .concat(unresolved.filter((entity) => entity.type !== "camera").map((entity) => `${entity.label}: ${entity.unresolved_reason}`))
 
   return <div className="space-y-5">
     <PageHeader eyebrow="Dataset contents" title="Cell" description="Read-only, millimetre-accurate view of the configured cell and recorded flange trajectory." />
-    {(scene.warnings.length > 0 || unresolved.length > 0) && <div className="flex items-start gap-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-4 text-sm"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" /><div><div className="font-semibold">Scene has unresolved provenance</div><div className="mt-1 text-xs text-muted-foreground">{scene.warnings.map((warning) => warning.message).concat(unresolved.map((entity) => `${entity.label}: ${entity.unresolved_reason}`)).join(" · ")}</div></div></div>}
+    {(scene.warnings.length > 0 || unresolved.length > 0) && <div className="flex items-start gap-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-4 text-sm"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" /><div className="min-w-0"><div className="font-semibold">Partial cell scene</div><div className="mt-1 text-xs text-muted-foreground">{unresolvedCameras.length > 0 ? `${unresolvedCameras.length} camera${unresolvedCameras.length === 1 ? " is" : "s are"} hidden until this run has matching promoted calibration profiles. The recorded trajectory and available template evidence remain visible.` : "Available scene evidence remains visible."}</div>{otherIssues.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-xs font-medium">Show {otherIssues.length} provenance detail{otherIssues.length === 1 ? "" : "s"}</summary><ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-muted-foreground">{otherIssues.map((message, index) => <li key={index}>{message}</li>)}</ul></details>}</div></div>}
     <div className="grid grid-cols-[minmax(0,1fr)_340px] gap-5">
       <Card className="overflow-hidden"><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>3D cell</CardTitle><CardDescription>Right-handed · Z-up · millimetres · no pose interpolation</CardDescription></div><div className="flex gap-2"><Button size="sm" variant={preset === "perspective" ? "default" : "outline"} onClick={() => setPreset("perspective")}><Focus />Perspective</Button><Button size="sm" variant={preset === "top" ? "default" : "outline"} onClick={() => setPreset("top")}><ScanLine />Top</Button><Button size="sm" variant={preset === "front" ? "default" : "outline"} onClick={() => setPreset("front")}><Crosshair />Front</Button><Button size="sm" variant="outline" aria-label="Reset cell view" onClick={() => { setPreset("perspective"); setResetToken((value) => value + 1) }}><RotateCcw /></Button></div></div></CardHeader>
         <CardContent className="p-0">{webgl ? <div className="h-[620px]"><CellCanvas scene={scene} visible={visible} pose={pose} trajectory={trajectory} selected={selected} onSelect={setSelected} preset={preset} resetToken={resetToken} /></div> : <div data-testid="cell-webgl-fallback" className="grid h-[620px] place-items-center p-10 text-center"><div><AlertTriangle className="mx-auto mb-3 size-8 text-amber-500" /><div className="font-semibold">WebGL is unavailable</div><p className="mt-2 max-w-md text-sm text-muted-foreground">The component and provenance list remains available. Use a browser with WebGL support to orbit the scene.</p></div></div>}</CardContent>

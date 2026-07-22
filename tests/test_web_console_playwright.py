@@ -1229,6 +1229,37 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
                 },
             },
             {"id": "camera:missing", "type": "camera", "label": "Uncalibrated camera", "status": "unresolved", "transform": None, "unresolved_reason": "No valid calibration profile", "geometry": {"kind": "camera_frustum"}, "provenance": {"source": "calibration_profiles"}},
+            {
+                "id": "calibration_target",
+                "type": "calibration_target",
+                "label": "calib00 (reference placement)",
+                "status": "reference",
+                "transform": identity,
+                "unresolved_reason": None,
+                "geometry": {
+                    "kind": "calibration_target",
+                    "placement_known": False,
+                    "target_bounds": {"x_mm": 0, "y_mm": 0, "width_mm": 90, "height_mm": 40},
+                    "markers": [{"id": 0, "corners_mm": [[0, 0, 0], [40, 0, 0], [40, 40, 0], [0, 40, 0]]}],
+                    "pdf_url": "/ui/cell-calibration-target-pdf?run_root=test",
+                },
+                "provenance": {"source": "processed/calibration/attempt/target_bundle/calibration_target.json", "placement_known": False},
+            },
+            *([] if objectless else [{
+                "id": "pose_template_footprint",
+                "type": "template",
+                "label": "Exact object footprint",
+                "status": "planned",
+                "transform": identity,
+                "unresolved_reason": None,
+                "geometry": {
+                    "kind": "pose_template_footprint",
+                    "page": {"width_mm": 420, "height_mm": 297},
+                    "page_configuration": {"origin_from_lower_left_mm": [15, 15]},
+                    "contours": [{"instance_uuid": "object-1", "contours": [[{"x_mm": 20, "y_mm": 20}, {"x_mm": 50, "y_mm": 20}, {"x_mm": 35, "y_mm": 50}]]}],
+                },
+                "provenance": {"source": "pose_template_preview.json"},
+            }]),
         ],
         "warnings": [{"code": "missing_calibration_profiles", "message": "No calibration profile collection is available"}],
         "timelines": [{"id": "sensor:realsense_123", "label": "realsense_123", "kind": "synchronized", "frame_count": 2, "default": True, "exact": True, "interpolation": "none", "page_limit": 2000, "source": "match_robot_ee_poses.json"}],
@@ -1261,7 +1292,12 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     page.goto(f"{console_server.url}/#/cell", wait_until="networkidle")
 
     expect(page.get_by_test_id("cell-webgl-canvas")).to_be_visible()
-    expect(page.get_by_text("Scene has unresolved provenance")).to_be_visible()
+    expect(page.get_by_text("Partial cell scene")).to_be_visible()
+    expect(page.get_by_text("1 camera is hidden", exact=False)).to_be_visible()
+    expect(page.get_by_text("Exact object footprint", exact=True)).to_be_visible()
+    page.get_by_text("calib00 (reference placement)", exact=True).click()
+    expect(page.get_by_text("Shown at the reference origin", exact=False)).to_be_visible()
+    expect(page.get_by_role("link", name="Open exact calibration-target PDF")).to_be_visible()
     page.get_by_text("Wrist D435", exact=True).click()
     evidence = page.get_by_test_id("cell-calibration-evidence")
     expect(evidence.get_by_text("Calibration extrinsic", exact=True)).to_be_visible()
@@ -1296,7 +1332,7 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     expect(page.get_by_text("10.00, 20.00, 30.00")).not_to_be_visible()
     page.get_by_role("slider", name="Frame scrubber").fill("1")
     expect(page.get_by_text("Exact frame 000001.png · arc")).to_be_visible()
-    page.get_by_text("Recorded trajectory").click()
+    page.get_by_text("Recorded trajectory", exact=True).click()
     expect(page.get_by_role("checkbox", name="Recorded trajectory")).not_to_be_checked()
 
 

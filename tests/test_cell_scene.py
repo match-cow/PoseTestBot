@@ -16,7 +16,11 @@ from posetestbot.calibration.profiles import (
     TransformFrame,
     write_profile_collection,
 )
-from posetestbot.cell.scene import build_cell_scene, cell_timeline_page
+from posetestbot.cell.scene import (
+    _pose_template_footprint,
+    build_cell_scene,
+    cell_timeline_page,
+)
 from posetestbot.io.artifacts import BOP_DIR, BOP_EXPORT_MANIFEST
 from posetestbot.pipeline.run_config import (
     FixedFrameTransform,
@@ -426,6 +430,7 @@ def test_scene_marks_missing_calibration_and_supports_raw_fallback(
     )
     config = json.loads((run_root / "run_config.json").read_text())
     config["calibration_profiles"] = None
+    config["frames"]["fixed_transforms"] = []
     (run_root / "run_config.json").write_text(json.dumps(config))
 
     scene = build_cell_scene(run_root)
@@ -439,6 +444,146 @@ def test_scene_marks_missing_calibration_and_supports_raw_fallback(
         warning["code"] == "missing_calibration_profiles"
         for warning in scene["warnings"]
     )
+    entities = {item["id"]: item for item in scene["entities"]}
+    assert entities["physical_robot_base"]["status"] == "not_configured"
+    assert entities["physical_robot_base"]["unresolved_reason"] is None
+    assert entities["tcp"]["status"] == "not_configured"
+
+
+def test_scene_uses_latest_run_attempt_board_as_reference_surface(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_root = make_scene_run(tmp_path)
+    (run_root / "calibration_target.json").unlink()
+    config_path = run_root / "run_config.json"
+    config = json.loads(config_path.read_text())
+    config["calibration_profiles"] = None
+    config_path.write_text(json.dumps(config))
+    attempt_id = "a" * 32
+    attempt = run_root / "processed" / "calibration" / attempt_id
+    bundle = attempt / "target_bundle"
+    bundle.mkdir(parents=True)
+    target = {
+        "schema_version": "calibration_target.v2",
+        "target_id": "target-from-attempt",
+        "target_type": "aruco_grid",
+        "display_name": "Attempt board",
+        "target_bounds": {"x_mm": 0, "y_mm": 0, "width_mm": 90, "height_mm": 40},
+        "grid_size": [2, 1],
+        "markers": [
+            {"id": 0, "corners_mm": [[0, 0, 0], [40, 0, 0], [40, 40, 0], [0, 40, 0]]},
+            {"id": 1, "corners_mm": [[50, 0, 0], [90, 0, 0], [90, 40, 0], [50, 40, 0]]},
+        ],
+    }
+    (bundle / "calibration_target.json").write_text(json.dumps(target))
+    (bundle / "calibration_target.pdf").write_bytes(b"%PDF-1.4\n% cell test\n")
+    (attempt / "request.json").write_text(
+        json.dumps(
+            {
+                "attempt_id": attempt_id,
+                "created_at": "2026-07-22T10:00:00Z",
+                "target_mounting": {
+                    "from": "aruco_grid",
+                    "to": "template_base",
+                    "state": "estimated",
+                },
+            }
+        )
+    )
+    (attempt / "progress.json").write_text(
+        json.dumps({"attempt_id": attempt_id, "status": "complete"})
+    )
+
+    scene = build_cell_scene(run_root)
+    entities = {item["id"]: item for item in scene["entities"]}
+    board = entities["calibration_target"]
+
+    assert board["label"] == "Attempt board (reference placement)"
+    assert board["status"] == "reference"
+    assert board["transform"]["translation_mm"] == [0.0, 0.0, 0.0]
+    assert len(board["geometry"]["markers"]) == 2
+    assert board["geometry"]["pdf_url"].startswith(
+        "/ui/cell-calibration-target-pdf?run_root="
+    )
+    assert board["provenance"]["attempt_id"] == attempt_id
+    assert not any(item["id"] == "hri_template" for item in scene["entities"])
+
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
+    monkeypatch.setenv("POSETESTBOT_WEB_INPUT_ROOTS", tmp_path.as_posix())
+    response = create_app().test_client().get(
+        "/ui/cell-calibration-target-pdf",
+        query_string={"run_root": run_root},
+    )
+    assert response.status_code == 200
+    assert response.mimetype == "application/pdf"
+    assert response.data.startswith(b"%PDF")
+
+
+def test_scene_places_promoted_board_from_profile_companion_transform(
+    tmp_path: Path,
+) -> None:
+    run_root = make_scene_run(tmp_path)
+    target_path = run_root / "calibration_target.json"
+    target = json.loads(target_path.read_text())
+    target.pop("placement")
+    target["target_id"] = "target-1"
+    target_path.write_text(json.dumps(target))
+
+    scene = build_cell_scene(run_root)
+    board = next(item for item in scene["entities"] if item["id"] == "calibration_target")
+
+    assert board["status"] == "planned"
+    assert board["transform"]["translation_mm"] == [1.0, 2.0, 3.0]
+    assert board["provenance"]["placement_source"] == (
+        "promoted_calibration_profile_companion"
+    )
+    assert board["geometry"]["placement_known"] is True
+
+
+def test_pose_template_footprint_uses_exact_snapshot_preview(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    snapshot = run_root / "processed" / "pose_template_selection"
+    snapshot.mkdir(parents=True)
+    (snapshot / "pose_template_bundle.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Fixture footprint",
+                "configuration": {
+                    "page": {
+                        "size": "A3",
+                        "orientation": "landscape",
+                        "origin_from_lower_left_mm": [15, 15],
+                    }
+                },
+            }
+        )
+    )
+    contours = [[{"x_mm": 10, "y_mm": 20}, {"x_mm": 30, "y_mm": 20}, {"x_mm": 10, "y_mm": 40}]]
+    (snapshot / "pose_template_preview.json").write_text(
+        json.dumps(
+            {
+                "page": {"width_mm": 420, "height_mm": 297},
+                "instances": [
+                    {"instance_uuid": "instance-1", "compensated_contours": contours}
+                ],
+            }
+        )
+    )
+
+    geometry = _pose_template_footprint(
+        run_root,
+        {
+            "bundle_snapshot": "processed/pose_template_selection",
+            "template_uuid": "template-1",
+            "bundle_sha256": "b" * 64,
+        },
+    )
+
+    assert geometry["kind"] == "pose_template_footprint"
+    assert geometry["page"] == {"width_mm": 420, "height_mm": 297}
+    assert geometry["contours"] == [
+        {"instance_uuid": "instance-1", "contours": contours}
+    ]
 
 
 def test_scene_rejects_pinned_profile_for_another_mounting_identity(
