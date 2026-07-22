@@ -75,7 +75,9 @@ def _check(
     }
 
 
-def _json_file_check(name: str, path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _json_file_check(
+    name: str, path: Path
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     data, error = _load_json_object(path)
     if error:
         return (
@@ -297,7 +299,7 @@ def _enabled_run_config_sensors(run_config: dict[str, Any]) -> list[dict[str, An
     return [
         sensor
         for sensor in sensors
-        if isinstance(sensor, dict) and sensor.get("enabled", True)
+        if isinstance(sensor, dict) and sensor.get("enabled", True) is True
     ]
 
 
@@ -363,9 +365,11 @@ def _bop_export_readiness_checks(
     if bop_export is not None:
         objectless = bop_export.get("objectless") is True
         raw_exports = bop_export.get("exports")
-        exports = [
-            export for export in raw_exports if isinstance(export, Mapping)
-        ] if isinstance(raw_exports, list) else []
+        exports = (
+            [export for export in raw_exports if isinstance(export, Mapping)]
+            if isinstance(raw_exports, list)
+            else []
+        )
         validation = bop_export.get("validation")
         validation_ok = (
             isinstance(validation, Mapping) and validation.get("status") == "ok"
@@ -415,13 +419,17 @@ def _bop_export_readiness_checks(
             pose_template is not None
             and pose_template.get("schema_version") == "posetestbot_pose_template.v1"
             and isinstance(template_summary, Mapping)
-            and pose_template.get("template_uuid") == template_summary.get("template_uuid")
-            and pose_template.get("bundle_sha256") == template_summary.get("bundle_sha256")
+            and pose_template.get("template_uuid")
+            == template_summary.get("template_uuid")
+            and pose_template.get("bundle_sha256")
+            == template_summary.get("bundle_sha256")
             and template_selection is not None
             and template_selection.get("schema_version") == "pose_template_selection.v1"
             and template_selection.get("placement_confirmed") is True
-            and pose_template.get("template_uuid") == template_selection.get("template_uuid")
-            and pose_template.get("bundle_sha256") == template_selection.get("bundle_sha256")
+            and pose_template.get("template_uuid")
+            == template_selection.get("template_uuid")
+            and pose_template.get("bundle_sha256")
+            == template_selection.get("bundle_sha256")
             and pose_template.get("configuration_sha256")
             == template_selection.get("configuration_sha256")
             and pose_template.get("template_base_from_pose_template")
@@ -503,9 +511,13 @@ def _bop_export_readiness_checks(
         depth_count = _png_count(scene_folder / DEPTH_DIR)
         rgb_names = {path.name for path in (scene_folder / RGB_DIR).glob("*.png")}
         depth_names = {path.name for path in (scene_folder / DEPTH_DIR).glob("*.png")}
-        scene_camera, camera_error = _load_json_object(scene_folder / "scene_camera.json")
+        scene_camera, camera_error = _load_json_object(
+            scene_folder / "scene_camera.json"
+        )
         scene_gt, gt_error = _load_json_object(scene_folder / "scene_gt.json")
-        scene_gt_info, info_error = _load_json_object(scene_folder / "scene_gt_info.json")
+        scene_gt_info, info_error = _load_json_object(
+            scene_folder / "scene_gt_info.json"
+        )
         expected_keys = {str(int(Path(name).stem)) for name in rgb_names}
         json_keys_ok = all(
             data is not None and set(data) == expected_keys
@@ -559,7 +571,9 @@ def _bop_export_readiness_checks(
                 scene_objects[(scene_id, int(image_id))] = object_ids
                 scene_annotation_ids[(scene_id, int(image_id))] = annotation_ids
         if objectless and (
-            any(scene_objects.get((scene_id, image_id), set()) for image_id in image_ids)
+            any(
+                scene_objects.get((scene_id, image_id), set()) for image_id in image_ids
+            )
             or (scene_folder / "mask").exists()
             or (scene_folder / "mask_visib").exists()
         ):
@@ -689,7 +703,9 @@ def _bop_export_readiness_checks(
                     except (KeyError, TypeError, ValueError):
                         references_ok = False
                         continue
-                    if image_id not in scene_images.get(scene_id, set()) or obj_id not in scene_objects.get((scene_id, image_id), set()):
+                    if image_id not in scene_images.get(
+                        scene_id, set()
+                    ) or obj_id not in scene_objects.get((scene_id, image_id), set()):
                         references_ok = False
             ok = (
                 isinstance(target_rows, list)
@@ -754,17 +770,23 @@ def _bop_export_readiness_checks(
     if template_selection is not None and template_object_instances is not None:
         selection_path = root / POSE_TEMPLATE_SELECTION
         object_rows = template_object_instances.get("instances")
-        map_rows = template_instance_map.get("instances") if template_instance_map else None
+        map_rows = (
+            template_instance_map.get("instances") if template_instance_map else None
+        )
         selection_digest_ok = (
             selection_path.is_file()
             and template_object_instances.get("selection_sha256")
             == hashlib.sha256(selection_path.read_bytes()).hexdigest()
         )
-        object_by_uuid = {
-            str(item.get("instance_uuid")): item
-            for item in object_rows or []
-            if isinstance(item, Mapping)
-        } if isinstance(object_rows, list) else {}
+        object_by_uuid = (
+            {
+                str(item.get("instance_uuid")): item
+                for item in object_rows or []
+                if isinstance(item, Mapping)
+            }
+            if isinstance(object_rows, list)
+            else {}
+        )
         expected_gt_keys = {
             (scene_id, image_id, gt_id)
             for (scene_id, image_id), ids in scene_annotation_ids.items()
@@ -800,18 +822,34 @@ def _bop_export_readiness_checks(
         for item in object_by_uuid.values():
             try:
                 expected_render_instances.add(
-                    (str(item["instance_uuid"]), str(item["catalog_uuid"]), int(item["obj_id"]))
+                    (
+                        str(item["instance_uuid"]),
+                        str(item["catalog_uuid"]),
+                        int(item["obj_id"]),
+                    )
                 )
             except (KeyError, TypeError, ValueError):
                 render_ok = False
         for sensor_name in scene_sensors.values():
             candidates = [
-                root / PROCESSED_DIR / "rectified" / sensor_name / "blenderproc" / "output"
+                root
+                / PROCESSED_DIR
+                / "rectified"
+                / sensor_name
+                / "blenderproc"
+                / "output"
                 / "posetestbot_render_instances.json",
-                root / PROCESSED_DIR / "synchronized" / sensor_name / "blenderproc" / "output"
+                root
+                / PROCESSED_DIR
+                / "synchronized"
+                / sensor_name
+                / "blenderproc"
+                / "output"
                 / "posetestbot_render_instances.json",
             ]
-            sidecar_path = next((path for path in candidates if path.is_file()), candidates[-1])
+            sidecar_path = next(
+                (path for path in candidates if path.is_file()), candidates[-1]
+            )
             sidecar, sidecar_error = _load_json_object(sidecar_path)
             rows = sidecar.get("instances") if sidecar else None
             actual: set[tuple[str, str, int]] = set()
@@ -839,7 +877,9 @@ def _bop_export_readiness_checks(
                 and actual == expected_render_instances
             )
             render_ok = render_ok and sensor_ok
-            render_details[sensor_name] = "ok" if sensor_ok else str(sidecar_error or "mismatch")
+            render_details[sensor_name] = (
+                "ok" if sensor_ok else str(sidecar_error or "mismatch")
+            )
 
         geometry_ok = isinstance(models_info, Mapping)
         if isinstance(models_info, Mapping):
@@ -856,8 +896,15 @@ def _bop_export_readiness_checks(
                 geometry_by_obj[obj_id] = digest
             for obj_id, digest in geometry_by_obj.items():
                 model = models_info.get(str(obj_id))
-                geometry = model.get("posetestbot_geometry") if isinstance(model, Mapping) else None
-                if not isinstance(geometry, Mapping) or geometry.get("source_sha256") != digest:
+                geometry = (
+                    model.get("posetestbot_geometry")
+                    if isinstance(model, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(geometry, Mapping)
+                    or geometry.get("source_sha256") != digest
+                ):
                     geometry_ok = False
         evidence_ok = selection_digest_ok and mapping_ok and render_ok and geometry_ok
         checks.append(
@@ -890,8 +937,7 @@ def _bop_export_readiness_checks(
         }
         scene_profile_ids = [export.get("calibration_profile_id") for export in exports]
         calibration_ok = bool(scene_profile_ids) and all(
-            isinstance(profile_id, str)
-            and profile_statuses.get(profile_id) == "valid"
+            isinstance(profile_id, str) and profile_statuses.get(profile_id) == "valid"
             for profile_id in scene_profile_ids
         )
         checks.append(
@@ -973,9 +1019,7 @@ def build_full_capture_gate_report(run_root: str | Path) -> dict[str, Any]:
             else None
         )
         selected_robot_mode = (
-            selected_profile.get("mode")
-            if isinstance(selected_profile, dict)
-            else None
+            selected_profile.get("mode") if isinstance(selected_profile, dict) else None
         )
         status_ok = status in {"ok", "warning", "ready", "succeeded"}
         robot_mode_ok = selected_robot_mode == "real"
@@ -985,9 +1029,7 @@ def build_full_capture_gate_report(run_root: str | Path) -> dict[str, Any]:
                 "hardware_status_report.json has acceptable status and real robot mode."
             )
         elif not robot_mode_ok:
-            message = (
-                "hardware_status_report.json must select the real robot profile."
-            )
+            message = "hardware_status_report.json must select the real robot profile."
         else:
             message = "hardware_status_report.json must be ok or warning."
         check = _check(
@@ -1108,11 +1150,15 @@ def build_full_capture_gate_report(run_root: str | Path) -> dict[str, Any]:
         raw_pose_count = int(capture.get("raw_pose_count") or 0)
         selected_roles = _capture_selected_roles(capture)
         processes = capture.get("processes")
-        sensor_processes = [
-            process
-            for process in processes
-            if isinstance(process, dict) and process.get("role") == "sensor_capture"
-        ] if isinstance(processes, list) else []
+        sensor_processes = (
+            [
+                process
+                for process in processes
+                if isinstance(process, dict) and process.get("role") == "sensor_capture"
+            ]
+            if isinstance(processes, list)
+            else []
+        )
         sensor_process_ready = bool(sensor_processes) and all(
             process.get("status") in {"succeeded", "stopped"}
             and process.get("started_at")
@@ -1193,6 +1239,28 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
 
     root = Path(run_root)
     checks: list[dict[str, Any]] = []
+    _run_config_check, run_config = _json_file_check("run_config", root / RUN_CONFIG)
+    enabled_sensors = (
+        _enabled_run_config_sensors(run_config) if run_config is not None else []
+    )
+    configured_sensors = (
+        [
+            sensor
+            for sensor in run_config.get("capture", {}).get("sensors", [])
+            if isinstance(sensor, dict)
+        ]
+        if run_config is not None and isinstance(run_config.get("capture"), dict)
+        else []
+    )
+    enabled_identities = {
+        (str(sensor.get("sensor_type") or ""), str(sensor.get("device_id") or ""))
+        for sensor in enabled_sensors
+    }
+    disabled_only_identities = {
+        (str(sensor.get("sensor_type") or ""), str(sensor.get("device_id") or ""))
+        for sensor in configured_sensors
+        if sensor.get("enabled", True) is not True
+    } - enabled_identities
 
     check, validation = _json_file_check(
         "calibration_validation",
@@ -1204,18 +1272,12 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
         overall_status = validation.get("overall_status")
         promotion = validation.get("promotion")
         profile_count = int(validation.get("profile_count") or 0)
-        promotable_profile_count = int(
-            validation.get("promotable_profile_count") or 0
-        )
+        promotable_profile_count = int(validation.get("promotable_profile_count") or 0)
         promotion_requested = (
-            bool(promotion.get("requested"))
-            if isinstance(promotion, dict)
-            else False
+            bool(promotion.get("requested")) if isinstance(promotion, dict) else False
         )
         promotion_promoted = (
-            bool(promotion.get("promoted"))
-            if isinstance(promotion, dict)
-            else False
+            bool(promotion.get("promoted")) if isinstance(promotion, dict) else False
         )
         promoted_profile_count = (
             int(promotion.get("profile_count") or 0)
@@ -1290,23 +1352,33 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
                         "profile_id": profile.get("profile_id"),
                         "sensor_id": profile.get("sensor_id"),
                         "sensor_type": profile.get("sensor_type"),
+                        "mounting_mode": profile.get("mounting_mode"),
                         "status": profile.get("status"),
                         "num_inliers": quality.get("num_inliers"),
                         "residual_translation_mm": quality.get(
                             "residual_translation_mm"
                         ),
-                        "residual_rotation_deg": quality.get(
-                            "residual_rotation_deg"
-                        ),
+                        "residual_rotation_deg": quality.get("residual_rotation_deg"),
                     }
                 )
-        all_profiles_valid = bool(profile_summaries) and all(
+        ignored_disabled_profiles = [
+            profile
+            for profile in profile_summaries
+            if (str(profile["sensor_type"] or ""), str(profile["sensor_id"] or ""))
+            in disabled_only_identities
+        ]
+        validated_profile_summaries = [
+            profile
+            for profile in profile_summaries
+            if profile not in ignored_disabled_profiles
+        ]
+        all_profiles_valid = bool(validated_profile_summaries) and all(
             profile["status"] == "valid"
             and isinstance(profile["num_inliers"], int)
             and profile["num_inliers"] > 0
             and profile["residual_translation_mm"] is not None
             and profile["residual_rotation_deg"] is not None
-            for profile in profile_summaries
+            for profile in validated_profile_summaries
         )
         collection_profile_ids = {
             profile["profile_id"]
@@ -1316,8 +1388,8 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
         promoted_profiles_present = bool(promoted_profile_ids) and (
             promoted_profile_ids <= collection_profile_ids
         )
-        collection_count_matches_promotion = (
-            promoted_profile_count == len(profile_summaries)
+        collection_count_matches_promotion = promoted_profile_count == len(
+            profile_summaries
         )
         ok = (
             all_profiles_valid
@@ -1342,9 +1414,82 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
                 "promoted_profiles_present": promoted_profiles_present,
                 "collection_count_matches_promotion": collection_count_matches_promotion,
                 "profiles": profile_summaries,
+                "validated_profile_ids": [
+                    profile["profile_id"] for profile in validated_profile_summaries
+                ],
+                "ignored_disabled_profile_ids": [
+                    profile["profile_id"] for profile in ignored_disabled_profiles
+                ],
             },
         )
     checks.append(check)
+
+    coverage: list[dict[str, Any]] = []
+    if profile_collection is not None and isinstance(
+        profile_collection.get("profiles"), list
+    ):
+        raw_profiles = [
+            profile
+            for profile in profile_collection["profiles"]
+            if isinstance(profile, dict)
+        ]
+        for sensor in enabled_sensors:
+            sensor_type = str(sensor.get("sensor_type") or "")
+            device_id = str(sensor.get("device_id") or "")
+            mounting_mode = str(sensor.get("mounting_mode") or "")
+            configured_profile_id = sensor.get("calibration_profile_id")
+            matching_profile_ids = [
+                str(profile.get("profile_id"))
+                for profile in raw_profiles
+                if profile.get("status") == "valid"
+                and str(profile.get("sensor_type") or "") == sensor_type
+                and str(profile.get("sensor_id") or "") == device_id
+                and str(profile.get("mounting_mode") or "") == mounting_mode
+                and (
+                    not configured_profile_id
+                    or str(profile.get("profile_id") or "")
+                    == str(configured_profile_id)
+                )
+            ]
+            coverage.append(
+                {
+                    "sensor_type": sensor_type,
+                    "device_id": device_id,
+                    "mounting_mode": mounting_mode,
+                    "configured_profile_id": configured_profile_id,
+                    "matching_profile_ids": matching_profile_ids,
+                    "exact_match": len(matching_profile_ids) == 1,
+                }
+            )
+    coverage_ok = (
+        bool(enabled_sensors)
+        and len(coverage) == len(enabled_sensors)
+        and all(item["exact_match"] for item in coverage)
+    )
+    checks.append(
+        _check(
+            name="calibration_profile_sensor_coverage",
+            path=root / CALIBRATION_PROFILES,
+            ok=coverage_ok,
+            message=(
+                "Every enabled run-config sensor has exactly one valid identity- and mounting-matched profile."
+                if coverage_ok
+                else (
+                    "Every enabled run-config sensor must have exactly one valid "
+                    "profile matching sensor type, device ID, mounting mode, and "
+                    "any configured profile ID."
+                )
+            ),
+            details={
+                "run_config_path": (root / RUN_CONFIG).as_posix(),
+                "enabled_sensor_count": len(enabled_sensors),
+                "covered_sensor_count": sum(
+                    1 for item in coverage if item["exact_match"]
+                ),
+                "sensors": coverage,
+            },
+        )
+    )
 
     return _gate_report(
         gate_id=CALIBRATION_VALIDATION_GATE_ID,
@@ -1375,7 +1520,9 @@ def build_gate_report(run_root: str | Path, *, gate_id: str) -> dict[str, Any]:
     raise ValueError(f"Unknown rewrite gate: {gate_id}")
 
 
-def write_gate_report(run_root: str | Path, *, gate_id: str) -> tuple[Path, dict[str, Any]]:
+def write_gate_report(
+    run_root: str | Path, *, gate_id: str
+) -> tuple[Path, dict[str, Any]]:
     root = Path(run_root)
     report = build_gate_report(root, gate_id=gate_id)
     path = root / REWRITE_GATE_REPORT
@@ -1546,9 +1693,7 @@ def _rewrite_status_next_actions(
                 )
             ]
         if "hardware_status" in blocker_names:
-            selected_robot_mode = _existing_hardware_selected_robot_mode(
-                gate_run_root
-            )
+            selected_robot_mode = _existing_hardware_selected_robot_mode(gate_run_root)
             if selected_robot_mode is not None and selected_robot_mode != "real":
                 return [
                     _action(
@@ -1760,7 +1905,10 @@ def _rewrite_status_next_actions(
         return actions
 
     if gate_id == CALIBRATION_VALIDATION_GATE_ID:
-        if "calibration_validation" in blocker_names or "calibration_profiles" in blocker_names:
+        if (
+            "calibration_validation" in blocker_names
+            or "calibration_profiles" in blocker_names
+        ):
             actions.append(
                 _action(
                     gate_id=gate_id,
@@ -1920,8 +2068,7 @@ def build_rewrite_status_report(
         "schema_version": STATUS_SCHEMA_VERSION,
         "run_root": root.as_posix(),
         "gate_run_roots": {
-            gate_id: gate_roots.get(gate_id, root).as_posix()
-            for gate_id in gate_ids
+            gate_id: gate_roots.get(gate_id, root).as_posix() for gate_id in gate_ids
         },
         "overall_status": "ready" if not blocked_gates else "blocked",
         "summary": {

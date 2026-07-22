@@ -112,7 +112,7 @@ def _profile(
         }
     else:
         native_value = intrinsic_profile["native"]
-        rectified_value = intrinsic_profile["rectified"]
+        rectified_value = intrinsic_profile.get("rectified")
         depth_scale = float(intrinsic_profile["depth"]["scale_to_mm"])
         native = CameraIntrinsics(
             cam_k=tuple(float(item) for item in native_value["cam_K"]),
@@ -120,24 +120,53 @@ def _profile(
             height=int(native_value["height"]),
             distortion=tuple(float(item) for item in native_value["distortion"]),
             depth_scale_to_mm=depth_scale,
+            distortion_model=str(
+                native_value.get("distortion_model", "brown_conrady")
+            ),
+            projection_source=str(
+                intrinsic_profile.get("source", {}).get(
+                    "camera_projection", "intrinsic_profile"
+                )
+            ),
         )
-        rectified = CameraIntrinsics(
-            cam_k=tuple(float(item) for item in rectified_value["cam_K"]),
-            width=int(rectified_value["width"]),
-            height=int(rectified_value["height"]),
-            distortion=tuple(float(item) for item in rectified_value["distortion"]),
-            depth_scale_to_mm=depth_scale,
-        )
-        rectified_roi = tuple(int(item) for item in rectified_value["valid_roi"])
+        if isinstance(rectified_value, Mapping):
+            rectified = CameraIntrinsics(
+                cam_k=tuple(float(item) for item in rectified_value["cam_K"]),
+                width=int(rectified_value["width"]),
+                height=int(rectified_value["height"]),
+                distortion=tuple(
+                    float(item) for item in rectified_value["distortion"]
+                ),
+                depth_scale_to_mm=depth_scale,
+                distortion_model=str(
+                    rectified_value.get("distortion_model", "brown_conrady")
+                ),
+                projection_source="intrinsic_profile_rectified_alpha0",
+            )
+            rectified_roi = tuple(
+                int(item) for item in rectified_value["valid_roi"]
+            )
+        else:
+            rectified = None
+            rectified_roi = None
         intrinsic_metadata = {
             "intrinsic_profile_id": intrinsic_profile["profile_id"],
             "intrinsic_source": intrinsic_profile["source"],
             "projection_provenance": {
                 "native": intrinsic_profile["source"],
-                "rectified": {
-                    "algorithm": "opencv_alpha0_same_resolution",
-                    "valid_roi": list(rectified_roi),
-                },
+                "rectified": (
+                    {
+                        "algorithm": "opencv_alpha0_same_resolution",
+                        "valid_roi": list(rectified_roi),
+                    }
+                    if rectified_roi is not None
+                    else {
+                        "available": False,
+                        "reason": intrinsic_profile.get("source", {}).get(
+                            "rectification_unavailable_reason"
+                        ),
+                    }
+                ),
                 "depth": intrinsic_profile["depth"],
             },
         }

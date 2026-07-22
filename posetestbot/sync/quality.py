@@ -19,10 +19,15 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
+from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 
 
 SCHEMA_VERSION = "sync_quality_report.v2"
-SUPPORTED_SYNC_REPORT_SCHEMAS = {"sync_report.v1", "sync_report.v2"}
+SUPPORTED_SYNC_REPORT_SCHEMAS = {
+    "sync_report.v1",
+    "sync_report.v2",
+    "sync_report.v3",
+}
 
 
 def _check(
@@ -66,7 +71,13 @@ def discover_sync_reports(run_root: str | Path) -> list[Path]:
     sync_root = root / PROCESSED_DIR / SYNCHRONIZED_DIR
     if not sync_root.is_dir():
         return []
-    return sorted(sync_root.glob(f"*/{SYNC_REPORT}"))
+    folders = filter_enabled_sensor_folders(
+        root,
+        (path for path in sorted(sync_root.iterdir()) if path.is_dir()),
+    )
+    return [
+        folder / SYNC_REPORT for folder in folders if (folder / SYNC_REPORT).is_file()
+    ]
 
 
 def _relative(path: Path, root: Path) -> str:
@@ -91,8 +102,15 @@ def _sensor_summary(
     motion_intervals = report.get("motion_intervals")
     motion_windows = report.get("motion_windows", {})
     timestamp_source_counts = report.get("timestamp_source_counts")
-    provenance_audited = report_schema == "sync_report.v2" and isinstance(
-        timestamp_source_counts, Mapping
+    provenance_audited = report_schema in {
+        "sync_report.v2",
+        "sync_report.v3",
+    } and isinstance(timestamp_source_counts, Mapping)
+    timestamp_pair = report.get("timestamp_pair")
+    pair_audited = (
+        report_schema == "sync_report.v3"
+        and report.get("timestamp_pair_provenance_audited") is True
+        and isinstance(timestamp_pair, Mapping)
     )
     return {
         "sync_report_schema_version": report_schema,
@@ -109,14 +127,26 @@ def _sensor_summary(
             if isinstance(timestamp_source_counts, Mapping)
             else {}
         ),
-        "timestamp_fallback_count": int(
-            report.get("timestamp_fallback_count", 0) or 0
-        ),
-        "timestamp_missing_count": int(
-            report.get("timestamp_missing_count", 0) or 0
-        ),
+        "timestamp_fallback_count": int(report.get("timestamp_fallback_count", 0) or 0),
+        "timestamp_missing_count": int(report.get("timestamp_missing_count", 0) or 0),
         "timestamp_provenance_audited": provenance_audited,
+        "frame_timestamp_source": report.get(
+            "frame_timestamp_source", report.get("timestamp_source")
+        ),
+        "requested_frame_timestamp_source": report.get(
+            "requested_frame_timestamp_source",
+            report.get("requested_timestamp_source", report.get("timestamp_source")),
+        ),
+        "robot_timestamp_source": report.get("robot_timestamp_source"),
+        "timestamp_pair": (
+            dict(timestamp_pair) if isinstance(timestamp_pair, Mapping) else {}
+        ),
+        "timestamp_pair_provenance_audited": pair_audited,
         "sync_delta_ms": report.get("sync_delta_ms"),
+        "max_nearest_pose_delta_ms": report.get("max_nearest_pose_delta_ms"),
+        "nearest_pose_delta_rejection_count": int(
+            report.get("nearest_pose_delta_rejection_count", 0) or 0
+        ),
         "total_frames": total_frames,
         "matched_frames": matched_frames,
         "dropped_frames": dropped_frames,
@@ -140,6 +170,7 @@ def _sensor_checks(
     max_dropped_frames: int | None,
     max_nearest_pose_delta_ms: float | None,
     require_timestamp_source: str | None,
+    require_robot_timestamp_source: str | None,
 ) -> list[dict[str, Any]]:
     name = str(sensor["sensor_name"])
     checks: list[dict[str, Any]] = []
@@ -264,7 +295,48 @@ def _sensor_checks(
                 },
             )
         )
+    if require_robot_timestamp_source:
+        robot_source = sensor.get("robot_timestamp_source")
+        pair = sensor.get("timestamp_pair")
+        if not isinstance(pair, Mapping):
+            pair = {}
+        audited = bool(sensor.get("timestamp_pair_provenance_audited"))
+        source_ok = (
+            audited
+            and robot_source == require_robot_timestamp_source
+            and pair.get("robot_timestamp_source") == require_robot_timestamp_source
+        )
+        checks.append(
+            _check(
+                f"sync_robot_timestamp_source:{name}",
+                "ok" if source_ok else "error",
+                (
+                    f"{name} used robot timestamp source {robot_source}."
+                    if source_ok
+                    else (
+                        f"{name} did not prove robot timestamp source "
+                        f"{require_robot_timestamp_source}; actual={robot_source}."
+                    )
+                ),
+                details={
+                    "robot_timestamp_source": robot_source,
+                    "timestamp_pair": dict(pair),
+                    "timestamp_pair_provenance_audited": audited,
+                    "require_robot_timestamp_source": (require_robot_timestamp_source),
+                },
+            )
+        )
     return checks
+
+
+def _required_source_for_sensor(
+    value: str | Mapping[str, str] | None,
+    sensor_name: str,
+) -> str | None:
+    if isinstance(value, Mapping):
+        selected = value.get(sensor_name)
+        return str(selected) if selected is not None else None
+    return value
 
 
 def build_sync_quality_report(
@@ -273,7 +345,8 @@ def build_sync_quality_report(
     min_match_ratio: float = 0.8,
     max_dropped_frames: int | None = None,
     max_nearest_pose_delta_ms: float | None = 50.0,
-    require_timestamp_source: str | None = None,
+    require_timestamp_source: str | Mapping[str, str] | None = None,
+    require_robot_timestamp_source: str | Mapping[str, str] | None = None,
     report_paths: Iterable[str | Path] | None = None,
 ) -> dict[str, Any]:
     if not 0.0 <= min_match_ratio <= 1.0:
@@ -321,21 +394,25 @@ def build_sync_quality_report(
         # is relative, prepending it again produces ``run/run/processed/...``.
         # Explicit report paths retain the documented run-root-relative behavior.
         resolved = (
-            path
-            if path.is_absolute() or reports_were_discovered
-            else root / path
+            path if path.is_absolute() or reports_were_discovered else root / path
         )
         try:
             report = _read_json(resolved)
             sensor = _sensor_summary(resolved, report, root)
             sensors.append(sensor)
+            sensor_name = str(sensor["sensor_name"])
             checks.extend(
                 _sensor_checks(
                     sensor,
                     min_match_ratio=min_match_ratio,
                     max_dropped_frames=max_dropped_frames,
                     max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
-                    require_timestamp_source=require_timestamp_source,
+                    require_timestamp_source=_required_source_for_sensor(
+                        require_timestamp_source, sensor_name
+                    ),
+                    require_robot_timestamp_source=_required_source_for_sensor(
+                        require_robot_timestamp_source, sensor_name
+                    ),
                 )
             )
         except Exception as exc:
@@ -365,7 +442,16 @@ def build_sync_quality_report(
         "min_match_ratio": min_match_ratio,
         "max_dropped_frames": max_dropped_frames,
         "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
-        "require_timestamp_source": require_timestamp_source,
+        "require_timestamp_source": (
+            dict(require_timestamp_source)
+            if isinstance(require_timestamp_source, Mapping)
+            else require_timestamp_source
+        ),
+        "require_robot_timestamp_source": (
+            dict(require_robot_timestamp_source)
+            if isinstance(require_robot_timestamp_source, Mapping)
+            else require_robot_timestamp_source
+        ),
         "sensors": sensors,
     }
 
@@ -388,7 +474,8 @@ def write_sync_quality_report_with_manifest(
     min_match_ratio: float = 0.8,
     max_dropped_frames: int | None = None,
     max_nearest_pose_delta_ms: float | None = 50.0,
-    require_timestamp_source: str | None = None,
+    require_timestamp_source: str | Mapping[str, str] | None = None,
+    require_robot_timestamp_source: str | Mapping[str, str] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     run_root_path = Path(run_root)
     manifest = load_or_create_run_manifest(run_root_path)
@@ -401,6 +488,7 @@ def write_sync_quality_report_with_manifest(
             max_dropped_frames=max_dropped_frames,
             max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
             require_timestamp_source=require_timestamp_source,
+            require_robot_timestamp_source=require_robot_timestamp_source,
         )
         path = write_sync_quality_report(run_root_path, report)
         upsert_stage(

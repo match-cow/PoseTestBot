@@ -7,7 +7,15 @@ import argparse
 import json
 from pathlib import Path
 
-from posetestbot.pipeline.capture_execution import run_capture_execution
+from posetestbot.pipeline.capture_execution import (
+    DEFAULT_CAMERA_READINESS_TIMEOUT_S,
+    DEFAULT_CAPTURE_EXECUTION_TIMEOUT_S,
+    run_capture_execution,
+)
+from posetestbot.robot.pose_receiver import (
+    DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
+    DEFAULT_RECEIVE_START_TIMEOUT_S,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,20 +44,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout-s",
         type=float,
-        default=30.0,
+        default=DEFAULT_CAPTURE_EXECUTION_TIMEOUT_S,
         help="Seconds to wait for the pose receiver command.",
     )
     parser.add_argument(
         "--startup-wait",
         type=float,
-        default=0.2,
-        help="Seconds to wait after background startup before pose receiver.",
+        default=DEFAULT_CAMERA_READINESS_TIMEOUT_S,
+        help=(
+            "Maximum seconds to wait for every camera to publish the required "
+            "valid committed frame_metadata.jsonl records before starting the "
+            "pose receiver."
+        ),
     )
     parser.add_argument(
         "--terminate-timeout-s",
         type=float,
         default=2.0,
         help="Seconds to wait for background process termination.",
+    )
+    parser.add_argument(
+        "--receive-start-timeout-s",
+        type=float,
+        default=DEFAULT_RECEIVE_START_TIMEOUT_S,
+        help="Seconds the pose receiver waits for its first robot packet.",
+    )
+    parser.add_argument(
+        "--receive-idle-timeout-s",
+        type=float,
+        default=DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
+        help="Seconds the pose receiver waits between robot packets.",
     )
     parser.add_argument(
         "--no-write-plan-if-missing",
@@ -75,6 +99,8 @@ def main() -> None:
         timeout_s=args.timeout_s,
         startup_wait_s=args.startup_wait,
         terminate_timeout_s=args.terminate_timeout_s,
+        receive_start_timeout_s=args.receive_start_timeout_s,
+        receive_idle_timeout_s=args.receive_idle_timeout_s,
         write_plan_if_missing=not args.no_write_plan_if_missing,
     )
 

@@ -44,6 +44,7 @@ from posetestbot.pipeline.run_config import (
     sequence_plan_from_run_config,
     validate_run_config,
 )
+from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 from posetestbot.pipeline.stages import build_pipeline_job
 
 
@@ -164,7 +165,10 @@ def _capture_plan_summary(root: Path) -> dict[str, Any]:
             "command_count": 0,
         }
     value = _json_if_present(path)
-    if not isinstance(value, Mapping) or value.get("schema_version") != "capture_plan.v1":
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") != "capture_plan.v1"
+    ):
         return {
             "ready_for_preflight": False,
             "blocker": "invalid_capture_plan",
@@ -180,8 +184,7 @@ def _capture_plan_summary(root: Path) -> dict[str, Any]:
     receiver_count = sum(
         1
         for command in commands
-        if isinstance(command, Mapping)
-        and command.get("role") == "robot_pose_receiver"
+        if isinstance(command, Mapping) and command.get("role") == "robot_pose_receiver"
     )
     if receiver_count != 1:
         return {
@@ -269,7 +272,9 @@ def _aruco_coverage_summary(root: Path) -> dict[str, Any]:
     )
 
 
-def _calibration_stage_summary(root: Path, artifact_name: str, label: str) -> dict[str, Any]:
+def _calibration_stage_summary(
+    root: Path, artifact_name: str, label: str
+) -> dict[str, Any]:
     return _status_summary(
         root,
         artifact_name,
@@ -360,7 +365,13 @@ def _synchronized_sensor_dirs(run_root: Path) -> list[Path]:
     root = _synchronized_root(run_root)
     if not root.is_dir():
         return []
-    return [child for child in sorted(root.iterdir()) if child.is_dir()]
+    discovered = [child for child in sorted(root.iterdir()) if child.is_dir()]
+    try:
+        return filter_enabled_sensor_folders(run_root, discovered)
+    except ValueError:
+        # Invalid run config is reported separately and must not make the
+        # recommendations endpoint itself unavailable.
+        return discovered
 
 
 def _has_raw_sensor_folders(run_root: Path) -> bool:
@@ -570,9 +581,7 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
         "has_aruco_outputs": _has_aruco_outputs(root),
         "has_target_pose_outputs": _has_target_pose_outputs(root),
         "has_aruco_coverage": (root / ARUCO_COVERAGE_REPORT).is_file(),
-        "aruco_coverage_ready_for_calibration": aruco_coverage[
-            "ready_for_calibration"
-        ],
+        "aruco_coverage_ready_for_calibration": aruco_coverage["ready_for_calibration"],
         "has_calibration_profiles": (root / CALIBRATION_PROFILES).is_file(),
         "has_calibration_preflight": (root / CALIBRATION_PREFLIGHT_REPORT).is_file(),
         "calibration_preflight_ready": calibration_preflight[
@@ -678,9 +687,10 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
                 expected_artifacts=[CAPTURE_PLAN],
             )
         )
-    if capture_plan["ready_for_preflight"] and not capture_plan_preflight[
-        "ready_for_execution_plan"
-    ]:
+    if (
+        capture_plan["ready_for_preflight"]
+        and not capture_plan_preflight["ready_for_execution_plan"]
+    ):
         recommendations.append(
             _stage_recommendation(
                 recommendation_id="preflight_capture_plan",
@@ -693,9 +703,10 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
                 expected_artifacts=[CAPTURE_PLAN_PREFLIGHT_REPORT],
             )
         )
-    if capture_plan_preflight["ready_for_execution_plan"] and not capture_execution_plan[
-        "ready_to_execute"
-    ]:
+    if (
+        capture_plan_preflight["ready_for_execution_plan"]
+        and not capture_execution_plan["ready_to_execute"]
+    ):
         recommendations.append(
             _stage_recommendation(
                 recommendation_id="write_capture_execution_plan",
@@ -708,9 +719,10 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
                 expected_artifacts=[CAPTURE_EXECUTION_PLAN],
             )
         )
-    if capture_execution_plan["ready_to_execute"] and not capture_execution_report[
-        "ready_for_sync"
-    ]:
+    if (
+        capture_execution_plan["ready_to_execute"]
+        and not capture_execution_report["ready_for_sync"]
+    ):
         recommendations.append(
             _stage_recommendation(
                 recommendation_id="run_capture_execution",
@@ -777,9 +789,10 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
                 expected_artifacts=[ARUCO_COVERAGE_REPORT],
             )
         )
-    if facts["has_target_pose_outputs"] and not calibration_observations[
-        "ready_for_calibration_observations"
-    ]:
+    if (
+        facts["has_target_pose_outputs"]
+        and not calibration_observations["ready_for_calibration_observations"]
+    ):
         recommendations.append(
             _stage_recommendation(
                 recommendation_id="build_calibration_observations",
@@ -792,9 +805,10 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
                 expected_artifacts=[CALIBRATION_OBSERVATIONS],
             )
         )
-    if calibration_observations["ready_for_calibration_observations"] and not calibration_solver[
-        "ready_for_calibration_solver"
-    ]:
+    if (
+        calibration_observations["ready_for_calibration_observations"]
+        and not calibration_solver["ready_for_calibration_solver"]
+    ):
         recommendations.append(
             _stage_recommendation(
                 recommendation_id="solve_calibration",
@@ -807,9 +821,10 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
                 expected_artifacts=[CALIBRATION_SOLVER_REPORT],
             )
         )
-    if calibration_observations["ready_for_calibration_observations"] and not calibration_candidates[
-        "ready_for_calibration_candidates"
-    ]:
+    if (
+        calibration_observations["ready_for_calibration_observations"]
+        and not calibration_candidates["ready_for_calibration_candidates"]
+    ):
         recommendations.append(
             _stage_recommendation(
                 recommendation_id="build_calibration_candidates",
@@ -914,5 +929,7 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
         "generated_at": _utc_now(),
         "run_root": root.as_posix(),
         "facts": facts,
-        "recommendations": [recommendation.to_dict() for recommendation in recommendations],
+        "recommendations": [
+            recommendation.to_dict() for recommendation in recommendations
+        ],
     }

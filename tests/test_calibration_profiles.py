@@ -18,6 +18,7 @@ from posetestbot.calibration.profiles import (
     load_profile,
     load_profile_collection,
     migrate_legacy_camera_ee_profiles,
+    rectified_intrinsics_from_native,
     write_profile,
     write_profile_collection,
 )
@@ -65,7 +66,9 @@ def static_profile() -> CalibrationProfile:
     )
 
 
-def test_calibration_profile_round_trips_with_baseline_json_keys(tmp_path: Path) -> None:
+def test_calibration_profile_round_trips_with_baseline_json_keys(
+    tmp_path: Path,
+) -> None:
     profile = static_profile()
     path = tmp_path / "profile.json"
 
@@ -73,7 +76,17 @@ def test_calibration_profile_round_trips_with_baseline_json_keys(tmp_path: Path)
     value = json.loads(path.read_text())
 
     assert value["schema_version"] == "calibration.v2"
-    assert value["intrinsics"]["native"]["cam_K"] == [1.0, 0.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 1.0]
+    assert value["intrinsics"]["native"]["cam_K"] == [
+        1.0,
+        0.0,
+        2.0,
+        0.0,
+        3.0,
+        4.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
     assert value["intrinsics"]["rectified"]["distortion"] == [0.0] * 5
     assert value["extrinsics"]["from"] == "camera"
     assert value["extrinsics"]["to"] == "template_base"
@@ -82,7 +95,60 @@ def test_calibration_profile_round_trips_with_baseline_json_keys(tmp_path: Path)
     assert loaded.profile_id == profile.profile_id
     assert loaded.intrinsics == profile.intrinsics
     assert loaded.rectified_intrinsics == profile.rectified_intrinsics
-    assert loaded.rectified_valid_roi == tuple(value["intrinsics"]["rectified"]["valid_roi"])
+    assert loaded.rectified_valid_roi == tuple(
+        value["intrinsics"]["rectified"]["valid_roi"]
+    )
+
+
+def test_nonzero_inverse_sdk_distortion_round_trips_without_opencv_rectification(
+    tmp_path: Path,
+) -> None:
+    native = replace(
+        static_profile().intrinsics,
+        distortion_model="inverse_brown_conrady",
+        projection_source="realsense_sdk_color_stream",
+    )
+    profile = replace(
+        static_profile(),
+        intrinsics=native,
+        rectified_intrinsics=None,
+        rectified_valid_roi=None,
+    )
+    path = tmp_path / "inverse-profile.json"
+
+    write_profile(profile, path)
+    loaded = load_profile(path)
+
+    assert loaded.intrinsics.distortion_model == "inverse_brown_conrady"
+    assert loaded.intrinsics.projection_source == "realsense_sdk_color_stream"
+    assert rectified_intrinsics_from_native(loaded.intrinsics) is None
+
+
+def test_exact_zero_inverse_sdk_distortion_keeps_rectified_projection(
+    tmp_path: Path,
+) -> None:
+    native = replace(
+        static_profile().intrinsics,
+        distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
+        distortion_model="inverse_brown_conrady",
+        projection_source="realsense_sdk_color_stream",
+    )
+    profile = replace(
+        static_profile(),
+        intrinsics=native,
+        rectified_intrinsics=None,
+        rectified_valid_roi=None,
+    )
+    path = tmp_path / "zero-inverse-profile.json"
+
+    write_profile(profile, path)
+    serialized = json.loads(path.read_text())
+    loaded = load_profile(path)
+
+    assert serialized["intrinsics"]["rectified"] is not None
+    assert serialized["intrinsics"]["rectified"]["distortion"] == [0.0] * 5
+    assert loaded.rectified_intrinsics is not None
+    assert loaded.rectified_intrinsics.distortion == (0.0,) * 5
 
 
 def test_eye_in_hand_profile_requires_camera_to_robot_flange() -> None:
@@ -92,7 +158,9 @@ def test_eye_in_hand_profile_requires_camera_to_robot_flange() -> None:
     try:
         invalid.validate()
     except ValueError as exc:
-        assert "eye_in_hand calibration must transform camera to robot_flange" in str(exc)
+        assert "eye_in_hand calibration must transform camera to robot_flange" in str(
+            exc
+        )
     else:
         raise AssertionError("invalid eye-in-hand transform direction was accepted")
 

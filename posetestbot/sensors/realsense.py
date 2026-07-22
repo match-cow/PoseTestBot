@@ -24,10 +24,41 @@ class RealSenseCaptureError(RuntimeError):
     """Raised when a RealSense capture cannot be started or completed."""
 
 
+def _distortion_model_name(value: Any) -> str:
+    """Return the stable librealsense distortion name without importing its SDK."""
+
+    if value is None:
+        return "unknown"
+    name = str(value).strip().lower().rsplit(".", 1)[-1]
+    aliases = {
+        "0": "none",
+        "1": "modified_brown_conrady",
+        "2": "inverse_brown_conrady",
+        "3": "ftheta",
+        "4": "brown_conrady",
+        "5": "kannala_brandt4",
+    }
+    return aliases.get(name, name)
+
+
+def _opencv_projection_compatible(model: str) -> bool:
+    # Modified Brown-Conrady, like ordinary Brown-Conrady, is a forward
+    # undistorted-to-distorted projection. Inverse Brown coefficients are not.
+    return model in {"none", "brown_conrady", "modified_brown_conrady"}
+
+
 def camera_intrinsics_from_realsense(
     intrinsics: Any,
     depth_scale_to_mm: float,
 ) -> CameraIntrinsics:
+    raw_coefficients = getattr(intrinsics, "coeffs", ())
+    distortion = tuple(
+        float(value)
+        for value in (() if raw_coefficients is None else raw_coefficients)
+    )
+    model = _distortion_model_name(getattr(intrinsics, "model", None))
+    if model == "unknown" and not any(distortion):
+        model = "none"
     return CameraIntrinsics(
         cam_k=(
             float(intrinsics.fx),
@@ -42,7 +73,10 @@ def camera_intrinsics_from_realsense(
         ),
         width=int(getattr(intrinsics, "width", 1280)),
         height=int(getattr(intrinsics, "height", 720)),
+        distortion=distortion,
         depth_scale_to_mm=float(depth_scale_to_mm),
+        distortion_model=model,
+        projection_source="realsense_sdk_color_stream",
     )
 
 
@@ -61,6 +95,17 @@ def _intrinsics_for_orientation(
     cam_k = list(intrinsics.cam_k)
     cam_k[2] = float(intrinsics.width - 1) - float(cam_k[2])
     cam_k[5] = float(intrinsics.height - 1) - float(cam_k[5])
+    distortion = list(intrinsics.distortion)
+    if intrinsics.distortion_model in {
+        "brown_conrady",
+        "modified_brown_conrady",
+        "inverse_brown_conrady",
+    } and len(distortion) >= 4:
+        # A 180-degree image rotation negates normalized x/y. Radial terms are
+        # unchanged, while both tangential terms change sign. The inverse model
+        # remains tagged inverse and is never passed to OpenCV as a forward model.
+        distortion[2] = -float(distortion[2])
+        distortion[3] = -float(distortion[3])
     return CameraIntrinsics(
         cam_k=(
             float(cam_k[0]),
@@ -75,8 +120,14 @@ def _intrinsics_for_orientation(
         ),
         width=intrinsics.width,
         height=intrinsics.height,
-        distortion=intrinsics.distortion,
+        distortion=tuple(float(value) for value in distortion),
         depth_scale_to_mm=intrinsics.depth_scale_to_mm,
+        distortion_model=intrinsics.distortion_model,
+        projection_source=(
+            f"{intrinsics.projection_source}_rotated_180"
+            if intrinsics.projection_source
+            else "rotated_180"
+        ),
     )
 
 
@@ -289,6 +340,10 @@ def capture_realsense_rgbd(
             and not (stop_requested and stop_requested())
         ):
             frames = pipeline.wait_for_frames()
+            # Capture host receipt at the first userspace point after the SDK
+            # delivers the frameset.  Alignment, conversion, preview and disk
+            # work must not become part of the robot/camera sync timestamp.
+            host_received_timestamp_ns = time.monotonic_ns()
             if stop_requested and stop_requested():
                 break
             aligned_frames = align.process(frames)
@@ -309,7 +364,10 @@ def capture_realsense_rgbd(
                         break
                 continue
 
-            intrinsics = aligned_depth_frame.profile.as_video_stream_profile().intrinsics
+            # PnP uses the RGB image, so provenance must come from the aligned
+            # color profile rather than relying on the aligned-depth profile to
+            # happen to expose equivalent calibration.
+            intrinsics = color_frame.profile.as_video_stream_profile().intrinsics
             camera_intrinsics = camera_intrinsics_from_realsense(
                 intrinsics,
                 depth_scale_to_mm,
@@ -319,7 +377,16 @@ def capture_realsense_rgbd(
                 inverted=inverted,
             )
             if record and output is not None and not sidecars_written:
-                written = write_legacy_camera_sidecars(output, camera_intrinsics)
+                written = write_legacy_camera_sidecars(
+                    output,
+                    camera_intrinsics,
+                    include_distortion_in_cam_k=(
+                        bool(camera_intrinsics.distortion)
+                        and _opencv_projection_compatible(
+                            camera_intrinsics.distortion_model
+                        )
+                    ),
+                )
                 sidecar_paths = {key: path.name for key, path in written.items()}
                 sidecars_written = True
 
@@ -360,7 +427,7 @@ def capture_realsense_rgbd(
                     frame_index=captured_frames,
                     sensor_timestamp_ns=color_timestamp_ns,
                     depth_sensor_timestamp_ns=depth_timestamp_ns,
-                    host_received_timestamp_ns=time.monotonic_ns(),
+                    host_received_timestamp_ns=host_received_timestamp_ns,
                     host_wall_timestamp_ns=host_wall_timestamp_ns,
                     frame_stem=frame_stem,
                     extra_metadata={

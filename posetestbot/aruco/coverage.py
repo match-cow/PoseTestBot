@@ -20,6 +20,7 @@ from posetestbot.io.artifacts import (
     PROCESSED_DIR,
     SYNCHRONIZED_DIR,
 )
+from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
     upsert_stage,
@@ -73,7 +74,15 @@ def discover_aruco_outputs(run_root: str | Path) -> list[Path]:
     synchronized_root = root / PROCESSED_DIR / SYNCHRONIZED_DIR
     if not synchronized_root.is_dir():
         return []
-    return sorted(synchronized_root.glob(f"*/{ARUCO_POSE_ESTIMATION}"))
+    folders = filter_enabled_sensor_folders(
+        root,
+        (path for path in sorted(synchronized_root.iterdir()) if path.is_dir()),
+    )
+    return [
+        folder / ARUCO_POSE_ESTIMATION
+        for folder in folders
+        if (folder / ARUCO_POSE_ESTIMATION).is_file()
+    ]
 
 
 def _vector(value: Any) -> list[float] | None:
@@ -85,7 +94,9 @@ def _vector(value: Any) -> list[float] | None:
         return None
 
 
-def _frame_coverage(frame: Mapping[str, Any], *, min_marker_count: int) -> dict[str, Any]:
+def _frame_coverage(
+    frame: Mapping[str, Any], *, min_marker_count: int
+) -> dict[str, Any]:
     aruco = frame.get("aruco_pose_estimation")
     if not isinstance(aruco, Mapping):
         return {
@@ -97,7 +108,10 @@ def _frame_coverage(frame: Mapping[str, Any], *, min_marker_count: int) -> dict[
         }
     marker_count = int(aruco.get("len_ids", 0) or 0)
     has_detection = marker_count > 0
-    has_pose = _vector(aruco.get("rvec")) is not None and _vector(aruco.get("tvec")) is not None
+    has_pose = (
+        _vector(aruco.get("rvec")) is not None
+        and _vector(aruco.get("tvec")) is not None
+    )
     if marker_count < min_marker_count:
         reason = "insufficient_markers"
     elif not has_pose:
@@ -133,7 +147,9 @@ def build_aruco_coverage_report(
 
     root = Path(run_root)
     target_path = root / CALIBRATION_TARGET
-    target = load_calibration_target_spec(target_path) if target_path.is_file() else None
+    target = (
+        load_calibration_target_spec(target_path) if target_path.is_file() else None
+    )
     paths = (
         [Path(path) for path in aruco_paths]
         if aruco_paths is not None
@@ -237,7 +253,9 @@ def build_aruco_coverage_report(
         detection_ratio = _ratio(detected_frame_count, frame_count)
         sensor_status = (
             "ok"
-            if frame_count and valid_pose_ratio >= min_valid_pose_ratio and valid_pose_count > 0
+            if frame_count
+            and valid_pose_ratio >= min_valid_pose_ratio
+            and valid_pose_count > 0
             else "warning"
         )
         sensor_summary = {
@@ -281,7 +299,9 @@ def build_aruco_coverage_report(
         )
 
     frame_count = sum(int(sensor["frame_count"]) for sensor in sensors)
-    detected_frame_count = sum(int(sensor["detected_frame_count"]) for sensor in sensors)
+    detected_frame_count = sum(
+        int(sensor["detected_frame_count"]) for sensor in sensors
+    )
     pose_frame_count = sum(int(sensor["pose_frame_count"]) for sensor in sensors)
     valid_pose_count = sum(int(sensor["valid_pose_count"]) for sensor in sensors)
     return {

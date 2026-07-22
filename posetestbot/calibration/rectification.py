@@ -11,8 +11,15 @@ from typing import Any, Mapping, Sequence
 import cv2
 import numpy as np
 
-from posetestbot.calibration.intrinsics import select_intrinsic_profile, sensor_intrinsic_identity
-from posetestbot.io.atomic import atomic_write_json, atomic_write_text, replace_directory
+from posetestbot.calibration.intrinsics import (
+    select_intrinsic_profile,
+    sensor_intrinsic_identity,
+)
+from posetestbot.io.atomic import (
+    atomic_write_json,
+    atomic_write_text,
+    replace_directory,
+)
 from posetestbot.io.artifacts import (
     CAMERA_DATA_JSON,
     CAMERA_RECTIFICATION_REPORT,
@@ -25,6 +32,7 @@ from posetestbot.io.artifacts import (
     RGB_DIR,
     SYNCHRONIZED_DIR,
 )
+from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 
 
 SCHEMA_VERSION = "camera_rectification.v1"
@@ -35,13 +43,19 @@ def _pairs(sensor_folder: Path) -> list[tuple[Path, Path]]:
     rgb = {path.name: path for path in (sensor_folder / RGB_DIR).glob("*.png")}
     depth = {path.name: path for path in (sensor_folder / DEPTH_DIR).glob("*.png")}
     if not rgb or set(rgb) != set(depth):
-        raise ValueError(f"RGB/depth filenames must be non-empty and identical: {sensor_folder}")
+        raise ValueError(
+            f"RGB/depth filenames must be non-empty and identical: {sensor_folder}"
+        )
     return [(rgb[name], depth[name]) for name in sorted(rgb)]
 
 
 def _maps(profile: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     native = profile["native"]
-    rectified = profile["rectified"]
+    rectified = profile.get("rectified")
+    if not isinstance(rectified, Mapping):
+        raise ValueError(
+            "Intrinsic profile has no OpenCV-compatible rectified projection"
+        )
     image_size = tuple(int(item) for item in profile["resolution"])
     native_k = np.asarray(native["cam_K"], dtype=float).reshape(3, 3)
     distortion = np.asarray(native["distortion"], dtype=float).reshape(5)
@@ -79,7 +93,10 @@ def _copy_metadata(source: Path, destination: Path, profile_id: str) -> int:
         records.append(record)
     atomic_write_text(
         destination,
-        "".join(json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n" for record in records),
+        "".join(
+            json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n"
+            for record in records
+        ),
     )
     return len(records)
 
@@ -95,7 +112,9 @@ def _write_sidecars(
     matrix_rows = rectified_k.tolist()
     atomic_write_text(
         destination / CAM_K,
-        "".join(" ".join(str(float(item)) for item in row) + "\n" for row in matrix_rows)
+        "".join(
+            " ".join(str(float(item)) for item in row) + "\n" for row in matrix_rows
+        )
         + "0.0 0.0 0.0 0.0 0.0\n",
     )
     atomic_write_text(destination / DEPTH_SCALE, f"{depth_scale}\n")
@@ -103,7 +122,10 @@ def _write_sidecars(
         destination / CAMERA_DATA_JSON,
         {
             "K": matrix_rows,
-            "resolution": [int(profile["resolution"][1]), int(profile["resolution"][0])],
+            "resolution": [
+                int(profile["resolution"][1]),
+                int(profile["resolution"][0]),
+            ],
             "distortion": [0.0] * 5,
             "projection": "rectified_alpha0",
             "valid_roi": profile["rectified"]["valid_roi"],
@@ -124,7 +146,11 @@ def rectify_sensor_folder(
     source = Path(source_sensor)
     destination = Path(destination_sensor)
     sensor_id, orientation, image_size = sensor_intrinsic_identity(source)
-    expected = (str(profile["sensor_id"]), str(profile["orientation"]), tuple(profile["resolution"]))
+    expected = (
+        str(profile["sensor_id"]),
+        str(profile["orientation"]),
+        tuple(profile["resolution"]),
+    )
     actual = (sensor_id, orientation, image_size)
     if actual != expected:
         raise ValueError(
@@ -142,7 +168,9 @@ def rectify_sensor_folder(
         if rgb is None or depth is None:
             raise ValueError(f"Unreadable RGB-D frame pair: {rgb_path.name}")
         if rgb.shape[:2] != depth.shape or (rgb.shape[1], rgb.shape[0]) != image_size:
-            raise ValueError(f"RGB-D dimensions do not match intrinsic profile: {rgb_path.name}")
+            raise ValueError(
+                f"RGB-D dimensions do not match intrinsic profile: {rgb_path.name}"
+            )
         rectified_rgb = cv2.remap(
             rgb,
             map_x,
@@ -159,9 +187,13 @@ def rectify_sensor_folder(
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
-        if not cv2.imwrite((destination / RGB_DIR / rgb_path.name).as_posix(), rectified_rgb):
+        if not cv2.imwrite(
+            (destination / RGB_DIR / rgb_path.name).as_posix(), rectified_rgb
+        ):
             raise OSError(f"Failed to write rectified RGB: {rgb_path.name}")
-        if not cv2.imwrite((destination / DEPTH_DIR / depth_path.name).as_posix(), rectified_depth):
+        if not cv2.imwrite(
+            (destination / DEPTH_DIR / depth_path.name).as_posix(), rectified_depth
+        ):
             raise OSError(f"Failed to write rectified depth: {depth_path.name}")
 
     for artifact in (MATCH_ROBOT_EE_POSES,):
@@ -211,18 +243,35 @@ def rectify_run(
     """Build every rectified sensor in one staging tree, then promote it atomically."""
 
     root = Path(run_root)
-    source_root = Path(input_root) if input_root else root / PROCESSED_DIR / SYNCHRONIZED_DIR
-    destination_root = Path(output_root) if output_root else root / PROCESSED_DIR / RECTIFIED_DIR
+    source_root = (
+        Path(input_root) if input_root else root / PROCESSED_DIR / SYNCHRONIZED_DIR
+    )
+    destination_root = (
+        Path(output_root) if output_root else root / PROCESSED_DIR / RECTIFIED_DIR
+    )
     if destination_root.exists() and not overwrite:
         raise FileExistsError(f"Rectified output already exists: {destination_root}")
-    sensors = [
-        path
-        for path in sorted(source_root.iterdir())
-        if path.is_dir() and (path / RGB_DIR).is_dir() and (path / DEPTH_DIR).is_dir()
-    ] if source_root.is_dir() else []
+    discovered_sensors = (
+        [
+            path
+            for path in sorted(source_root.iterdir())
+            if path.is_dir()
+            and (path / RGB_DIR).is_dir()
+            and (path / DEPTH_DIR).is_dir()
+        ]
+        if source_root.is_dir()
+        else []
+    )
+    sensors = (
+        filter_enabled_sensor_folders(root, discovered_sensors)
+        if input_root is None
+        else discovered_sensors
+    )
     if not sensors:
         raise FileNotFoundError(f"No synchronized RGB-D sensor folders: {source_root}")
-    staging = destination_root.with_name(f".{destination_root.name}.{uuid.uuid4().hex}.tmp")
+    staging = destination_root.with_name(
+        f".{destination_root.name}.{uuid.uuid4().hex}.tmp"
+    )
     staging.mkdir(parents=True, exist_ok=False)
     records = []
     try:
@@ -234,10 +283,14 @@ def rectify_run(
                 resolution=resolution,
                 orientation=orientation,
             )
-            records.append(rectify_sensor_folder(sensor, staging / sensor.name, profile))
+            records.append(
+                rectify_sensor_folder(sensor, staging / sensor.name, profile)
+            )
         replace_directory(staging, destination_root)
         for record in records:
-            record["output"] = (destination_root / str(record["sensor_name"])).as_posix()
+            record["output"] = (
+                destination_root / str(record["sensor_name"])
+            ).as_posix()
     except BaseException:
         if staging.exists():
             shutil.rmtree(staging)

@@ -20,41 +20,46 @@ def write_sync_report(
     matched_frames: int = 8,
     dropped_frames: int = 2,
     timestamp_source: str = "host_received",
+    robot_timestamp_source: str = "host_received",
     max_delta_ns: int = 10_000_000,
     schema_version: str = "sync_report.v2",
 ) -> Path:
-    report_path = (
-        run_root
-        / "processed"
-        / "synchronized"
-        / sensor_name
-        / SYNC_REPORT
-    )
+    report_path = run_root / "processed" / "synchronized" / sensor_name / SYNC_REPORT
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
-        json.dumps(
+    value = {
+        "schema_version": schema_version,
+        "sensor_folder": str(run_root / sensor_name),
+        "output_folder": str(report_path.parent),
+        "timestamp_source": timestamp_source,
+        "requested_timestamp_source": timestamp_source,
+        "timestamp_source_counts": {timestamp_source: total_frames},
+        "timestamp_fallback_count": 0,
+        "timestamp_missing_count": 0,
+        "sync_delta_ms": 0,
+        "max_nearest_pose_delta_ms": 20.0,
+        "nearest_pose_delta_rejection_count": 2,
+        "total_frames": total_frames,
+        "matched_frames": matched_frames,
+        "dropped_frames": dropped_frames,
+        "motion_intervals": [{"motion": "circ_far", "pose_count": matched_frames}],
+        "mean_abs_nearest_pose_delta_ns": 5_000_000,
+        "max_abs_nearest_pose_delta_ns": max_delta_ns,
+    }
+    if schema_version == "sync_report.v3":
+        value.update(
             {
-                "schema_version": schema_version,
-                "sensor_folder": str(run_root / sensor_name),
-                "output_folder": str(report_path.parent),
-                "timestamp_source": timestamp_source,
-                "requested_timestamp_source": timestamp_source,
-                "timestamp_source_counts": {timestamp_source: total_frames},
-                "timestamp_fallback_count": 0,
-                "timestamp_missing_count": 0,
-                "sync_delta_ms": 0,
-                "total_frames": total_frames,
-                "matched_frames": matched_frames,
-                "dropped_frames": dropped_frames,
-                "motion_intervals": [
-                    {"motion": "circ_far", "pose_count": matched_frames}
-                ],
-                "mean_abs_nearest_pose_delta_ns": 5_000_000,
-                "max_abs_nearest_pose_delta_ns": max_delta_ns,
+                "frame_timestamp_source": timestamp_source,
+                "requested_frame_timestamp_source": timestamp_source,
+                "robot_timestamp_source": robot_timestamp_source,
+                "timestamp_pair": {
+                    "frame_timestamp_source": timestamp_source,
+                    "requested_frame_timestamp_source": timestamp_source,
+                    "robot_timestamp_source": robot_timestamp_source,
+                },
+                "timestamp_pair_provenance_audited": True,
             }
         )
-        + "\n"
-    )
+    report_path.write_text(json.dumps(value) + "\n")
     return report_path
 
 
@@ -78,6 +83,8 @@ def test_build_sync_quality_report_summarizes_sync_reports(tmp_path: Path) -> No
     assert report["total_frames"] == 10
     assert report["overall_match_ratio"] == 0.8
     assert report["sensors"][0]["sensor_name"] == "realsense_123"
+    assert report["sensors"][0]["max_nearest_pose_delta_ms"] == 20.0
+    assert report["sensors"][0]["nearest_pose_delta_rejection_count"] == 2
     assert {check["status"] for check in report["checks"]} == {"ok"}
 
 
@@ -119,9 +126,7 @@ def test_build_sync_quality_report_warns_on_quality_thresholds(
     )
 
     warnings = {
-        check["name"]
-        for check in report["checks"]
-        if check["status"] == "warning"
+        check["name"] for check in report["checks"] if check["status"] == "warning"
     }
     assert report["overall_status"] == "error"
     assert warnings == {
@@ -152,6 +157,53 @@ def test_v1_sync_report_cannot_prove_required_timestamp_source(
     assert report["sensors"][0]["timestamp_provenance_audited"] is False
 
 
+def test_v3_sync_report_audits_frame_and_robot_timestamp_pair(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    write_sync_report(
+        run_root,
+        schema_version="sync_report.v3",
+        timestamp_source="sensor",
+        robot_timestamp_source="host_wall",
+    )
+
+    report = build_sync_quality_report(
+        run_root,
+        require_timestamp_source="sensor",
+        require_robot_timestamp_source="host_wall",
+    )
+
+    assert report["overall_status"] == "ok"
+    assert report["sensors"][0]["timestamp_pair_provenance_audited"] is True
+    assert report["sensors"][0]["timestamp_pair"] == {
+        "frame_timestamp_source": "sensor",
+        "requested_frame_timestamp_source": "sensor",
+        "robot_timestamp_source": "host_wall",
+    }
+    check = next(
+        item
+        for item in report["checks"]
+        if item["name"] == "sync_robot_timestamp_source:realsense_123"
+    )
+    assert check["status"] == "ok"
+
+
+def test_v2_sync_report_cannot_prove_robot_timestamp_source(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    write_sync_report(run_root, schema_version="sync_report.v2")
+
+    report = build_sync_quality_report(
+        run_root,
+        require_robot_timestamp_source="host_received",
+    )
+
+    assert report["overall_status"] == "error"
+    assert report["sensors"][0]["timestamp_pair_provenance_audited"] is False
+
+
 def test_build_sync_quality_report_errors_without_sync_reports(
     tmp_path: Path,
 ) -> None:
@@ -174,7 +226,9 @@ def test_write_sync_quality_report_updates_manifest(tmp_path: Path) -> None:
     assert path == run_root / SYNC_QUALITY_REPORT
     assert report["overall_status"] == "ok"
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
-    stage = next(stage for stage in manifest["stages"] if stage["name"] == "sync_quality")
+    stage = next(
+        stage for stage in manifest["stages"] if stage["name"] == "sync_quality"
+    )
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][SYNC_QUALITY_REPORT] == SYNC_QUALITY_REPORT
 

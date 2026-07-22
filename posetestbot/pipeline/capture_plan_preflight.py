@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -25,7 +26,11 @@ from posetestbot.pipeline.capture_plan import (
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.sensors.registry import get_sensor_adapter, sensor_folder_name
-from posetestbot.sensors.status import collect_sensor_status
+from posetestbot.sensors.status import (
+    REALSENSE_MIN_USB_MAJOR,
+    collect_sensor_status,
+    realsense_usb_major_version,
+)
 
 
 SCHEMA_VERSION = "capture_plan_preflight.v1"
@@ -80,11 +85,34 @@ def _sensor_families(sensor_status: Mapping[str, Any] | None) -> dict[str, Mappi
 
 
 def _sensor_devices(family: Mapping[str, Any]) -> set[str]:
+    sensor_type = str(family.get("sensor_type") or "")
     return {
         str(device.get("device_id"))
         for device in family.get("devices", [])
-        if isinstance(device, Mapping) and device.get("connected", True)
+        if (
+            isinstance(device, Mapping)
+            and device.get("connected", True)
+            and device.get("capture_ready") is not False
+            and not _realsense_device_below_superspeed(
+                sensor_type=sensor_type,
+                device=device,
+            )
+        )
     }
+
+
+def _realsense_device_below_superspeed(
+    *,
+    sensor_type: str,
+    device: Mapping[str, Any],
+) -> bool:
+    if sensor_type != "realsense_d435":
+        return False
+    metadata = device.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return False
+    usb_major = realsense_usb_major_version(metadata.get("usb_type_descriptor"))
+    return usb_major is not None and usb_major < REALSENSE_MIN_USB_MAJOR
 
 
 def _sensor_family_diagnostics(family: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -127,7 +155,7 @@ def _enabled_config_sensors(config: Mapping[str, Any]) -> list[Mapping[str, Any]
     return [
         sensor
         for sensor in sensors
-        if isinstance(sensor, Mapping) and bool(sensor.get("enabled", True))
+        if isinstance(sensor, Mapping) and sensor.get("enabled", True) is True
     ]
 
 
@@ -203,7 +231,7 @@ def _validate_output_folders(
             continue
         folders.setdefault(folder_name, []).append(sensor)
         folder_path = run_root / folder_name
-        if not folder_path.exists():
+        if not os.path.lexists(folder_path):
             checks.append(
                 _check(
                     f"sensor_output_folder:{folder_name}",
@@ -214,15 +242,17 @@ def _validate_output_folders(
             )
             continue
         child_count = sum(1 for _ in folder_path.iterdir()) if folder_path.is_dir() else 0
-        status = "error" if child_count else "ok"
         checks.append(
             _check(
                 f"sensor_output_folder:{folder_name}",
-                status,
+                "error",
                 (
                     f"Planned sensor output folder already contains {child_count} item(s): {folder_name}."
                     if child_count
-                    else f"Planned sensor output folder exists and is empty: {folder_name}."
+                    else (
+                        "Planned sensor output folder already exists, even though "
+                        f"it is empty: {folder_name}. Use a new run root."
+                    )
                 ),
                 details={
                     "path": folder_path.as_posix(),
@@ -367,13 +397,14 @@ def _validate_robot_safety(
     *,
     allow_real_robot: bool,
 ) -> list[dict[str, Any]]:
+    allowed = allow_real_robot is True
     checks = [
         _check(
             "real_robot_permission",
-            "ok" if allow_real_robot else "error",
+            "ok" if allowed else "error",
             (
                 "Real robot use was explicitly allowed for this preflight."
-                if allow_real_robot
+                if allowed
                 else "Real robot use requires allow_real_robot=true."
             ),
             details={"allow_real_robot": allow_real_robot},
@@ -483,9 +514,9 @@ def _validate_sensor_readiness(
                     check_name,
                     "ok" if ok else "error",
                     (
-                        f"Auto device can select from {len(devices)} connected {sensor_type} device(s)."
+                        f"Auto device can select from {len(devices)} capture-ready {sensor_type} device(s)."
                         if ok
-                        else f"No connected {sensor_type} devices for auto selection."
+                        else f"No capture-ready {sensor_type} devices for auto selection."
                     ),
                     details=_sensor_check_details(
                         sensor_type=sensor_type,
@@ -501,9 +532,9 @@ def _validate_sensor_readiness(
                 check_name,
                 "ok" if device_id in devices else "error",
                 (
-                    f"Configured device {device_id} is connected."
+                    f"Configured device {device_id} is capture-ready."
                     if device_id in devices
-                    else f"Configured device {device_id} is not connected."
+                    else f"Configured device {device_id} is not capture-ready."
                 ),
                 details=_sensor_check_details(
                     sensor_type=sensor_type,
@@ -547,6 +578,7 @@ def build_capture_plan_preflight(
     pre_plan_checks.extend(_validate_output_folders(config, run_root=run_root_path))
     pre_plan_checks.extend(_validate_raw_pose_output(run_root_path))
     pre_plan_has_errors = any(check["status"] == "error" for check in pre_plan_checks)
+    sensor_status = collect_sensors() if include_sensor_status else None
 
     plan: dict[str, Any] | None = None
     plan_build_error: str | None = None
@@ -566,7 +598,6 @@ def build_capture_plan_preflight(
         except ValueError as exc:
             plan_build_error = str(exc)
 
-    sensor_status = collect_sensors() if include_sensor_status else None
     checks = [
         *pre_plan_checks,
         _check(

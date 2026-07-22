@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,11 @@ from posetestbot.io.artifacts import (
     DEPTH_DIR,
     DEPTH_SCALE,
     RGB_DIR,
+)
+from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
+    create_run_config,
+    write_run_config,
 )
 
 
@@ -52,7 +58,9 @@ def export_command(run_root: Path) -> list[str]:
     ]
 
 
-def test_bop_export_stage_writes_objectless_dataset_and_manifest(tmp_path: Path) -> None:
+def test_bop_export_stage_writes_objectless_dataset_and_manifest(
+    tmp_path: Path,
+) -> None:
     run_root = create_synchronized_sensor_fixture(tmp_path)
     repo_root = Path(__file__).resolve().parents[1]
 
@@ -86,8 +94,67 @@ def test_bop_export_stage_writes_objectless_dataset_and_manifest(tmp_path: Path)
     assert coco["categories"] == []
     assert coco["annotations"] == []
     run_manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
-    stage = next(item for item in run_manifest["stages"] if item["name"] == "bop_export")
+    stage = next(
+        item for item in run_manifest["stages"] if item["name"] == "bop_export"
+    )
     assert stage["status"] == "succeeded"
+
+
+def test_bop_export_default_ignores_disabled_stale_sensor_folder(
+    tmp_path: Path,
+) -> None:
+    run_root = create_synchronized_sensor_fixture(tmp_path)
+    synchronized = run_root / "processed" / "synchronized"
+    shutil.copytree(synchronized / "realsense_123", synchronized / "realsense_999")
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig("realsense_d435", "123", "Enabled"),
+                SensorRunConfig("realsense_d435", "999", "Disabled", enabled=False),
+            ),
+        ),
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+
+    default_result = subprocess.run(
+        export_command(run_root),
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "Exported 1 synchronized sensor folder" in default_result.stdout
+    default_manifest = json.loads(
+        (run_root / BOP_DIR / BOP_EXPORT_MANIFEST).read_text()
+    )
+    assert [item["sensor_name"] for item in default_manifest["exports"]] == [
+        "realsense_123"
+    ]
+
+    explicit_output = run_root / "explicit-bop"
+    explicit_result = subprocess.run(
+        [
+            *export_command(run_root),
+            "--input-folder",
+            str(synchronized),
+            "--output-folder",
+            str(explicit_output),
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "Exported 2 synchronized sensor folder" in explicit_result.stdout
+    explicit_manifest = json.loads((explicit_output / BOP_EXPORT_MANIFEST).read_text())
+    assert [item["sensor_name"] for item in explicit_manifest["exports"]] == [
+        "realsense_123",
+        "realsense_999",
+    ]
 
 
 def test_bop_export_objectless_rejects_stale_object_gt(tmp_path: Path) -> None:

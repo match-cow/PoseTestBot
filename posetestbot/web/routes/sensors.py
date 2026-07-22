@@ -219,6 +219,8 @@ def _include_preview_claimed_devices(status: Mapping[str, Any]) -> dict[str, Any
             continue
         claimed_device = dict(spec)
         claimed_device["connected"] = True
+        claimed_device["capture_ready"] = True
+        claimed_device["capture_readiness_reason"] = None
         claimed_device["discovery_state"] = "claimed_by_preview"
         family["devices"].append(claimed_device)
         known_keys.add(key)
@@ -227,12 +229,18 @@ def _include_preview_claimed_devices(status: Mapping[str, Any]) -> dict[str, Any
         connected_count = sum(
             device.get("connected") is not False for device in family["devices"]
         )
+        capture_ready_count = sum(
+            device.get("connected") is not False
+            and device.get("capture_ready") is not False
+            for device in family["devices"]
+        )
         family["connected_count"] = connected_count
+        family["capture_ready_count"] = capture_ready_count
         expected_count = family.get("expected_count")
         if isinstance(expected_count, int):
-            family["meets_expected"] = connected_count >= expected_count
+            family["meets_expected"] = capture_ready_count >= expected_count
             diagnostics = family.get("diagnostics")
-            if connected_count >= expected_count and isinstance(diagnostics, list):
+            if capture_ready_count >= expected_count and isinstance(diagnostics, list):
                 family["diagnostics"] = [
                     item
                     for item in diagnostics
@@ -245,6 +253,10 @@ def _include_preview_claimed_devices(status: Mapping[str, Any]) -> dict[str, Any
     merged["families"] = families
     merged["total_connected"] = sum(
         int(family.get("connected_count", 0)) for family in families
+    )
+    merged["total_capture_ready"] = sum(
+        int(family.get("capture_ready_count", family.get("connected_count", 0)))
+        for family in families
     )
     merged["all_expected_connected"] = all(
         family.get("meets_expected") is not False for family in families

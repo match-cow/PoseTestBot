@@ -533,9 +533,9 @@ def run_command():
     try:
         command_args, command_parameters = _robot_control_command_args(command, data)
         if command == "start_iiwa":
-            allow_real_robot = _truthy(data.get("allow_real_robot"), default=False)
-            allow_cameras = _truthy(data.get("allow_cameras"), default=False)
-            if not allow_real_robot or not allow_cameras:
+            allow_real_robot = data.get("allow_real_robot") is True
+            allow_cameras = data.get("allow_cameras") is True
+            if allow_real_robot is not True or allow_cameras is not True:
                 raise ValueError(
                     "start_iiwa requires allow_real_robot=true and "
                     "allow_cameras=true"
@@ -546,6 +546,7 @@ def run_command():
                     "allow_cameras": True,
                 }
             )
+            command_args.extend(["--allow-real-robot", "--allow-cameras"])
     except ValueError as exc:
         return jsonify({'output': str(exc)}), 400
     command_array = list(spec["command"]) + command_args
@@ -893,13 +894,21 @@ def capture_plan_preflight_endpoint():
             return jsonify({'output': 'Invalid request: run_root required'}), 400
         if 'robot_mode' in data:
             return jsonify({'output': 'Invalid request: robot_mode is retired'}), 400
+        if data.get('allow_real_robot') is not True:
+            return jsonify(
+                {
+                    'output': (
+                        'Fresh execution acknowledgement must be literal true: '
+                        'allow_real_robot'
+                    )
+                }
+            ), 400
         include_sensors = not _truthy(data.get('no_sensors'), default=False)
-        allow_real_robot = _truthy(data.get('allow_real_robot'), default=False)
         try:
             path, report = write_capture_plan_preflight_with_manifest(
                 data['run_root'],
                 include_sensor_status=include_sensors,
-                allow_real_robot=allow_real_robot,
+                allow_real_robot=True,
             )
         except FileNotFoundError as exc:
             return jsonify({'output': str(exc)}), 404
@@ -956,14 +965,26 @@ def capture_plan_execution_endpoint():
             return jsonify({'output': 'Invalid request: execution mode is retired; only full capture is supported'}), 400
         if 'robot_mode' in data:
             return jsonify({'output': 'Invalid request: robot_mode is retired'}), 400
-        allow_cameras = _truthy(data.get('allow_cameras'), default=False)
-        allow_real_robot = _truthy(data.get('allow_real_robot'), default=False)
+        missing_acknowledgements = [
+            name
+            for name in ('allow_cameras', 'allow_real_robot')
+            if data.get(name) is not True
+        ]
+        if missing_acknowledgements:
+            return jsonify(
+                {
+                    'output': (
+                        'Fresh execution acknowledgements must be literal true: '
+                        + ', '.join(missing_acknowledgements)
+                    )
+                }
+            ), 400
         include_sensor_status = _truthy(data.get('include_sensors'), default=False)
         try:
             path, plan = write_capture_execution_plan_with_manifest(
                 data['run_root'],
-                allow_cameras=allow_cameras,
-                allow_real_robot=allow_real_robot,
+                allow_cameras=True,
+                allow_real_robot=True,
                 include_sensor_status=include_sensor_status,
             )
         except FileNotFoundError as exc:
@@ -1461,6 +1482,26 @@ def run_pipeline_stage():
     if not isinstance(options, dict):
         return jsonify({'output': 'Invalid request: options must be an object'}), 400
 
+    required_acknowledgements = {
+        "capture_plan_preflight": ("allow_real_robot",),
+        "capture_execution_plan": ("allow_cameras", "allow_real_robot"),
+        "capture_execution": ("allow_cameras", "allow_real_robot"),
+    }
+    missing = [
+        name
+        for name in required_acknowledgements.get(str(data['stage']), ())
+        if options.get(name) is not True
+    ]
+    if missing:
+        return jsonify(
+            {
+                'output': (
+                    "Fresh execution acknowledgements must be literal true: "
+                    + ", ".join(missing)
+                )
+            }
+        ), 400
+
     try:
         pipeline_job = build_pipeline_job(
             stage_id=data['stage'],
@@ -1582,6 +1623,7 @@ def run_pipeline_sequence():
             cwd=APP_ROOT,
             resources=sequence_job.resources,
             parameters=sequence_job.parameters,
+            env=sequence_job.execution_environment,
         )
     except ValueError as exc:
         return jsonify({'output': str(exc)}), 400
@@ -1700,6 +1742,7 @@ def run_pipeline_from_config():
             cwd=APP_ROOT,
             resources=sequence_job.resources,
             parameters=parameters,
+            env=sequence_job.execution_environment,
         )
     except FileNotFoundError as exc:
         return jsonify({'output': str(exc)}), 404

@@ -256,6 +256,8 @@ def test_start_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
         "172.31.1.150",
         "--port_robot",
         "30305",
+        "--allow-real-robot",
+        "--allow-cameras",
     ]
     assert fake_runner.submitted[0]["parameters"]["robot_ip"] == "172.31.1.150"
     assert fake_runner.submitted[0]["parameters"]["robot_port"] == 30305
@@ -292,10 +294,19 @@ def test_start_iiwa_command_requires_both_execution_gates(monkeypatch) -> None:
             "allow_cameras": "false",
         },
     )
+    true_strings = client.post(
+        "/run-command",
+        json={
+            "command": "start_iiwa",
+            "allow_real_robot": "true",
+            "allow_cameras": "true",
+        },
+    )
 
     assert missing_both.status_code == 400
     assert missing_camera_gate.status_code == 400
     assert false_string.status_code == 400
+    assert true_strings.status_code == 400
     assert missing_both.get_json()["output"] == (
         "start_iiwa requires allow_real_robot=true and allow_cameras=true"
     )
@@ -452,6 +463,7 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
                     "device_id": "auto",
                     "mounting_mode": "static",
                     "display_name": "Cell OAK-D Pro",
+                    "enabled": False,
                 },
             ],
         },
@@ -461,6 +473,7 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
     assert response.status_code == 201
     assert payload["config"]["capture"]["sensors"][0]["inverted"] is True
     assert payload["config"]["capture"]["sensors"][1]["inverted"] is False
+    assert payload["config"]["capture"]["sensors"][1]["enabled"] is False
 
     loaded = client.get(
         "/run-config",
@@ -469,6 +482,28 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
 
     assert loaded["config"]["capture"]["sensors"][0]["inverted"] is True
     assert loaded["config"]["capture"]["sensors"][0]["sensor_type"] == "realsense_d435"
+    assert loaded["config"]["capture"]["sensors"][1]["enabled"] is False
+
+
+def test_run_config_endpoint_rejects_truthy_string_enabled(tmp_path: Path) -> None:
+    response = app.test_client().post(
+        "/run-config",
+        json={
+            "run_root": (tmp_path / "run-string-enabled").as_posix(),
+            "sensors": [
+                {
+                    "sensor_type": "realsense",
+                    "device_id": "123",
+                    "mounting_mode": "eye_in_hand",
+                    "display_name": "Wrist RealSense",
+                    "enabled": "false",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "literal JSON boolean" in response.get_json()["output"]
 
 
 def test_run_config_endpoint_rejects_retired_robot_mode(tmp_path: Path) -> None:
@@ -495,6 +530,139 @@ def test_capture_execution_endpoint_rejects_retired_mode(tmp_path: Path) -> None
 
     assert response.status_code == 400
     assert "execution mode is retired" in response.get_json()["output"]
+
+
+def test_capture_plan_post_endpoints_require_literal_execution_gates(
+    tmp_path: Path,
+) -> None:
+    client = app.test_client()
+    preflight_root = tmp_path / "strict-preflight-web"
+    execution_root = tmp_path / "strict-execution-web"
+
+    preflight = client.post(
+        "/capture-plan/preflight",
+        json={
+            "run_root": preflight_root.as_posix(),
+            "allow_real_robot": "true",
+        },
+    )
+    execution = client.post(
+        "/capture-plan/execution",
+        json={
+            "run_root": execution_root.as_posix(),
+            "allow_real_robot": "true",
+            "allow_cameras": "true",
+        },
+    )
+
+    assert preflight.status_code == 400
+    assert execution.status_code == 400
+    assert "literal JSON boolean" in preflight.get_json()["output"]
+    assert "literal JSON boolean" in execution.get_json()["output"]
+    assert not preflight_root.exists()
+    assert not execution_root.exists()
+
+
+def test_pipeline_and_sequence_web_boundaries_reject_string_gates(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            raise AssertionError("string acknowledgements must not queue a job")
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    client = app.test_client()
+    string_options = {
+        "capture_plan_preflight": {"allow_real_robot": "true"},
+        "capture_execution_plan": {
+            "allow_cameras": "true",
+            "allow_real_robot": "true",
+        },
+        "capture_execution": {
+            "allow_cameras": "true",
+            "allow_real_robot": "true",
+        },
+    }
+
+    stage = client.post(
+        "/pipeline/run",
+        json={
+            "run_root": (tmp_path / "strict-stage").as_posix(),
+            "stage": "capture_execution",
+            "options": string_options["capture_execution"],
+        },
+    )
+    sequence = client.post(
+        "/pipeline/run-sequence",
+        json={
+            "run_root": (tmp_path / "strict-sequence").as_posix(),
+            "sequence": "real_full_capture_validation",
+            "options": string_options,
+        },
+    )
+
+    assert stage.status_code == 400
+    assert sequence.status_code == 400
+    assert fake_runner.submitted == []
+
+
+def test_real_sequence_web_submission_passes_ephemeral_gates_only_in_environment(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FakeJob:
+        id = "sequence-job"
+        status = "queued"
+
+        def to_dict(self):
+            return {"id": self.id, "status": self.status}
+
+    class FakeRunner:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, **kwargs):
+            self.submitted.append(kwargs)
+            return FakeJob()
+
+    fake_runner = FakeRunner()
+    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    client = app.test_client()
+    options = {
+        "capture_plan_preflight": {"allow_real_robot": True},
+        "capture_execution_plan": {
+            "allow_cameras": True,
+            "allow_real_robot": True,
+        },
+        "capture_execution": {
+            "allow_cameras": True,
+            "allow_real_robot": True,
+        },
+    }
+
+    response = client.post(
+        "/pipeline/run-sequence",
+        json={
+            "run_root": (tmp_path / "ephemeral-sequence").as_posix(),
+            "sequence": "real_full_capture_validation",
+            "options": options,
+        },
+    )
+
+    assert response.status_code == 202
+    submission = fake_runner.submitted[0]
+    serialized = json.dumps(
+        {"command": submission["command"], "parameters": submission["parameters"]}
+    )
+    assert "allow_cameras" not in serialized
+    assert "allow_real_robot" not in serialized
+    assert "POSETESTBOT_SEQUENCE_EXECUTION_ACKNOWLEDGEMENTS" in submission["env"]
 
 
 def test_sensor_alias_endpoint_round_trips_lab_local_file(
@@ -895,12 +1063,16 @@ def test_sensor_status_keeps_preview_claimed_oak_visible(monkeypatch) -> None:
     family = payload["families"][0]
     assert response.status_code == 200
     assert payload["total_connected"] == 1
+    assert payload["total_capture_ready"] == 1
     assert payload["all_expected_connected"] is True
     assert family["connected_count"] == 1
+    assert family["capture_ready_count"] == 1
     assert family["meets_expected"] is True
     assert family["diagnostics"] == []
     assert family["devices"] == [
         {
+            "capture_readiness_reason": None,
+            "capture_ready": True,
             "connected": True,
             "device_id": "18443010314F3B1300",
             "discovery_state": "claimed_by_preview",

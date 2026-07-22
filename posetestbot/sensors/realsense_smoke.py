@@ -51,7 +51,7 @@ def _enabled_sensors(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         dict(sensor)
         for sensor in sensors
-        if isinstance(sensor, Mapping) and bool(sensor.get("enabled", True))
+        if isinstance(sensor, Mapping) and sensor.get("enabled", True) is True
     ]
 
 

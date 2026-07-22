@@ -29,6 +29,11 @@ from posetestbot.io.artifacts import (
     DERIVED_CAMERA_EE_TRANSFORM,
     MATCH_ROBOT_EE_POSES,
 )
+from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
+    create_run_config,
+    write_run_config,
+)
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 
 
@@ -76,9 +81,7 @@ def create_blenderproc_prepare_fixture(tmp_path: Path) -> tuple[Path, Path]:
 def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
     tmp_path: Path,
 ) -> None:
-    run_root, camera_transforms = create_blenderproc_prepare_fixture(
-        tmp_path
-    )
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(tmp_path)
     repo_root = Path(__file__).resolve().parents[1]
 
     result = subprocess.run(
@@ -100,7 +103,9 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
     blenderproc_folder = (
         run_root / "processed" / "synchronized" / "realsense_123" / "blenderproc"
     )
-    assert json.loads((blenderproc_folder / "objects.json").read_text())["instances"] == []
+    assert (
+        json.loads((blenderproc_folder / "objects.json").read_text())["instances"] == []
+    )
     assert list((blenderproc_folder / "objects").iterdir()) == []
     np.testing.assert_allclose(
         np.load(blenderproc_folder / "camera_matrix.npy"),
@@ -123,10 +128,56 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
     )
 
 
-def test_blenderproc_prepare_prefers_rectified_sensor_tree(tmp_path: Path) -> None:
-    run_root, camera_transforms = create_blenderproc_prepare_fixture(
-        tmp_path
+def test_blenderproc_prepare_default_ignores_disabled_stale_sensor_folder(
+    tmp_path: Path,
+) -> None:
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(tmp_path)
+    synchronized = run_root / "processed" / "synchronized"
+    disabled = synchronized / "realsense_999"
+    shutil.copytree(synchronized / "realsense_123", disabled)
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig("realsense_d435", "123", "Enabled"),
+                SensorRunConfig("realsense_d435", "999", "Disabled", enabled=False),
+            ),
+        ),
     )
+    repo_root = Path(__file__).resolve().parents[1]
+    command = [
+        sys.executable,
+        str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
+        str(run_root),
+        "--camera-transformations",
+        str(camera_transforms),
+    ]
+
+    subprocess.run(
+        command,
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert (synchronized / "realsense_123" / "blenderproc").is_dir()
+    assert not (disabled / "blenderproc").exists()
+
+    subprocess.run(
+        [*command, "--input-folder", str(synchronized)],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert (disabled / "blenderproc").is_dir()
+
+
+def test_blenderproc_prepare_prefers_rectified_sensor_tree(tmp_path: Path) -> None:
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(tmp_path)
     synchronized = run_root / "processed" / "synchronized" / "realsense_123"
     rectified = run_root / "processed" / "rectified" / "realsense_123"
     shutil.copytree(synchronized, rectified)
@@ -313,9 +364,7 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
 def test_blenderproc_prepare_failure_preserves_all_existing_outputs(
     tmp_path: Path,
 ) -> None:
-    run_root, camera_transforms = create_blenderproc_prepare_fixture(
-        tmp_path
-    )
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(tmp_path)
     synchronized = run_root / "processed" / "synchronized"
     first_output = synchronized / "realsense_123" / "blenderproc"
     first_output.mkdir()

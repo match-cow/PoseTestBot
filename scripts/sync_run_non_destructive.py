@@ -52,6 +52,15 @@ def parse_args() -> argparse.Namespace:
         help="Timestamp source used for matching frames to robot poses.",
     )
     parser.add_argument(
+        "--robot-timestamp-source",
+        choices=("host_received", "host_wall", "filename"),
+        default=None,
+        help=(
+            "Robot-pose timestamp source. Required for sensor/filename frame "
+            "timestamps; inferred only for matching host clock sources."
+        ),
+    )
+    parser.add_argument(
         "--no-copy",
         action="store_true",
         help="Write metadata only without copying rgb/depth frames.",
@@ -86,6 +95,7 @@ def main() -> None:
         output_root=args.output_root,
         sync_delta=sync_delta,
         timestamp_source=args.timestamp_source,
+        robot_timestamp_source=args.robot_timestamp_source,
         copy_files=not args.no_copy,
     )
 

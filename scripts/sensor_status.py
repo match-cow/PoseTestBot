@@ -70,13 +70,22 @@ def print_status_table(status: dict) -> None:
                 family["display_name"],
                 sdk,
                 str(family["connected_count"]),
+                str(family.get("capture_ready_count", family["connected_count"])),
                 "-" if expected is None else str(expected),
                 family_status_label(family),
                 format_devices(family),
             ]
         )
 
-    headers = ["Sensor", "SDK", "Connected", "Expected", "Status", "Devices"]
+    headers = [
+        "Sensor",
+        "SDK",
+        "Connected",
+        "Capture ready",
+        "Expected",
+        "Status",
+        "Devices",
+    ]
     widths = [
         max(len(str(row[index])) for row in [headers, *rows])
         for index in range(len(headers))

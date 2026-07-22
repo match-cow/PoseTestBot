@@ -64,6 +64,34 @@ def test_capture_plan_stage_accepts_warmup_frames(tmp_path: Path) -> None:
     assert job.parameters["options"]["warmup_frames"] == 30
 
 
+@pytest.mark.parametrize(
+    "stage_id",
+    ["capture_plan_preflight", "capture_execution_plan"],
+)
+def test_live_capture_planning_stages_reserve_camera(
+    tmp_path: Path,
+    stage_id: str,
+) -> None:
+    job = build_pipeline_job(stage_id=stage_id, run_root=tmp_path / stage_id)
+
+    assert job.resources == ["camera", "disk_io"]
+
+
+def test_capture_execution_uses_calibration_receiver_timeouts(
+    tmp_path: Path,
+) -> None:
+    job = build_pipeline_job(
+        stage_id="capture_execution",
+        run_root=tmp_path / "capture",
+        options={"allow_cameras": True, "allow_real_robot": True},
+    )
+
+    assert job.parameters["options"]["receive_start_timeout_s"] == 120.0
+    assert job.parameters["options"]["receive_idle_timeout_s"] == 60.0
+    assert job.command[job.command.index("--receive-start-timeout-s") + 1] == "120.0"
+    assert job.command[job.command.index("--receive-idle-timeout-s") + 1] == "60.0"
+
+
 def test_rewrite_gate_choices_are_acquisition_only(tmp_path: Path) -> None:
     job = build_pipeline_job(stage_id="rewrite_gate", run_root=tmp_path / "run")
 

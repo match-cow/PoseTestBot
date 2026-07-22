@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping
 import cv2
 import numpy as np
 
+from posetestbot.calibration.intrinsics import projection_is_opencv_compatible
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 
@@ -180,23 +181,32 @@ class CalibrationProfile:
             raise ValueError("intrinsics.cam_k bottom row must be [0, 0, 1]")
         if self.rectified_intrinsics is not None:
             rectified = self.rectified_intrinsics
-            if rectified.width != self.intrinsics.width or rectified.height != self.intrinsics.height:
-                raise ValueError("rectified intrinsics must preserve native output resolution")
+            if (
+                rectified.width != self.intrinsics.width
+                or rectified.height != self.intrinsics.height
+            ):
+                raise ValueError(
+                    "rectified intrinsics must preserve native output resolution"
+                )
             if len(rectified.cam_k) != 9:
                 raise ValueError("rectified_intrinsics.cam_k must have 9 values")
-            if any(not math.isclose(float(value), 0.0, abs_tol=1e-12) for value in rectified.distortion):
+            if any(
+                not math.isclose(float(value), 0.0, abs_tol=1e-12)
+                for value in rectified.distortion
+            ):
                 raise ValueError("rectified intrinsics must have zero distortion")
         if self.rectified_valid_roi is not None:
             if len(self.rectified_valid_roi) != 4 or any(
                 int(value) < 0 for value in self.rectified_valid_roi
             ):
-                raise ValueError("rectified valid ROI must contain four nonnegative integers")
+                raise ValueError(
+                    "rectified valid ROI must contain four nonnegative integers"
+                )
             x, y, width, height = self.rectified_valid_roi
-            if (
-                x + width > self.intrinsics.width
-                or y + height > self.intrinsics.height
-            ):
-                raise ValueError("rectified valid ROI must fit within output resolution")
+            if x + width > self.intrinsics.width or y + height > self.intrinsics.height:
+                raise ValueError(
+                    "rectified valid ROI must fit within output resolution"
+                )
         if self.sync_delta_ms is not None and not math.isfinite(
             float(self.sync_delta_ms)
         ):
@@ -204,7 +214,9 @@ class CalibrationProfile:
         self.extrinsics.validate_for_mounting_mode(self.mounting_mode)
         self.quality.validate()
         if self.status == CalibrationStatus.VALID and self.quality.num_inliers <= 0:
-            raise ValueError("valid calibration profiles must record at least one inlier")
+            raise ValueError(
+                "valid calibration profiles must record at least one inlier"
+            )
 
 
 def _enum_value(value: Any) -> Any:
@@ -230,9 +242,10 @@ def _intrinsics_to_dict(intrinsics: CameraIntrinsics) -> dict[str, Any]:
         "cam_K": list(intrinsics.cam_k),
         "width": intrinsics.width,
         "height": intrinsics.height,
-        "distortion_model": "brown_conrady",
+        "distortion_model": intrinsics.distortion_model,
         "distortion": distortion,
         "depth_scale_to_mm": intrinsics.depth_scale_to_mm,
+        "projection_source": intrinsics.projection_source,
     }
 
 
@@ -245,6 +258,12 @@ def _intrinsics_from_dict(value: Mapping[str, Any]) -> CameraIntrinsics:
         height=int(value.get("height", 0)),
         distortion=tuple(distortion),
         depth_scale_to_mm=float(value.get("depth_scale_to_mm", 1.0)),
+        distortion_model=str(value.get("distortion_model", "brown_conrady")),
+        projection_source=(
+            str(value["projection_source"])
+            if value.get("projection_source") is not None
+            else None
+        ),
     )
 
 
@@ -252,6 +271,13 @@ def rectified_projection_from_native(
     intrinsics: CameraIntrinsics,
 ) -> tuple[CameraIntrinsics | None, tuple[int, int, int, int] | None]:
     if intrinsics.width <= 0 or intrinsics.height <= 0:
+        return None, None
+    if not projection_is_opencv_compatible(
+        {
+            "distortion_model": intrinsics.distortion_model,
+            "distortion": list(intrinsics.distortion),
+        }
+    ):
         return None, None
     matrix = np.asarray(intrinsics.cam_k, dtype=float).reshape(3, 3)
     distortion = np.zeros(5, dtype=float)
@@ -271,12 +297,20 @@ def rectified_projection_from_native(
             height=intrinsics.height,
             distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
             depth_scale_to_mm=intrinsics.depth_scale_to_mm,
+            distortion_model="brown_conrady",
+            projection_source=(
+                f"rectified_alpha0_from:{intrinsics.projection_source}"
+                if intrinsics.projection_source
+                else "rectified_alpha0"
+            ),
         ),
         tuple(int(item) for item in roi),
     )
 
 
-def rectified_intrinsics_from_native(intrinsics: CameraIntrinsics) -> CameraIntrinsics | None:
+def rectified_intrinsics_from_native(
+    intrinsics: CameraIntrinsics,
+) -> CameraIntrinsics | None:
     return rectified_projection_from_native(intrinsics)[0]
 
 
@@ -293,7 +327,9 @@ def _transform_frame(value: Any, *, source_schema: str) -> TransformFrame:
 
 def profile_to_dict(profile: CalibrationProfile) -> dict[str, Any]:
     profile.validate()
-    derived_rectified, derived_roi = rectified_projection_from_native(profile.intrinsics)
+    derived_rectified, derived_roi = rectified_projection_from_native(
+        profile.intrinsics
+    )
     rectified_intrinsics = profile.rectified_intrinsics or derived_rectified
     rectified_roi = profile.rectified_valid_roi or derived_roi
     rectified_value = (
@@ -388,7 +424,9 @@ def profile_from_dict(value: Mapping[str, Any]) -> CalibrationProfile:
         rectified_intrinsics=normalized_rectified,
         rectified_valid_roi=rectified_roi,
         extrinsics=RigidTransform(
-            from_frame=_transform_frame(extrinsics["from"], source_schema=source_schema),
+            from_frame=_transform_frame(
+                extrinsics["from"], source_schema=source_schema
+            ),
             to_frame=_transform_frame(extrinsics["to"], source_schema=source_schema),
             rotation_quaternion_wxyz=tuple(
                 float(item) for item in extrinsics["rotation_quaternion_wxyz"]
@@ -494,7 +532,9 @@ def migrate_legacy_camera_ee_profiles(
     return profiles
 
 
-def write_profile_collection(profiles: list[CalibrationProfile], path: str | Path) -> Path:
+def write_profile_collection(
+    profiles: list[CalibrationProfile], path: str | Path
+) -> Path:
     path = Path(path)
     validate_profile_collection(profiles)
     return atomic_write_json(

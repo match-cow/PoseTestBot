@@ -25,10 +25,14 @@ The rewrite already provides:
 - real-only capture planning, preflight, supervised execution, cancellation,
   and rewrite gates;
 - RealSense, OAK-D Pro, and ZED 2i capture/status contracts, plus supported
-  RealSense/OAK live previews and the managed UGREEN WebRTC monitor;
+  RealSense/OAK live previews, the managed UGREEN WebRTC monitor, and
+  run-scoped camera enable/disable selection that retains disabled camera
+  identity and metadata;
 - transactional non-destructive synchronization and sync-quality reports;
-- PoseGridGen target bundles, attempt-scoped two-mode calibration, explicit
-  validation/promotion, and derived rectification;
+- PoseGridGen target bundles, attempt-scoped two-mode calibration, exact
+  RealSense timebase/intrinsic compatibility gates, deterministic common-
+  bundle multi-camera ranking, explicit validation/promotion, and derived
+  rectification;
 - managed PoseTemplateCreator catalog/bundles, run-owned placement and
   instance evidence, BlenderProc 2.8.0 identity validation, and BOP v3
   provenance sidecars;
@@ -41,7 +45,11 @@ Historical real evidence at
 `working_data/hot_full_capture_fixed_20260710_1351` passes
 `rewrite_full_capture.v1` at 10/10 for the three RealSense cameras. It remains
 valid evidence for that configuration, but it is not acceptance of the current
-five-sensor default profile, which also includes OAK-D Pro and ZED 2i.
+five-sensor default profile, which also includes OAK-D Pro and ZED 2i. It is
+also not calibration evidence for the current `calib00` campaign: the captured
+board is the older 10 × 7 / 70-marker geometry, and its motion labels and
+rotation diversity do not satisfy the current hand-eye gates. Preserve it as a
+negative baseline; never relabel or retrofit it as a `calib00` run.
 
 The 2026-07-21 repository audit also verified both pinned source checkouts, a
 wheel and sdist containing the complete pose-template/UI surface, and an
@@ -51,23 +59,36 @@ must be resolved for the relevant real-data milestones below.
 
 ## P0 — Safety and Capture-Contract Hardening
 
-These items precede another deliberate robot capture.
+The completed receiver-hardening items below precede every deliberate robot
+capture. The still-open ordinary full-capture application items are P2
+blockers; the nine-frame calibration deployment and commissioning blockers are
+tracked separately under P3.
 
 ### Harden the low-level pose receiver
 
-- [ ] Make direct `scripts/pose_receiver_udp_json.py` execution require fresh
+- [x] Make direct `scripts/pose_receiver_udp_json.py` execution require fresh
   `allow_real_robot` and `allow_cameras` acknowledgements at the execution
   boundary. Do not bake approvals into reusable plan artifacts.
-- [ ] Refuse an existing `raw_robot_ee_poses.json` before binding the socket or
+- [x] Refuse an existing `raw_robot_ee_poses.json` before binding the socket or
   sending the start command, closing the preflight/execution race and
   protecting direct invocation.
-- [ ] Add a configurable receive-start/idle timeout and record a terminal
+- [x] Add a configurable receive-start/idle timeout and record a terminal
   failed/canceled manifest state on timeout, malformed packets, bind failure,
   or interruption. Preserve any partial evidence separately; never replace a
   prior raw artifact.
-- [ ] Cover direct invocation, supervised invocation, overwrite refusal,
+- [x] Cover direct invocation, supervised invocation, overwrite refusal,
   timeout, malformed packet, and cancellation behavior without contacting the
   robot.
+
+The hardened receiver uses a conservative 120-second first-packet timeout and
+60-second inter-packet timeout by default. Supervised capture injects both
+fresh acknowledgements and timeout values only into the runtime receiver
+command, records that command in the execution report, and leaves reusable
+capture/sequence plans authorization-free. The supervisor default is 300
+seconds. Every selected camera must publish at least three valid, committed
+`frame_metadata.jsonl` records within the 15-second readiness window before
+receiver bind or `START`. Direct IIWA start uses the same two fresh
+acknowledgements.
 
 ### Establish one authoritative Sunrise capture application
 
@@ -84,8 +105,9 @@ These items precede another deliberate robot capture.
   interrupt an active motion in the current program.
 - [ ] Compile and simulate the exact controller project offline, then rename or
   replace the source only after the deployed application is identified. Keep
-  the nine-frame calibration proposal as a separate, disabled commissioning
-  program.
+  the nine-frame calibration application separate from the ordinary
+  full-capture application and reconcile its enabled repository/deployed state
+  independently.
 
 ## P1 — Combined Camera-Service Lifecycle Acceptance
 
@@ -143,9 +165,10 @@ Depends on P0 and on an operator-ready robot/camera cell.
   project. Create and resolve exactly nine persistent children below
   `/PoseTestBot/TemplateBase`; there are no persistent depth or orientation
   variant frames in this revision.
-- [ ] Complete the offline endpoint and swept-path simulation in
-  `docs/IIWA_CALIBRATION_TEACHING_CHECKLIST.md`. Keep
-  `ENABLE_AFTER_OFFLINE_VALIDATION=false` until that review passes.
+- [ ] Reconcile the exact deployed application revision with the enabled
+  repository source and retain the offline endpoint/swept-path evidence in
+  `docs/IIWA_CALIBRATION_TEACHING_CHECKLIST.md`. The enable boolean alone is not
+  commissioning evidence.
 - [ ] Obtain separate authorization for reduced-speed T1 single-stepping and
   record joint branch, singularity, collision/clearance, payload, cable, and
   visibility evidence for the raster and all nine relative orientation legs.
@@ -154,21 +177,90 @@ Depends on P0 and on an operator-ready robot/camera cell.
 
 ### Calibration evidence and promotion
 
-- [ ] Use the actual printed, measured target bundle and require target/hash/
-  placement agreement through detections, observations, candidates, ranking,
-  and promotion.
-- [ ] For every required camera, meet at least 15 accepted views, 6/9 coverage
-  cells, no more than 3 px per-view error, no more than 1.5 px intrinsic RMS,
-  sufficient translation/rotation diversity, and passing sync quality.
-- [ ] Investigate RealSense `825412070181` separately if its historical high
-  reprojection error recurs; trajectory variation alone is not a correction.
-- [ ] Review every PnP/extrinsic result, explicitly accept only passing camera
-  profiles, preserve unrelated profiles, and pass
+The initial 2026-07-21 live preflight for
+`working_data/eye_in_hand_calib00_20260721_163559` stopped before `START`:
+RealSense `033422071805` had lost its SuperSpeed/UVC interfaces, and its USB2
+fallback failed kernel configuration with error `-28` (insufficient bandwidth).
+A host reboot reproduced the transport failure, so software restart alone was
+not remediation. For the current calibration campaign the operator explicitly
+disabled that camera, retained its full run-config identity and mounting/
+orientation/profile metadata, regenerated the plans, and completed physical
+acquisition with the two enabled RealSense cameras. The new immutable
+attempt `3c4a0b7b765f44bd9cc37fffc48fb321` promoted the complete common
+`IPPE + Horaud` bundle. It produced 652/652 and 655/656 inliers, held-out means
+of 3.129 mm / 0.491 degrees and 3.332 mm / 0.427 degrees, and 3.612 mm /
+0.277 degrees stationary-companion closure. The exact camera-to-flange and
+grid-to-template-base transforms and promotion provenance are exposed in Cell.
+Both `rewrite_full_capture.v1` (9/9) and
+`rewrite_calibration_validation.v1` (3/3) are ready on this reduced-camera run.
+
+This reduced calibration camera set does not close P1/P2 hardware acceptance:
+reseat, flip, or replace the disabled camera's SuperSpeed cable/connector path
+and require exact SDK enumeration of all three serials for the three-camera
+service and full-capture milestones. Status and capture-plan preflight reject
+an enabled SDK-enumerated RealSense whose known `usb_type_descriptor` has a
+major version below 3, preventing a future USB2 fallback from satisfying
+readiness. Disabled cameras remain visible configuration/diagnostic evidence
+but are excluded from capture/preflight, calibration, Cell, and rewrite-gate
+expectations.
+
+- [x] For the current eye-in-hand campaign, use the actual printed and measured
+  `calib00` bundle (`15b49f67-7cf5-4c00-9e7f-914aa6ed5da0`):
+  `DICT_5X5_100`, 7 × 5, 35 markers, geometry SHA-256
+  `3da681424ff77e55dc51c8c1c9bb58e0a425f7fa039b63d29c798aa2ad02b256`.
+  Keep placement `unknown` so eye-in-hand solving estimates the stationary
+  target companion transform. Require target/hash/placement agreement through
+  detections, observations, candidates, ranking, and promotion.
+- [x] Retain `intrinsic_comparison.json` for every enabled camera, including
+  both factory and manual evidence and the selection reason. Treat RealSense
+  `inverse_brown_conrady` as forward-OpenCV-compatible only when every
+  coefficient is finite and exactly zero; retain that factory pinhole
+  projection and keep the manual result comparison-only. Never pass nonzero
+  inverse coefficients as forward distortion. When factory projection is
+  unusable, activate manual intrinsics only after at least 15 training views,
+  6/9 image-centroid cells, five held-out views, parameter-plausibility,
+  3 px/view, and 1.5 px RMS gates pass.
+- [x] Require each target pose to have at least 12 common corner inliers, at
+  least 50% whole-board support, and no more than 3 px whole-board mean
+  reprojection error, with four three-corner-supported markers spanning two
+  rows/columns per view and 50% marker plus 60% row/column campaign coverage.
+- [x] For every required camera, require at least 15 accepted extrinsic views,
+  6/9 image-centroid cells, four distinct motion poses, at least 20 mm
+  translation span, at least 5° rotation span, six hand-eye inliers, no more
+  than 10 mm / 5° mean held-out residual, no more than 25% motion-balanced
+  outliers, no more than 25% outliers within any repeated motion, and
+  rotation-axis singular ratio 0.15 from at least 2° samples before/after
+  pruning. Treat raw outlier density as evidence rather than a promotion gate.
+  Balance fitting to five frames per motion and validate every accepted frame.
+  For RealSense require SDK `global_time` color sensor timestamps paired with
+  robot host-wall timestamps, zero manual offset, no fallback, and at most
+  20 ms nearest-pose delta.
+- [x] Confirm the historical high reprojection error on RealSense
+  `825412070181` did not recur: factory/manual held-out RMS is 1.194/0.967 px
+  and promoted-candidate mean reprojection is 1.035 px. Trajectory variation
+  was not treated as a correction.
+- [x] Review every PnP/extrinsic result. For the enabled cameras require a
+  complete common bundle using the same PnP and extrinsic method, with every
+  individual candidate passing and maximum pairwise stationary-companion
+  closure no greater than 10 mm / 5°. Establish the best normalized mean
+  individual score, treat bundles within 0.01 as quality-equivalent, and rank
+  that band by normalized companion closure rounded to six decimals, followed
+  by canonical method tie-breaks. Keep clearly worse individual solutions
+  outside the band even if their closure is smaller. If no common bundle
+  passes, fail closed and forbid partial or mixed-method promotion. Explicitly
+  promote the selected complete bundle, preserve unrelated profiles, expose
+  its exact transforms in Cell, and pass
   `rewrite_calibration_validation.v1` with promotion evidence.
+- [ ] Revalidate metric depth on RealSense `923322072633` after the cable and
+  firmware maintenance opportunity. Saved aligned-depth checks showed a
+  range-dependent scale anomaly; the promoted RGB eye-in-hand transform is
+  valid, but factory depth scale/alignment remains explicitly not recalibrated.
 
 ## P4 — Real Pose-Template, BlenderProc, and BOP v3 Acceptance
 
-Depends on promoted real calibration and BlenderProc 2.8.0.
+The promoted-calibration dependency is satisfied by the two-camera `calib00`
+attempt. Real BlenderProc 2.8.0 and BOP acceptance remain outstanding for an
+appropriate dataset run.
 
 - [ ] Import/inspect the real CAD and texture assets, generate an immutable
   printable template, print/measure it, and confirm the full
@@ -200,7 +292,7 @@ These tasks are useful but do not replace the real-data gates.
   BOP/sync readers can be retired. Until a data migration policy exists, they
   remain supported readers rather than dead code. The object-registry path was
   retired on 2026-07-21; object-bearing runs now require pose-template bundles.
-- [ ] Reduce the lazy Cell production chunk (about 932 kB minified in the
+- [ ] Reduce the lazy Cell production chunk (about 937 kB minified in the
   2026-07-21 build) if operator load time or deployment limits justify it.
   Preserve the WebGL-free fallback and add a bundle-size assertion before
   treating this as a release gate.

@@ -36,7 +36,11 @@ def snapshot_specs_from_status(
         if not isinstance(family, Mapping):
             continue
         for device in family.get("devices", []):
-            if not isinstance(device, Mapping) or not device.get("connected", True):
+            if (
+                not isinstance(device, Mapping)
+                or not device.get("connected", True)
+                or device.get("capture_ready") is False
+            ):
                 continue
             key = sensor_key(str(device.get("sensor_type")), str(device.get("device_id")))
             if selected is not None and key not in selected:

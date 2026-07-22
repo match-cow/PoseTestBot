@@ -96,6 +96,10 @@ def test_capture_plan_builds_sensor_commands_then_one_receiver(tmp_path: Path) -
         "scripts/pose_receiver_udp_json.py",
     ]
     assert "--robot_mode" not in receiver["command"]
+    assert "--allow-cameras" not in receiver["command"]
+    assert "--allow-real-robot" not in receiver["command"]
+    assert "--receive-start-timeout-s" not in receiver["command"]
+    assert "--receive-idle-timeout-s" not in receiver["command"]
 
 
 def test_capture_plan_uses_adapter_resolution_validation(tmp_path: Path) -> None:
@@ -108,6 +112,32 @@ def test_capture_plan_uses_adapter_resolution_validation(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="RealSense D435"):
         build_capture_plan(config)
+
+
+def test_capture_plan_excludes_disabled_sensor_without_deleting_identity(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-disabled-camera"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(
+            sensor_config_from_token("realsense:working:eye_in_hand:Working"),
+            sensor_config_from_token("realsense:offline:eye_in_hand:Offline"),
+        ),
+    ).to_dict()
+    config["capture"]["sensors"][1]["enabled"] = False
+
+    plan = build_capture_plan(config).to_dict()
+
+    assert len(config["capture"]["sensors"]) == 2
+    assert config["capture"]["sensors"][1]["device_id"] == "offline"
+    assert plan["capture"]["sensor_count"] == 2
+    assert plan["capture"]["enabled_sensor_count"] == 1
+    assert [sensor["device_id"] for sensor in plan["sensors"]] == ["working"]
+    assert [command["role"] for command in plan["commands"]] == [
+        "sensor_capture",
+        "robot_pose_receiver",
+    ]
 
 
 def test_capture_plan_rejects_negative_warmup_frames(tmp_path: Path) -> None:

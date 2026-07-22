@@ -9,7 +9,7 @@ import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 from pytransform3d import rotations as pr
@@ -34,7 +34,9 @@ def validate_subdir(subdir: str) -> str:
     """Require one safe relative directory component."""
 
     if not SAFE_COMPONENT.fullmatch(subdir) or Path(subdir).name != subdir:
-        raise ValueError(f"BlenderProc subdir must be one safe path component: {subdir!r}")
+        raise ValueError(
+            f"BlenderProc subdir must be one safe path component: {subdir!r}"
+        )
     return subdir
 
 
@@ -127,16 +129,28 @@ def read_camera_parameters(sensor_folder: Path) -> tuple[np.ndarray, np.ndarray]
             else np.zeros(5, dtype=float)
         )
     except ValueError as exc:
-        raise ValueError(f"Camera intrinsics contain non-numeric values: {path}") from exc
-    if not np.all(np.isfinite(camera_matrix)) or camera_matrix[0, 0] <= 0 or camera_matrix[1, 1] <= 0:
-        raise ValueError(f"Camera intrinsics must be finite with positive focal lengths: {path}")
+        raise ValueError(
+            f"Camera intrinsics contain non-numeric values: {path}"
+        ) from exc
+    if (
+        not np.all(np.isfinite(camera_matrix))
+        or camera_matrix[0, 0] <= 0
+        or camera_matrix[1, 1] <= 0
+    ):
+        raise ValueError(
+            f"Camera intrinsics must be finite with positive focal lengths: {path}"
+        )
     if distortion.shape != (5,) or not np.all(np.isfinite(distortion)):
-        raise ValueError(f"Distortion coefficients must contain five finite values: {path}")
+        raise ValueError(
+            f"Distortion coefficients must contain five finite values: {path}"
+        )
     return camera_matrix, distortion.reshape(5, 1)
 
 
 def _ordered_robot_poses(sensor_folder: Path) -> list[Mapping[str, object]]:
-    values = _read_json_mapping(sensor_folder / MATCH_ROBOT_EE_POSES, "matched robot poses")
+    values = _read_json_mapping(
+        sensor_folder / MATCH_ROBOT_EE_POSES, "matched robot poses"
+    )
     ordered: list[tuple[int, Mapping[str, object]]] = []
     for filename, record in values.items():
         if not isinstance(filename, str) or Path(filename).suffix != ".png":
@@ -144,7 +158,9 @@ def _ordered_robot_poses(sensor_folder: Path) -> list[Mapping[str, object]]:
         try:
             frame_id = int(Path(filename).stem)
         except ValueError as exc:
-            raise ValueError(f"Matched pose key must have a numeric stem: {filename!r}") from exc
+            raise ValueError(
+                f"Matched pose key must have a numeric stem: {filename!r}"
+            ) from exc
         if not isinstance(record, Mapping):
             raise ValueError(f"Matched pose record must be an object: {filename}")
         robot_pose = record.get("robot_ee_pose")
@@ -153,7 +169,9 @@ def _ordered_robot_poses(sensor_folder: Path) -> list[Mapping[str, object]]:
         ordered.append((frame_id, robot_pose))
     ordered.sort(key=lambda item: item[0])
     if len({frame_id for frame_id, _pose in ordered}) != len(ordered):
-        raise ValueError(f"Duplicate numeric frame IDs in {sensor_folder / MATCH_ROBOT_EE_POSES}")
+        raise ValueError(
+            f"Duplicate numeric frame IDs in {sensor_folder / MATCH_ROBOT_EE_POSES}"
+        )
     return [pose for _frame_id, pose in ordered]
 
 
@@ -170,7 +188,9 @@ def _camera_poses(
                 translation = [float(robot_pose[key]) for key in ("X", "Y", "Z")]
                 euler = [float(robot_pose[key]) for key in ("C", "B", "A")]
             except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(f"Invalid robot pose at frame {index}: {robot_pose}") from exc
+                raise ValueError(
+                    f"Invalid robot pose at frame {index}: {robot_pose}"
+                ) from exc
             if not np.all(np.isfinite([*translation, *euler])):
                 raise ValueError(f"Non-finite robot pose at frame {index}")
             flange_to_template_base = pt.transform_from(
@@ -215,7 +235,9 @@ def _prepare_sensor(
             mesh_name = f"{instance_uuid}.ply"
             transform_name = f"{instance_uuid}.npy"
             shutil.copy2(source, objects_output / mesh_name)
-            matrix = np.asarray(item["template_base_from_object"]["matrix"], dtype=float)
+            matrix = np.asarray(
+                item["template_base_from_object"]["matrix"], dtype=float
+            )
             if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
                 raise ValueError(f"Invalid instance transform: {instance_uuid}")
             transform_metres = matrix.copy()
@@ -227,7 +249,9 @@ def _prepare_sensor(
                 try:
                     texture_source.resolve(strict=True).relative_to(run_root.resolve())
                 except (FileNotFoundError, ValueError) as exc:
-                    raise ValueError(f"Instance texture escapes run root: {texture_source}") from exc
+                    raise ValueError(
+                        f"Instance texture escapes run root: {texture_source}"
+                    ) from exc
                 texture_name = f"{instance_uuid}.png"
                 shutil.copy2(texture_source, objects_output / texture_name)
             prepared_instances.append(
@@ -264,7 +288,9 @@ def _prepare_sensor(
     np.save(staging / "dist_coefficients.npy", distortion)
     np.save(staging / "camera_poses.npy", camera_poses)
     if np.load(staging / "camera_poses.npy").shape != (len(robot_poses), 4, 4):
-        raise ValueError(f"Prepared camera pose count is invalid for {sensor_folder.name}")
+        raise ValueError(
+            f"Prepared camera pose count is invalid for {sensor_folder.name}"
+        )
     return PreparedSensor(
         sensor_name=sensor_folder.name,
         output_folder=sensor_folder,
@@ -280,6 +306,7 @@ def prepare_sensor_folders(
     subdir: str = "blenderproc",
     object_instances: Mapping[str, Any] | None = None,
     run_root: str | Path | None = None,
+    sensor_names: Sequence[str] | None = None,
 ) -> list[PreparedSensor]:
     """Prepare every sensor in staging and promote only after all validate."""
 
@@ -288,6 +315,9 @@ def prepare_sensor_folders(
     if not input_path.is_dir():
         raise FileNotFoundError(f"Synchronized input folder not found: {input_path}")
     sensors = [path for path in sorted(input_path.iterdir()) if path.is_dir()]
+    if sensor_names is not None:
+        selected_names = set(sensor_names)
+        sensors = [path for path in sensors if path.name in selected_names]
     if not sensors:
         raise FileNotFoundError(f"No synchronized sensor folders in {input_path}")
     if object_instances is not None:

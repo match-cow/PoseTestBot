@@ -26,11 +26,11 @@ import org.json.simple.parser.JSONParser;
  * Proposal for an ArUco calibration capture with more image-space and
  * orientation variance than PoseTestBot_Test's single-axis A1 sweep.
  *
- * IMPORTANT: The proposed Cartesian frames have not been commissioned on the
- * physical cell. Keep ENABLE_AFTER_OFFLINE_VALIDATION false until every frame
- * and connecting motion has been checked in Sunrise.Workbench and then
- * single-stepped in T1 at reduced override with the real tool, cables, target,
- * cameras, and safety equipment represented.
+ * IMPORTANT: This repository revision is enabled for lab validation, but the
+ * exact deployed controller application and revision must be independently
+ * recorded. Revalidate every frame and connecting motion in Sunrise.Workbench
+ * and T1 whenever the frames, tool, cables, target, cameras, or safety setup
+ * change.
  *
  * The nine raster targets are persistent Application Data ObjectFrames directly
  * below /PoseTestBot/TemplateBase. Numeric values in the repository teaching
@@ -52,7 +52,7 @@ public class PoseTestBot_CalibrationVarianceProposal
 	private static final String CALIBRATION_COVERAGE_LOWER_CENTER_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerCenter";
 	private static final String CALIBRATION_COVERAGE_LOWER_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerRight";
 
-	/* Deliberate deployment interlock for this uncommissioned proposal. */
+	/* Enabled in repository source for lab validation; verify deployed identity. */
 	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = true;
 	/* Commission one phase at a time before enabling both together. */
 	private static final boolean RUN_COVERAGE_RASTER = true;

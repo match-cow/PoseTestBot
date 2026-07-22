@@ -99,6 +99,16 @@ def fake_sensor_status(expected_counts=None) -> dict:
     }
 
 
+def fake_sensor_status_with_unready_camera(expected_counts=None) -> dict:
+    status = fake_sensor_status(expected_counts)
+    status["families"][0]["devices"][0]["capture_ready"] = True
+    unready = status["families"][0]["devices"][1]
+    unready["capture_ready"] = False
+    unready["capture_readiness_reason"] = "usb_connection_below_superspeed"
+    status["total_capture_ready"] = 1
+    return status
+
+
 def fake_full_lab_sensor_status(expected_counts=None) -> dict:
     status = fake_sensor_status(expected_counts)
     status["families"][0]["devices"].append(
@@ -480,6 +490,48 @@ def page():
 
 def sensor_card(page, sensor_key: str):
     return page.locator(f'[data-testid="sensor-card"][data-sensor-key="{sensor_key}"]')
+
+
+def test_unready_camera_is_not_presented_as_usable_and_can_be_deselected(
+    preview_server,
+    page,
+    monkeypatch,
+) -> None:
+    server, runner = preview_server
+    monkeypatch.setattr(
+        web_sensors,
+        "collect_sensor_status",
+        fake_sensor_status_with_unready_camera,
+    )
+    selected_json = json.dumps(json.dumps([SENSOR_B]))
+    page.add_init_script(
+        f'window.localStorage.setItem("posetestbot.selectedSensors", {selected_json})'
+    )
+
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
+
+    unready = sensor_card(page, SENSOR_B)
+    expect(unready).to_have_attribute("data-capture-ready", "false")
+    expect(unready.get_by_text("Not capture-ready", exact=True)).to_be_visible()
+    expect(unready.locator('[data-testid="sensor-capture-readiness"]')).to_contain_text(
+        "below SuperSpeed"
+    )
+    expect(unready.locator('[data-testid="sensor-preview-toggle"]')).to_be_disabled()
+    expect(unready.locator('[data-testid="sensor-preview-toggle"]')).to_contain_text(
+        "Not ready"
+    )
+    expect(unready.get_by_role("button", name="Snapshot")).to_be_disabled()
+
+    use_in_run = unready.locator('[data-testid="sensor-run-selection"]')
+    expect(use_in_run).to_be_checked()
+    expect(use_in_run).to_be_enabled()
+    use_in_run.click()
+    expect(use_in_run).not_to_be_checked()
+    expect(use_in_run).to_be_disabled()
+    assert page.evaluate(
+        'JSON.parse(window.localStorage.getItem("posetestbot.selectedSensors"))'
+    ) == []
+    assert runner.submitted == []
 
 
 def test_sidebar_webcam_monitor_plays_synthetic_webrtc_without_jpegs(

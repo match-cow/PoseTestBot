@@ -4,8 +4,10 @@ import cv2
 import json
 import numpy as np
 import pytest
+from pathlib import Path
 from pytransform3d import rotations as pr
 from pytransform3d import transformations as pt
+from types import SimpleNamespace
 
 from posetestbot.calibration.attempt_solver import (
     EXTRINSIC_METHOD_ORDER,
@@ -20,9 +22,787 @@ from posetestbot.calibration.attempt_solver import (
 )
 from posetestbot.calibration import attempts as attempt_module
 from posetestbot.calibration.candidates import _robot_ee_to_reference
+from posetestbot.calibration.intrinsics import (
+    IntrinsicCalibrationError,
+    factory_intrinsic_profile,
+    write_intrinsic_profile_collection,
+)
+from posetestbot.calibration.targets import DEFAULT_TARGET_SPEC, opencv_grid_board
+from posetestbot.io.artifacts import (
+    INTRINSIC_CALIBRATION_PROFILES,
+    INTRINSIC_COMPARISON,
+)
+from posetestbot.sensors.contracts import CameraIntrinsics
+from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
 
 
-def _fixture_observations(mode: str) -> tuple[list[dict], np.ndarray, np.ndarray]:
+@pytest.mark.parametrize(
+    ("actual_sync_delta_ms", "should_fail"),
+    [(0.0, False), (100.0, True), ("nan", True)],
+)
+def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    actual_sync_delta_ms: float | str,
+    should_fail: bool,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    run_root = Path("run")
+    attempt_root = run_root / "processed" / "calibration" / ("a" * 32)
+    attempt_root.mkdir(parents=True)
+    sensor_folder = run_root / "realsense_1"
+    sensor_folder.mkdir(parents=True)
+    (sensor_folder / "frame_metadata.jsonl").write_text(
+        json.dumps(
+            {
+                "frame_id": "1000.png",
+                "sensor_timestamp_ns": 10_000_000_000,
+                "color_timestamp_domain": "global_time",
+            }
+        )
+        + "\n"
+    )
+    (run_root / "raw_robot_ee_poses.json").write_text(
+        json.dumps(
+            {
+                "0": {
+                    "host_wall_timestamp_ns": 10_000_000_000,
+                    "motion": "pose_0",
+                    "pose": {
+                        "X": 0.0,
+                        "Y": 0.0,
+                        "Z": 500.0,
+                        "A": 0.0,
+                        "B": 0.0,
+                        "C": 0.0,
+                    },
+                }
+            }
+        )
+    )
+    output_folder = attempt_root / "processed" / "synchronized" / "realsense_1"
+    report_path = output_folder / "sync_report.json"
+
+    def fake_synchronize_run(*_args, **kwargs):
+        assert kwargs["sync_delta"] == 0.0
+        assert kwargs["timestamp_source"] == "sensor"
+        assert kwargs["robot_timestamp_source"] == "host_wall"
+        assert kwargs["max_nearest_pose_delta_ms"] == 20.0
+        return [
+            SimpleNamespace(
+                sensor_folder=sensor_folder,
+                output_folder=output_folder,
+                report_path=report_path,
+            )
+        ]
+
+    monkeypatch.setattr(
+        attempt_module,
+        "synchronize_run",
+        fake_synchronize_run,
+    )
+
+    def fake_quality(
+        root: Path,
+        *,
+        report_paths: list[Path],
+        max_nearest_pose_delta_ms: float,
+        require_timestamp_source: dict[str, str],
+        require_robot_timestamp_source: dict[str, str],
+    ) -> dict:
+        assert root == run_root
+        assert report_paths == [report_path.resolve()]
+        assert max_nearest_pose_delta_ms == 20.0
+        assert require_timestamp_source == {"realsense_1": "sensor"}
+        assert require_robot_timestamp_source == {"realsense_1": "host_wall"}
+        return {
+            "overall_status": "ok",
+            "sensors": [
+                {
+                    "sensor_name": "realsense_1",
+                    "sync_delta_ms": actual_sync_delta_ms,
+                }
+            ],
+            "checks": [
+                {
+                    "name": "sync_timestamp_source:realsense_1",
+                    "status": "ok",
+                },
+                {
+                    "name": "sync_robot_timestamp_source:realsense_1",
+                    "status": "ok",
+                },
+                {
+                    "name": "sync_nearest_pose_delta:realsense_1",
+                    "status": "ok",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(attempt_module, "build_sync_quality_report", fake_quality)
+    monkeypatch.setattr(
+        attempt_module,
+        "_intrinsics_for_sensors",
+        lambda *_args: ([], {}),
+    )
+
+    arguments = (
+        run_root,
+        attempt_root,
+        {
+            "sensors": [
+                {
+                    "sensor_key": "realsense_d435:1",
+                    "folder": "realsense_1",
+                    "sensor_type": "realsense_d435",
+                    "robot_pose_path": "raw_robot_ee_poses.json",
+                }
+            ]
+        },
+    )
+    if should_fail:
+        with pytest.raises(ValueError, match="strict eye-in-hand policy"):
+            attempt_module._prepare_attempt_data(*arguments)
+        return
+
+    synchronized, intrinsics = attempt_module._prepare_attempt_data(*arguments)
+
+    assert synchronized == {"realsense_d435:1": output_folder.resolve()}
+    assert intrinsics == {}
+
+
+def test_realsense_calibration_timestamp_preflight_requires_global_time(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor_folder = run_root / "realsense_1"
+    sensor_folder.mkdir(parents=True)
+    (sensor_folder / "frame_metadata.jsonl").write_text(
+        json.dumps(
+            {
+                "frame_id": "1000.png",
+                "sensor_timestamp_ns": 10_000_000_000,
+                "color_timestamp_domain": "system_time",
+            }
+        )
+        + "\n"
+    )
+    (run_root / "raw_robot_ee_poses.json").write_text(
+        json.dumps(
+            {
+                "0": {
+                    "host_wall_timestamp_ns": 10_000_000_000,
+                    "motion": "pose_0",
+                    "pose": {},
+                }
+            }
+        )
+    )
+    sensors = [
+        {
+            "sensor_key": "realsense_d435:1",
+            "sensor_type": "realsense_d435",
+            "folder": "realsense_1",
+            "robot_pose_path": "raw_robot_ee_poses.json",
+        }
+    ]
+
+    with pytest.raises(ValueError, match="must all use global_time"):
+        attempt_module._calibration_timestamp_preflight(run_root, sensors)
+
+
+def test_prepare_attempt_rejects_mutated_per_sensor_timestamp_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    attempt_root = run_root / "processed" / "calibration" / ("a" * 32)
+    sensor_folder = run_root / "realsense_1"
+    attempt_root.mkdir(parents=True)
+    sensor_folder.mkdir(parents=True)
+    (sensor_folder / "frame_metadata.jsonl").write_text(
+        json.dumps(
+            {
+                "frame_id": "1000.png",
+                "sensor_timestamp_ns": 10_000_000_000,
+                "color_timestamp_domain": "global_time",
+            }
+        )
+        + "\n"
+    )
+    (run_root / "raw_robot_ee_poses.json").write_text(
+        json.dumps(
+            {
+                "0": {
+                    "host_wall_timestamp_ns": 10_000_000_000,
+                    "motion": "pose_0",
+                    "pose": {},
+                }
+            }
+        )
+    )
+    sensors = [
+        {
+            "sensor_key": "realsense_d435:1",
+            "sensor_type": "realsense_d435",
+            "folder": "realsense_1",
+            "robot_pose_path": "raw_robot_ee_poses.json",
+        }
+    ]
+    recorded_policy = attempt_module._calibration_timestamp_preflight(run_root, sensors)
+    recorded_policy["per_sensor"]["realsense_d435:1"]["frame_timestamp_source"] = (
+        "host_received"
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "synchronize_run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "synchronization must not run after timestamp-policy mutation"
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="realsense_d435:1: frame_timestamp_source",
+    ):
+        attempt_module._prepare_attempt_data(
+            run_root,
+            attempt_root,
+            {"sensors": sensors, "timestamp_policy": recorded_policy},
+        )
+
+
+def _intrinsic_sensor_fixture(folder: Path) -> dict:
+    folder.mkdir(parents=True)
+    write_legacy_camera_sidecars(
+        folder,
+        CameraIntrinsics(
+            cam_k=(600.0, 0.0, 320.0, 0.0, 601.0, 240.0, 0.0, 0.0, 1.0),
+            width=640,
+            height=480,
+            distortion=(0.01, -0.02, 0.001, -0.002, 0.003),
+            depth_scale_to_mm=1.0,
+            distortion_model="brown_conrady",
+            projection_source="test_factory_color",
+        ),
+        include_distortion_in_cam_k=True,
+    )
+    return factory_intrinsic_profile(folder)
+
+
+def _unsupported_intrinsic_profile(profile: dict, *, profile_id: str) -> dict:
+    return {
+        **profile,
+        "profile_id": profile_id,
+        "native": {
+            **profile["native"],
+            "distortion_model": "inverse_brown_conrady",
+        },
+        "rectified": None,
+        "source": {
+            **profile["source"],
+            "opencv_projection_compatible": False,
+            "rectification_available": False,
+            "rectification_unavailable_reason": (
+                "sdk_distortion_model_is_not_forward_opencv_compatible"
+            ),
+        },
+    }
+
+
+def _intrinsic_split_detections(
+    count: int,
+    *,
+    reverse_mapping: bool = False,
+) -> dict:
+    _dictionary, board = opencv_grid_board(DEFAULT_TARGET_SPEC)
+    ids = board.getIds().reshape(-1).astype(int).tolist()
+    objects = [
+        np.asarray(item, dtype=np.float32).reshape(4, 3)
+        for item in board.getObjPoints()
+    ]
+    camera = np.asarray(
+        [[600.0, 0.0, 320.0], [0.0, 605.0, 240.0], [0.0, 0.0, 1.0]],
+        dtype=float,
+    )
+    cell_x = (-300.0, -125.0, 50.0)
+    cell_y = (-250.0, -90.0, 160.0)
+    frames = {}
+    for index in range(count):
+        unique_index = index // 3
+        cell = unique_index % 9
+        cycle = unique_index // 9
+        row, column = divmod(cell, 3)
+        rvec = np.asarray(
+            [
+                -0.28 + 0.035 * (cycle % 9),
+                -0.22 + 0.045 * ((cycle * 2 + cell) % 9),
+                -0.20 + 0.05 * ((cycle + cell * 2) % 9),
+            ]
+        )
+        tvec = np.asarray(
+            [
+                cell_x[column] + 8.0 * (cycle % 5),
+                cell_y[row] + 6.0 * ((cycle + cell) % 5),
+                650.0 + 28.0 * (cycle % 7),
+            ]
+        )
+        corners = [
+            cv2.projectPoints(points, rvec, tvec, camera, np.zeros(5))[0]
+            .reshape(4, 2)
+            .tolist()
+            for points in objects
+        ]
+        all_points = np.concatenate([np.asarray(item, dtype=float) for item in corners])
+        name = f"{index:06d}.png"
+        frames[name] = {
+            "ids": ids,
+            "corners": corners,
+            "marker_count": len(ids),
+            "image_centroid_px": all_points.mean(axis=0).tolist(),
+        }
+    items = list(frames.items())
+    if reverse_mapping:
+        items.reverse()
+    return {
+        "schema_version": "aruco_detections.v1",
+        "image_size": [640, 480],
+        "frames": dict(items),
+    }
+
+
+def test_intrinsic_split_caps_views_preserves_coverage_and_blocks_leakage() -> None:
+    detections = _intrinsic_split_detections(240)
+
+    training, holdout, split = attempt_module._intrinsic_detection_split(
+        detections,
+        DEFAULT_TARGET_SPEC,
+    )
+    shuffled_training, shuffled_holdout, shuffled_split = (
+        attempt_module._intrinsic_detection_split(
+            _intrinsic_split_detections(240, reverse_mapping=True),
+            DEFAULT_TARGET_SPEC,
+        )
+    )
+
+    assert list(training["frames"]) == split["training_views"]
+    assert list(holdout["frames"]) == split["heldout_views"]
+    assert len(training["frames"]) == 45
+    assert len(holdout["frames"]) == 15
+    assert set(training["frames"]).isdisjoint(holdout["frames"])
+    assert len(split["training_coverage_cells"]) >= 6
+    assert split["holdout_guard"] == {
+        "requested_temporal_radius_views": 5,
+        "effective_temporal_radius_views": 5,
+        "requested_descriptor_distance": 1.0,
+        "effective_descriptor_distance": 1.0,
+        "relaxed_for_minimum_split_feasibility": False,
+    }
+    assert shuffled_split["training_views"] == split["training_views"]
+    assert shuffled_split["heldout_views"] == split["heldout_views"]
+    assert list(shuffled_training["frames"]) == split["training_views"]
+    assert list(shuffled_holdout["frames"]) == split["heldout_views"]
+
+    evidence = {item["frame"]: item for item in split["selected_view_evidence"]}
+    scale = split["descriptor"]["normalized_corner_coordinate_scale"]
+    for training_name in split["training_views"]:
+        training_view = evidence[training_name]
+        training_descriptor = (
+            np.asarray(training_view["projected_board_corners_normalized"]) / scale
+        )
+        for holdout_name in split["heldout_views"]:
+            holdout_view = evidence[holdout_name]
+            holdout_descriptor = (
+                np.asarray(holdout_view["projected_board_corners_normalized"]) / scale
+            )
+            assert (
+                abs(
+                    training_view["chronological_index"]
+                    - holdout_view["chronological_index"]
+                )
+                > 5
+            )
+            assert np.linalg.norm(training_descriptor - holdout_descriptor) >= 1.0
+
+
+def test_intrinsic_split_relaxes_guards_only_to_keep_small_dataset_feasible() -> None:
+    detections = _intrinsic_split_detections(20)
+
+    training, holdout, split = attempt_module._intrinsic_detection_split(
+        detections,
+        DEFAULT_TARGET_SPEC,
+    )
+
+    assert len(training["frames"]) == 15
+    assert len(holdout["frames"]) == 5
+    assert set(training["frames"]).isdisjoint(holdout["frames"])
+    assert len(split["training_coverage_cells"]) >= 6
+    assert split["holdout_guard"]["relaxed_for_minimum_split_feasibility"] is True
+    assert split["selected_usable_view_count"] == 20
+    assert split["omitted_usable_view_count"] == 0
+
+
+def test_intrinsic_split_audits_duplicate_heavy_omissions() -> None:
+    detections = _intrinsic_split_detections(180)
+
+    _training, _holdout, split = attempt_module._intrinsic_detection_split(
+        detections,
+        DEFAULT_TARGET_SPEC,
+    )
+
+    assert split["strategy"] == ("deterministic_projective_maximin_guarded_views_v2")
+    assert split["max_training_views"] == 45
+    assert split["max_holdout_views"] == 15
+    assert split["usable_view_count"] == 180
+    assert split["omitted_usable_view_count"] == len(split["omitted_views"])
+    assert split["omitted_correlated_view_count"] > 0
+    assert {
+        reason for item in split["omitted_views"] for reason in item["reasons"]
+    } >= {"holdout_temporal_guard", "training_diversity_cap"}
+    assert len(split["selected_view_evidence"]) == (
+        split["training_usable_view_count"] + split["heldout_usable_view_count"]
+    )
+
+
+def test_reuse_intrinsics_rejects_incompatible_existing_and_uses_factory(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    attempt_root = run_root / "processed" / "calibration" / ("d" * 32)
+    attempt_root.mkdir(parents=True)
+    folder = attempt_root / "processed" / "synchronized" / "realsense_1"
+    factory = _intrinsic_sensor_fixture(folder)
+    existing = _unsupported_intrinsic_profile(
+        factory,
+        profile_id="stored-inverse-projection",
+    )
+    write_intrinsic_profile_collection(
+        [existing],
+        run_root / INTRINSIC_CALIBRATION_PROFILES,
+    )
+
+    profiles, by_sensor = attempt_module._intrinsics_for_sensors(
+        run_root,
+        attempt_root,
+        {"realsense_d435:1": folder},
+        {
+            "attempt_id": "d" * 32,
+            "intrinsics_policy": "reuse_compatible_or_factory",
+            "target": {},
+        },
+    )
+
+    assert profiles[0]["profile_id"] == factory["profile_id"]
+    selected = by_sensor["realsense_d435:1"]
+    assert selected["attempt_intrinsics_source"] == (
+        "factory_capture_sidecars_existing_projection_unusable"
+    )
+    comparison = json.loads((attempt_root / INTRINSIC_COMPARISON).read_text())
+    sensor = comparison["sensors"][0]
+    assert sensor["status"] == "factory_selected"
+    assert sensor["existing_projection"] == {
+        "profile_id": "stored-inverse-projection",
+        "opencv_projection_compatible": False,
+        "distortion_model": "inverse_brown_conrady",
+        "reason": "distortion_model_is_not_forward_opencv_compatible",
+    }
+    assert sensor["factory_projection"]["opencv_projection_compatible"] is True
+    assert sensor["unusable_projection"] is None
+    assert {item["profile_id"] for item in sensor["candidates"]} == {
+        factory["profile_id"],
+        "stored-inverse-projection",
+    }
+
+
+def test_reuse_intrinsics_preserves_evidence_and_fails_when_all_unusable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    attempt_root = run_root / "processed" / "calibration" / ("e" * 32)
+    attempt_root.mkdir(parents=True)
+    folder = attempt_root / "processed" / "synchronized" / "realsense_1"
+    factory = _intrinsic_sensor_fixture(folder)
+    existing = _unsupported_intrinsic_profile(
+        factory,
+        profile_id="stored-inverse-projection",
+    )
+    captured = _unsupported_intrinsic_profile(
+        factory,
+        profile_id="captured-inverse-projection",
+    )
+    write_intrinsic_profile_collection(
+        [existing],
+        run_root / INTRINSIC_CALIBRATION_PROFILES,
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "factory_intrinsic_profile",
+        lambda *_args: captured,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="No OpenCV-compatible intrinsic projection.*realsense_d435:1",
+    ):
+        attempt_module._intrinsics_for_sensors(
+            run_root,
+            attempt_root,
+            {"realsense_d435:1": folder},
+            {
+                "attempt_id": "e" * 32,
+                "intrinsics_policy": "reuse_compatible_or_factory",
+                "target": {},
+            },
+        )
+
+    comparison = json.loads((attempt_root / INTRINSIC_COMPARISON).read_text())
+    sensor = comparison["sensors"][0]
+    assert sensor["status"] == "unusable"
+    assert sensor["selected_profile_id"] is None
+    assert sensor["unusable_projection"] == {
+        "reason": "no_opencv_compatible_intrinsic_projection",
+        "factory": {
+            "profile_id": "captured-inverse-projection",
+            "opencv_projection_compatible": False,
+            "distortion_model": "inverse_brown_conrady",
+            "reason": "distortion_model_is_not_forward_opencv_compatible",
+        },
+        "existing": {
+            "profile_id": "stored-inverse-projection",
+            "opencv_projection_compatible": False,
+            "distortion_model": "inverse_brown_conrady",
+            "reason": "distortion_model_is_not_forward_opencv_compatible",
+        },
+        "selected": None,
+    }
+
+
+@pytest.mark.parametrize("factory_compatible", [False, True])
+def test_attempt_intrinsic_comparison_keeps_compatible_factory_as_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    factory_compatible: bool,
+) -> None:
+    run_root = tmp_path / "run"
+    attempt_root = run_root / "processed" / "calibration" / ("b" * 32)
+    attempt_root.mkdir(parents=True)
+    folder = attempt_root / "processed" / "synchronized" / "realsense_1"
+    factory = _intrinsic_sensor_fixture(folder)
+    manual = {
+        **factory,
+        "profile_id": "1_640x480_normal_aruco",
+        "native": {
+            **factory["native"],
+            "cam_K": [
+                602.0,
+                0.0,
+                319.0,
+                0.0,
+                604.0,
+                241.5,
+                0.0,
+                0.0,
+                1.0,
+            ],
+            "distortion": [0.02, -0.01, 0.002, -0.001, 0.004],
+        },
+        "source": {"mode": "calibrate", "algorithm": "cv2.calibrateCameraExtended"},
+        "quality": {
+            "status": "accepted",
+            "accepted_view_count": 18,
+            "coverage_cells": [0, 1, 2, 3, 4, 5],
+            "rms_reprojection_error_px": 0.8,
+            "rejected_views": [],
+        },
+    }
+    unusable_factory = {
+        **factory,
+        "native": {
+            **factory["native"],
+            "distortion_model": "inverse_brown_conrady",
+        },
+        "rectified": None,
+        "source": {
+            **factory["source"],
+            "opencv_projection_compatible": False,
+            "rectification_available": False,
+            "rectification_unavailable_reason": (
+                "sdk_distortion_model_is_not_forward_opencv_compatible"
+            ),
+        },
+    }
+    monkeypatch.setattr(
+        attempt_module,
+        "factory_intrinsic_profile",
+        lambda *_args: factory if factory_compatible else unusable_factory,
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "detect_sensor_folder",
+        lambda *_args, **_kwargs: {"frames": {}},
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "calibrate_intrinsic_profile",
+        lambda *_args, **_kwargs: manual,
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "_intrinsic_detection_split",
+        lambda *_args: (
+            {"frames": {}},
+            {"frames": {}},
+            {
+                "training_usable_view_count": 15,
+                "heldout_usable_view_count": 5,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "_intrinsic_holdout_evaluation",
+        lambda profile, *_args: {
+            "status": "accepted",
+            "comparable": True,
+            "rms_reprojection_error_px": (
+                0.8 if profile["profile_id"] == manual["profile_id"] else 1.0
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "_manual_intrinsic_plausibility",
+        lambda *_args: {"status": "accepted"},
+    )
+
+    profiles, by_sensor = attempt_module._intrinsics_for_sensors(
+        run_root,
+        attempt_root,
+        {"realsense_d435:1": folder},
+        {
+            "attempt_id": "b" * 32,
+            "intrinsics_policy": "compare_factory_opencv",
+            "target": {},
+        },
+    )
+
+    expected = factory if factory_compatible else manual
+    assert profiles[0]["profile_id"] == expected["profile_id"]
+    assert by_sensor["realsense_d435:1"]["attempt_intrinsics_source"] == (
+        "factory_compatible_default_comparison_only"
+        if factory_compatible
+        else "opencv_manual_factory_projection_unavailable"
+    )
+    comparison = json.loads((attempt_root / INTRINSIC_COMPARISON).read_text())
+    sensor = comparison["sensors"][0]
+    assert sensor["status"] == (
+        "factory_selected" if factory_compatible else "manual_selected"
+    )
+    assert sensor["factory_profile_id"] == factory["profile_id"]
+    assert sensor["manual_profile_id"] == manual["profile_id"]
+    assert len(sensor["candidates"]) == 2
+    assert sensor["deltas"]["focal_length_delta_px"] == [2.0, 3.0]
+
+
+def test_attempt_intrinsic_comparison_preserves_manual_failure_and_factory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    attempt_root = run_root / "processed" / "calibration" / ("c" * 32)
+    attempt_root.mkdir(parents=True)
+    folder = attempt_root / "processed" / "synchronized" / "realsense_1"
+    factory = _intrinsic_sensor_fixture(folder)
+    monkeypatch.setattr(
+        attempt_module,
+        "detect_sensor_folder",
+        lambda *_args, **_kwargs: {"frames": {}},
+    )
+
+    def reject_manual(*_args, **_kwargs):
+        report = {
+            "status": "rejected",
+            "reason": "coverage 2/9 is below 6/9",
+            "accepted_views": ["000001.png"],
+        }
+        raise IntrinsicCalibrationError(report["reason"], report)
+
+    monkeypatch.setattr(
+        attempt_module,
+        "calibrate_intrinsic_profile",
+        reject_manual,
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "_intrinsic_detection_split",
+        lambda *_args: (
+            {"frames": {}},
+            {"frames": {}},
+            {
+                "training_usable_view_count": 15,
+                "heldout_usable_view_count": 5,
+            },
+        ),
+    )
+
+    profiles, _by_sensor = attempt_module._intrinsics_for_sensors(
+        run_root,
+        attempt_root,
+        {"realsense_d435:1": folder},
+        {
+            "attempt_id": "c" * 32,
+            "intrinsics_policy": "compare_factory_opencv",
+            "target": {},
+        },
+    )
+
+    assert profiles[0]["profile_id"] == factory["profile_id"]
+    comparison = json.loads((attempt_root / INTRINSIC_COMPARISON).read_text())
+    sensor = comparison["sensors"][0]
+    assert sensor["status"] == "factory_selected"
+    assert sensor["manual_profile_id"] is None
+    assert sensor["manual_failure"]["quality"]["reason"] == (
+        "coverage 2/9 is below 6/9"
+    )
+    assert sensor["candidates"][0]["profile_id"] == factory["profile_id"]
+
+
+def test_manual_intrinsic_plausibility_rejects_absurd_parameters(
+    tmp_path: Path,
+) -> None:
+    factory = _intrinsic_sensor_fixture(tmp_path / "realsense_1")
+    manual = {
+        **factory,
+        "native": {
+            **factory["native"],
+            "cam_K": [
+                50.0,
+                0.0,
+                -100.0,
+                0.0,
+                3000.0,
+                900.0,
+                0.0,
+                0.0,
+                1.0,
+            ],
+            "distortion": [2.0, -4.0, 0.2, -0.2, 8.0],
+        },
+    }
+
+    result = attempt_module._manual_intrinsic_plausibility(factory, manual)
+
+    assert result["status"] == "rejected"
+    assert result["checks"]["principal_point_inside_image"] is False
+    assert result["checks"]["distortion_magnitude"] is False
+
+
+def _fixture_observations(
+    mode: str,
+    *,
+    count: int = 10,
+) -> tuple[list[dict], np.ndarray, np.ndarray]:
     camera_to_flange = pt.transform_from(
         pr.matrix_from_compact_axis_angle(np.array([0.08, -0.04, 0.03])),
         np.array([35.0, -20.0, 80.0]),
@@ -48,7 +828,7 @@ def _fixture_observations(mode: str) -> tuple[list[dict], np.ndarray, np.ndarray
             "B": 0.12 - 0.04 * (index % 5),
             "C": -0.25 + 0.07 * index,
         }
-        for index in range(10)
+        for index in range(count)
     ]
     observations = []
     for index, robot_pose in enumerate(poses):
@@ -62,9 +842,7 @@ def _fixture_observations(mode: str) -> tuple[list[dict], np.ndarray, np.ndarray
             expected_primary, expected_companion = camera_to_flange, target_to_base
         else:
             target_to_camera = (
-                pt.invert_transform(camera_to_base)
-                @ flange_to_base
-                @ target_to_flange
+                pt.invert_transform(camera_to_base) @ flange_to_base @ target_to_flange
             )
             expected_primary, expected_companion = camera_to_base, target_to_flange
         observations.append(
@@ -78,6 +856,7 @@ def _fixture_observations(mode: str) -> tuple[list[dict], np.ndarray, np.ndarray
                     to_frame="camera",
                 ),
                 "mean_reprojection_error_px": 0.1,
+                "image_coverage_cell": index % 9,
             }
         )
     return observations, expected_primary, expected_companion
@@ -148,6 +927,37 @@ def test_robust_closure_rejects_one_outlier_and_recovers_transform(mode: str) ->
     )
 
 
+def test_motion_balanced_fit_still_validates_every_accepted_frame() -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand", count=40)
+    for index, observation in enumerate(observations):
+        observation["motion"] = f"motion_{index // 10}"
+    # Five evenly spaced solver samples per ten-frame motion are indices
+    # 0, 2, 4, 7 and 9. Corrupt only discarded frames in one motion.
+    for index in (1, 3, 5, 6, 8):
+        corrupted = transform_from_record(observations[index]["target_to_camera"])
+        corrupted[:3, 3] += np.asarray([30.0, 0.0, 0.0])
+        observations[index]["target_to_camera"] = transform_record(
+            corrupted,
+            from_frame="aruco_grid",
+            to_frame="camera",
+        )
+
+    candidate = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+    )
+
+    assert candidate["status"] == "failed"
+    assert candidate["observation_count"] == 40
+    assert candidate["solver_observation_count"] == 20
+    assert candidate["full_input_validation"][
+        "max_repeated_motion_outlier_ratio"
+    ] == pytest.approx(0.5)
+
+
 @pytest.mark.parametrize("mode", ["eye_in_hand", "eye_to_hand"])
 def test_target_camera_frame_inversion_is_not_silently_accepted(mode: str) -> None:
     observations, expected, _companion = _fixture_observations(mode)
@@ -197,6 +1007,205 @@ def test_degenerate_motion_is_reported_as_candidate_failure() -> None:
     assert "degenerate robot motion" in candidate["error"]
 
 
+def test_single_axis_robot_rotation_is_not_observable() -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    for index, observation in enumerate(observations):
+        observation["robot_ee_pose"] = {
+            "X": float(index * 25),
+            "Y": float((index % 3) * 20),
+            "Z": 500.0,
+            "A": 0.0,
+            "B": 0.0,
+            "C": float(index) * 0.08,
+        }
+
+    candidate = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+    )
+
+    assert candidate["status"] == "error"
+    assert "rotation-axis second/first singular ratio" in candidate["error"]
+
+
+def test_attempt_quality_gates_require_fifteen_views_and_six_coverage_cells() -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+
+    too_few = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+        min_accepted_views=15,
+        min_coverage_cells=6,
+    )
+
+    assert too_few["status"] == "error"
+    assert "accepted view count 10 is below required 15" in too_few["error"]
+
+    many, _expected, _companion = _fixture_observations("eye_in_hand", count=18)
+    for observation in many:
+        observation["image_coverage_cell"] = 4
+    poor_coverage = evaluate_extrinsic_candidate(
+        many,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+        min_accepted_views=15,
+        min_coverage_cells=6,
+    )
+
+    assert poor_coverage["status"] == "error"
+    assert "image-centroid coverage 1/9 is below required 6/9" in poor_coverage["error"]
+
+
+def test_attempt_quality_gate_requires_distinct_motion_labels() -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand", count=18)
+    for observation in observations:
+        observation["motion"] = "circ_1"
+
+    candidate = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+        min_accepted_views=15,
+        min_coverage_cells=6,
+        min_motion_poses=4,
+        min_translation_span_mm=20.0,
+        min_rotation_span_deg=5.0,
+    )
+
+    assert candidate["status"] == "error"
+    assert "requires at least 4 distinct motion poses; found 1" in candidate["error"]
+
+
+def _coplanar_pnp_ransac_regression_fixture() -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    object_points = np.asarray(
+        [
+            [column * 55.275 + x, row * 55.0 + y, 0.0]
+            for row in range(5)
+            for column in range(7)
+            for x, y in (
+                (0.0, 0.0),
+                (45.225, 0.0),
+                (45.225, 45.0),
+                (0.0, 45.0),
+            )
+        ],
+        dtype=np.float64,
+    )
+    camera = np.asarray(
+        [
+            [903.128737, 0.0, 632.458263],
+            [0.0, 914.254590, 385.141689],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    distortion = np.asarray(
+        [0.124566, -0.378566, 0.002004, -0.000095, 0.288739],
+        dtype=np.float64,
+    )
+    projected = cv2.projectPoints(
+        object_points,
+        np.asarray([-0.812730, 0.342254, 0.149498]),
+        np.asarray([122.142598, -10.936042, 797.931882]),
+        camera,
+        distortion,
+    )[0].reshape(-1, 2)
+    image_points = projected + np.random.default_rng(0).normal(
+        0.0,
+        0.65,
+        projected.shape,
+    )
+    return object_points, image_points, camera, distortion
+
+
+def test_planar_pnp_avoids_sparse_minimal_pnp_consensus() -> None:
+    object_points, image_points, camera, distortion = (
+        _coplanar_pnp_ransac_regression_fixture()
+    )
+    direct_success, direct_rvec, direct_tvec = cv2.solvePnP(
+        object_points,
+        image_points,
+        camera,
+        distortion,
+        flags=cv2.SOLVEPNP_ITERATIVE,
+    )
+    direct_projection = cv2.projectPoints(
+        object_points,
+        direct_rvec,
+        direct_tvec,
+        camera,
+        distortion,
+    )[0].reshape(-1, 2)
+    legacy_success, _rvec, _tvec, legacy_inliers = cv2.solvePnPRansac(
+        object_points,
+        image_points,
+        camera,
+        distortion,
+        iterationsCount=200,
+        reprojectionError=4.0,
+        confidence=0.999,
+        flags=cv2.SOLVEPNP_ITERATIVE,
+    )
+
+    assert direct_success is True
+    assert np.mean(np.linalg.norm(direct_projection - image_points, axis=1)) < 1.0
+    assert legacy_success is True
+    assert legacy_inliers is not None
+    assert len(legacy_inliers) < len(object_points) / 2
+
+    result = solve_planar_pnp_candidates(
+        object_points,
+        image_points,
+        camera,
+        distortion,
+        methods=["ITERATIVE"],
+    )
+
+    assert result["common_inlier_count"] == len(object_points)
+    assert set(result["selected"]) == {"ITERATIVE"}
+    assert result["selected"]["ITERATIVE"]["all_point_mean_reprojection_error_px"] < 1.0
+
+
+def test_planar_pnp_homography_consensus_rejects_gross_outliers() -> None:
+    object_points, image_points, camera, distortion = (
+        _coplanar_pnp_ransac_regression_fixture()
+    )
+    outlier_indices = np.arange(0, len(object_points), 7)
+    image_points[outlier_indices] += np.asarray([80.0, -60.0])
+
+    result = solve_planar_pnp_candidates(
+        object_points,
+        image_points,
+        camera,
+        distortion,
+        methods=["ITERATIVE"],
+    )
+
+    expected_inliers = sorted(set(range(len(object_points))) - set(outlier_indices))
+    assert result["common_inlier_indices"] == expected_inliers
+    assert result["common_inlier_count"] == len(expected_inliers)
+    assert result["selected"] == {}
+    assert any(
+        item.get("reason") == "whole_board_reprojection_error"
+        for item in result["failures"]
+    )
+
+
 def test_planar_pnp_uses_shared_inliers_refines_and_retains_ippe_ambiguity() -> None:
     object_points = np.asarray(
         [[x, y, 0.0] for y in (0.0, 40.0, 80.0) for x in (0.0, 40.0, 80.0, 120.0)],
@@ -231,6 +1240,61 @@ def test_planar_pnp_uses_shared_inliers_refines_and_retains_ippe_ambiguity() -> 
     )
 
 
+def test_planar_pnp_requires_marker_support_across_both_grid_axes() -> None:
+    object_points = np.asarray(
+        [
+            [column * 60.0 + x, row * 60.0 + y, 0.0]
+            for row, column in ((0, 0), (0, 1), (1, 0), (1, 1))
+            for x, y in ((0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0))
+        ],
+        dtype=float,
+    )
+    marker_ids = np.repeat(np.arange(4), 4)
+    grid_indices = np.repeat(
+        np.asarray(((0, 0), (0, 1), (1, 0), (1, 1))),
+        4,
+        axis=0,
+    )
+    camera = np.asarray(
+        [[700.0, 0.0, 320.0], [0.0, 705.0, 240.0], [0.0, 0.0, 1.0]],
+        dtype=float,
+    )
+    image_points = cv2.projectPoints(
+        object_points,
+        np.asarray([0.1, -0.05, 0.03]),
+        np.asarray([10.0, -20.0, 700.0]),
+        camera,
+        np.zeros(5),
+    )[0].reshape(-1, 2)
+
+    accepted = solve_planar_pnp_candidates(
+        object_points,
+        image_points,
+        camera,
+        np.zeros(5),
+        methods=["ITERATIVE"],
+        point_marker_ids=marker_ids,
+        point_grid_indices=grid_indices,
+    )
+    one_row = solve_planar_pnp_candidates(
+        object_points,
+        image_points,
+        camera,
+        np.zeros(5),
+        methods=["ITERATIVE"],
+        point_marker_ids=marker_ids,
+        point_grid_indices=np.column_stack(
+            (np.zeros(len(grid_indices), dtype=int), grid_indices[:, 1])
+        ),
+    )
+
+    assert set(accepted["selected"]) == {"ITERATIVE"}
+    assert accepted["supported_marker_count"] == 4
+    assert accepted["supported_grid_rows"] == [0, 1]
+    assert one_row["selected"] == {}
+    assert one_row["failures"][0]["reason"] == ("insufficient_spatial_pnp_support")
+
+
 def test_planar_pnp_rejects_non_cheiral_hypotheses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -240,9 +1304,7 @@ def test_planar_pnp_rejects_non_cheiral_hypotheses(
     image_points = np.asarray(
         [[100.0, 100.0], [140.0, 100.0], [140.0, 140.0], [100.0, 140.0]]
     )
-    camera = np.asarray(
-        [[600.0, 0.0, 320.0], [0.0, 600.0, 240.0], [0.0, 0.0, 1.0]]
-    )
+    camera = np.asarray([[600.0, 0.0, 320.0], [0.0, 600.0, 240.0], [0.0, 0.0, 1.0]])
     monkeypatch.setattr(
         "posetestbot.calibration.attempt_solver._common_pnp_inliers",
         lambda *_args: np.arange(4),
@@ -271,11 +1333,83 @@ def test_planar_pnp_rejects_non_cheiral_hypotheses(
         camera,
         np.zeros(5),
         methods=["IPPE"],
+        min_common_inliers=4,
     )
 
     assert result["selected"] == {}
+    assert any(item.get("reason") == "non_cheiral_pose" for item in result["failures"])
+
+
+def test_planar_pnp_rejects_tiny_support_seen_with_wrong_target_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_points = np.asarray(
+        [[float(index % 14), float(index // 14), 0.0] for index in range(140)]
+    )
+    image_points = object_points[:, :2] * 10.0 + 100.0
+    monkeypatch.setattr(
+        "posetestbot.calibration.attempt_solver._common_pnp_inliers",
+        lambda *_args: np.arange(8),
+    )
+
+    result = solve_planar_pnp_candidates(
+        object_points,
+        image_points,
+        np.asarray([[600.0, 0.0, 320.0], [0.0, 600.0, 240.0], [0.0, 0.0, 1.0]]),
+        np.zeros(5),
+        methods=["ITERATIVE"],
+    )
+
+    assert result["selected"] == {}
+    assert result["correspondence_count"] == 140
+    assert result["common_inlier_count"] == 8
+    assert result["common_inlier_ratio"] == pytest.approx(8 / 140)
+    assert result["failures"][0]["reason"] == "insufficient_common_pnp_support"
+
+
+def test_planar_pnp_rejects_high_whole_board_error_even_with_good_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_points = np.asarray(
+        [
+            [x, y, 0.0]
+            for y in (0.0, 40.0, 80.0, 120.0)
+            for x in (0.0, 40.0, 80.0, 120.0)
+        ],
+        dtype=float,
+    )
+    camera = np.asarray(
+        [[700.0, 0.0, 320.0], [0.0, 705.0, 240.0], [0.0, 0.0, 1.0]],
+        dtype=float,
+    )
+    image_points = cv2.projectPoints(
+        object_points,
+        np.asarray([0.1, -0.05, 0.03]),
+        np.asarray([10.0, -20.0, 600.0]),
+        camera,
+        np.zeros(5),
+    )[0].reshape(-1, 2)
+    image_points[-4:] += np.asarray([80.0, -60.0])
+    monkeypatch.setattr(
+        "posetestbot.calibration.attempt_solver._common_pnp_inliers",
+        lambda *_args: np.arange(12),
+    )
+
+    result = solve_planar_pnp_candidates(
+        object_points,
+        image_points,
+        camera,
+        np.zeros(5),
+        methods=["ITERATIVE"],
+    )
+
+    assert result["common_inlier_ratio"] == pytest.approx(0.75)
+    assert result["selected"] == {}
+    assert result["candidates"][0]["quality_status"] == "rejected"
+    assert result["candidates"][0]["all_point_mean_reprojection_error_px"] > 3.0
     assert any(
-        item.get("reason") == "non_cheiral_pose" for item in result["failures"]
+        item.get("reason") == "whole_board_reprojection_error"
+        for item in result["failures"]
     )
 
 
@@ -288,10 +1422,30 @@ def test_candidate_ranking_has_stable_method_tie_breaks() -> None:
         "sensor_key": "realsense_d435:1",
     }
     values = [
-        {**common, "candidate_id": "sq", "pnp_method": "SQPNP", "extrinsic_method": "tsai"},
-        {**common, "candidate_id": "it", "pnp_method": "ITERATIVE", "extrinsic_method": "tsai"},
-        {**common, "candidate_id": "ip", "pnp_method": "IPPE", "extrinsic_method": "park"},
-        {**common, "candidate_id": "ip-tsai", "pnp_method": "IPPE", "extrinsic_method": "tsai"},
+        {
+            **common,
+            "candidate_id": "sq",
+            "pnp_method": "SQPNP",
+            "extrinsic_method": "tsai",
+        },
+        {
+            **common,
+            "candidate_id": "it",
+            "pnp_method": "ITERATIVE",
+            "extrinsic_method": "tsai",
+        },
+        {
+            **common,
+            "candidate_id": "ip",
+            "pnp_method": "IPPE",
+            "extrinsic_method": "park",
+        },
+        {
+            **common,
+            "candidate_id": "ip-tsai",
+            "pnp_method": "IPPE",
+            "extrinsic_method": "tsai",
+        },
     ]
 
     ranked = rank_candidates(values)
@@ -304,7 +1458,7 @@ def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    observations, _expected, _companion = _fixture_observations("eye_in_hand", count=18)
     run_root = tmp_path / "run"
     attempt_id = "a" * 32
     attempt_root = run_root / "processed" / "calibration" / attempt_id
@@ -349,6 +1503,7 @@ def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
             "width": 640,
             "height": 480,
             "distortion": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "distortion_model": "inverse_brown_conrady",
         },
         "depth": {"scale_to_mm": 1.0},
     }
@@ -387,11 +1542,493 @@ def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
         "candidate_profiles.json",
     ):
         assert (attempt_root / filename).is_file()
+    candidate_profiles = json.loads(
+        (attempt_root / "candidate_profiles.json").read_text()
+    )
+    candidate_profile = candidate_profiles["profiles"][0]
+    assert candidate_profile["sync_delta_ms"] == 0.0
+    assert candidate_profile["intrinsics"]["native"]["distortion_model"] == (
+        "inverse_brown_conrady"
+    )
+    assert candidate_profile["intrinsics"]["rectified"] is not None
+    assert candidate_profile["intrinsics"]["rectified"]["distortion"] == [0.0] * 5
+    assert candidate_profile["metadata"]["synchronization"] == {
+        "sync_delta_ms": 0.0,
+        "timestamp_source": "sensor",
+        "frame_timestamp_source": "sensor",
+        "robot_timestamp_source": "host_wall",
+        "required_frame_timestamp_domain": "global_time",
+        "timestamp_fallback_allowed": False,
+        "max_nearest_pose_delta_ms": 20.0,
+        "historical_per_sensor_offsets_allowed": False,
+        "sensor_key": sensor_key,
+        "quality_report": (
+            f"processed/calibration/{attempt_id}/sync_quality_report.json"
+        ),
+    }
     with pytest.raises(ValueError, match="immutable"):
         attempt_module.run_calibration_attempt(run_root, attempt_id)
 
 
-def test_multi_camera_ranking_keeps_passing_camera_when_peer_fails(tmp_path) -> None:
+def _multi_camera_candidate_variant(
+    base: dict,
+    *,
+    sensor_key: str,
+    pnp_method: str,
+    extrinsic_method: str,
+    score: float,
+    companion_translation_offset_mm: float,
+) -> dict:
+    candidate = json.loads(json.dumps(base))
+    candidate.update(
+        {
+            "candidate_id": f"{sensor_key}|{pnp_method}|{extrinsic_method}",
+            "sensor_key": sensor_key,
+            "pnp_method": pnp_method,
+            "extrinsic_method": extrinsic_method,
+            "algorithms": [pnp_method, extrinsic_method],
+            "score": score,
+        }
+    )
+    companion = transform_from_record(candidate["companion_transform"])
+    companion[0, 3] += companion_translation_offset_mm
+    candidate["companion_transform"] = transform_record(
+        companion,
+        from_frame="aruco_grid",
+        to_frame="template_base",
+    )
+    return candidate
+
+
+def _multi_camera_request() -> dict:
+    return {
+        "attempt_id": "a" * 32,
+        "mode": "eye_in_hand",
+        "sensor_keys": ["realsense_d435:1", "oak_d_pro:2"],
+        "sensors": [
+            {
+                "sensor_key": "realsense_d435:1",
+                "sensor_name": "realsense_1",
+                "sensor_type": "realsense_d435",
+                "device_id": "1",
+                "display_name": "D435",
+            },
+            {
+                "sensor_key": "oak_d_pro:2",
+                "sensor_name": "luxonis_2",
+                "sensor_type": "oak_d_pro",
+                "device_id": "2",
+                "display_name": "OAK",
+            },
+        ],
+        "target_id": "target-1",
+        "target_mounting": {
+            "from": "aruco_grid",
+            "to": "template_base",
+            "state": "estimated",
+        },
+        "solver_policy": "auto_compare",
+        "pnp_methods": ["IPPE", "ITERATIVE"],
+        "extrinsic_methods": ["park"],
+        "intrinsics_policy": "reuse_compatible_or_factory",
+    }
+
+
+def _multi_camera_intrinsics() -> dict[str, dict]:
+    intrinsic = {
+        "profile_id": "factory",
+        "sensor_id": "1",
+        "native": {
+            "cam_K": [600.0, 0.0, 320.0, 0.0, 600.0, 240.0, 0.0, 0.0, 1.0],
+            "width": 640,
+            "height": 480,
+            "distortion": [0.0, 0.0, 0.0, 0.0, 0.0],
+        },
+        "depth": {"scale_to_mm": 1.0},
+    }
+    return {
+        "realsense_d435:1": intrinsic,
+        "oak_d_pro:2": {**intrinsic, "sensor_id": "2"},
+    }
+
+
+def test_multi_camera_ranking_selects_best_common_bundle_and_records_evidence(
+    tmp_path: Path,
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    base = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+    )
+    candidates = [
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key="realsense_d435:1",
+            pnp_method="IPPE",
+            extrinsic_method="park",
+            score=0.05,
+            companion_translation_offset_mm=0.0,
+        ),
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key="realsense_d435:1",
+            pnp_method="ITERATIVE",
+            extrinsic_method="park",
+            score=0.20,
+            companion_translation_offset_mm=0.0,
+        ),
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key="oak_d_pro:2",
+            pnp_method="IPPE",
+            extrinsic_method="park",
+            score=0.60,
+            companion_translation_offset_mm=2.0,
+        ),
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key="oak_d_pro:2",
+            pnp_method="ITERATIVE",
+            extrinsic_method="park",
+            score=0.21,
+            companion_translation_offset_mm=6.0,
+        ),
+    ]
+    request_value = _multi_camera_request()
+
+    ranking = attempt_module._validate_and_rank(
+        tmp_path,
+        request_value,
+        candidates,
+        _multi_camera_intrinsics(),
+    )
+
+    assert ranking["status"] == "complete"
+    assert ranking["recommended_camera_count"] == 2
+    assert {
+        result["sensor_key"]: result["recommendation"]["pnp_method"]
+        for result in ranking["results"]
+    } == {
+        "realsense_d435:1": "ITERATIVE",
+        "oak_d_pro:2": "ITERATIVE",
+    }
+    consistency = ranking["multi_camera_consistency"]
+    assert consistency["status"] == "passing"
+    assert consistency["recommended_bundle_id"] == "ITERATIVE|park"
+    assert consistency["passing_bundle_count"] == 2
+    assert [bundle["bundle_id"] for bundle in consistency["bundles"]] == [
+        "ITERATIVE|park",
+        "IPPE|park",
+    ]
+    recommended = consistency["recommendation"]
+    assert recommended["mean_score"] == pytest.approx(0.205)
+    assert recommended["aggregate_score"] == pytest.approx(0.41)
+    assert recommended["max_pairwise_companion_translation_mm"] == pytest.approx(6.0)
+    assert recommended["max_pairwise_companion_rotation_deg"] == pytest.approx(0.0)
+    assert recommended["individual_score_equivalent_to_best"] is True
+    assert consistency["bundles"][1]["individual_score_equivalent_to_best"] is False
+    assert recommended["pairwise_companion_residuals"] == [
+        {
+            "left_sensor_key": "realsense_d435:1",
+            "right_sensor_key": "oak_d_pro:2",
+            "left_candidate_id": "realsense_d435:1|ITERATIVE|park",
+            "right_candidate_id": "oak_d_pro:2|ITERATIVE|park",
+            "translation_mm": pytest.approx(6.0),
+            "rotation_deg": pytest.approx(0.0),
+            "status": "ok",
+        }
+    ]
+    checks = json.loads((tmp_path / "checks.json").read_text())["checks"]
+    joint_checks = [
+        check for check in checks if check.get("scope") == "multi_camera_bundle"
+    ]
+    assert len(joint_checks) == 12
+    assert {check["bundle_id"] for check in joint_checks} == {
+        "IPPE|park",
+        "ITERATIVE|park",
+    }
+
+    attempt = {"request": request_value, "results": ranking}
+    expected = {
+        "realsense_d435:1": "realsense_d435:1|ITERATIVE|park",
+        "oak_d_pro:2": "oak_d_pro:2|ITERATIVE|park",
+    }
+    assert attempt_module._promotion_selections(attempt, None) == expected
+    assert attempt_module._promotion_selections(
+        attempt,
+        {
+            "realsense_d435:1": "realsense_d435:1|IPPE|park",
+            "oak_d_pro:2": "oak_d_pro:2|IPPE|park",
+        },
+    ) == {
+        "realsense_d435:1": "realsense_d435:1|IPPE|park",
+        "oak_d_pro:2": "oak_d_pro:2|IPPE|park",
+    }
+    with pytest.raises(ValueError, match="common algorithm bundle"):
+        attempt_module._promotion_selections(
+            attempt,
+            {
+                "realsense_d435:1": "realsense_d435:1|IPPE|park",
+                "oak_d_pro:2": "oak_d_pro:2|ITERATIVE|park",
+            },
+        )
+    with pytest.raises(ValueError, match="every jointly ranked sensor"):
+        attempt_module._promotion_selections(
+            attempt,
+            {"realsense_d435:1": "realsense_d435:1|ITERATIVE|park"},
+        )
+
+
+def test_multi_camera_ranking_prefers_closure_within_individual_quality_band(
+    tmp_path: Path,
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    base = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="IPPE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+    )
+    bundle_specs = (
+        ("shah", 0.666645, 5.689),
+        ("horaud", 0.672523, 3.612),
+        ("park", 0.672527, 3.617),
+        ("li", 0.80, 1.0),
+    )
+    candidates = [
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key=sensor_key,
+            pnp_method="IPPE",
+            extrinsic_method=extrinsic_method,
+            score=score,
+            companion_translation_offset_mm=(
+                0.0 if sensor_key == "realsense_d435:1" else closure_mm
+            ),
+        )
+        for extrinsic_method, score, closure_mm in bundle_specs
+        for sensor_key in ("realsense_d435:1", "oak_d_pro:2")
+    ]
+    request_value = _multi_camera_request()
+    request_value["pnp_methods"] = ["IPPE"]
+    request_value["extrinsic_methods"] = [
+        "shah",
+        "horaud",
+        "park",
+        "li",
+    ]
+
+    ranking = attempt_module._validate_and_rank(
+        tmp_path,
+        request_value,
+        candidates,
+        _multi_camera_intrinsics(),
+    )
+
+    consistency = ranking["multi_camera_consistency"]
+    assert consistency["recommended_bundle_id"] == "IPPE|horaud"
+    assert [bundle["bundle_id"] for bundle in consistency["bundles"]] == [
+        "IPPE|horaud",
+        "IPPE|park",
+        "IPPE|shah",
+        "IPPE|li",
+    ]
+    assert consistency["ranking_policy"] == {
+        "individual_quality_metric": "mean_score",
+        "best_individual_score": pytest.approx(0.666645),
+        "individual_score_equivalence_tolerance": 0.01,
+        "equivalent_quality_ordering_metric": ("normalized_companion_closure_score"),
+        "normalized_companion_closure_score_definition": (
+            "max_pairwise_translation_mm/max_translation_mm + "
+            "max_pairwise_rotation_deg/max_rotation_deg"
+        ),
+        "numeric_round_decimals": 6,
+        "closure_score_equivalence_tolerance": 1e-6,
+        "closure_equivalent_ordering": "canonical_algorithm_order",
+        "outside_equivalence_band_ordering_metric": "mean_score",
+    }
+    bundles = {bundle["bundle_id"]: bundle for bundle in consistency["bundles"]}
+    assert bundles["IPPE|shah"]["individual_score_delta_from_best"] == pytest.approx(
+        0.0
+    )
+    assert bundles["IPPE|horaud"]["individual_score_equivalent_to_best"] is True
+    assert bundles["IPPE|horaud"][
+        "normalized_companion_closure_score"
+    ] == pytest.approx(0.3612)
+    assert bundles["IPPE|li"]["individual_score_equivalent_to_best"] is False
+    assert bundles["IPPE|li"]["normalized_companion_closure_score"] == pytest.approx(
+        0.1
+    )
+    assert {
+        result["sensor_key"]: result["recommended_candidate_id"]
+        for result in ranking["results"]
+    } == {
+        "realsense_d435:1": "realsense_d435:1|IPPE|horaud",
+        "oak_d_pro:2": "oak_d_pro:2|IPPE|horaud",
+    }
+
+
+def test_multi_camera_ranking_ignores_sub_micrometre_pnp_closure_dust(
+    tmp_path: Path,
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    base = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="IPPE",
+        extrinsic_method="horaud",
+        sensor_key="realsense_d435:1",
+    )
+    candidates = [
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key=sensor_key,
+            pnp_method=pnp_method,
+            extrinsic_method="horaud",
+            score=0.6725234,
+            companion_translation_offset_mm=(
+                0.0 if sensor_key == "realsense_d435:1" else closure_mm
+            ),
+        )
+        for pnp_method, closure_mm in (
+            ("IPPE", 3.6120012),
+            ("ITERATIVE", 3.6120000),
+        )
+        for sensor_key in ("realsense_d435:1", "oak_d_pro:2")
+    ]
+    request_value = _multi_camera_request()
+    request_value["extrinsic_methods"] = ["horaud"]
+
+    ranking = attempt_module._validate_and_rank(
+        tmp_path,
+        request_value,
+        candidates,
+        _multi_camera_intrinsics(),
+    )
+
+    consistency = ranking["multi_camera_consistency"]
+    bundles = {bundle["bundle_id"]: bundle for bundle in consistency["bundles"]}
+    assert (
+        bundles["ITERATIVE|horaud"]["max_pairwise_companion_translation_mm"]
+        < bundles["IPPE|horaud"]["max_pairwise_companion_translation_mm"]
+    )
+    assert (
+        bundles["IPPE|horaud"]["max_pairwise_companion_translation_mm"]
+        - bundles["ITERATIVE|horaud"]["max_pairwise_companion_translation_mm"]
+    ) == pytest.approx(1.2e-6)
+    assert round(
+        bundles["IPPE|horaud"]["normalized_companion_closure_score"], 6
+    ) == round(bundles["ITERATIVE|horaud"]["normalized_companion_closure_score"], 6)
+    assert bundles["IPPE|horaud"]["closure_score_equivalent_to_best"] is True
+    assert bundles["ITERATIVE|horaud"]["closure_score_equivalent_to_best"] is True
+    assert consistency["ranking_policy"]["numeric_round_decimals"] == 6
+    assert consistency["ranking_policy"][
+        "closure_score_equivalence_tolerance"
+    ] == pytest.approx(1e-6)
+    assert consistency["recommended_bundle_id"] == "IPPE|horaud"
+
+
+def test_multi_camera_promotion_rejects_tampered_pairwise_summary(
+    tmp_path: Path,
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    base = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+    )
+    candidates = [
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key=sensor_key,
+            pnp_method="ITERATIVE",
+            extrinsic_method="park",
+            score=0.2,
+            companion_translation_offset_mm=offset,
+        )
+        for sensor_key, offset in (
+            ("realsense_d435:1", 0.0),
+            ("oak_d_pro:2", 2.0),
+        )
+    ]
+    request_value = _multi_camera_request()
+    request_value["pnp_methods"] = ["ITERATIVE"]
+    ranking = attempt_module._validate_and_rank(
+        tmp_path,
+        request_value,
+        candidates,
+        _multi_camera_intrinsics(),
+    )
+    ranking["multi_camera_consistency"]["bundles"][0][
+        "max_pairwise_companion_translation_mm"
+    ] = 0.0
+    attempt = {"request": request_value, "results": ranking}
+
+    with pytest.raises(ValueError, match="bundle summary is inconsistent"):
+        attempt_module._promotion_selections(attempt, None)
+
+
+def test_multi_camera_ranking_rejects_inconsistent_passing_companions(
+    tmp_path: Path,
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    base = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+    )
+    candidates = [
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key=sensor_key,
+            pnp_method="ITERATIVE",
+            extrinsic_method="park",
+            score=0.2,
+            companion_translation_offset_mm=offset,
+        )
+        for sensor_key, offset in (
+            ("realsense_d435:1", 0.0),
+            ("oak_d_pro:2", 10.01),
+        )
+    ]
+    request_value = _multi_camera_request()
+    request_value["pnp_methods"] = ["ITERATIVE"]
+
+    ranking = attempt_module._validate_and_rank(
+        tmp_path,
+        request_value,
+        candidates,
+        _multi_camera_intrinsics(),
+    )
+
+    assert all(candidate["status"] == "passing" for candidate in candidates)
+    assert ranking["status"] == "failed"
+    assert ranking["recommended_camera_count"] == 0
+    bundle = ranking["multi_camera_consistency"]["bundles"][0]
+    assert bundle["status"] == "failed"
+    assert bundle["max_pairwise_companion_translation_mm"] == pytest.approx(10.01)
+    assert next(
+        check
+        for check in bundle["checks"]
+        if check["name"] == "joint_companion_translation_consistency"
+    ) == {
+        "name": "joint_companion_translation_consistency",
+        "status": "error",
+        "actual": pytest.approx(10.01),
+        "threshold": 10.0,
+        "unit": "mm",
+    }
+
+
+def test_multi_camera_ranking_fails_closed_when_peer_fails(tmp_path) -> None:
     observations, _expected, _companion = _fixture_observations("eye_in_hand")
     passing = evaluate_extrinsic_candidate(
         observations,
@@ -462,10 +2099,23 @@ def test_multi_camera_ranking_keeps_passing_camera_when_peer_fails(tmp_path) -> 
         },
     )
 
-    assert ranking["status"] == "partial"
-    assert ranking["recommended_camera_count"] == 1
-    assert ranking["failed_camera_count"] == 1
-    assert ranking["results"][0]["recommended_candidate_id"] == (
-        "realsense_d435:1|ITERATIVE|park"
-    )
+    assert ranking["status"] == "failed"
+    assert ranking["recommended_camera_count"] == 0
+    assert ranking["failed_camera_count"] == 2
+    assert ranking["results"][0]["recommended_candidate_id"] is None
     assert ranking["results"][1]["recommended_candidate_id"] is None
+    consistency = ranking["multi_camera_consistency"]
+    assert consistency["status"] == "failed"
+    assert consistency["recommended_bundle_id"] is None
+    assert consistency["bundles"][0]["candidate_ids"] == {
+        "realsense_d435:1": "realsense_d435:1|ITERATIVE|park",
+        "oak_d_pro:2": "oak_d_pro:2|ITERATIVE|park",
+    }
+    assert (
+        next(
+            check
+            for check in consistency["bundles"][0]["checks"]
+            if check["name"] == "joint_individual_candidate_validation"
+        )["status"]
+        == "error"
+    )

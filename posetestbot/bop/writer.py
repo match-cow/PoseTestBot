@@ -562,7 +562,7 @@ def scene_camera_calibration_metadata(
         "schema_version": profile.schema_version,
         "projection": projection,
         "projection_provenance": {
-            "native_distortion_model": "brown_conrady",
+            "native_distortion_model": profile.intrinsics.distortion_model,
             "rectification": "alpha0" if projection == "rectified" else None,
             "output_resolution_unchanged": projection == "rectified",
         },

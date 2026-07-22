@@ -27,6 +27,8 @@ class CameraIntrinsics:
     height: int
     distortion: tuple[float, ...] = ()
     depth_scale_to_mm: float = 1.0
+    distortion_model: str = "brown_conrady"
+    projection_source: str | None = None
 
     def as_matrix_rows(self) -> tuple[tuple[float, float, float], ...]:
         return (
@@ -61,4 +63,3 @@ class SensorDeviceInfo:
     display_name: str
     connected: bool = True
     metadata: Mapping[str, Any] = field(default_factory=dict)
-

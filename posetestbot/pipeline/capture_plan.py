@@ -160,7 +160,9 @@ def build_capture_plan(
 
     sensor_records: list[Mapping[str, Any]] = []
     enabled_sensors = [
-        sensor for sensor in capture.get("sensors", []) if bool(sensor.get("enabled", True))
+        sensor
+        for sensor in capture.get("sensors", [])
+        if sensor.get("enabled", True) is True
     ]
     for index, sensor in enumerate(enabled_sensors):
         sensor_type = str(sensor["sensor_type"])

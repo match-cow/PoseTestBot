@@ -26,6 +26,9 @@ and metric reporting belong in a separate consumer repo.
   instructions.
 - The lab KUKA iiwa is the sole robot profile. Never execute physical capture
   without explicit operator authorization and both execution safety gates.
+- During repeated calibration, never send the iiwa UDP `STOP` command. It
+  cannot interrupt active motion and exits the waiting calibration program,
+  requiring a manual Sunrise application restart.
 - Do not add blocking request handlers for long-running or hardware-touching
   work. Queue them through `posetestbot.jobs.runner.LocalJobRunner` and declare
   resources.
@@ -118,6 +121,7 @@ Do not reintroduce downstream estimator/evaluator behavior here:
 - Run-level sync quality report: `sync_quality_report.json`.
 - Calibration artifacts: `calibration_preflight_report.json`,
   `calibration_target.json`, `intrinsic_calibration_profiles.json`,
+  attempt-level `intrinsic_comparison.json`,
   per-sensor `aruco_detections.json`, `camera_rectification_report.json`,
   `calibration_observations.json`, `calibration_candidates.json`,
   `calibration_profiles_from_observations.json`,
@@ -126,9 +130,10 @@ Do not reintroduce downstream estimator/evaluator behavior here:
   `calibration_profiles.json` (`calibration.v2`; v1 remains loadable).
 - Intent-level calibration attempts live under
   `processed/calibration/<attempt_id>/` and retain `request.json`,
-  `progress.json`, `pnp_candidates.json`, `extrinsic_candidates.json`,
-  `ranking.json`, `checks.json`, `candidate_profiles.json`, the selected target
-  bundle, and explicit promotion evidence.
+  `progress.json`, `intrinsic_comparison.json`, `pnp_candidates.json`,
+  `extrinsic_candidates.json`, `ranking.json`, `checks.json`,
+  `candidate_profiles.json`, the selected target bundle, and explicit promotion
+  evidence.
 - BlenderProc render plan artifact: `blenderproc_render_plan.json`.
 - Pose-template artifacts: global `object_catalog/object_catalog.json`, global
   immutable `pose_templates/<uuid>/pose_template_bundle.json`, run-owned

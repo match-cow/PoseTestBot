@@ -53,6 +53,16 @@ DEFAULT_MIN_INLIERS = 6
 DEFAULT_MAX_MEAN_TRANSLATION_MM = 10.0
 DEFAULT_MAX_MEAN_ROTATION_DEG = 5.0
 DEFAULT_MAX_OUTLIER_RATIO = 0.25
+DEFAULT_MIN_PNP_COMMON_INLIERS = 12
+DEFAULT_MIN_PNP_COMMON_INLIER_RATIO = 0.5
+DEFAULT_MAX_PNP_ALL_POINT_MEAN_ERROR_PX = 3.0
+DEFAULT_MIN_PNP_SUPPORTED_MARKERS = 4
+DEFAULT_MIN_PNP_SUPPORTED_CORNERS_PER_MARKER = 3
+DEFAULT_MIN_PNP_GRID_ROWS = 2
+DEFAULT_MIN_PNP_GRID_COLUMNS = 2
+DEFAULT_MIN_ROTATION_AXIS_ANGLE_DEG = 2.0
+DEFAULT_MIN_ROTATION_AXIS_SINGULAR_RATIO = 0.15
+DEFAULT_MAX_OBSERVATIONS_PER_MOTION = 5
 
 
 def _finite_transform(value: np.ndarray) -> bool:
@@ -149,27 +159,116 @@ def residual_summary(records: Sequence[Mapping[str, float]]) -> dict[str, float]
     }
 
 
+def _motion_balanced_validation(
+    observations: Sequence[Mapping[str, Any]],
+    residuals: Sequence[Mapping[str, float]],
+    *,
+    max_translation_mm: float,
+    max_rotation_deg: float,
+) -> dict[str, Any]:
+    grouped: dict[str, list[Mapping[str, float]]] = {}
+    for observation, residual in zip(observations, residuals, strict=True):
+        grouped.setdefault(_pose_key(observation), []).append(residual)
+    per_motion: dict[str, dict[str, Any]] = {}
+    for pose_key, values in grouped.items():
+        mask = [
+            item["translation_mm"] <= max_translation_mm
+            and item["rotation_deg"] <= max_rotation_deg
+            for item in values
+        ]
+        per_motion[pose_key] = {
+            "observation_count": len(values),
+            "inlier_count": sum(mask),
+            "outlier_count": len(mask) - sum(mask),
+            "outlier_ratio": (len(mask) - sum(mask)) / len(mask),
+            "residuals": residual_summary(values),
+        }
+    balanced_outlier_ratio = float(
+        mean(item["outlier_ratio"] for item in per_motion.values())
+    )
+    repeated_motion_ratios = [
+        float(item["outlier_ratio"])
+        for item in per_motion.values()
+        if int(item["observation_count"]) >= 4
+    ]
+    return {
+        "per_motion": per_motion,
+        "motion_balanced_mean_translation_mm": float(
+            mean(
+                item["residuals"]["mean_translation_mm"]
+                for item in per_motion.values()
+            )
+        ),
+        "motion_balanced_mean_rotation_deg": float(
+            mean(
+                item["residuals"]["mean_rotation_deg"]
+                for item in per_motion.values()
+            )
+        ),
+        "motion_balanced_outlier_ratio": balanced_outlier_ratio,
+        "max_repeated_motion_outlier_ratio": max(
+            repeated_motion_ratios, default=0.0
+        ),
+    }
+
+
 def _common_pnp_inliers(
     object_points: np.ndarray,
     image_points: np.ndarray,
     camera_matrix: np.ndarray,
     distortion: np.ndarray,
 ) -> np.ndarray:
-    success, _rvec, _tvec, inliers = cv2.solvePnPRansac(
-        object_points,
-        image_points,
-        camera_matrix,
-        distortion,
-        iterationsCount=200,
-        reprojectionError=4.0,
-        confidence=0.999,
-        flags=cv2.SOLVEPNP_ITERATIVE,
+    """Return a robust mask without using a degenerate planar PnP sample.
+
+    OpenCV's PnP RANSAC uses a minimal PnP kernel even when the requested
+    final method is iterative.  That kernel can be unstable for a coplanar
+    calibration board and return a tiny consensus set despite an accurate
+    direct planar fit.  A plane-to-image homography is the appropriate robust
+    model here.  Image points are undistorted back into pixel coordinates so
+    the RANSAC threshold retains its four-pixel meaning.
+    """
+
+    centered_objects = object_points - np.mean(object_points, axis=0)
+    _left, singular_values, plane_axes = np.linalg.svd(
+        centered_objects,
+        full_matrices=False,
     )
-    if not success or inliers is None:
-        raise ValueError("robust PnP could not find a common inlier set")
-    indices = np.unique(np.asarray(inliers, dtype=int).reshape(-1))
+    rank_tolerance = (
+        np.finfo(np.float64).eps
+        * max(centered_objects.shape)
+        * max(float(singular_values[0]), 1.0)
+    )
+    if float(singular_values[1]) <= rank_tolerance:
+        raise ValueError("robust planar PnP requires non-collinear object points")
+    planarity_tolerance = max(
+        1e-6,
+        float(singular_values[0]) * 1e-6,
+    )
+    if float(singular_values[2]) > planarity_tolerance:
+        raise ValueError("robust planar PnP requires coplanar object points")
+    plane_points = centered_objects @ plane_axes[:2].T
+
+    undistorted_pixels = cv2.undistortPoints(
+        image_points.reshape(-1, 1, 2),
+        camera_matrix,
+        distortion if distortion.size else None,
+        P=camera_matrix,
+    ).reshape(-1, 2)
+    if not np.all(np.isfinite(undistorted_pixels)):
+        raise ValueError("robust planar PnP received non-finite image points")
+    homography, inliers = cv2.findHomography(
+        plane_points,
+        undistorted_pixels,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=4.0,
+        maxIters=2000,
+        confidence=0.999,
+    )
+    if homography is None or inliers is None or not np.all(np.isfinite(homography)):
+        raise ValueError("robust planar PnP could not find a common inlier set")
+    indices = np.flatnonzero(np.asarray(inliers, dtype=np.uint8).reshape(-1))
     if len(indices) < 4:
-        raise ValueError("robust PnP found fewer than four common inliers")
+        raise ValueError("robust planar PnP found fewer than four common inliers")
     return indices
 
 
@@ -180,6 +279,19 @@ def solve_planar_pnp_candidates(
     distortion: Any,
     *,
     methods: Sequence[str] = PNP_METHOD_ORDER,
+    min_common_inliers: int = DEFAULT_MIN_PNP_COMMON_INLIERS,
+    min_common_inlier_ratio: float = DEFAULT_MIN_PNP_COMMON_INLIER_RATIO,
+    max_all_point_mean_error_px: float = (
+        DEFAULT_MAX_PNP_ALL_POINT_MEAN_ERROR_PX
+    ),
+    point_marker_ids: Any | None = None,
+    point_grid_indices: Any | None = None,
+    min_supported_markers: int = DEFAULT_MIN_PNP_SUPPORTED_MARKERS,
+    min_supported_corners_per_marker: int = (
+        DEFAULT_MIN_PNP_SUPPORTED_CORNERS_PER_MARKER
+    ),
+    min_grid_rows: int = DEFAULT_MIN_PNP_GRID_ROWS,
+    min_grid_columns: int = DEFAULT_MIN_PNP_GRID_COLUMNS,
 ) -> dict[str, Any]:
     """Compare supported planar PnP algorithms with one robust point mask."""
 
@@ -191,13 +303,116 @@ def solve_planar_pnp_candidates(
         raise ValueError("PnP requires at least four paired object/image points")
     if not all(method in PNP_METHODS for method in methods):
         raise ValueError("Unsupported PnP method subset")
+    if min_common_inliers < 4:
+        raise ValueError("PnP minimum common inliers must be at least four")
+    if not 0.0 < min_common_inlier_ratio <= 1.0:
+        raise ValueError("PnP minimum common inlier ratio must be in (0, 1]")
+    if max_all_point_mean_error_px <= 0.0:
+        raise ValueError("PnP whole-board reprojection threshold must be positive")
+    if (point_marker_ids is None) != (point_grid_indices is None):
+        raise ValueError(
+            "PnP marker IDs and grid indices must be provided together"
+        )
+    marker_ids: np.ndarray | None = None
+    grid_indices: np.ndarray | None = None
+    if point_marker_ids is not None:
+        marker_ids = np.asarray(point_marker_ids, dtype=np.int64).reshape(-1)
+        grid_indices = np.asarray(point_grid_indices, dtype=np.int64).reshape(
+            -1, 2
+        )
+        if len(marker_ids) != len(object_array) or len(grid_indices) != len(
+            object_array
+        ):
+            raise ValueError(
+                "PnP marker/grid metadata must align with point correspondences"
+            )
+        if min_supported_markers < 1 or min_supported_corners_per_marker < 1:
+            raise ValueError("PnP marker support thresholds must be positive")
+        if min_grid_rows < 1 or min_grid_columns < 1:
+            raise ValueError("PnP grid span thresholds must be positive")
     common_indices = _common_pnp_inliers(
         object_array, image_array, matrix, distortion_array
     )
+    common_inlier_ratio = float(len(common_indices) / len(object_array))
+    supported_marker_ids: list[int] = []
+    supported_grid_rows: list[int] = []
+    supported_grid_columns: list[int] = []
+    marker_corner_counts: dict[str, int] = {}
+    spatial_support_available = marker_ids is not None and grid_indices is not None
+    if spatial_support_available:
+        assert marker_ids is not None
+        assert grid_indices is not None
+        for marker_id in sorted({int(value) for value in marker_ids[common_indices]}):
+            count = int(np.count_nonzero(marker_ids[common_indices] == marker_id))
+            marker_corner_counts[str(marker_id)] = count
+            if count >= min_supported_corners_per_marker:
+                supported_marker_ids.append(marker_id)
+        supported_mask = np.isin(marker_ids, supported_marker_ids)
+        supported_grid_rows = sorted(
+            {int(value) for value in grid_indices[supported_mask, 0]}
+        )
+        supported_grid_columns = sorted(
+            {int(value) for value in grid_indices[supported_mask, 1]}
+        )
+    spatial_support_ok = (
+        not spatial_support_available
+        or (
+            len(supported_marker_ids) >= min_supported_markers
+            and len(supported_grid_rows) >= min_grid_rows
+            and len(supported_grid_columns) >= min_grid_columns
+        )
+    )
+    support_evidence = {
+        "correspondence_count": int(len(object_array)),
+        "common_inlier_count": int(len(common_indices)),
+        "common_inlier_ratio": common_inlier_ratio,
+        "spatial_support_available": spatial_support_available,
+        "supported_marker_ids": supported_marker_ids,
+        "supported_marker_count": len(supported_marker_ids),
+        "supported_marker_corner_counts": marker_corner_counts,
+        "supported_grid_rows": supported_grid_rows,
+        "supported_grid_columns": supported_grid_columns,
+        "thresholds": {
+            "min_common_inliers": int(min_common_inliers),
+            "min_common_inlier_ratio": float(min_common_inlier_ratio),
+            "max_all_point_mean_reprojection_error_px": float(
+                max_all_point_mean_error_px
+            ),
+            "min_supported_markers": int(min_supported_markers),
+            "min_supported_corners_per_marker": int(
+                min_supported_corners_per_marker
+            ),
+            "min_grid_rows": int(min_grid_rows),
+            "min_grid_columns": int(min_grid_columns),
+        },
+    }
+    if (
+        len(common_indices) < min_common_inliers
+        or common_inlier_ratio < min_common_inlier_ratio
+        or not spatial_support_ok
+    ):
+        reason = (
+            "insufficient_common_pnp_support"
+            if len(common_indices) < min_common_inliers
+            or common_inlier_ratio < min_common_inlier_ratio
+            else "insufficient_spatial_pnp_support"
+        )
+        return {
+            "common_inlier_indices": common_indices.astype(int).tolist(),
+            **support_evidence,
+            "candidates": [],
+            "selected": {},
+            "failures": [
+                {
+                    "reason": reason,
+                    **support_evidence,
+                }
+            ],
+        }
     inlier_objects = object_array[common_indices]
     inlier_images = image_array[common_indices]
     candidates: list[dict[str, Any]] = []
-    failures: list[dict[str, str]] = []
+    failures: list[dict[str, Any]] = []
 
     for method in methods:
         try:
@@ -268,12 +483,19 @@ def solve_planar_pnp_candidates(
                         np.max(errors[common_indices])
                     ),
                     "all_point_mean_reprojection_error_px": float(np.mean(errors)),
+                    "all_point_max_reprojection_error_px": float(np.max(errors)),
                     "transform": transform_record(
                         pose,
                         from_frame="aruco_grid",
                         to_frame="camera",
                     ),
                 }
+                item["quality_status"] = (
+                    "accepted"
+                    if item["all_point_mean_reprojection_error_px"]
+                    <= max_all_point_mean_error_px
+                    else "rejected"
+                )
                 method_candidates.append(item)
             if not method_candidates:
                 raise ValueError("all pose hypotheses were non-cheiral")
@@ -283,7 +505,27 @@ def solve_planar_pnp_candidates(
                     item["hypothesis"],
                 )
             )
-            method_candidates[0]["selected_for_method"] = True
+            accepted_candidates = [
+                item
+                for item in method_candidates
+                if item["quality_status"] == "accepted"
+            ]
+            if accepted_candidates:
+                accepted_candidates[0]["selected_for_method"] = True
+            else:
+                best = method_candidates[0]
+                failures.append(
+                    {
+                        "method": method,
+                        "reason": "whole_board_reprojection_error",
+                        "all_point_mean_reprojection_error_px": best[
+                            "all_point_mean_reprojection_error_px"
+                        ],
+                        "max_all_point_mean_reprojection_error_px": float(
+                            max_all_point_mean_error_px
+                        ),
+                    }
+                )
             candidates.extend(method_candidates)
         except (cv2.error, ValueError, TypeError) as exc:
             failures.append({"method": method, "reason": str(exc)})
@@ -295,7 +537,7 @@ def solve_planar_pnp_candidates(
     }
     return {
         "common_inlier_indices": common_indices.astype(int).tolist(),
-        "common_inlier_count": int(len(common_indices)),
+        **support_evidence,
         "candidates": candidates,
         "selected": selected,
         "failures": failures,
@@ -601,22 +843,128 @@ def _pose_key(observation: Mapping[str, Any]) -> str:
     return str(value) if value not in {None, ""} else str(observation.get("frame_id"))
 
 
-def _observability_check(observations: Sequence[Mapping[str, Any]]) -> None:
+def _balanced_motion_observations(
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    max_per_motion: int = DEFAULT_MAX_OBSERVATIONS_PER_MOTION,
+) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+    if max_per_motion < 1:
+        raise ValueError("maximum observations per motion must be positive")
+    grouped: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
+    for index, observation in enumerate(observations):
+        grouped.setdefault(_pose_key(observation), []).append(
+            (index, observation)
+        )
+    selected: list[tuple[int, Mapping[str, Any]]] = []
+    per_motion: dict[str, dict[str, int]] = {}
+    for pose_key, values in grouped.items():
+        if len(values) <= max_per_motion:
+            indices = list(range(len(values)))
+        elif max_per_motion == 1:
+            indices = [len(values) // 2]
+        else:
+            indices = sorted(
+                {
+                    round(index * (len(values) - 1) / (max_per_motion - 1))
+                    for index in range(max_per_motion)
+                }
+            )
+        selected.extend(values[index] for index in indices)
+        per_motion[pose_key] = {
+            "available": len(values),
+            "selected": len(indices),
+        }
+    selected.sort(key=lambda item: item[0])
+    return [item for _index, item in selected], {
+        "strategy": "evenly_spaced_per_motion_v1",
+        "max_observations_per_motion": max_per_motion,
+        "input_observation_count": len(observations),
+        "solver_observation_count": len(selected),
+        "per_motion": per_motion,
+    }
+
+
+def _observability_check(
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    min_pose_count: int = 4,
+    min_translation_span_mm: float = 1e-3,
+    min_rotation_span_deg: float = 1e-3,
+    min_rotation_axis_angle_deg: float = DEFAULT_MIN_ROTATION_AXIS_ANGLE_DEG,
+    min_rotation_axis_singular_ratio: float = (
+        DEFAULT_MIN_ROTATION_AXIS_SINGULAR_RATIO
+    ),
+) -> dict[str, Any]:
     pose_keys = {_pose_key(item) for item in observations}
-    if len(pose_keys) < 4:
-        raise ValueError("leave-one-pose-out validation requires at least four poses")
+    if len(pose_keys) < min_pose_count:
+        raise ValueError(
+            "leave-one-pose-out validation requires at least "
+            f"{min_pose_count} distinct motion poses; found {len(pose_keys)}"
+        )
+    if min_rotation_axis_angle_deg <= 0.0:
+        raise ValueError("rotation-axis minimum angle must be positive")
+    if not 0.0 < min_rotation_axis_singular_ratio <= 1.0:
+        raise ValueError("rotation-axis singular ratio must be in (0, 1]")
     robot, _target = _observation_transforms(observations)
-    relative_rotation = []
-    relative_translation = []
-    reference = robot[0]
-    for item in robot[1:]:
-        residual = transform_residual(reference, item)
+    # The caller balances frames per motion before this check.  Retaining the
+    # evenly spaced samples (instead of only a motion endpoint) captures axis
+    # excitation that occurs within a sweep without letting long sweeps
+    # dominate short orientation-dither motions.
+    representative_robot = robot
+    relative_rotation: list[float] = []
+    relative_translation: list[float] = []
+    rotation_axes: list[np.ndarray] = []
+    for left, right in combinations(representative_robot, 2):
+        residual = transform_residual(left, right)
         relative_rotation.append(residual["rotation_deg"])
         relative_translation.append(residual["translation_mm"])
-    if max(relative_rotation, default=0.0) < 1e-3:
-        raise ValueError("degenerate robot motion: no rotational excitation")
-    if max(relative_translation, default=0.0) < 1e-3:
-        raise ValueError("degenerate robot motion: no translational excitation")
+        relative_rvec, _ = cv2.Rodrigues(left[:3, :3].T @ right[:3, :3])
+        angle_rad = float(np.linalg.norm(relative_rvec))
+        if math.degrees(angle_rad) >= min_rotation_axis_angle_deg:
+            rotation_axes.append(relative_rvec.reshape(3) / angle_rad)
+    rotation_span = max(relative_rotation, default=0.0)
+    translation_span = max(relative_translation, default=0.0)
+    if rotation_span < min_rotation_span_deg:
+        raise ValueError(
+            "degenerate robot motion: rotation span "
+            f"{rotation_span:.3f} deg is below {min_rotation_span_deg:.3f} deg"
+        )
+    if translation_span < min_translation_span_mm:
+        raise ValueError(
+            "degenerate robot motion: translation span "
+            f"{translation_span:.3f} mm is below {min_translation_span_mm:.3f} mm"
+        )
+    if len(rotation_axes) < 2:
+        raise ValueError(
+            "degenerate robot motion: fewer than two relative rotations meet "
+            f"the {min_rotation_axis_angle_deg:.3f} deg axis-analysis threshold"
+        )
+    singular_values = np.linalg.svd(
+        np.asarray(rotation_axes, dtype=float), compute_uv=False
+    )
+    singular_ratio = (
+        float(singular_values[1] / singular_values[0])
+        if singular_values.size >= 2 and singular_values[0] > 0.0
+        else 0.0
+    )
+    if singular_ratio < min_rotation_axis_singular_ratio:
+        raise ValueError(
+            "degenerate robot motion: rotation-axis second/first singular "
+            f"ratio {singular_ratio:.3f} is below "
+            f"{min_rotation_axis_singular_ratio:.3f}"
+        )
+    return {
+        "distinct_motion_pose_count": len(pose_keys),
+        "translation_span_mm": float(translation_span),
+        "rotation_span_deg": float(rotation_span),
+        "rotation_axis_sample_count": len(rotation_axes),
+        "rotation_axis_singular_values": singular_values.astype(float).tolist(),
+        "rotation_axis_second_to_first_ratio": singular_ratio,
+        "rotation_axis_minimum_angle_deg": float(min_rotation_axis_angle_deg),
+        "rotation_axis_minimum_singular_ratio": float(
+            min_rotation_axis_singular_ratio
+        ),
+    }
 
 
 def evaluate_extrinsic_candidate(
@@ -630,16 +978,52 @@ def evaluate_extrinsic_candidate(
     max_mean_translation_mm: float = DEFAULT_MAX_MEAN_TRANSLATION_MM,
     max_mean_rotation_deg: float = DEFAULT_MAX_MEAN_ROTATION_DEG,
     max_outlier_ratio: float = DEFAULT_MAX_OUTLIER_RATIO,
+    min_accepted_views: int = 0,
+    min_coverage_cells: int = 0,
+    min_motion_poses: int = 4,
+    min_translation_span_mm: float = 1e-3,
+    min_rotation_span_deg: float = 1e-3,
 ) -> dict[str, Any]:
     """Evaluate one PnP/extrinsic pair with deterministic leave-one-pose-out."""
 
     candidate_id = f"{sensor_key}|{pnp_method}|{extrinsic_method}"
+    input_observations = list(observations)
+    input_observation_count = len(input_observations)
+    balance_evidence: dict[str, Any] | None = None
     try:
         if max_mean_translation_mm <= 0 or max_mean_rotation_deg <= 0:
             raise ValueError("residual thresholds must be greater than zero")
         if not 0 <= max_outlier_ratio <= 1:
             raise ValueError("max_outlier_ratio must be between zero and one")
-        _observability_check(observations)
+        accepted_views = {
+            str(item.get("frame_id"))
+            for item in observations
+            if item.get("frame_id") not in {None, ""}
+        }
+        if len(accepted_views) < min_accepted_views:
+            raise ValueError(
+                f"accepted view count {len(accepted_views)} is below "
+                f"required {min_accepted_views}"
+            )
+        coverage_cells = {
+            int(item["image_coverage_cell"])
+            for item in observations
+            if item.get("image_coverage_cell") is not None
+        }
+        if len(coverage_cells) < min_coverage_cells:
+            raise ValueError(
+                f"image-centroid coverage {len(coverage_cells)}/9 is below "
+                f"required {min_coverage_cells}/9"
+            )
+        observations, balance_evidence = _balanced_motion_observations(
+            input_observations
+        )
+        observability = _observability_check(
+            observations,
+            min_pose_count=min_motion_poses,
+            min_translation_span_mm=min_translation_span_mm,
+            min_rotation_span_deg=min_rotation_span_deg,
+        )
         primary, companion, inlier_mask = _robust_extrinsic_seed(
             observations,
             mode=mode,
@@ -685,6 +1069,12 @@ def evaluate_extrinsic_candidate(
             for item, keep in zip(observations, inlier_mask, strict=True)
             if keep
         ]
+        post_pruning_observability = _observability_check(
+            inlier_observations,
+            min_pose_count=min_motion_poses,
+            min_translation_span_mm=min_translation_span_mm,
+            min_rotation_span_deg=min_rotation_span_deg,
+        )
         inlier_pose_keys = sorted({_pose_key(item) for item in inlier_observations})
         held_out_records: list[dict[str, Any]] = []
         for pose_key in inlier_pose_keys:
@@ -730,19 +1120,48 @@ def evaluate_extrinsic_candidate(
                 }
             )
         held_out_summary = residual_summary(held_out_records)
-        inlier_count = sum(inlier_mask)
-        outlier_count = len(inlier_mask) - inlier_count
-        outlier_ratio = outlier_count / len(inlier_mask) if inlier_mask else 1.0
+        solver_inlier_count = sum(inlier_mask)
+        solver_outlier_count = len(inlier_mask) - solver_inlier_count
+        input_residuals = _closure_residuals(
+            input_observations,
+            primary,
+            companion,
+            mode=mode,
+        )
+        input_inlier_mask = [
+            item["translation_mm"] <= max_mean_translation_mm
+            and item["rotation_deg"] <= max_mean_rotation_deg
+            for item in input_residuals
+        ]
+        inlier_count = sum(input_inlier_mask)
+        outlier_count = len(input_inlier_mask) - inlier_count
+        raw_outlier_ratio = (
+            outlier_count / len(input_inlier_mask) if input_inlier_mask else 1.0
+        )
+        input_validation = _motion_balanced_validation(
+            input_observations,
+            input_residuals,
+            max_translation_mm=max_mean_translation_mm,
+            max_rotation_deg=max_mean_rotation_deg,
+        )
+        outlier_ratio = input_validation["motion_balanced_outlier_ratio"]
         full_summary = residual_summary(full_residuals)
+        input_summary = residual_summary(input_residuals)
         reprojection_values = [
             float(item.get("mean_reprojection_error_px", 0.0))
-            for item in observations
+            for item in input_observations
         ]
         passing = (
-            inlier_count >= min_inliers
+            solver_inlier_count >= min_inliers
             and held_out_summary["mean_translation_mm"] <= max_mean_translation_mm
             and held_out_summary["mean_rotation_deg"] <= max_mean_rotation_deg
+            and input_validation["motion_balanced_mean_translation_mm"]
+            <= max_mean_translation_mm
+            and input_validation["motion_balanced_mean_rotation_deg"]
+            <= max_mean_rotation_deg
             and outlier_ratio <= max_outlier_ratio
+            and input_validation["max_repeated_motion_outlier_ratio"]
+            <= max_outlier_ratio
         )
         score = (
             held_out_summary["median_translation_mm"] / max_mean_translation_mm
@@ -760,9 +1179,72 @@ def evaluate_extrinsic_candidate(
         )
         checks = [
             {
+                "name": "accepted_views",
+                "status": "ok",
+                "actual": len(accepted_views),
+                "threshold": min_accepted_views,
+            },
+            {
+                "name": "image_centroid_coverage",
+                "status": "ok",
+                "actual": len(coverage_cells),
+                "threshold": min_coverage_cells,
+                "cells": sorted(coverage_cells),
+            },
+            {
+                "name": "motion_pose_diversity",
+                "status": "ok",
+                "actual": observability["distinct_motion_pose_count"],
+                "threshold": min_motion_poses,
+            },
+            {
+                "name": "translation_diversity",
+                "status": "ok",
+                "actual": observability["translation_span_mm"],
+                "threshold": min_translation_span_mm,
+                "unit": "mm",
+            },
+            {
+                "name": "rotation_diversity",
+                "status": "ok",
+                "actual": observability["rotation_span_deg"],
+                "threshold": min_rotation_span_deg,
+                "unit": "deg",
+            },
+            {
+                "name": "rotation_axis_observability",
+                "status": "ok",
+                "actual": observability[
+                    "rotation_axis_second_to_first_ratio"
+                ],
+                "threshold": observability[
+                    "rotation_axis_minimum_singular_ratio"
+                ],
+            },
+            {
+                "name": "post_pruning_motion_pose_diversity",
+                "status": "ok",
+                "actual": post_pruning_observability[
+                    "distinct_motion_pose_count"
+                ],
+                "threshold": min_motion_poses,
+            },
+            {
+                "name": "post_pruning_rotation_axis_observability",
+                "status": "ok",
+                "actual": post_pruning_observability[
+                    "rotation_axis_second_to_first_ratio"
+                ],
+                "threshold": post_pruning_observability[
+                    "rotation_axis_minimum_singular_ratio"
+                ],
+            },
+            {
                 "name": "minimum_inliers",
-                "status": "ok" if inlier_count >= min_inliers else "error",
-                "actual": inlier_count,
+                "status": (
+                    "ok" if solver_inlier_count >= min_inliers else "error"
+                ),
+                "actual": solver_inlier_count,
                 "threshold": min_inliers,
             },
             {
@@ -794,6 +1276,51 @@ def evaluate_extrinsic_candidate(
                 "actual": outlier_ratio,
                 "threshold": max_outlier_ratio,
             },
+            {
+                "name": "full_input_motion_balanced_translation_residual",
+                "status": (
+                    "ok"
+                    if input_validation[
+                        "motion_balanced_mean_translation_mm"
+                    ]
+                    <= max_mean_translation_mm
+                    else "error"
+                ),
+                "actual": input_validation[
+                    "motion_balanced_mean_translation_mm"
+                ],
+                "threshold": max_mean_translation_mm,
+                "unit": "mm",
+            },
+            {
+                "name": "full_input_motion_balanced_rotation_residual",
+                "status": (
+                    "ok"
+                    if input_validation["motion_balanced_mean_rotation_deg"]
+                    <= max_mean_rotation_deg
+                    else "error"
+                ),
+                "actual": input_validation[
+                    "motion_balanced_mean_rotation_deg"
+                ],
+                "threshold": max_mean_rotation_deg,
+                "unit": "deg",
+            },
+            {
+                "name": "full_input_repeated_motion_outlier_ratio",
+                "status": (
+                    "ok"
+                    if input_validation[
+                        "max_repeated_motion_outlier_ratio"
+                    ]
+                    <= max_outlier_ratio
+                    else "error"
+                ),
+                "actual": input_validation[
+                    "max_repeated_motion_outlier_ratio"
+                ],
+                "threshold": max_outlier_ratio,
+            },
         ]
         return {
             "candidate_id": candidate_id,
@@ -804,13 +1331,26 @@ def evaluate_extrinsic_candidate(
             "status": "passing" if passing else "failed",
             "validation_state": "passed" if passing else "failed",
             "score": float(score),
-            "observation_count": len(observations),
+            "observation_count": input_observation_count,
+            "input_observation_count": input_observation_count,
+            "solver_observation_count": len(observations),
+            "solver_inlier_count": solver_inlier_count,
+            "solver_outlier_count": solver_outlier_count,
             "inlier_count": inlier_count,
             "outlier_count": outlier_count,
             "outlier_ratio": float(outlier_ratio),
+            "raw_outlier_ratio": float(raw_outlier_ratio),
             "mean_reprojection_error_px": (
                 float(mean(reprojection_values)) if reprojection_values else None
             ),
+            "observation_quality": {
+                "accepted_view_count": len(accepted_views),
+                "coverage_cells": sorted(coverage_cells),
+                "pre_pruning_observability": observability,
+                "post_pruning_observability": post_pruning_observability,
+                "motion_balancing": balance_evidence,
+                **post_pruning_observability,
+            },
             "primary_transform": transform_record(
                 primary,
                 from_frame=primary_frames[0],
@@ -823,6 +1363,8 @@ def evaluate_extrinsic_candidate(
             ),
             "held_out_residuals": held_out_summary,
             "fit_residuals": full_summary,
+            "full_input_residuals": input_summary,
+            "full_input_validation": input_validation,
             "leave_one_pose_out": held_out_records,
             "checks": checks,
         }
@@ -836,11 +1378,25 @@ def evaluate_extrinsic_candidate(
             "status": "error",
             "validation_state": "failed",
             "score": None,
-            "observation_count": len(observations),
+            "observation_count": input_observation_count,
+            "input_observation_count": input_observation_count,
+            "solver_observation_count": (
+                int(balance_evidence["solver_observation_count"])
+                if balance_evidence is not None
+                else input_observation_count
+            ),
             "inlier_count": 0,
-            "outlier_count": len(observations),
+            "outlier_count": input_observation_count,
             "outlier_ratio": 1.0,
             "error": str(exc),
+            "motion_balancing": balance_evidence,
+            "acceptance_thresholds": {
+                "min_accepted_views": min_accepted_views,
+                "min_coverage_cells": min_coverage_cells,
+                "min_motion_poses": min_motion_poses,
+                "min_translation_span_mm": min_translation_span_mm,
+                "min_rotation_span_deg": min_rotation_span_deg,
+            },
             "checks": [
                 {
                     "name": "solver",

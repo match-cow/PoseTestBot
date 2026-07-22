@@ -18,10 +18,21 @@ from posetestbot.calibration.intrinsics import (
     write_intrinsic_profile_collection,
 )
 from posetestbot.calibration.targets import load_calibration_target_spec
-from posetestbot.io.artifacts import ARUCO_DETECTIONS, CALIBRATION_TARGET, INTRINSIC_CALIBRATION_PROFILES, PROCESSED_DIR, SYNCHRONIZED_DIR
-from posetestbot.io.manifest import load_or_create_run_manifest, upsert_stage, write_run_manifest
+from posetestbot.io.artifacts import (
+    ARUCO_DETECTIONS,
+    CALIBRATION_TARGET,
+    INTRINSIC_CALIBRATION_PROFILES,
+    PROCESSED_DIR,
+    SYNCHRONIZED_DIR,
+)
+from posetestbot.io.manifest import (
+    load_or_create_run_manifest,
+    upsert_stage,
+    write_run_manifest,
+)
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.calibration.intrinsics import SCHEMA_VERSION as INTRINSIC_SCHEMA
+from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,9 +41,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("factory", "calibrate"), default="factory")
     parser.add_argument("--calibration-target")
     parser.add_argument("--input-root")
-    parser.add_argument("--min-accepted-views", type=int, default=DEFAULT_MIN_ACCEPTED_VIEWS)
-    parser.add_argument("--min-coverage-cells", type=int, default=DEFAULT_MIN_COVERAGE_CELLS)
-    parser.add_argument("--max-view-error-px", type=float, default=DEFAULT_MAX_VIEW_ERROR_PX)
+    parser.add_argument(
+        "--min-accepted-views", type=int, default=DEFAULT_MIN_ACCEPTED_VIEWS
+    )
+    parser.add_argument(
+        "--min-coverage-cells", type=int, default=DEFAULT_MIN_COVERAGE_CELLS
+    )
+    parser.add_argument(
+        "--max-view-error-px", type=float, default=DEFAULT_MAX_VIEW_ERROR_PX
+    )
     parser.add_argument("--max-rms-px", type=float, default=DEFAULT_MAX_RMS_PX)
     return parser.parse_args()
 
@@ -40,13 +57,28 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root = Path(args.run_root)
-    input_root = Path(args.input_root) if args.input_root else root / PROCESSED_DIR / SYNCHRONIZED_DIR
-    sensors = [path for path in sorted(input_root.iterdir()) if path.is_dir() and (path / ARUCO_DETECTIONS).is_file()]
+    input_root = (
+        Path(args.input_root)
+        if args.input_root
+        else root / PROCESSED_DIR / SYNCHRONIZED_DIR
+    )
+    sensors = filter_enabled_sensor_folders(
+        root,
+        (
+            path
+            for path in sorted(input_root.iterdir())
+            if path.is_dir() and (path / ARUCO_DETECTIONS).is_file()
+        ),
+    )
     if not sensors:
         raise FileNotFoundError(f"No ArUco detection artifacts: {input_root}")
     target = None
     if args.mode == "calibrate":
-        target_path = Path(args.calibration_target) if args.calibration_target else root / CALIBRATION_TARGET
+        target_path = (
+            Path(args.calibration_target)
+            if args.calibration_target
+            else root / CALIBRATION_TARGET
+        )
         target = load_calibration_target_spec(target_path)
     manifest = load_or_create_run_manifest(root)
     upsert_stage(manifest, name="intrinsic_calibration", status="running")
@@ -85,7 +117,9 @@ def main() -> None:
             raise ValueError(
                 f"Intrinsic calibration quality gates failed for {len(failures)} sensor(s); see {output}"
             )
-        output = write_intrinsic_profile_collection(profiles, root / INTRINSIC_CALIBRATION_PROFILES)
+        output = write_intrinsic_profile_collection(
+            profiles, root / INTRINSIC_CALIBRATION_PROFILES
+        )
         upsert_stage(
             manifest,
             name="intrinsic_calibration",
@@ -95,7 +129,9 @@ def main() -> None:
         )
         write_run_manifest(manifest, root)
     except Exception as exc:
-        upsert_stage(manifest, name="intrinsic_calibration", status="failed", message=str(exc))
+        upsert_stage(
+            manifest, name="intrinsic_calibration", status="failed", message=str(exc)
+        )
         write_run_manifest(manifest, root)
         raise
     print(f"Wrote {output}")

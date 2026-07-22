@@ -74,7 +74,7 @@ def fulfill_json(route, value: object, *, status: int = 200) -> None:
     )
 
 
-def run_config(*, plan_only: bool = True) -> dict:
+def run_config(*, plan_only: bool = True, sensors: list[dict] | None = None) -> dict:
     return {
         "schema_version": "run_config.v2",
         "run_name": "new-run",
@@ -88,7 +88,7 @@ def run_config(*, plan_only: bool = True) -> dict:
             "resolution": "720p",
             "fps": 6,
             "velocity_m_s": 0.2,
-            "sensors": [],
+            "sensors": sensors or [],
         },
         "dataset_mode": "objectless",
         "pose_template": None,
@@ -169,9 +169,11 @@ def install_common_mocks(
     preflight_state: dict | None = None,
     requests: list[dict] | None = None,
     generator_available: bool = False,
+    config_payload: dict | None = None,
 ) -> None:
     requests = requests if requests is not None else []
     preflight_state = preflight_state if preflight_state is not None else {"blocker": None}
+    config_payload = config_payload if config_payload is not None else run_config()
 
     page.route("**/ui/bootstrap", lambda route: fulfill_json(route, {
         "schema_version": "web_bootstrap.v1",
@@ -217,9 +219,9 @@ def install_common_mocks(
     def config_handler(route) -> None:
         if route.request.method == "POST":
             requests.append({"path": "/run-config", "body": route.request.post_data_json})
-            fulfill_json(route, {"config": run_config(), "output": "written"}, status=201)
+            fulfill_json(route, {"config": config_payload, "output": "written"}, status=201)
         else:
-            fulfill_json(route, {"config": run_config(), "preflight": {"queue_blocker": preflight_state["blocker"]}})
+            fulfill_json(route, {"config": config_payload, "preflight": {"queue_blocker": preflight_state["blocker"]}})
     page.route("**/run-config**", config_handler)
 
     def pipeline_handler(route) -> None:
@@ -501,6 +503,9 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     preflight_state["blocker"] = None
     page.reload(wait_until="networkidle")
     page.get_by_role("button", name="Open capture gate").click()
+    expect(page.get_by_test_id("capture-timeout-envelope")).to_contain_text(
+        "300 s total · 15 s sustained camera readiness (3 frames each) · 120 s to first robot packet · 60 s between robot packets"
+    )
     submit = page.locator('[data-testid="capture-submit"]')
     expect(submit).to_be_disabled()
     page.locator('[data-testid="capture-robot-ack"]').click()
@@ -510,9 +515,97 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     submit.click()
     expect(page.get_by_text("Physical capture queued")).to_be_visible()
     capture_request = [item["body"] for item in requests if item["path"] == "/pipeline/run" and item["body"]["stage"] == "capture_execution"][-1]
-    assert capture_request["options"]["allow_cameras"] is True
-    assert capture_request["options"]["allow_real_robot"] is True
+    assert capture_request["options"] == {
+        "allow_cameras": True,
+        "allow_real_robot": True,
+        "include_sensors": True,
+        "timeout_s": 300,
+        "startup_wait_s": 15,
+        "receive_start_timeout_s": 120,
+        "receive_idle_timeout_s": 60,
+    }
     assert any(item["path"] == "/sensors/previews/stop" for item in requests)
+
+
+def test_run_setup_disables_camera_without_deleting_identity_or_profile(
+    console_server,
+    page,
+) -> None:
+    requests: list[dict] = []
+    configured = run_config(
+        sensors=[
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "display_name": "Wrist RGB-D",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+                "calibration_profile_id": "profile-wrist-1",
+            },
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "static-1",
+                "display_name": "Static RGB-D",
+                "mounting_mode": "static",
+                "enabled": True,
+                "inverted": True,
+                "calibration_profile_id": "profile-static-1",
+            },
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "offline-1",
+                "display_name": "Offline wrist camera",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+                "calibration_profile_id": "profile-offline-1",
+            },
+        ]
+    )
+    status = selected_sensor_status()
+    status["families"][0]["devices"].append(
+        {
+            "sensor_type": "realsense_d435",
+            "device_id": "offline-1",
+            "display_name": "Offline wrist camera",
+            "effective_display_name": "Offline wrist camera",
+            "connected": True,
+            "capture_ready": False,
+            "capture_readiness_reason": "USB SuperSpeed unavailable",
+            "mounting_mode": "eye_in_hand",
+            "inverted": False,
+        }
+    )
+    status["total_connected"] = 3
+    install_common_mocks(page, requests=requests, config_payload=configured)
+    page.route("**/sensors/status", lambda route: fulfill_json(route, status))
+
+    page.goto(f"{console_server.url}/#/workflow/setup", wait_until="networkidle")
+
+    rows = page.locator('[data-testid="run-camera-row"]')
+    expect(rows).to_have_count(3)
+    offline = page.locator(
+        '[data-testid="run-camera-row"][data-sensor-key="realsense_d435:offline-1"]'
+    )
+    expect(offline).to_have_attribute("data-camera-state", "enabled")
+    expect(offline).to_contain_text("not capture-ready")
+    page.get_by_label("Enable Offline wrist camera for this run").click()
+    expect(offline).to_have_attribute("data-camera-state", "disabled")
+    expect(offline).to_have_css("opacity", "0.6")
+
+    page.get_by_role("button", name="Write run config").click()
+    expect(page.get_by_text("Run configuration written")).to_be_visible()
+    written = next(item["body"] for item in requests if item["path"] == "/run-config")
+    assert len(written["sensors"]) == 3
+    disabled = next(
+        sensor for sensor in written["sensors"] if sensor["device_id"] == "offline-1"
+    )
+    assert disabled["enabled"] is False
+    assert disabled["calibration_profile_id"] == "profile-offline-1"
+    assert {
+        sensor["device_id"] for sensor in written["sensors"] if sensor["enabled"]
+    } == {"wrist-1", "static-1"}
 
 
 def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page) -> None:
@@ -547,6 +640,10 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
 
     page.get_by_role("button", name="Stop IIWA").click()
+    stop_warning = page.get_by_test_id("iiwa-stop-warning")
+    expect(stop_warning).to_contain_text("IIWA STOP is not a safety stop")
+    expect(stop_warning).to_contain_text("cannot interrupt active motion")
+    expect(stop_warning).to_contain_text("Sunrise must be restarted manually before another START")
     expect(page.get_by_role("button", name="Queue stop")).to_be_disabled()
     assert [item["command"] for item in commands] == ["start_iiwa"]
     page.get_by_text("I confirm this is the intended lab IIWA target.").click()
@@ -600,6 +697,10 @@ def test_dashboard_quick_robot_controls_use_configured_target(console_server, pa
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
 
     controls.get_by_role("button", name="Stop IIWA").click()
+    stop_warning = dialog.get_by_test_id("iiwa-stop-warning")
+    expect(stop_warning).to_contain_text("IIWA STOP is not a safety stop")
+    expect(stop_warning).to_contain_text("cannot interrupt active motion")
+    expect(stop_warning).to_contain_text("Sunrise must be restarted manually before another START")
     expect(dialog.get_by_role("button", name="Queue stop")).to_be_disabled()
     dialog.get_by_text("I confirm this is the intended lab IIWA target.").click()
     dialog.get_by_role("button", name="Queue stop").click()
@@ -677,7 +778,32 @@ def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_stat
             {"id": "eye_in_hand", "label": "Robot-mounted camera (eye-in-hand)", "primary_transform": "camera → robot_flange", "target_mounting": "stationary relative to template_base"},
             {"id": "eye_to_hand", "label": "Static camera (eye-to-hand)", "primary_transform": "camera → template_base", "target_mounting": "rigidly attached to robot_flange"},
         ],
-        "solver": {"default_pnp_methods": ["IPPE", "ITERATIVE", "SQPNP"], "default_extrinsic_methods": ["tsai", "park", "horaud", "andreff", "daniilidis", "shah", "li"]},
+        "solver": {
+            "default_pnp_methods": ["IPPE", "ITERATIVE", "SQPNP"],
+            "default_extrinsic_methods": ["tsai", "park", "horaud", "andreff", "daniilidis", "shah", "li"],
+            "intrinsics_policy": "compare_factory_opencv",
+            "intrinsics_policies": [
+                {"id": "compare_factory_opencv", "label": "Compare captured factory intrinsics with a gated OpenCV calibration"},
+                {"id": "reuse_compatible_or_factory", "label": "Reuse an exact compatible profile, otherwise captured factory intrinsics"},
+            ],
+            "thresholds": {
+                "min_pnp_common_inliers": 12,
+                "min_pnp_common_inlier_ratio": 0.5,
+                "max_pnp_all_point_mean_reprojection_error_px": 3.0,
+                "min_pnp_supported_markers": 4,
+                "min_pnp_grid_rows": 2,
+                "min_pnp_grid_columns": 2,
+                "min_accepted_views": 15,
+                "min_coverage_cells": 6,
+                "max_per_view_reprojection_error_px": 3.0,
+                "max_intrinsic_rms_reprojection_error_px": 1.5,
+                "min_motion_poses": 4,
+                "min_translation_span_mm": 20.0,
+                "min_rotation_span_deg": 5.0,
+                "min_rotation_axis_second_to_first_ratio": 0.15,
+                "max_nearest_pose_delta_ms": 20.0,
+            },
+        },
         "latest_attempt": None,
     }
     page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
@@ -722,7 +848,7 @@ def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_stat
         return {
             "schema_version": "calibration_attempt.v1",
             "attempt_id": "a" * 32,
-            "request": {"mode": "eye_in_hand", "sensor_keys": ["realsense_d435:wrist-1", "oak_d_pro:static-1"], "target_id": setup["saved_targets"][0]["target_id"], "solver_policy": "auto_compare"},
+            "request": {"mode": "eye_in_hand", "sensor_keys": ["realsense_d435:wrist-1", "oak_d_pro:static-1"], "target_id": setup["saved_targets"][0]["target_id"], "solver_policy": "auto_compare", "intrinsics_policy": "compare_factory_opencv"},
             "progress": {"status": "complete", "message": "Calibration calculations are complete and awaiting review.", "phases": [
                 {"id": "prepare_data", "label": "Prepare data", "status": "complete"},
                 {"id": "estimate_target_poses", "label": "Estimate target poses", "status": "complete"},
@@ -733,6 +859,51 @@ def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_stat
                 {**setup["cameras"][0], "status": "passing", "recommended_candidate_id": recommended["candidate_id"], "recommendation": recommended, "candidates": [recommended, override]},
                 {**setup["cameras"][1], "status": "failed", "recommended_candidate_id": None, "recommendation": None, "candidates": [failed]},
             ]},
+            "intrinsic_comparison": {
+                "policy": "compare_factory_opencv",
+                "sensors": [
+                    {
+                        "sensor_key": "realsense_d435:wrist-1",
+                        "status": "manual_selected",
+                        "selected_profile_id": "wrist_manual",
+                        "selection_reason": "manual_opencv_passed_all_intrinsic_quality_gates",
+                        "factory_profile_id": "wrist_factory",
+                        "manual_profile_id": "wrist_manual",
+                        "manual_failure": None,
+                        "deltas": {
+                            "focal_length_delta_px": [1.25, -0.75],
+                            "principal_point_delta_px": [0.5, -0.25],
+                            "max_abs_distortion_delta": 0.002,
+                        },
+                        "candidates": [
+                            {
+                                "profile_id": "wrist_manual",
+                                "source": {"mode": "calibrate"},
+                                "quality": {
+                                    "status": "accepted",
+                                    "accepted_view_count": 18,
+                                    "coverage_cells": [0, 1, 2, 3, 4, 5],
+                                    "rms_reprojection_error_px": 0.82,
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "sensor_key": "oak_d_pro:static-1",
+                        "status": "factory_selected",
+                        "selected_profile_id": "static_factory",
+                        "selection_reason": "manual_opencv_not_available_or_failed_quality_gates",
+                        "factory_profile_id": "static_factory",
+                        "manual_profile_id": None,
+                        "manual_failure": {
+                            "message": "coverage failed",
+                            "quality": {"reason": "coverage 2/9 is below 6/9"},
+                        },
+                        "deltas": None,
+                        "candidates": [],
+                    },
+                ],
+            },
             "promotion": ({"status": "promoted", "promoted_profile_ids": ["wrist_sqpnp_tsai"]} if promoted["value"] else None),
         }
 
@@ -767,9 +938,13 @@ def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_stat
     assert requests[0]["body"]["mode"] == "eye_in_hand"
     assert requests[0]["body"]["sensor_keys"] == ["realsense_d435:wrist-1", "oak_d_pro:static-1"]
     assert requests[0]["body"]["target_id"] == "9ab5ff1c-60f6-46b1-823d-2a912d5d4e3f"
+    assert requests[0]["body"]["intrinsics_policy"] == "compare_factory_opencv"
 
     expect(page.get_by_text("Prepare data")).to_be_visible()
     expect(page.get_by_test_id("calibration-results")).to_be_visible()
+    expect(page.get_by_test_id("calibration-acceptance-thresholds")).to_contain_text("≥15 accepted views")
+    expect(page.get_by_test_id("intrinsic-comparison-realsense_d435:wrist-1")).to_contain_text("OpenCV selected")
+    expect(page.get_by_test_id("intrinsic-comparison-oak_d_pro:static-1")).to_contain_text("coverage 2/9 is below 6/9")
     expect(page.get_by_text("camera → robot_flange").last).to_be_visible()
     expect(page.get_by_text("Every attempted candidate and failure").first).to_be_visible()
     page.get_by_label("Candidate override").click()
@@ -989,6 +1164,70 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
         "entities": [
             {"id": "template_base", "type": "reference_frame", "label": "Template base", "status": "planned", "transform": {**identity, "parent_frame": None}, "unresolved_reason": None, "geometry": {"kind": "axes", "size_mm": 100}, "provenance": {"source": "config"}},
             {"id": "robot_flange", "type": "robot_flange", "label": "Robot flange", "status": "recorded", "transform": identity, "unresolved_reason": None, "geometry": {"kind": "flange_proxy"}, "provenance": {"source": "match_robot_ee_poses.json"}},
+            {
+                "id": "camera:realsense_123",
+                "type": "camera",
+                "label": "Wrist D435",
+                "status": "planned",
+                "transform": {**identity, "parent_frame": "robot_flange", "translation_mm": [10, 20, 30]},
+                "unresolved_reason": None,
+                "geometry": {"kind": "camera_frustum", "width": 1280, "height": 720, "fx": 900, "fy": 900, "cx": 640, "cy": 360},
+                "provenance": {"source": "calibration_profiles.json", "profile_id": "wrist-profile"},
+                "calibration": {
+                    "profile_id": "wrist-profile",
+                    "schema_version": "calibration.v2",
+                    "status": "valid",
+                    "mounting_mode": "eye_in_hand",
+                    "rig_position": "wrist",
+                    "extrinsics": {
+                        "from": "camera",
+                        "to": "robot_flange",
+                        "matrix": [[1, 0, 0, 10], [0, 1, 0, 20], [0, 0, 1, 30], [0, 0, 0, 1]],
+                        "rotation_quaternion_wxyz": [1, 0, 0, 0],
+                        "translation_mm": [10, 20, 30],
+                    },
+                    "companion_transform": {
+                        "from": "aruco_grid",
+                        "to": "template_base",
+                        "matrix": [[1, 0, 0, 1], [0, 1, 0, 2], [0, 0, 1, 3], [0, 0, 0, 1]],
+                        "rotation_quaternion_wxyz": [1, 0, 0, 0],
+                        "translation_mm": [1, 2, 3],
+                    },
+                    "quality": {
+                        "num_observations": 12,
+                        "num_inliers": 10,
+                        "mean_reprojection_error_px": 0.321,
+                        "max_reprojection_error_px": 0.8,
+                        "residual_translation_mm": 0.75,
+                        "residual_rotation_deg": 0.4,
+                        "outlier_count": 2,
+                        "outlier_ratio": 0.1667,
+                        "held_out_residuals": {
+                            "translation_mean_mm": 0.75,
+                            "rotation_mean_deg": 0.4,
+                            "fold_count": 3,
+                        },
+                        "notes": None,
+                    },
+                    "evidence": {
+                        "profile_source": "/tmp/run/calibration_profiles.json",
+                        "method": "auto_compare:IPPE+park",
+                        "calibration_dataset_id": "attempt-dataset",
+                        "target_type": "aruco_grid",
+                        "target_id": "target-1",
+                        "calibrated_at": "2026-07-21T12:00:00+00:00",
+                        "operator": "operator",
+                        "sync_delta_ms": 1.2,
+                        "promotion_attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "promotion_candidate_id": "realsense_d435:123|IPPE|park",
+                        "promotion_multi_camera_bundle_id": "joint:IPPE:park",
+                        "promotion_solver_provenance": {"solver_policy": "auto_compare", "pnp_method": "IPPE", "extrinsic_method": "park"},
+                        "promoted_at": "2026-07-21T12:00:00+00:00",
+                        "promoted_by": "operator",
+                        "intrinsic_profile_id": "123_1280x720_normal_factory",
+                    },
+                },
+            },
             {"id": "camera:missing", "type": "camera", "label": "Uncalibrated camera", "status": "unresolved", "transform": None, "unresolved_reason": "No valid calibration profile", "geometry": {"kind": "camera_frustum"}, "provenance": {"source": "calibration_profiles"}},
         ],
         "warnings": [{"code": "missing_calibration_profiles", "message": "No calibration profile collection is available"}],
@@ -1011,6 +1250,11 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
 def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -> None:
     install_common_mocks(page)
     scene = cell_scene_payload()
+    calibration = scene["entities"][2]["calibration"]
+    calibration["extrinsics"]["matrix"][0][3] = "10"
+    calibration["extrinsics"]["rotation_quaternion_wxyz"] = ["1", "0", "0", "0"]
+    calibration["extrinsics"]["translation_mm"] = ["10", "20", "30"]
+    calibration["quality"]["mean_reprojection_error_px"] = "0.321"
     page.route("**/ui/cell-scene?**", lambda route: fulfill_json(route, scene))
     page.route("**/ui/cell-scene/timeline?**", lambda route: fulfill_json(route, {"schema_version": "cell_timeline.v1", "timeline": scene["timelines"][0], "offset": 0, "limit": 2000, "total": 2, "next_offset": None, "previous_offset": None, "poses": scene["trajectory_preview"]}))
 
@@ -1018,6 +1262,36 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
 
     expect(page.get_by_test_id("cell-webgl-canvas")).to_be_visible()
     expect(page.get_by_text("Scene has unresolved provenance")).to_be_visible()
+    page.get_by_text("Wrist D435", exact=True).click()
+    evidence = page.get_by_test_id("cell-calibration-evidence")
+    expect(evidence.get_by_text("Calibration extrinsic", exact=True)).to_be_visible()
+    expect(page.get_by_test_id("cell-calibration-transform-frames")).to_have_text("camera → robot_flange")
+    expect(
+        evidence.get_by_text(
+            "1.0000000, 0.0000000, 0.0000000, 0.0000000",
+            exact=True,
+        ).first
+    ).to_be_visible()
+    expect(evidence.get_by_text("10.0000, 20.0000, 30.0000", exact=True)).to_be_visible()
+    expect(evidence.get_by_text("12 / 10", exact=True)).to_be_visible()
+    expect(evidence.get_by_text("0.321 px", exact=True)).to_be_visible()
+    expect(evidence.get_by_text("0.800 px", exact=True)).to_be_visible()
+    expect(evidence.get_by_text("0.1667", exact=True)).to_be_visible()
+    expect(evidence.get_by_text("1.200 ms", exact=True)).to_be_visible()
+    expect(evidence.get_by_text("operator / operator", exact=True)).to_be_visible()
+    expect(evidence.get_by_text("attempt-dataset", exact=True)).to_be_visible()
+    expect(evidence.get_by_text('"fold_count":3', exact=False)).to_be_visible()
+    expect(evidence.get_by_text("IPPE + park", exact=True)).to_be_visible()
+    expect(evidence.get_by_text("wrist-profile", exact=True)).to_be_visible()
+    expect(page.get_by_test_id("cell-calibration-matrix")).to_contain_text("10.000000")
+    expect(page.get_by_test_id("cell-calibration-companion-frames")).to_have_text("aruco_grid → template_base")
+    expect(page.get_by_test_id("cell-calibration-companion-matrix")).to_contain_text("3.000000")
+    expect(evidence.get_by_text("joint:IPPE:park", exact=True)).to_be_visible()
+    page.get_by_text("Raw provenance", exact=True).click()
+    raw_provenance = page.get_by_test_id("cell-raw-provenance")
+    expect(raw_provenance).to_contain_text('"calibration_dataset_id": "attempt-dataset"')
+    expect(raw_provenance).to_contain_text('"outlier_ratio": 0.1667')
+    expect(raw_provenance).to_contain_text('"sync_delta_ms": 1.2')
     page.get_by_text("Robot flange", exact=True).click()
     expect(page.get_by_text("10.00, 20.00, 30.00")).not_to_be_visible()
     page.get_by_role("slider", name="Frame scrubber").fill("1")

@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
         help="Warn when a sync report used a different timestamp source.",
     )
     parser.add_argument(
+        "--require-robot-timestamp-source",
+        choices=("host_received", "host_wall", "filename"),
+        help="Error when a sync report cannot prove this robot timestamp source.",
+    )
+    parser.add_argument(
         "--no-write",
         action="store_true",
         help="Print a report without writing sync_quality_report.json.",
@@ -64,15 +69,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     max_delta = (
-        None
-        if args.no_nearest_pose_threshold
-        else args.max_nearest_pose_delta_ms
+        None if args.no_nearest_pose_threshold else args.max_nearest_pose_delta_ms
     )
     report_args = {
         "min_match_ratio": args.min_match_ratio,
         "max_dropped_frames": args.max_dropped_frames,
         "max_nearest_pose_delta_ms": max_delta,
         "require_timestamp_source": args.require_timestamp_source,
+        "require_robot_timestamp_source": (args.require_robot_timestamp_source),
     }
 
     if args.no_write:

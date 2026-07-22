@@ -224,16 +224,30 @@ def discover_realsense_d435() -> list[SensorDeviceInfo]:
             serial = dev.get_info(rs.camera_info.serial_number)
             name = dev.get_info(rs.camera_info.name)
             product_line = dev.get_info(rs.camera_info.product_line)
-            metadata: dict[str, object] = {"product_line": product_line}
+            metadata: dict[str, object] = {
+                "product_line": product_line,
+                "discovery": "librealsense",
+            }
             for info_name, metadata_key in (
                 ("product_id", "product_id"),
                 ("firmware_version", "firmware_version"),
+                ("recommended_firmware_version", "recommended_firmware_version"),
                 ("usb_type_descriptor", "usb_type_descriptor"),
                 ("physical_port", "physical_port"),
             ):
                 info = getattr(rs.camera_info, info_name, None)
                 if info is None:
                     continue
+                supports = getattr(dev, "supports", None)
+                if callable(supports):
+                    try:
+                        if not supports(info):
+                            continue
+                    except Exception:
+                        # Some older bindings expose ``supports`` but reject
+                        # newer camera_info enum values.  The guarded get_info
+                        # call below remains the compatibility fallback.
+                        pass
                 try:
                     value = dev.get_info(info)
                 except Exception:

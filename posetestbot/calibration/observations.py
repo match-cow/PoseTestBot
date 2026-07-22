@@ -30,6 +30,7 @@ from posetestbot.io.manifest import (
     write_run_manifest,
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 from posetestbot.sensors.registry import sensor_folder_name
 
 
@@ -102,7 +103,9 @@ def _read_json(path: Path) -> dict[str, Any]:
     with open(path, "r") as f:
         value = json.load(f)
     if not isinstance(value, dict):
-        raise ValueError(f"Calibration observation source must be a JSON object: {path}")
+        raise ValueError(
+            f"Calibration observation source must be a JSON object: {path}"
+        )
     return value
 
 
@@ -111,7 +114,15 @@ def discover_aruco_outputs(run_root: str | Path) -> list[Path]:
     aruco_root = root / PROCESSED_DIR / SYNCHRONIZED_DIR
     if not aruco_root.is_dir():
         return []
-    return sorted(aruco_root.glob(f"*/{ARUCO_POSE_ESTIMATION}"))
+    folders = filter_enabled_sensor_folders(
+        root,
+        (path for path in sorted(aruco_root.iterdir()) if path.is_dir()),
+    )
+    return [
+        folder / ARUCO_POSE_ESTIMATION
+        for folder in folders
+        if (folder / ARUCO_POSE_ESTIMATION).is_file()
+    ]
 
 
 def discover_calibration_pose_outputs(
@@ -124,10 +135,17 @@ def discover_calibration_pose_outputs(
     if not synchronized_root.is_dir():
         return []
     filenames = TARGET_SOURCE_FILES.get(target_type, TARGET_SOURCE_FILES["aruco_grid"])
+    folders = filter_enabled_sensor_folders(
+        root,
+        (path for path in sorted(synchronized_root.iterdir()) if path.is_dir()),
+    )
     paths: list[Path] = []
     seen: set[Path] = set()
     for filename in filenames:
-        for path in sorted(synchronized_root.glob(f"*/{filename}")):
+        for folder in folders:
+            path = folder / filename
+            if not path.is_file():
+                continue
             if path in seen:
                 continue
             paths.append(path)
@@ -156,13 +174,18 @@ def _run_config_sensor_map(run_root: Path) -> dict[str, dict[str, Any]]:
     return mapped
 
 
-def _sensor_metadata(sensor_name: str, config_sensors: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+def _sensor_metadata(
+    sensor_name: str, config_sensors: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any]:
     sensor_type, device_id = sensor_identity_from_folder_name(sensor_name)
     config = dict(config_sensors.get(sensor_name, {}))
     return {
         "sensor_name": sensor_name,
         "sensor_type": (
-            str(config.get("sensor_type") or (sensor_type.value if sensor_type else "unknown"))
+            str(
+                config.get("sensor_type")
+                or (sensor_type.value if sensor_type else "unknown")
+            )
         ),
         "device_id": str(config.get("device_id") or device_id),
         "mounting_mode": config.get("mounting_mode"),
@@ -193,7 +216,13 @@ def _pose_source(
 
 
 def _feature_count(pose: Mapping[str, Any]) -> int:
-    for key in ("feature_count", "marker_count", "corner_count", "len_ids", "len_corners"):
+    for key in (
+        "feature_count",
+        "marker_count",
+        "corner_count",
+        "len_ids",
+        "len_corners",
+    ):
         if key not in pose or pose.get(key) is None:
             continue
         try:
@@ -417,14 +446,10 @@ def build_calibration_observations(
                         "reason": reason,
                         "target_pose_source": source_key,
                         "marker_count": (
-                            _feature_count(pose)
-                            if isinstance(pose, Mapping)
-                            else None
+                            _feature_count(pose) if isinstance(pose, Mapping) else None
                         ),
                         "feature_count": (
-                            _feature_count(pose)
-                            if isinstance(pose, Mapping)
-                            else None
+                            _feature_count(pose) if isinstance(pose, Mapping) else None
                         ),
                     }
                 )

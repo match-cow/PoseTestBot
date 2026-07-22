@@ -124,9 +124,19 @@ def run_preflight_queue_summary(
 def _sensor_counts(config: Mapping[str, Any]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for sensor in config["capture"]["sensors"]:
+        if sensor.get("enabled", True) is not True:
+            continue
         sensor_type = str(sensor["sensor_type"])
         counts[sensor_type] = counts.get(sensor_type, 0) + 1
     return counts
+
+
+def _enabled_sensor_count(config: Mapping[str, Any]) -> int:
+    return sum(
+        1
+        for sensor in config["capture"]["sensors"]
+        if sensor.get("enabled", True) is True
+    )
 
 
 def _non_dry_run_steps(plan) -> list[str]:
@@ -254,6 +264,8 @@ def build_run_preflight(
     runtimes = collect_runtimes() if include_runtime_status else None
     plan_only = bool(config["pipeline"].get("plan_only", True))
     non_dry_run_steps = _non_dry_run_steps(plan)
+    enabled_sensor_count = _enabled_sensor_count(config)
+    configured_sensor_count = len(config["capture"]["sensors"])
 
     checks = [
         _check(
@@ -269,9 +281,14 @@ def build_run_preflight(
         _check(
             "run_config",
             "ok",
-            f"Loaded {config['schema_version']} for {len(config['capture']['sensors'])} sensor(s).",
+            (
+                f"Loaded {config['schema_version']} for {enabled_sensor_count} "
+                f"enabled of {configured_sensor_count} configured sensor(s)."
+            ),
             details={
                 "robot_profile": "real",
+                "configured_sensor_count": configured_sensor_count,
+                "enabled_sensor_count": enabled_sensor_count,
                 "sensor_counts": _sensor_counts(config),
             },
         ),

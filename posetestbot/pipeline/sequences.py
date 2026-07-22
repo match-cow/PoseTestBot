@@ -18,6 +18,10 @@ from posetestbot.pipeline.stages import (
 
 
 SCHEMA_VERSION = "pipeline_sequence_plan.v1"
+SEQUENCE_EXECUTION_ACK_ENV = "POSETESTBOT_SEQUENCE_EXECUTION_ACKNOWLEDGEMENTS"
+EXECUTION_ACKNOWLEDGEMENT_KEYS = frozenset(
+    {"allow_cameras", "allow_real_robot"}
+)
 
 
 @dataclass(frozen=True)
@@ -99,11 +103,18 @@ class PipelineSequenceJobSpec:
     resources: list[str]
     parameters: dict[str, Any]
     plan: PipelineSequencePlan
+    execution_environment: dict[str, str] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["plan"] = self.plan.to_dict()
-        return data
+        return {
+            "sequence_id": self.sequence_id,
+            "sequence_label": self.sequence_label,
+            "run_root": self.run_root,
+            "command": list(self.command),
+            "resources": list(self.resources),
+            "parameters": dict(self.parameters),
+            "plan": sequence_plan_without_acknowledgements(self.plan).to_dict(),
+        }
 
 
 def _stringify_path(value: str | Path) -> str:
@@ -221,6 +232,109 @@ def _normalize_sequence_option_groups(
     return normalized
 
 
+def _without_execution_acknowledgements(
+    options: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Remove one-shot motion/camera approvals from a reusable plan request."""
+
+    sanitized: dict[str, Any] = {}
+    for group, value in dict(options or {}).items():
+        if isinstance(value, Mapping):
+            sanitized[group] = {
+                key: item
+                for key, item in value.items()
+                if key not in EXECUTION_ACKNOWLEDGEMENT_KEYS
+            }
+        else:
+            sanitized[group] = value
+    return sanitized
+
+
+def _execution_acknowledgements_only(
+    options: Mapping[str, Any] | None,
+) -> dict[str, dict[str, bool]]:
+    acknowledgements: dict[str, dict[str, bool]] = {}
+    for group, value in dict(options or {}).items():
+        if not isinstance(value, Mapping):
+            continue
+        selected = {
+            key: True
+            for key, item in value.items()
+            if key in EXECUTION_ACKNOWLEDGEMENT_KEYS and item is True
+        }
+        if selected:
+            acknowledgements[str(group)] = selected
+    return acknowledgements
+
+
+def validate_sequence_execution_options(
+    *,
+    sequence_id: str,
+    options: Mapping[str, Any] | None,
+) -> None:
+    """Require literal booleans for each one-shot real-capture gate."""
+
+    if sequence_id != "real_full_capture_validation":
+        return
+    provided = dict(options or {})
+    required = {
+        "capture_plan_preflight": ("allow_real_robot",),
+        "capture_execution_plan": ("allow_cameras", "allow_real_robot"),
+        "capture_execution": ("allow_cameras", "allow_real_robot"),
+    }
+    missing = []
+    for group, names in required.items():
+        values = provided.get(group)
+        if not isinstance(values, Mapping):
+            missing.extend(f"{group}.{name}" for name in names)
+            continue
+        missing.extend(
+            f"{group}.{name}" for name in names if values.get(name) is not True
+        )
+    if missing:
+        raise ValueError(
+            "Real capture sequence execution requires fresh literal-true "
+            "per-step acknowledgements: " + ", ".join(missing) + "."
+        )
+
+
+def sequence_plan_without_acknowledgements(
+    plan: PipelineSequencePlan,
+) -> PipelineSequencePlan:
+    """Return reusable evidence with one-shot gates removed from options/commands."""
+
+    steps = []
+    for step in plan.steps:
+        steps.append(
+            PipelineSequenceStepPlan(
+                id=step.id,
+                stage_id=step.stage_id,
+                stage_label=step.stage_label,
+                depends_on=list(step.depends_on),
+                command=[
+                    item
+                    for item in step.command
+                    if item not in {"--allow-cameras", "--allow-real-robot"}
+                ],
+                resources=list(step.resources),
+                options={
+                    key: value
+                    for key, value in step.options.items()
+                    if key not in EXECUTION_ACKNOWLEDGEMENT_KEYS
+                },
+            )
+        )
+    return PipelineSequencePlan(
+        schema_version=plan.schema_version,
+        sequence_id=plan.sequence_id,
+        sequence_label=plan.sequence_label,
+        run_root=plan.run_root,
+        plan_only=plan.plan_only,
+        steps=steps,
+        resources=list(plan.resources),
+    )
+
+
 def _resolve_option_placeholders(value: Any, *, run_root: str) -> Any:
     if isinstance(value, str):
         return value.replace("{run_root}", run_root)
@@ -272,7 +386,10 @@ def build_sequence_plan(
         raise ValueError("Pipeline sequence run_root must not be empty")
 
     ordered_steps = _topological_steps(sequence, stage_registry=stage_specs)
-    sequence_options = _normalize_sequence_option_groups(sequence, options)
+    effective_options = (
+        _without_execution_acknowledgements(options) if plan_only else options
+    )
+    sequence_options = _normalize_sequence_option_groups(sequence, effective_options)
     step_plans: list[PipelineSequenceStepPlan] = []
     resource_set: set[str] = set()
 
@@ -314,7 +431,10 @@ def write_sequence_plan(
     filename: str = PIPELINE_SEQUENCE_PLAN,
 ) -> Path:
     path = Path(run_root) / filename
-    return atomic_write_json(path, plan.to_dict())
+    return atomic_write_json(
+        path,
+        sequence_plan_without_acknowledgements(plan).to_dict(),
+    )
 
 
 def execute_sequence_plan(
@@ -322,6 +442,7 @@ def execute_sequence_plan(
     *,
     cwd: str | Path | None = None,
 ) -> list[subprocess.CompletedProcess]:
+    validate_sequence_execution_plan(plan)
     completed = set()
     results: list[subprocess.CompletedProcess] = []
     for step in plan.steps:
@@ -337,6 +458,28 @@ def execute_sequence_plan(
     return results
 
 
+def validate_sequence_execution_plan(
+    plan: PipelineSequencePlan,
+) -> None:
+    if plan.sequence_id != "real_full_capture_validation":
+        return
+    required = {
+        "capture_plan_preflight": ("allow_real_robot",),
+        "capture_execution_plan": ("allow_cameras", "allow_real_robot"),
+        "capture_execution": ("allow_cameras", "allow_real_robot"),
+    }
+    missing: list[str] = []
+    for step in plan.steps:
+        for acknowledgement in required.get(step.id, ()):
+            if step.options.get(acknowledgement) is not True:
+                missing.append(f"{step.id}.{acknowledgement}")
+    if missing:
+        raise ValueError(
+            "Real capture sequence execution requires fresh per-step "
+            "acknowledgements: " + ", ".join(missing) + "."
+        )
+
+
 def build_sequence_job(
     *,
     sequence_id: str,
@@ -346,15 +489,28 @@ def build_sequence_job(
     sequence_registry: Mapping[str, PipelineSequenceSpec] | None = None,
     stage_registry: Mapping[str, PipelineStageSpec] | None = None,
 ) -> PipelineSequenceJobSpec:
+    if not plan_only:
+        validate_sequence_execution_options(
+            sequence_id=sequence_id,
+            options=options,
+        )
+    effective_options = (
+        _without_execution_acknowledgements(options)
+        if plan_only
+        else dict(options or {})
+    )
     plan = build_sequence_plan(
         sequence_id=sequence_id,
         run_root=run_root,
-        options=options,
+        options=effective_options,
         plan_only=plan_only,
         sequence_registry=sequence_registry,
         stage_registry=stage_registry,
     )
-    options_json = json.dumps(dict(options or {}), sort_keys=True)
+    if not plan_only:
+        validate_sequence_execution_plan(plan)
+    persisted_options = _without_execution_acknowledgements(effective_options)
+    options_json = json.dumps(persisted_options, sort_keys=True)
     command = [
         "uv",
         "run",
@@ -369,6 +525,7 @@ def build_sequence_job(
     if plan_only:
         command.append("--plan-only")
     job_resources = ["disk_io"] if plan_only else list(plan.resources)
+    evidence_plan = sequence_plan_without_acknowledgements(plan)
     parameters = {
         "pipeline_sequence": plan.sequence_id,
         "sequence_label": plan.sequence_label,
@@ -376,8 +533,9 @@ def build_sequence_job(
         "plan_only": plan_only,
         "locked_resources": list(job_resources),
         "planned_resources": list(plan.resources),
-        "options": dict(options or {}),
-        "steps": [step.to_dict() for step in plan.steps],
+        "options": persisted_options,
+        "steps": [step.to_dict() for step in evidence_plan.steps],
+        "execution_acknowledgements": "validated_ephemeral",
     }
     return PipelineSequenceJobSpec(
         sequence_id=plan.sequence_id,
@@ -387,6 +545,16 @@ def build_sequence_job(
         resources=job_resources,
         parameters=parameters,
         plan=plan,
+        execution_environment=(
+            {
+                SEQUENCE_EXECUTION_ACK_ENV: json.dumps(
+                    _execution_acknowledgements_only(effective_options),
+                    sort_keys=True,
+                )
+            }
+            if not plan_only and sequence_id == "real_full_capture_validation"
+            else {}
+        ),
     )
 
 
@@ -422,15 +590,12 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 id="capture_plan_preflight",
                 stage_id="capture_plan_preflight",
                 depends_on=("capture_plan",),
-                options={"allow_real_robot": True},
             ),
             PipelineSequenceStepSpec(
                 id="capture_execution_plan",
                 stage_id="capture_execution_plan",
                 depends_on=("capture_plan_preflight",),
                 options={
-                    "allow_cameras": True,
-                    "allow_real_robot": True,
                     "include_sensors": True,
                 },
             ),
@@ -439,11 +604,11 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 stage_id="capture_execution",
                 depends_on=("capture_execution_plan",),
                 options={
-                    "allow_cameras": True,
-                    "allow_real_robot": True,
                     "include_sensors": True,
-                    "timeout_s": 120.0,
-                    "startup_wait_s": 6.0,
+                    "timeout_s": 300.0,
+                    "startup_wait_s": 15.0,
+                    "receive_start_timeout_s": 120.0,
+                    "receive_idle_timeout_s": 60.0,
                 },
             ),
             PipelineSequenceStepSpec(

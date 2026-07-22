@@ -116,7 +116,7 @@ def test_manifest_frames_and_relative_deltas_match_java() -> None:
     assert "CALIBRATION_ORIENTATION_" not in java
     assert "robotinfo.setBase(TEMPLATE_BASE_PATH);" in java
     assert "templateBase = requiredFrame(TEMPLATE_BASE_PATH);" in java
-    assert "ENABLE_AFTER_OFFLINE_VALIDATION = false" in java
+    assert "ENABLE_AFTER_OFFLINE_VALIDATION = true" in java
     assert "Transformation.ofDeg(0, 0, 0," in java
     assert "linRel(offset," in java
     assert "calibrationCenter).setCartVelocity(cartVelocityMmS)" in java
@@ -177,6 +177,7 @@ def test_printable_checklist_has_one_signoff_row_per_taught_frame() -> None:
     assert "--allow-real-robot" in checklist
     assert "--allow-cameras" in checklist
     assert "UDP stop messages cannot interrupt active motion" in checklist
+    assert "requires a manual application restart" in checklist
     assert "at least 6/9 image-centroid coverage cells" in checklist
 
 

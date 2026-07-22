@@ -14,8 +14,17 @@ def send_start_message(
     capture_vel: float | None,
     protocol: str,
     run_id: str | None,
+    allow_real_robot: bool = False,
+    allow_cameras: bool = False,
 ) -> bool:
     """Send a capture-start message to the configured iiwa controller."""
+
+    if allow_real_robot is not True or allow_cameras is not True:
+        print(
+            "Starting the iiwa requires fresh --allow-real-robot and "
+            "--allow-cameras acknowledgements."
+        )
+        return False
 
     profile = robot_profile().with_overrides(
         robot_ip=ip_robot,
@@ -69,6 +78,16 @@ def main():
         help="Optional run identifier included with v1 commands.",
     )
     parser.add_argument(
+        "--allow-real-robot",
+        action="store_true",
+        help="Fresh acknowledgement that this invocation may start robot motion.",
+    )
+    parser.add_argument(
+        "--allow-cameras",
+        action="store_true",
+        help="Fresh acknowledgement that camera acquisition is authorized.",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose output",
@@ -94,6 +113,8 @@ def main():
         capture_vel=selected_profile.cartesian_velocity_m_s,
         protocol=args.protocol,
         run_id=args.run_id,
+        allow_real_robot=args.allow_real_robot,
+        allow_cameras=args.allow_cameras,
     )
 
     if success:

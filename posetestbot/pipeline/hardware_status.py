@@ -52,6 +52,8 @@ def _sensor_family_checks(sensor_status: Mapping[str, Any]) -> list[dict[str, An
         if not isinstance(family, Mapping):
             continue
         sensor_type = str(family.get("sensor_type", "unknown"))
+        connected_count = family.get("connected_count", 0)
+        capture_ready_count = family.get("capture_ready_count", connected_count)
         if family.get("error"):
             checks.append(
                 _check(
@@ -78,12 +80,13 @@ def _sensor_family_checks(sensor_status: Mapping[str, Any]) -> list[dict[str, An
                     f"sensor:{sensor_type}",
                     "warning",
                     (
-                        f"{family.get('display_name', sensor_type)} connected "
-                        f"{family.get('connected_count', 0)} / expected "
+                        f"{family.get('display_name', sensor_type)} capture-ready "
+                        f"{capture_ready_count} / expected "
                         f"{family.get('expected_count')}."
                     ),
                     details={
-                        "connected_count": family.get("connected_count"),
+                        "connected_count": connected_count,
+                        "capture_ready_count": capture_ready_count,
                         "expected_count": family.get("expected_count"),
                     },
                 )
@@ -95,10 +98,12 @@ def _sensor_family_checks(sensor_status: Mapping[str, Any]) -> list[dict[str, An
                 "ok",
                 (
                     f"{family.get('display_name', sensor_type)} status is ready "
-                    f"with {family.get('connected_count', 0)} connected device(s)."
+                    f"with {capture_ready_count} capture-ready device(s) "
+                    f"from {connected_count} detected record(s)."
                 ),
                 details={
-                    "connected_count": family.get("connected_count"),
+                    "connected_count": connected_count,
+                    "capture_ready_count": capture_ready_count,
                     "expected_count": family.get("expected_count"),
                 },
             )
@@ -206,6 +211,10 @@ def build_hardware_status_report(
                 ),
                 details={
                     "total_connected": sensors.get("total_connected"),
+                    "total_capture_ready": sensors.get(
+                        "total_capture_ready",
+                        sensors.get("total_connected"),
+                    ),
                     "all_expected_connected": sensors.get("all_expected_connected"),
                     "expected_counts_requested": expected_counts_requested,
                 },

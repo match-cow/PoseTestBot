@@ -29,7 +29,11 @@ from posetestbot.pipeline.rewrite_gate import (
     build_rewrite_status_report,
     build_gate_report,
 )
-from posetestbot.pipeline.run_config import create_run_config, write_run_config
+from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
+    create_run_config,
+    write_run_config,
+)
 
 
 def write_json(path: Path, value: object) -> None:
@@ -47,7 +51,9 @@ def populate_bop_export(
     (scene / DEPTH_DIR).mkdir()
     (scene / RGB_DIR / "000000.png").write_bytes(b"rgb")
     (scene / DEPTH_DIR / "000000.png").write_bytes(b"depth")
-    write_json(scene / "scene_camera.json", {"0": {"cam_K": [1, 0, 0, 0, 1, 0, 0, 0, 1]}})
+    write_json(
+        scene / "scene_camera.json", {"0": {"cam_K": [1, 0, 0, 0, 1, 0, 0, 0, 1]}}
+    )
     write_json(
         scene / "scene_gt.json",
         {
@@ -98,9 +104,7 @@ def populate_bop_export(
                     "calibration_profile_id": "profile-1",
                 }
             ],
-            "calibration_profiles": [
-                {"profile_id": "profile-1", "status": "valid"}
-            ],
+            "calibration_profiles": [{"profile_id": "profile-1", "status": "valid"}],
             "object_models": [
                 {
                     "object_name": "cube",
@@ -134,7 +138,9 @@ def test_bop_export_readiness_gate_blocks_missing_targets(tmp_path: Path) -> Non
     assert "bop_targets" in blockers
 
 
-def test_bop_export_readiness_accepts_consistent_objectless_dataset(tmp_path: Path) -> None:
+def test_bop_export_readiness_accepts_consistent_objectless_dataset(
+    tmp_path: Path,
+) -> None:
     run_root = tmp_path / "objectless-bop"
     populate_bop_export(run_root)
     bop = run_root / BOP_DIR
@@ -178,12 +184,14 @@ def test_bop_export_readiness_requires_matching_pose_template_instance_evidence(
         "template_uuid": template_uuid,
         "bundle_sha256": "a" * 64,
         "selection_sha256": selection_sha,
-        "instances": [{
-            "instance_uuid": instance_uuid,
-            "catalog_uuid": catalog_uuid,
-            "obj_id": 1,
-            "canonical_ply_sha256": "c" * 64,
-        }],
+        "instances": [
+            {
+                "instance_uuid": instance_uuid,
+                "catalog_uuid": catalog_uuid,
+                "obj_id": 1,
+                "canonical_ply_sha256": "c" * 64,
+            }
+        ],
     }
     write_json(run_root / "object_instances.json", object_instances)
     pose_sidecar = {
@@ -198,28 +206,37 @@ def test_bop_export_readiness_requires_matching_pose_template_instance_evidence(
         run_root / BOP_DIR / "posetestbot_instance_map.json",
         {
             "schema_version": "posetestbot_bop_instance_map.v1",
-            "instances": [{
-                "scene_id": 1,
-                "im_id": 0,
-                "gt_id": 0,
-                "obj_id": 1,
-                "instance_uuid": instance_uuid,
-                "catalog_uuid": catalog_uuid,
-            }],
+            "instances": [
+                {
+                    "scene_id": 1,
+                    "im_id": 0,
+                    "gt_id": 0,
+                    "obj_id": 1,
+                    "instance_uuid": instance_uuid,
+                    "catalog_uuid": catalog_uuid,
+                }
+            ],
         },
     )
     write_json(
-        run_root / "processed" / "synchronized" / "realsense_123" / "blenderproc"
-        / "output" / "posetestbot_render_instances.json",
+        run_root
+        / "processed"
+        / "synchronized"
+        / "realsense_123"
+        / "blenderproc"
+        / "output"
+        / "posetestbot_render_instances.json",
         {
             "schema_version": "posetestbot_render_instances.v1",
             "blenderproc_version": "2.8.0",
             "identity_contract": "bop_gt_index_matches_loaded_instance_order.v1",
-            "instances": [{
-                "instance_uuid": instance_uuid,
-                "catalog_uuid": catalog_uuid,
-                "obj_id": 1,
-            }],
+            "instances": [
+                {
+                    "instance_uuid": instance_uuid,
+                    "catalog_uuid": catalog_uuid,
+                    "obj_id": 1,
+                }
+            ],
         },
     )
     models_info = json.loads(
@@ -229,14 +246,16 @@ def test_bop_export_readiness_requires_matching_pose_template_instance_evidence(
     write_json(run_root / BOP_DIR / "models" / "models_info.json", models_info)
     manifest_path = run_root / BOP_DIR / BOP_EXPORT_MANIFEST
     manifest = json.loads(manifest_path.read_text())
-    manifest.update({
-        "schema_version": "bop_export_manifest.v3",
-        "dataset_mode": "pose_template",
-        "pose_template": {
-            "template_uuid": template_uuid,
-            "bundle_sha256": "a" * 64,
-        },
-    })
+    manifest.update(
+        {
+            "schema_version": "bop_export_manifest.v3",
+            "dataset_mode": "pose_template",
+            "pose_template": {
+                "template_uuid": template_uuid,
+                "bundle_sha256": "a" * 64,
+            },
+        }
+    )
     write_json(manifest_path, manifest)
 
     report = build_bop_export_readiness_gate_report(run_root)
@@ -248,7 +267,9 @@ def test_bop_export_readiness_requires_matching_pose_template_instance_evidence(
     instance_map = json.loads(
         (run_root / BOP_DIR / "posetestbot_instance_map.json").read_text()
     )
-    instance_map["instances"][0]["instance_uuid"] = "44444444-4444-4444-8444-444444444444"
+    instance_map["instances"][0]["instance_uuid"] = (
+        "44444444-4444-4444-8444-444444444444"
+    )
     write_json(run_root / BOP_DIR / "posetestbot_instance_map.json", instance_map)
     blocked = build_bop_export_readiness_gate_report(run_root)
     assert blocked["overall_status"] == "blocked"
@@ -256,6 +277,20 @@ def test_bop_export_readiness_requires_matching_pose_template_instance_evidence(
 
 def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> None:
     run_root = tmp_path / "calibration-run"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "123",
+                    "Wrist RealSense",
+                    mounting_mode="eye_in_hand",
+                ),
+            ),
+        ),
+    )
     write_json(
         run_root / CALIBRATION_VALIDATION_REPORT,
         {
@@ -279,8 +314,9 @@ def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> No
             "profiles": [
                 {
                     "profile_id": "profile-1",
-                    "sensor_id": "realsense_123",
+                    "sensor_id": "123",
                     "sensor_type": "realsense_d435",
+                    "mounting_mode": "eye_in_hand",
                     "status": "valid",
                     "quality": {
                         "num_inliers": 8,
@@ -298,8 +334,25 @@ def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> No
     assert report["overall_status"] == "ready"
 
 
-def test_calibration_validation_gate_allows_preserved_valid_profiles(tmp_path: Path) -> None:
+def test_calibration_validation_gate_allows_preserved_valid_profiles(
+    tmp_path: Path,
+) -> None:
     run_root = tmp_path / "calibration-merged-run"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=tuple(
+                SensorRunConfig(
+                    "realsense_d435",
+                    profile_id,
+                    profile_id,
+                    mounting_mode="eye_in_hand",
+                )
+                for profile_id in ("profile-existing", "profile-new")
+            ),
+        ),
+    )
     write_json(
         run_root / CALIBRATION_VALIDATION_REPORT,
         {
@@ -324,6 +377,7 @@ def test_calibration_validation_gate_allows_preserved_valid_profiles(tmp_path: P
                 "profile_id": profile_id,
                 "sensor_id": profile_id,
                 "sensor_type": "realsense_d435",
+                "mounting_mode": "eye_in_hand",
                 "status": "valid",
                 "quality": {
                     "num_inliers": 8,
@@ -340,6 +394,203 @@ def test_calibration_validation_gate_allows_preserved_valid_profiles(tmp_path: P
     report = build_calibration_validation_gate_report(run_root)
 
     assert report["overall_status"] == "ready"
+
+
+def test_calibration_validation_gate_blocks_partial_enabled_sensor_coverage(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "partial-calibration-run"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig("realsense_d435", "1", "First"),
+                SensorRunConfig("realsense_d435", "2", "Second"),
+            ),
+        ),
+    )
+    write_json(
+        run_root / CALIBRATION_VALIDATION_REPORT,
+        {
+            "overall_status": "ok",
+            "profile_count": 1,
+            "promotable_profile_count": 1,
+            "promotion": {
+                "requested": True,
+                "promoted": True,
+                "profile_count": 1,
+                "promoted_profile_ids": ["profile-1"],
+                "path": CALIBRATION_PROFILES,
+            },
+        },
+    )
+    write_json(
+        run_root / CALIBRATION_PROFILES,
+        {
+            "profiles": [
+                {
+                    "profile_id": "profile-1",
+                    "sensor_id": "1",
+                    "sensor_type": "realsense_d435",
+                    "mounting_mode": "eye_in_hand",
+                    "status": "valid",
+                    "quality": {
+                        "num_inliers": 8,
+                        "residual_translation_mm": 1.0,
+                        "residual_rotation_deg": 0.5,
+                    },
+                }
+            ]
+        },
+    )
+
+    report = build_calibration_validation_gate_report(run_root)
+
+    coverage = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "calibration_profile_sensor_coverage"
+    )
+    assert report["overall_status"] == "blocked"
+    assert coverage["status"] == "blocked"
+    assert coverage["details"]["enabled_sensor_count"] == 2
+    assert coverage["details"]["covered_sensor_count"] == 1
+
+
+def test_calibration_validation_gate_ignores_disabled_sensor_coverage(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "disabled-calibration-run"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig("realsense_d435", "1", "First"),
+                SensorRunConfig("realsense_d435", "2", "Offline", enabled=False),
+            ),
+        ),
+    )
+    write_json(
+        run_root / CALIBRATION_VALIDATION_REPORT,
+        {
+            "overall_status": "ok",
+            "profile_count": 1,
+            "promotable_profile_count": 1,
+            "promotion": {
+                "requested": True,
+                "promoted": True,
+                "profile_count": 1,
+                "promoted_profile_ids": ["profile-1"],
+                "path": CALIBRATION_PROFILES,
+            },
+        },
+    )
+    write_json(
+        run_root / CALIBRATION_PROFILES,
+        {
+            "profiles": [
+                {
+                    "profile_id": "profile-1",
+                    "sensor_id": "1",
+                    "sensor_type": "realsense_d435",
+                    "mounting_mode": "eye_in_hand",
+                    "status": "valid",
+                    "quality": {
+                        "num_inliers": 8,
+                        "residual_translation_mm": 1.0,
+                        "residual_rotation_deg": 0.5,
+                    },
+                }
+            ]
+        },
+    )
+
+    report = build_calibration_validation_gate_report(run_root)
+
+    coverage = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "calibration_profile_sensor_coverage"
+    )
+    assert report["overall_status"] == "ready"
+    assert coverage["status"] == "ready"
+    assert coverage["details"]["enabled_sensor_count"] == 1
+
+
+def test_calibration_validation_gate_ignores_invalid_disabled_sensor_profile(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "disabled-invalid-profile-run"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig("realsense_d435", "1", "Enabled"),
+                SensorRunConfig("realsense_d435", "2", "Disabled", enabled=False),
+            ),
+        ),
+    )
+    write_json(
+        run_root / CALIBRATION_VALIDATION_REPORT,
+        {
+            "overall_status": "ok",
+            "profile_count": 1,
+            "promotable_profile_count": 1,
+            "promotion": {
+                "requested": True,
+                "promoted": True,
+                "profile_count": 2,
+                "promoted_profile_ids": ["profile-enabled"],
+                "path": CALIBRATION_PROFILES,
+            },
+        },
+    )
+    write_json(
+        run_root / CALIBRATION_PROFILES,
+        {
+            "profiles": [
+                {
+                    "profile_id": "profile-enabled",
+                    "sensor_id": "1",
+                    "sensor_type": "realsense_d435",
+                    "mounting_mode": "eye_in_hand",
+                    "status": "valid",
+                    "quality": {
+                        "num_inliers": 8,
+                        "residual_translation_mm": 1.0,
+                        "residual_rotation_deg": 0.5,
+                    },
+                },
+                {
+                    "profile_id": "profile-disabled-needs-validation",
+                    "sensor_id": "2",
+                    "sensor_type": "realsense_d435",
+                    "mounting_mode": "eye_in_hand",
+                    "status": "needs_validation",
+                    "quality": {
+                        "num_inliers": 0,
+                        "residual_translation_mm": None,
+                        "residual_rotation_deg": None,
+                    },
+                },
+            ]
+        },
+    )
+
+    report = build_calibration_validation_gate_report(run_root)
+
+    collection = next(
+        check for check in report["checks"] if check["name"] == "calibration_profiles"
+    )
+    assert report["overall_status"] == "ready"
+    assert collection["status"] == "ready"
+    assert collection["details"]["validated_profile_ids"] == ["profile-enabled"]
+    assert collection["details"]["ignored_disabled_profile_ids"] == [
+        "profile-disabled-needs-validation"
+    ]
 
 
 def test_rewrite_status_uses_three_real_data_gate_ids(tmp_path: Path) -> None:
@@ -395,7 +646,11 @@ def test_full_capture_gate_checks_real_hardware_snapshot(tmp_path: Path) -> None
     write_run_config(run_root, config)
     write_json(
         run_root / RUN_PREFLIGHT_REPORT,
-        {"schema_version": "run_preflight.v1", "overall_status": "ok", "config": config.to_dict()},
+        {
+            "schema_version": "run_preflight.v1",
+            "overall_status": "ok",
+            "config": config.to_dict(),
+        },
     )
     write_json(
         run_root / HARDWARE_STATUS_REPORT,
@@ -410,7 +665,9 @@ def test_full_capture_gate_checks_real_hardware_snapshot(tmp_path: Path) -> None
 
     report = build_full_capture_gate_report(run_root)
 
-    hardware = next(check for check in report["checks"] if check["name"] == "hardware_status")
+    hardware = next(
+        check for check in report["checks"] if check["name"] == "hardware_status"
+    )
     assert report["gate_id"] == FULL_CAPTURE_GATE_ID
     assert hardware["status"] == "blocked"
     assert hardware["details"]["robot_mode_ok"] is False

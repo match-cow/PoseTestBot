@@ -39,6 +39,7 @@ BOOLEAN_FIELDS = {
     "promote",
     "require_valid",
 }
+EXECUTION_ACKNOWLEDGEMENT_FIELDS = {"allow_cameras", "allow_real_robot"}
 RUN_PATH_FIELDS = {"candidates", "observations", "profiles", "run_config"}
 OUTPUT_PATH_FIELDS = {"output_profiles"}
 INPUT_PATH_FIELDS = {
@@ -155,6 +156,9 @@ def _normalize_stage_options(
 ) -> dict[str, Any]:
     stage = get_pipeline_stage(stage_id)
     normalized = dict(options)
+    for name in EXECUTION_ACKNOWLEDGEMENT_FIELDS & normalized.keys():
+        if not isinstance(normalized[name], bool):
+            raise ValueError(f"{name} must be a literal JSON boolean")
     for parameter in stage.parameters:
         if parameter.kind != "path" or parameter.name not in normalized:
             continue
@@ -206,7 +210,10 @@ def _normalize_pipeline_payload(data: dict[str, Any], run_root: Path) -> None:
 
 
 def _normalize_json_payload(data: dict[str, Any]) -> None:
-    for key in BOOLEAN_FIELDS & data.keys():
+    for key in EXECUTION_ACKNOWLEDGEMENT_FIELDS & data.keys():
+        if not isinstance(data[key], bool):
+            raise ValueError(f"{key} must be a literal JSON boolean")
+    for key in (BOOLEAN_FIELDS - EXECUTION_ACKNOWLEDGEMENT_FIELDS) & data.keys():
         data[key] = parse_strict_bool(data[key], name=key)
     raw_run_root = data.get("run_root")
     if raw_run_root is None:

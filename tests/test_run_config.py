@@ -45,6 +45,7 @@ def test_default_run_config_uses_real_robot_and_lab_sensors(tmp_path: Path) -> N
     assert [sensor["sensor_type"] for sensor in sensors].count("realsense_d435") == 3
     assert [sensor["sensor_type"] for sensor in sensors].count("oak_d_pro") == 1
     assert [sensor["sensor_type"] for sensor in sensors].count("zed_2i") == 1
+    assert all(sensor["enabled"] is True for sensor in sensors)
     assert all(sensor["inverted"] is False for sensor in sensors)
 
     plan = sequence_plan_from_run_config(data)
@@ -82,6 +83,34 @@ def test_sensor_config_accepts_realsense_inverted_orientation() -> None:
     assert token_sensor.inverted is True
     assert mapping_sensor.device_id == "456"
     assert mapping_sensor.inverted is True
+
+
+def test_sensor_config_preserves_literal_disabled_flag() -> None:
+    sensor = sensor_config_from_mapping(
+        {
+            "sensor_type": "realsense",
+            "device_id": "456",
+            "mounting_mode": "eye_in_hand",
+            "display_name": "Wrist RealSense",
+            "enabled": False,
+        }
+    )
+
+    assert sensor.enabled is False
+
+
+@pytest.mark.parametrize("enabled", ["false", "true", 0, 1, None])
+def test_sensor_config_rejects_non_literal_enabled_values(enabled: object) -> None:
+    with pytest.raises(ValueError, match="literal JSON boolean"):
+        sensor_config_from_mapping(
+            {
+                "sensor_type": "realsense",
+                "device_id": "456",
+                "mounting_mode": "eye_in_hand",
+                "display_name": "Wrist RealSense",
+                "enabled": enabled,
+            }
+        )
 
 
 def test_sensor_configs_from_status_uses_alias_defaults() -> None:
@@ -159,6 +188,21 @@ def test_run_config_loads_from_run_root_and_builds_sequence_job(
     assert job.parameters["options"] == {"aruco": {"save_images": True}}
 
 
+def test_run_config_rejects_persisted_execution_acknowledgements(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="must not persist execution gate"):
+        create_run_config(
+            run_root=tmp_path / "unsafe-reusable-config",
+            sequence_options={
+                "capture_execution": {
+                    "allow_cameras": True,
+                    "allow_real_robot": True,
+                }
+            },
+        )
+
+
 def test_run_config_v1_remains_loadable_and_v2_pose_template_avoids_legacy_flags(
     tmp_path: Path,
 ) -> None:
@@ -185,6 +229,21 @@ def test_run_config_v1_remains_loadable_and_v2_pose_template_avoids_legacy_flags
         step = next(item for item in plan.steps if item.stage_id == stage_id)
         assert step.options.get("objectless") is not True
         assert "object_name" not in step.options
+
+
+def test_legacy_run_config_defaults_missing_sensor_enabled_to_true(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "legacy-enabled"
+    value = create_run_config(run_root=run_root).to_dict()
+    for sensor in value["capture"]["sensors"]:
+        sensor.pop("enabled")
+    run_root.mkdir()
+    (run_root / RUN_CONFIG).write_text(json.dumps(value))
+
+    loaded = load_run_config_for_run_root(run_root)
+
+    assert all(sensor["enabled"] is True for sensor in loaded["capture"]["sensors"])
 
 
 def test_run_config_calibration_profiles_flow_to_calibrated_sequence(
@@ -290,8 +349,8 @@ def test_create_run_config_cli_writes_real_full_capture_validation_plan(
     assert config["pipeline"]["plan_only"] is True
     assert '"sequence_id": "real_full_capture_validation"' in result.stdout
     assert "scripts/run_capture_execution_stage.py" in result.stdout
-    assert "--allow-cameras" in result.stdout
-    assert "--allow-real-robot" in result.stdout
+    assert "--allow-cameras" not in result.stdout
+    assert "--allow-real-robot" not in result.stdout
     assert "scripts/run_rewrite_gate.py" in result.stdout
     assert "rewrite_full_capture.v1" in result.stdout
 

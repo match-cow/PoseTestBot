@@ -53,16 +53,22 @@ def validate_prepared_folder(sensor_folder: Path, subdir: str) -> tuple[Path, in
         camera_matrix = np.load(blenderproc_folder / "camera_matrix.npy")
         camera_poses = np.load(blenderproc_folder / "camera_poses.npy")
     except (OSError, ValueError) as exc:
-        raise ValueError(f"Invalid prepared arrays in {blenderproc_folder}: {exc}") from exc
+        raise ValueError(
+            f"Invalid prepared arrays in {blenderproc_folder}: {exc}"
+        ) from exc
     if camera_matrix.shape != (3, 3) or not np.all(np.isfinite(camera_matrix)):
-        raise ValueError(f"camera_matrix.npy must be a finite 3x3 array: {blenderproc_folder}")
+        raise ValueError(
+            f"camera_matrix.npy must be a finite 3x3 array: {blenderproc_folder}"
+        )
     if (
         camera_poses.ndim != 3
         or camera_poses.shape[0] < 1
         or camera_poses.shape[1:] != (4, 4)
         or not np.all(np.isfinite(camera_poses))
     ):
-        raise ValueError(f"camera_poses.npy must be a non-empty finite Nx4x4 array: {blenderproc_folder}")
+        raise ValueError(
+            f"camera_poses.npy must be a non-empty finite Nx4x4 array: {blenderproc_folder}"
+        )
     return blenderproc_folder, int(camera_poses.shape[0])
 
 
@@ -72,6 +78,7 @@ def discover_render_jobs(
     render_script: str | Path,
     subdir: str,
     blenderproc_executable: str,
+    sensor_names: Sequence[str] | None = None,
 ) -> list[RenderJob]:
     input_path = Path(input_folder)
     script_path = Path(render_script)
@@ -82,9 +89,12 @@ def discover_render_jobs(
         raise FileNotFoundError(f"BlenderProc render script not found: {script_path}")
     if not blenderproc_executable.strip():
         raise ValueError("BlenderProc executable cannot be empty")
+    selected_names = set(sensor_names) if sensor_names is not None else None
     jobs = []
     for sensor_folder in sorted(input_path.iterdir()):
         if not sensor_folder.is_dir() or sensor_folder.name.startswith("."):
+            continue
+        if selected_names is not None and sensor_folder.name not in selected_names:
             continue
         prepared, frame_count = validate_prepared_folder(sensor_folder, subdir)
         camera_poses = prepared / "camera_poses.npy"
@@ -108,7 +118,9 @@ def discover_render_jobs(
             )
         )
     if not jobs:
-        raise FileNotFoundError(f"No prepared BlenderProc sensor folders in {input_path}")
+        raise FileNotFoundError(
+            f"No prepared BlenderProc sensor folders in {input_path}"
+        )
     return jobs
 
 
@@ -149,7 +161,9 @@ def validate_render_output(output: str | Path, *, expected_frame_count: int) -> 
     expected_ids = {f"{index:06d}" for index in range(expected_frame_count)}
     for folder_name in (RGB_DIR, DEPTH_DIR):
         folder = scene / folder_name
-        actual = {path.stem for path in folder.glob("*.png")} if folder.is_dir() else set()
+        actual = (
+            {path.stem for path in folder.glob("*.png")} if folder.is_dir() else set()
+        )
         if actual != expected_ids:
             raise ValueError(
                 f"BlenderProc {folder_name} frame IDs do not match camera poses: "
@@ -171,15 +185,21 @@ def validate_render_output(output: str | Path, *, expected_frame_count: int) -> 
         annotations = scene_gt[str(image_id)]
         info = scene_gt_info[str(image_id)]
         if not isinstance(annotations, list) or not annotations:
-            raise ValueError(f"scene_gt.json frame {image_id} has no object annotations")
+            raise ValueError(
+                f"scene_gt.json frame {image_id} has no object annotations"
+            )
         if not isinstance(info, list) or len(info) != len(annotations):
-            raise ValueError(f"scene_gt_info.json frame {image_id} does not match scene_gt")
+            raise ValueError(
+                f"scene_gt_info.json frame {image_id} does not match scene_gt"
+            )
         expected_masks.update(
             f"{image_id:06d}_{index:06d}" for index in range(len(annotations))
         )
     for folder_name in ("mask", "mask_visib"):
         folder = scene / folder_name
-        actual = {path.stem for path in folder.glob("*.png")} if folder.is_dir() else set()
+        actual = (
+            {path.stem for path in folder.glob("*.png")} if folder.is_dir() else set()
+        )
         if actual != expected_masks:
             raise ValueError(
                 f"BlenderProc {folder_name} files do not match GT annotations: "
@@ -192,16 +212,29 @@ def validate_render_output(output: str | Path, *, expected_frame_count: int) -> 
         if prepared.get("schema_version") == "blenderproc_object_instances.v1":
             rendered = _read_json_mapping(instance_sidecar)
             if rendered.get("schema_version") != "posetestbot_render_instances.v1":
-                raise ValueError("Rendered instance identity sidecar has the wrong schema")
+                raise ValueError(
+                    "Rendered instance identity sidecar has the wrong schema"
+                )
             if rendered.get("instances") != prepared.get("instances"):
-                raise ValueError("Rendered instance identity does not match prepared objects")
+                raise ValueError(
+                    "Rendered instance identity does not match prepared objects"
+                )
             if rendered.get("blenderproc_version") != "2.8.0":
-                raise ValueError("Rendered pose-template GT was not produced by BlenderProc 2.8.0")
-            if rendered.get("identity_contract") != "bop_gt_index_matches_loaded_instance_order.v1":
-                raise ValueError("Rendered instance identity contract is missing or unsupported")
+                raise ValueError(
+                    "Rendered pose-template GT was not produced by BlenderProc 2.8.0"
+                )
+            if (
+                rendered.get("identity_contract")
+                != "bop_gt_index_matches_loaded_instance_order.v1"
+            ):
+                raise ValueError(
+                    "Rendered instance identity contract is missing or unsupported"
+                )
             frames = rendered.get("frames")
             if not isinstance(frames, Mapping) or set(frames) != expected_json_ids:
-                raise ValueError("Rendered instance identity does not cover every output frame")
+                raise ValueError(
+                    "Rendered instance identity does not cover every output frame"
+                )
 
 
 def _workspace_command(job: RenderJob, workspace: Path) -> list[str]:

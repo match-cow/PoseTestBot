@@ -97,3 +97,34 @@ def test_rectification_refuses_profile_orientation_mismatch(tmp_path: Path) -> N
         rectify_run(run_root, [profile])
 
     assert not (run_root / "processed" / "rectified").exists()
+
+
+def test_rectification_refuses_unavailable_forward_projection(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    _sensor, profile = rectification_fixture(run_root)
+    profile = {
+        **profile,
+        "native": {
+            **profile["native"],
+            "distortion_model": "inverse_brown_conrady",
+        },
+        "rectified": None,
+        "source": {
+            **profile["source"],
+            "opencv_projection_compatible": False,
+            "rectification_available": False,
+            "rectification_unavailable_reason": (
+                "sdk_distortion_model_is_not_forward_opencv_compatible"
+            ),
+        },
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="no OpenCV-compatible rectified projection",
+    ):
+        rectify_run(run_root, [profile])
+
+    assert not (run_root / "processed" / "rectified").exists()

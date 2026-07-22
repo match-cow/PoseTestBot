@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -41,6 +42,7 @@ from posetestbot.io.artifacts import (
     CALIBRATION_TARGET,
     CALIBRATION_VALIDATION_REPORT,
     DEPTH_DIR,
+    FRAME_METADATA_JSONL,
     RGB_DIR,
 )
 from posetestbot.pipeline.run_config import (
@@ -48,6 +50,9 @@ from posetestbot.pipeline.run_config import (
     load_run_config_for_run_root,
     sensor_configs_from_values,
     write_run_config_with_manifest,
+)
+from posetestbot.pipeline.rewrite_gate import (
+    build_calibration_validation_gate_report,
 )
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
@@ -71,6 +76,17 @@ def _write_capture_folder(path: Path) -> None:
         target = path / directory / "1000.png"
         target.parent.mkdir(parents=True, exist_ok=True)
         assert cv2.imwrite(target.as_posix(), image)
+    (path / FRAME_METADATA_JSONL).write_text(
+        json.dumps(
+            {
+                "frame_id": "1000.png",
+                "host_received_timestamp_ns": 1_000_000_000,
+                "sensor_timestamp_ns": 10_000_000_000,
+                "color_timestamp_domain": "global_time",
+            }
+        )
+        + "\n"
+    )
     write_legacy_camera_sidecars(
         path,
         CameraIntrinsics(
@@ -93,6 +109,9 @@ def _profile(
     candidate_id: str,
     translation: tuple[float, float, float],
     status: CalibrationStatus = CalibrationStatus.NEEDS_VALIDATION,
+    observation_count: int = 8,
+    inlier_count: int = 8,
+    outlier_ratio: float = 0.0,
 ) -> CalibrationProfile:
     intrinsics = CameraIntrinsics(
         cam_k=(600.0, 0.0, 4.0, 0.0, 600.0, 4.0, 0.0, 0.0, 1.0),
@@ -123,8 +142,8 @@ def _profile(
         method="attempt-test",
         status=status,
         quality=CalibrationQuality(
-            num_observations=8,
-            num_inliers=8,
+            num_observations=observation_count,
+            num_inliers=inlier_count,
             mean_reprojection_error_px=0.2,
             residual_translation_mm=0.5,
             residual_rotation_deg=0.25,
@@ -132,14 +151,145 @@ def _profile(
         metadata={
             "candidate_id": candidate_id,
             "sensor_key": f"{sensor_type.value}:{sensor_id}",
-            "outlier_count": 0,
+            "companion_transform": {
+                "from": "aruco_grid",
+                "to": (
+                    "template_base"
+                    if mounting_mode == MountingMode.EYE_IN_HAND
+                    else "robot_flange"
+                ),
+                "matrix": [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                "rotation_quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                "translation_mm": [0.0, 0.0, 0.0],
+            },
+            "outlier_count": observation_count - inlier_count,
+            "outlier_ratio": outlier_ratio,
         },
     )
 
 
+def _motion_balanced_candidate(
+    candidate_id: str,
+    *,
+    translation: tuple[float, float, float] = (10.0, 20.0, 30.0),
+) -> dict:
+    per_motion = {
+        f"clean_{index}": {
+            "observation_count": 1,
+            "inlier_count": 1,
+            "outlier_count": 0,
+            "outlier_ratio": 0.0,
+            "residuals": {},
+        }
+        for index in range(12)
+    }
+    per_motion.update(
+        {
+            f"sparse_bad_{index}": {
+                "observation_count": 3,
+                "inlier_count": 0,
+                "outlier_count": 3,
+                "outlier_ratio": 1.0,
+                "residuals": {},
+            }
+            for index in range(3)
+        }
+    )
+    balanced_ratio = 3 / 15
+    raw_ratio = 9 / 21
+    return {
+        "candidate_id": candidate_id,
+        "pnp_method": "IPPE",
+        "extrinsic_method": "park",
+        "status": "passing",
+        "primary_transform": {
+            "from": "camera",
+            "to": "robot_flange",
+            "matrix": [
+                [1.0, 0.0, 0.0, translation[0]],
+                [0.0, 1.0, 0.0, translation[1]],
+                [0.0, 0.0, 1.0, translation[2]],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            "rotation_quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+            "translation_mm": list(translation),
+        },
+        "companion_transform": {
+            "from": "aruco_grid",
+            "to": "template_base",
+            "matrix": [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            "rotation_quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+            "translation_mm": [0.0, 0.0, 0.0],
+        },
+        "observation_count": 21,
+        "inlier_count": 12,
+        "outlier_count": 9,
+        "outlier_ratio": balanced_ratio,
+        "raw_outlier_ratio": raw_ratio,
+        "full_input_validation": {
+            "per_motion": per_motion,
+            "motion_balanced_outlier_ratio": balanced_ratio,
+            "max_repeated_motion_outlier_ratio": 0.0,
+        },
+        "checks": [
+            {
+                "name": "outlier_ratio",
+                "status": "ok",
+                "actual": balanced_ratio,
+                "threshold": 0.25,
+            },
+            {
+                "name": "full_input_repeated_motion_outlier_ratio",
+                "status": "ok",
+                "actual": 0.0,
+                "threshold": 0.25,
+            },
+        ],
+    }
+
+
+def test_promotion_outlier_evidence_rejects_tampered_aggregate() -> None:
+    candidate_id = "realsense_d435:1|IPPE|park"
+    candidate = _motion_balanced_candidate(candidate_id)
+    candidate["full_input_validation"]["motion_balanced_outlier_ratio"] = 0.1
+    profile = _profile(
+        profile_id="tamper-check",
+        sensor_type=SensorType.REALSENSE_D435,
+        sensor_id="1",
+        mounting_mode=MountingMode.EYE_IN_HAND,
+        candidate_id=candidate_id,
+        translation=(10.0, 20.0, 30.0),
+        observation_count=21,
+        inlier_count=12,
+        outlier_ratio=3 / 15,
+    )
+
+    with pytest.raises(ValueError, match="inconsistent aggregate outlier evidence"):
+        attempt_module._promotion_outlier_evidence(
+            candidate,
+            profile,
+            candidate_id=candidate_id,
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper_mode",
+    [None, "candidate_profile_transform", "promotion_status_selection"],
+)
 def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected_camera(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    tamper_mode: str | None,
 ) -> None:
     run_root = tmp_path / "run"
     configured = sensor_configs_from_values(
@@ -170,6 +320,7 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
                 "0": {
                     "motion": "pose_0",
                     "framename": 1000,
+                    "host_wall_timestamp_ns": 10_000_000_000,
                     "pose": {
                         "X": 0.0,
                         "Y": 0.0,
@@ -207,7 +358,19 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         mounting_mode=MountingMode.EYE_IN_HAND,
         candidate_id=candidate_id,
         translation=(10.0, 20.0, 30.0),
+        observation_count=21,
+        inlier_count=12,
+        outlier_ratio=3 / 15,
     )
+    candidate = replace(
+        candidate,
+        intrinsics=replace(
+            candidate.intrinsics,
+            distortion_model="inverse_brown_conrady",
+            projection_source="realsense_sdk_color_stream",
+        ),
+    )
+    candidate_evidence = _motion_balanced_candidate(candidate_id)
     write_profile_collection([candidate], attempt_root / "candidate_profiles.json")
     intrinsic = factory_intrinsic_profile(run_root / "realsense_1")
     write_intrinsic_profile_collection(
@@ -219,21 +382,12 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         run_root / "intrinsic_calibration_profiles.json",
     )
     (attempt_root / CALIBRATION_OBSERVATIONS).write_text(
-        json.dumps({"schema_version": "calibration_observations.v1", "observations": []})
+        json.dumps(
+            {"schema_version": "calibration_observations.v1", "observations": []}
+        )
     )
     (attempt_root / "extrinsic_candidates.json").write_text(
-        json.dumps(
-            {
-                "candidates": [
-                    {
-                        "candidate_id": candidate_id,
-                        "pnp_method": "IPPE",
-                        "extrinsic_method": "park",
-                        "status": "passing",
-                    }
-                ]
-            }
-        )
+        json.dumps({"candidates": [candidate_evidence]})
     )
     (attempt_root / "checks.json").write_text(json.dumps({"checks": []}))
     (attempt_root / "ranking.json").write_text(
@@ -246,14 +400,7 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
                     {
                         "sensor_key": "realsense_d435:1",
                         "recommended_candidate_id": candidate_id,
-                        "candidates": [
-                            {
-                                "candidate_id": candidate_id,
-                                "pnp_method": "IPPE",
-                                "extrinsic_method": "park",
-                                "status": "passing",
-                            }
-                        ],
+                        "candidates": [candidate_evidence],
                     },
                     {
                         "sensor_key": "oak_d_pro:2",
@@ -284,17 +431,65 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         operator="test-operator",
     )
 
+    if tamper_mode == "candidate_profile_transform":
+        write_profile_collection(
+            [
+                replace(
+                    candidate,
+                    extrinsics=replace(
+                        candidate.extrinsics,
+                        translation_mm=(999.0, 20.0, 30.0),
+                    ),
+                )
+            ],
+            attempt_root / "candidate_profiles.json",
+        )
+        with pytest.raises(ValueError, match="ranked primary transform evidence"):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+    if tamper_mode == "promotion_status_selection":
+        promotion_status_path = attempt_root / "promotion.json"
+        promotion_status = json.loads(promotion_status_path.read_text())
+        promotion_status["selections"] = {
+            "realsense_d435:1": "realsense_d435:1|ITERATIVE|park"
+        }
+        promotion_status_path.write_text(json.dumps(promotion_status))
+        with pytest.raises(ValueError, match="selections are inconsistent"):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+
     result = promote_calibration_attempt(run_root, attempt_id)
 
     assert result["status"] == "promoted"
+    assert candidate_evidence["raw_outlier_ratio"] > 0.25
+    assert candidate_evidence["outlier_ratio"] <= 0.25
     profiles = load_profile_collection(run_root / CALIBRATION_PROFILES)
     assert {profile.profile_id for profile in profiles} == {
         "keep_oak_profile",
         "new_d435_profile",
     }
-    promoted = next(profile for profile in profiles if profile.profile_id == "new_d435_profile")
+    promoted = next(
+        profile for profile in profiles if profile.profile_id == "new_d435_profile"
+    )
     assert promoted.status == CalibrationStatus.VALID
     assert promoted.operator == "test-operator"
+    assert promoted.intrinsics.distortion_model == "inverse_brown_conrady"
+    assert promoted.rectified_intrinsics is not None
+    canonical = json.loads((run_root / CALIBRATION_PROFILES).read_text())
+    promoted_value = next(
+        item
+        for item in canonical["profiles"]
+        if item["profile_id"] == "new_d435_profile"
+    )
+    assert promoted_value["intrinsics"]["rectified"] is not None
     assert promoted.metadata["promotion_attempt_id"] == attempt_id
     assert promoted.metadata["promotion_solver_provenance"] == {
         "solver_policy": "auto_compare",
@@ -325,3 +520,7 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         CALIBRATION_VALIDATION_REPORT,
     ):
         assert (run_root / filename).is_file()
+    validation = json.loads((run_root / CALIBRATION_VALIDATION_REPORT).read_text())
+    assert validation["promotion"]["profile_count"] == 2
+    gate = build_calibration_validation_gate_report(run_root)
+    assert gate["overall_status"] == "ready"

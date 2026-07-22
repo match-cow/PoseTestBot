@@ -40,6 +40,7 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
+from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,7 +117,11 @@ def infer_run_root(sensor_folder: Path) -> Path:
     return sensor_folder.parent
 
 
-def target_sensor_folders(target: Path) -> list[Path]:
+def target_sensor_folders(
+    target: Path,
+    *,
+    run_root: Path | None = None,
+) -> list[Path]:
     if is_sensor_folder(target):
         return [target]
 
@@ -126,9 +131,18 @@ def target_sensor_folders(target: Path) -> list[Path]:
             f"Could not find synchronized sensor root: {synchronized_root}"
         )
 
-    folders = [folder for folder in sorted(synchronized_root.iterdir()) if is_sensor_folder(folder)]
+    folders = filter_enabled_sensor_folders(
+        run_root or target,
+        (
+            folder
+            for folder in sorted(synchronized_root.iterdir())
+            if is_sensor_folder(folder)
+        ),
+    )
     if not folders:
-        raise FileNotFoundError(f"No synchronized sensor folders found in {synchronized_root}")
+        raise FileNotFoundError(
+            f"No synchronized sensor folders found in {synchronized_root}"
+        )
     return folders
 
 
@@ -191,7 +205,9 @@ def run_aruco_stage(
             )
             != identity
         ]
-        write_intrinsic_profile_collection([*retained, intrinsic_profile], intrinsic_path)
+        write_intrinsic_profile_collection(
+            [*retained, intrinsic_profile], intrinsic_path
+        )
         estimate_sensor_poses(sensor_folder, detections, target, intrinsic_profile)
         if save_images or not quiet:
             draw_detection_images(
@@ -228,8 +244,11 @@ def run_aruco_stage(
 def main() -> None:
     args = parse_args()
     target = Path(args.target)
-    sensor_folders = target_sensor_folders(target)
-    run_root = Path(args.run_root) if args.run_root else infer_run_root(sensor_folders[0])
+    requested_run_root = Path(args.run_root) if args.run_root else None
+    sensor_folders = target_sensor_folders(target, run_root=requested_run_root)
+    run_root = (
+        Path(args.run_root) if args.run_root else infer_run_root(sensor_folders[0])
+    )
     quiet = not args.show
     target = (
         load_calibration_target_spec(args.calibration_target)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from importlib import metadata as importlib_metadata
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from posetestbot.sensors.oak_d_pro import depthai_version_supported
 from posetestbot.sensors.registry import SENSOR_ADAPTERS
 
 SCHEMA_VERSION = "sensor_status.v1"
+REALSENSE_MIN_USB_MAJOR = 3
 
 SENSOR_FAMILY_LABELS: Mapping[SensorType, str] = {
     sensor_type: adapter.display_name
@@ -58,6 +60,7 @@ class SensorFamilyStatus:
     sdk_requirement: str | None
     expected_count: int | None
     connected_count: int
+    capture_ready_count: int
     meets_expected: bool | None
     devices: list[SensorDeviceInfo]
     error: str | None = None
@@ -71,7 +74,12 @@ class SensorFamilyStatus:
         value = asdict(self)
         value["sensor_type"] = self.sensor_type.value
         value["devices"] = [
-            sensor_device_to_dict(device, aliases=aliases) for device in self.devices
+            sensor_device_to_dict(
+                device,
+                aliases=aliases,
+                sdk_available=self.sdk_available,
+            )
+            for device in self.devices
         ]
         value["diagnostics"] = list(self.diagnostics or [])
         return value
@@ -81,6 +89,7 @@ def sensor_device_to_dict(
     device: SensorDeviceInfo,
     *,
     aliases: Mapping[str, Mapping[str, object]] | None = None,
+    sdk_available: bool | None = None,
 ) -> dict:
     alias_record = alias_record_for_device(
         aliases or {},
@@ -89,6 +98,10 @@ def sensor_device_to_dict(
     )
     alias = str(alias_record.get("alias") or "").strip() or None
     effective_display_name = alias or device.display_name
+    capture_ready, capture_readiness_reason = _device_capture_readiness(
+        device,
+        sdk_available=sdk_available,
+    )
     data = {
         "sensor_type": device.sensor_type.value,
         "device_id": device.device_id,
@@ -96,6 +109,8 @@ def sensor_device_to_dict(
         "alias": alias,
         "effective_display_name": effective_display_name,
         "connected": device.connected,
+        "capture_ready": capture_ready,
+        "capture_readiness_reason": capture_readiness_reason,
         "live_rgb_preview_supported": SENSOR_ADAPTERS[
             device.sensor_type
         ].live_rgb_preview_supported,
@@ -108,6 +123,123 @@ def sensor_device_to_dict(
     return {
         **data,
     }
+
+
+def _device_capture_readiness(
+    device: SensorDeviceInfo,
+    *,
+    sdk_available: bool | None,
+) -> tuple[bool, str | None]:
+    """Return whether a discovery record can identify a capture SDK device.
+
+    RealSense USB descriptor discovery is intentionally retained when
+    librealsense cannot enumerate a camera.  Those records are useful physical
+    diagnostics, but they are not addressable by ``capture_realsense_720p.py``
+    and therefore must not satisfy capture-readiness checks.
+    """
+
+    if not device.connected:
+        return False, "disconnected"
+    if device.sensor_type != SensorType.REALSENSE_D435:
+        return True, None
+    if sdk_available is False:
+        return False, "sdk_unavailable"
+    if str(device.metadata.get("discovery") or "") == "lsusb_descriptor":
+        return False, "not_enumerated_by_sdk"
+    usb_major = realsense_usb_major_version(
+        device.metadata.get("usb_type_descriptor")
+    )
+    if usb_major is not None and usb_major < REALSENSE_MIN_USB_MAJOR:
+        return False, "usb_connection_below_superspeed"
+    return True, None
+
+
+def realsense_usb_major_version(value: object) -> int | None:
+    """Parse librealsense's numeric USB transport descriptor when available.
+
+    Older discovery fixtures and SDK builds may omit this metadata.  Missing or
+    unrecognized values intentionally return ``None`` so those records retain
+    their prior readiness behavior.
+    """
+
+    if value is None or isinstance(value, bool):
+        return None
+    match = re.fullmatch(
+        r"\s*(?:usb\s*)?(?P<major>\d+)(?:\.\d+)?\s*",
+        str(value),
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return int(match.group("major"))
+
+
+def _unready_device_details(
+    device: SensorDeviceInfo,
+    *,
+    reason: str | None,
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "device_id": device.device_id,
+        "reason": reason,
+        "discovery": device.metadata.get("discovery"),
+    }
+    usb_descriptor = device.metadata.get("usb_type_descriptor")
+    if usb_descriptor is not None and usb_descriptor != "":
+        details["usb_type_descriptor"] = usb_descriptor
+    usb_major = realsense_usb_major_version(usb_descriptor)
+    if usb_major is not None:
+        details["usb_major"] = usb_major
+    return details
+
+
+def _realsense_firmware_mismatches(
+    devices: list[SensorDeviceInfo],
+) -> list[dict[str, str]]:
+    mismatches: list[dict[str, str]] = []
+    for device in devices:
+        if device.sensor_type != SensorType.REALSENSE_D435:
+            continue
+        actual = str(device.metadata.get("firmware_version") or "").strip()
+        recommended = str(
+            device.metadata.get("recommended_firmware_version") or ""
+        ).strip()
+        relation = _numeric_version_relation(actual, recommended)
+        if relation in {"older", "newer"}:
+            mismatches.append(
+                {
+                    "device_id": device.device_id,
+                    "firmware_version": actual,
+                    "recommended_firmware_version": recommended,
+                    "relation": relation,
+                }
+            )
+    return mismatches
+
+
+def _numeric_version_relation(actual: str, recommended: str) -> str | None:
+    """Compare dotted numeric firmware versions without imposing an update policy."""
+
+    def components(value: str) -> tuple[int, ...] | None:
+        parts = value.split(".")
+        if not parts or any(not part.isdigit() for part in parts):
+            return None
+        return tuple(int(part) for part in parts)
+
+    actual_parts = components(actual)
+    recommended_parts = components(recommended)
+    if actual_parts is None or recommended_parts is None:
+        return None
+    width = max(len(actual_parts), len(recommended_parts))
+    actual_padded = actual_parts + (0,) * (width - len(actual_parts))
+    recommended_padded = recommended_parts + (0,) * (
+        width - len(recommended_parts)
+    )
+    if actual_padded < recommended_padded:
+        return "older"
+    if actual_padded > recommended_padded:
+        return "newer"
+    return "match"
 
 
 def sdk_module_available(module_name: str) -> bool:
@@ -134,6 +266,9 @@ def _sensor_family_diagnostics(
     sdk_requirement: str | None,
     expected_count: int | None,
     connected_count: int,
+    capture_ready_count: int,
+    unready_devices: list[dict],
+    firmware_mismatches: list[dict[str, str]],
     error: str | None,
 ) -> list[dict]:
     diagnostics: list[dict] = []
@@ -184,7 +319,67 @@ def _sensor_family_diagnostics(
                 ],
             }
         )
-    if expected_count is not None and connected_count < expected_count:
+    if firmware_mismatches:
+        diagnostics.append(
+            {
+                "code": "realsense_firmware_recommendation_mismatch",
+                "severity": "warning",
+                "message": (
+                    "One or more RealSense firmware versions differ from the "
+                    "troubleshooting recommendation reported by the installed "
+                    "librealsense SDK. This does not identify the cause of a USB "
+                    "transport failure."
+                ),
+                "devices": firmware_mismatches,
+                "hints": [
+                    "Treat the SDK value as compatibility evidence, not an automatic update instruction.",
+                    "Review the matching RealSense SDK release guidance under lab change control before any firmware maintenance.",
+                    "PoseTestBot does not flash or update camera firmware.",
+                ],
+            }
+        )
+    low_speed_devices = [
+        device
+        for device in unready_devices
+        if device.get("reason") == "usb_connection_below_superspeed"
+    ]
+    if low_speed_devices:
+        diagnostics.append(
+            {
+                "code": "realsense_usb_below_superspeed",
+                "severity": "error",
+                "message": (
+                    f"{len(low_speed_devices)} SDK-enumerated RealSense device(s) "
+                    "are connected below SuperSpeed; PoseTestBot capture requires "
+                    f"a USB major version of at least {REALSENSE_MIN_USB_MAJOR}."
+                ),
+                "devices": low_speed_devices,
+                "hints": [
+                    "Reseat or power-cycle only the affected USB connection without moving the calibrated camera mount.",
+                    "Use a known-good SuperSpeed cable and USB 3 port or adequately powered USB 3 hub; avoid overcommitting one USB controller.",
+                    "Rerun sensor status and require usb_type_descriptor 3.x or newer for every configured RealSense before capture.",
+                ],
+            }
+        )
+    if unready_devices:
+        diagnostics.append(
+            {
+                "code": "devices_not_capture_ready",
+                "severity": "warning",
+                "message": (
+                    f"Detected {connected_count} "
+                    f"{SENSOR_FAMILY_LABELS[sensor_type]} device record(s), but "
+                    f"only {capture_ready_count} are capture-ready."
+                ),
+                "devices": unready_devices,
+                "hints": [
+                    "USB-only descriptor records are diagnostic evidence and do not satisfy expected capture-ready counts.",
+                    "SDK-enumerated RealSense devices below SuperSpeed also do not satisfy capture-ready counts.",
+                    "Check camera power, USB topology, permissions, and SDK enumeration before capture.",
+                ],
+            }
+        )
+    if expected_count is not None and capture_ready_count < expected_count:
         hints = [
             "Verify the expected lab cameras are physically connected and powered.",
         ]
@@ -201,8 +396,9 @@ def _sensor_family_diagnostics(
                 "code": "expected_count_not_met",
                 "severity": "warning",
                 "message": (
-                    f"Connected {connected_count} of expected {expected_count} "
-                    f"{SENSOR_FAMILY_LABELS[sensor_type]} device(s)."
+                    f"Capture-ready {capture_ready_count} of expected "
+                    f"{expected_count} {SENSOR_FAMILY_LABELS[sensor_type]} "
+                    f"device(s); {connected_count} device record(s) were detected."
                 ),
                 "hints": hints,
             }
@@ -230,9 +426,20 @@ def collect_sensor_family_status(
         error = f"{type(exc).__name__}: {exc}"
 
     connected_count = len(devices)
+    readiness = [
+        _device_capture_readiness(device, sdk_available=sdk_available)
+        for device in devices
+    ]
+    capture_ready_count = sum(is_ready for is_ready, _reason in readiness)
+    unready_devices = [
+        _unready_device_details(device, reason=reason)
+        for device, (is_ready, reason) in zip(devices, readiness, strict=True)
+        if not is_ready
+    ]
+    firmware_mismatches = _realsense_firmware_mismatches(devices)
     meets_expected = None
     if expected_count is not None:
-        meets_expected = connected_count >= expected_count
+        meets_expected = capture_ready_count >= expected_count
     diagnostics = _sensor_family_diagnostics(
         sensor_type=sensor_type,
         sdk_module=sdk_module,
@@ -241,6 +448,9 @@ def collect_sensor_family_status(
         sdk_requirement=sdk_requirement,
         expected_count=expected_count,
         connected_count=connected_count,
+        capture_ready_count=capture_ready_count,
+        unready_devices=unready_devices,
+        firmware_mismatches=firmware_mismatches,
         error=error,
     )
 
@@ -253,6 +463,7 @@ def collect_sensor_family_status(
         sdk_requirement=sdk_requirement,
         expected_count=expected_count,
         connected_count=connected_count,
+        capture_ready_count=capture_ready_count,
         meets_expected=meets_expected,
         devices=devices,
         error=error,
@@ -289,6 +500,9 @@ def collect_sensor_status(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "families": families,
         "total_connected": sum(family["connected_count"] for family in families),
+        "total_capture_ready": sum(
+            family["capture_ready_count"] for family in families
+        ),
         "all_expected_connected": all(
             family["meets_expected"] is not False for family in families
         ),

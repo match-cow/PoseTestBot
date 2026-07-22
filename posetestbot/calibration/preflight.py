@@ -253,7 +253,7 @@ def build_calibration_preflight(
     sensors = [
         sensor
         for sensor in config["capture"]["sensors"]
-        if isinstance(sensor, Mapping) and bool(sensor.get("enabled", True))
+        if isinstance(sensor, Mapping) and sensor.get("enabled", True) is True
     ]
     if profiles:
         for sensor in sensors:

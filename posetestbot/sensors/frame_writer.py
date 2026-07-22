@@ -137,6 +137,22 @@ def write_legacy_camera_sidecars(
         cam_k_text += " ".join(
             str(float(value)) for value in intrinsics.distortion
         ) + "\n"
+    camera_payload: dict[str, Any] = {
+        "cam_K": cam_k,
+        "depth_scale": float(intrinsics.depth_scale_to_mm),
+    }
+    camera_data_payload: dict[str, Any] = {
+        "K": [[float(value) for value in row] for row in matrix_rows],
+        "resolution": [int(intrinsics.height), int(intrinsics.width)],
+    }
+    if intrinsics.distortion or intrinsics.projection_source is not None:
+        distortion_evidence = {
+            "distortion": [float(value) for value in intrinsics.distortion],
+            "distortion_model": intrinsics.distortion_model,
+            "projection_source": intrinsics.projection_source,
+        }
+        camera_payload.update(distortion_evidence)
+        camera_data_payload.update(distortion_evidence)
 
     created: list[Path] = []
     try:
@@ -149,10 +165,7 @@ def write_legacy_camera_sidecars(
         created.append(
             atomic_write_json(
                 camera_json_path,
-                {
-                    "cam_K": cam_k,
-                    "depth_scale": float(intrinsics.depth_scale_to_mm),
-                },
+                camera_payload,
                 indent=4,
                 sort_keys=False,
             )
@@ -160,10 +173,7 @@ def write_legacy_camera_sidecars(
         created.append(
             atomic_write_json(
                 camera_data_path,
-                {
-                    "K": [[float(value) for value in row] for row in matrix_rows],
-                    "resolution": [int(intrinsics.height), int(intrinsics.width)],
-                },
+                camera_data_payload,
                 indent=None,
                 sort_keys=False,
             )

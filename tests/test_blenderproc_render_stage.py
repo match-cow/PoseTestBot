@@ -15,6 +15,12 @@ from posetestbot.io.artifacts import (
     DATASET_MANIFEST,
     MASKS_DIR,
 )
+from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
+    create_run_config,
+    write_run_config,
+)
+
 
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -25,11 +31,7 @@ def write_json(path: Path, value: dict) -> None:
 def create_prepared_render_fixture(tmp_path: Path) -> tuple[Path, Path]:
     run_root = tmp_path / "run-1"
     bproc_folder = (
-        run_root
-        / "processed"
-        / "synchronized"
-        / "realsense_123"
-        / "blenderproc"
+        run_root / "processed" / "synchronized" / "realsense_123" / "blenderproc"
     )
     objects_folder = bproc_folder / "objects"
     objects_folder.mkdir(parents=True)
@@ -76,6 +78,56 @@ def test_blenderproc_render_stage_dry_run_writes_plan_and_manifest(
     )
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][BLENDERPROC_RENDER_PLAN] == BLENDERPROC_RENDER_PLAN
+
+
+def test_blenderproc_render_default_ignores_disabled_stale_sensor_folder(
+    tmp_path: Path,
+) -> None:
+    run_root, enabled_prepared = create_prepared_render_fixture(tmp_path)
+    synchronized = run_root / "processed" / "synchronized"
+    shutil.copytree(enabled_prepared, synchronized / "realsense_999" / "blenderproc")
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig("realsense_d435", "123", "Enabled"),
+                SensorRunConfig("realsense_d435", "999", "Disabled", enabled=False),
+            ),
+        ),
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    command = [
+        sys.executable,
+        str(repo_root / "scripts" / "run_blenderproc_render_stage.py"),
+        str(run_root),
+        "--dry-run",
+    ]
+
+    subprocess.run(
+        command,
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    default_plan = json.loads((run_root / BLENDERPROC_RENDER_PLAN).read_text())
+    assert [item["sensor_name"] for item in default_plan["jobs"]] == ["realsense_123"]
+
+    subprocess.run(
+        [*command, "--input-folder", str(synchronized)],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    explicit_plan = json.loads((run_root / BLENDERPROC_RENDER_PLAN).read_text())
+    assert [item["sensor_name"] for item in explicit_plan["jobs"]] == [
+        "realsense_123",
+        "realsense_999",
+    ]
 
 
 def write_fake_render_output(workspace: Path) -> None:

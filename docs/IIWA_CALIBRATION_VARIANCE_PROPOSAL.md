@@ -2,11 +2,12 @@
 
 ## Outcome
 
-`iiwa/PoseTestBot_CalibrationVarianceProposal.java` is a deliberately disabled
-Sunrise application for a teachable ArUco calibration capture. The Workbench
-contract is reduced to exactly nine persistent 3 × 3 raster frames below
-`/PoseTestBot/TemplateBase`. `CalibrationCenter` is one of those nine frames and
-anchors both phases.
+`iiwa/PoseTestBot_CalibrationVarianceProposal.java` is an enabled repository
+candidate for the operator-reported running calibration application. The exact
+deployed controller application and revision are not yet captured as evidence.
+Its Workbench contract is reduced to exactly nine persistent 3 × 3 raster
+frames below `/PoseTestBot/TemplateBase`. `CalibrationCenter` is one of those
+nine frames and anchors both phases.
 
 The six A/B/C orientation variants are no longer Workbench frames. Sunrise
 generates their nine motion legs with zero-translation `linRel` transformations
@@ -112,7 +113,10 @@ synchronization candidates. These limits do not replace the reduced pendant
 override and T1 checks required during commissioning.
 
 The UDP stop message is read only while waiting for another start command. It
-cannot interrupt active motion and is not a safety control.
+cannot interrupt active motion and is not a safety control. In the current
+application it exits the wait loop and requires a manual application restart,
+so repeated calibration captures must use new start commands without sending
+`STOP` between them.
 
 ## Plot Contract and Regeneration
 
@@ -147,17 +151,23 @@ Use the [printable checklist](IIWA_CALIBRATION_TEACHING_CHECKLIST.md) for frame
 creation, touch-up read-back, per-frame reviewer sign-off, Workbench endpoint
 and swept-path checks, T1 single-stepping, and the supervised capture trial.
 
-`ENABLE_AFTER_OFFLINE_VALIDATION` must remain `false` until Workbench compiles
-the exact controller project, resolves all nine frames, and simulates both
-phases. Physical T1 validation and capture are operator-run work. Repository
-tests never access the robot or cameras.
+The repository source currently sets `ENABLE_AFTER_OFFLINE_VALIDATION=true` for
+lab validation. This does not establish that the controller is running this
+exact source. Record the deployed application and revision, and retain the
+Workbench compile, nine-frame resolution, path simulation, and T1 evidence;
+the boolean alone does not prove commissioning. Future application or cell
+changes must be revalidated before physical capture. Physical T1 validation
+and capture are operator-run work. Repository tests never access the robot or
+cameras.
 
 For every required camera, the supervised trial must demonstrate at least 15
 accepted views, 6/9 coverage cells, strong extreme detections, per-view
-reprojection no greater than 3 px, intrinsic RMS no greater than 1.5 px,
-sufficient motion diversity, and passing synchronization quality. Continue to
-investigate the prior high-error RealSense `825412070181` separately;
-trajectory variance alone does not resolve its reprojection discrepancy.
+reprojection no greater than 3 px, sufficient motion diversity, and passing
+synchronization quality. A manual OpenCV intrinsic fallback additionally
+requires no greater than 1.5 px training RMS plus its held-out and plausibility
+gates; that RMS is not a factory-profile requirement. Continue to investigate
+the prior high-error RealSense `825412070181` separately; trajectory variance
+alone does not resolve its reprojection discrepancy.
 
 ## Limits and Assumptions
 

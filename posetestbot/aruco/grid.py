@@ -9,6 +9,7 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
+from posetestbot.calibration.intrinsics import projection_is_opencv_compatible
 from posetestbot.calibration.targets import (
     normalize_calibration_target_spec,
     opencv_grid_board,
@@ -107,6 +108,10 @@ def _projection(profile: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     native = profile.get("native")
     if not isinstance(native, Mapping):
         raise ValueError("Intrinsic profile requires native projection")
+    if not projection_is_opencv_compatible(native):
+        raise ValueError(
+            "Intrinsic SDK distortion model is not a supported forward OpenCV projection"
+        )
     matrix = np.asarray(native.get("cam_K"), dtype=float).reshape(3, 3)
     distortion = np.asarray(native.get("distortion"), dtype=float).reshape(-1)
     if distortion.shape != (5,):

@@ -21,9 +21,16 @@ from posetestbot.io.artifacts import (
     RGB_DIR,
     SYNC_REPORT,
 )
+from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
+    create_run_config,
+    write_run_config,
+)
 from posetestbot.sync.non_destructive import (
     resolve_frame_timestamp,
+    resolve_max_nearest_pose_delta_ms,
     resolve_sync_delta_ms,
+    resolve_timestamp_pair,
     synchronize_run,
     synchronize_sensor_folder,
 )
@@ -57,7 +64,9 @@ def create_sync_fixture(tmp_path: Path) -> tuple[Path, Path]:
     (sensor_folder / CAM_K).write_text("1 0 2\n0 3 4\n0 0 1\n")
     (sensor_folder / DEPTH_SCALE).write_text("1.0\n")
     write_json(sensor_folder / CAMERA_JSON, {"cam_K": [1, 0, 2, 0, 3, 4, 0, 0, 1]})
-    write_json(sensor_folder / CAMERA_DATA_JSON, {"K": [[1, 0, 2], [0, 3, 4], [0, 0, 1]]})
+    write_json(
+        sensor_folder / CAMERA_DATA_JSON, {"K": [[1, 0, 2], [0, 3, 4], [0, 0, 1]]}
+    )
 
     write_jsonl(
         sensor_folder / FRAME_METADATA_JSONL,
@@ -107,18 +116,21 @@ def create_sync_fixture(tmp_path: Path) -> tuple[Path, Path]:
             "0": {
                 "framename": 1000,
                 "host_received_timestamp_ns": 1_000_000_000,
+                "host_wall_timestamp_ns": 10_000_000_000,
                 "motion": "circ_far",
                 "pose": {"X": 1, "Y": 2, "Z": 3, "A": 4, "B": 5, "C": 6},
             },
             "1": {
                 "framename": 1100,
                 "host_received_timestamp_ns": 1_100_000_000,
+                "host_wall_timestamp_ns": 10_100_000_000,
                 "motion": "circ_far",
                 "pose": {"X": 7, "Y": 8, "Z": 9, "A": 10, "B": 11, "C": 12},
             },
             "2": {
                 "framename": 2000,
                 "host_received_timestamp_ns": 2_000_000_000,
+                "host_wall_timestamp_ns": 11_000_000_000,
                 "motion": "zoom",
                 "pose": {"X": 13, "Y": 14, "Z": 15, "A": 16, "B": 17, "C": 18},
             },
@@ -173,7 +185,13 @@ def test_synchronize_sensor_folder_preserves_raw_frames(tmp_path: Path) -> None:
     assert abs(matched["000001.png"]["nearest_robot_delta_ns"]) == 50_000_000
 
     report = json.loads((output_folder / SYNC_REPORT).read_text())
-    assert report["schema_version"] == "sync_report.v2"
+    assert report["schema_version"] == "sync_report.v3"
+    assert report["timestamp_pair"] == {
+        "frame_timestamp_source": "host_received",
+        "requested_frame_timestamp_source": "host_received",
+        "robot_timestamp_source": "host_received",
+    }
+    assert report["timestamp_pair_provenance_audited"] is True
     assert report["matched_frames"] == 2
     assert report["dropped"][0]["frame_id"] == "1500.png"
     assert CAM_K in report["copied_metadata_artifacts"]
@@ -215,6 +233,57 @@ def test_synchronize_sensor_folder_replaces_stale_derived_frames(
     ]
 
 
+def test_sync_strict_nearest_pose_delta_drops_outlier_before_derived_output(
+    tmp_path: Path,
+) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+
+    result = synchronize_sensor_folder(
+        sensor_folder,
+        run_root=run_root,
+        sync_delta=0,
+        timestamp_source="host_received",
+        max_nearest_pose_delta_ms=20.0,
+    )
+
+    assert result.total_frames == 3
+    assert result.matched_frames == 1
+    assert result.dropped_frames == 2
+    assert (sensor_folder / RGB_DIR / "1050.png").is_file()
+    output_folder = Path(result.output_folder)
+    assert [path.name for path in (output_folder / RGB_DIR).glob("*.png")] == [
+        "000000.png"
+    ]
+    matched = json.loads((output_folder / MATCH_ROBOT_EE_POSES).read_text())
+    assert list(matched) == ["000000.png"]
+
+    report = json.loads((output_folder / SYNC_REPORT).read_text())
+    assert report["max_nearest_pose_delta_ms"] == 20.0
+    assert report["nearest_pose_delta_rejection_count"] == 1
+    assert report["mean_abs_nearest_pose_delta_ns"] == 0
+    assert report["max_abs_nearest_pose_delta_ns"] == 0
+    rejected = next(
+        item
+        for item in report["dropped"]
+        if item["reason"] == "nearest robot pose delta exceeds threshold"
+    )
+    assert rejected == {
+        "frame_id": "1050.png",
+        "timestamp_ns": 1_050_000_000,
+        "timestamp_source": "host_received",
+        "robot_timestamp_source": "host_received",
+        "delayed_timestamp_ns": 1_050_000_000,
+        "motion": "circ_far",
+        "matched_robot_pose_index": 0,
+        "robot_timestamp_ns": 1_000_000_000,
+        "nearest_robot_delta_ns": -50_000_000,
+        "abs_nearest_robot_delta_ns": 50_000_000,
+        "max_nearest_pose_delta_ms": 20.0,
+        "max_nearest_pose_delta_ns": 20_000_000,
+        "reason": "nearest robot pose delta exceeds threshold",
+    }
+
+
 def test_sync_reports_filename_timestamp_fallback(tmp_path: Path) -> None:
     run_root, sensor_folder = create_sync_fixture(tmp_path)
     records = [
@@ -240,6 +309,54 @@ def test_sync_reports_filename_timestamp_fallback(tmp_path: Path) -> None:
     assert report["timestamp_fallback_count"] == 1
 
 
+def test_sensor_exposure_timestamp_pairs_explicitly_with_robot_wall_clock(
+    tmp_path: Path,
+) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+    records = [
+        json.loads(line)
+        for line in (sensor_folder / FRAME_METADATA_JSONL).read_text().splitlines()
+    ]
+    for record in records:
+        record["sensor_timestamp_ns"] = record["host_wall_timestamp_ns"]
+        record["color_timestamp_domain"] = "global_time"
+    write_jsonl(sensor_folder / FRAME_METADATA_JSONL, records)
+
+    result = synchronize_sensor_folder(
+        sensor_folder,
+        run_root=run_root,
+        sync_delta=0,
+        timestamp_source="sensor",
+        robot_timestamp_source="host_wall",
+    )
+
+    assert result.matched_frames == 2
+    output_folder = Path(result.output_folder)
+    matched = json.loads((output_folder / MATCH_ROBOT_EE_POSES).read_text())
+    assert matched["000000.png"]["image_timestamp_ns"] == 10_000_000_000
+    assert matched["000000.png"]["robot_timestamp_ns"] == 10_000_000_000
+    assert matched["000000.png"]["robot_timestamp_source"] == "host_wall"
+    derived = [
+        json.loads(line)
+        for line in (output_folder / FRAME_METADATA_JSONL).read_text().splitlines()
+    ]
+    assert derived[0]["sync_timestamp_source"] == "sensor"
+    assert derived[0]["sync_robot_timestamp_source"] == "host_wall"
+    report = json.loads((output_folder / SYNC_REPORT).read_text())
+    assert report["timestamp_pair"] == {
+        "frame_timestamp_source": "sensor",
+        "requested_frame_timestamp_source": "sensor",
+        "robot_timestamp_source": "host_wall",
+    }
+
+
+def test_sensor_timestamp_requires_explicit_compatible_robot_clock() -> None:
+    with pytest.raises(ValueError, match="requires an explicit"):
+        resolve_timestamp_pair("sensor", None)
+    with pytest.raises(ValueError, match="unsupported pair"):
+        resolve_timestamp_pair("sensor", "host_received")
+
+
 def test_sync_cli_updates_manifest(tmp_path: Path) -> None:
     run_root, sensor_folder = create_sync_fixture(tmp_path)
     repo_root = Path(__file__).resolve().parents[1]
@@ -263,7 +380,9 @@ def test_sync_cli_updates_manifest(tmp_path: Path) -> None:
     assert "Matched 2/3 frames" in result.stdout
 
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
-    stage = next(stage for stage in manifest["stages"] if stage["name"] == "sync:realsense_123")
+    stage = next(
+        stage for stage in manifest["stages"] if stage["name"] == "sync:realsense_123"
+    )
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][MATCH_ROBOT_EE_POSES].endswith(
         "processed/synchronized/realsense_123/match_robot_ee_poses.json"
@@ -301,12 +420,41 @@ def test_sync_run_cli_processes_all_discovered_sensors(tmp_path: Path) -> None:
     assert stages["sync:realsense_123"]["status"] == "succeeded"
     assert stages["sync:luxonis_abc"]["status"] == "succeeded"
     assert (
-        run_root
-        / "processed"
-        / "synchronized"
-        / "luxonis_abc"
-        / MATCH_ROBOT_EE_POSES
+        run_root / "processed" / "synchronized" / "luxonis_abc" / MATCH_ROBOT_EE_POSES
     ).exists()
+
+
+def test_synchronize_run_defaults_to_enabled_run_config_sensors(
+    tmp_path: Path,
+) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+    disabled_folder = run_root / "realsense_999"
+    shutil.copytree(sensor_folder, disabled_folder)
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig("realsense_d435", "123", "Enabled"),
+                SensorRunConfig("realsense_d435", "999", "Disabled", enabled=False),
+            ),
+        ),
+    )
+
+    default_results = synchronize_run(run_root, sync_delta=0)
+    explicit_results = synchronize_run(
+        run_root,
+        sensor_folders=[disabled_folder],
+        output_root=run_root / "processed" / "explicit-disabled",
+        sync_delta=0,
+    )
+
+    assert [Path(item.sensor_folder).name for item in default_results] == [
+        "realsense_123"
+    ]
+    assert [Path(item.sensor_folder).name for item in explicit_results] == [
+        "realsense_999"
+    ]
 
 
 def test_synchronize_run_accepts_only_an_explicit_subset_and_output_root(
@@ -323,9 +471,7 @@ def test_synchronize_run_accepts_only_an_explicit_subset_and_output_root(
         sync_delta=0,
     )
 
-    assert [Path(item.sensor_folder).name for item in results] == [
-        "realsense_123"
-    ]
+    assert [Path(item.sensor_folder).name for item in results] == ["realsense_123"]
     assert (output_root / "realsense_123" / MATCH_ROBOT_EE_POSES).is_file()
     assert not (output_root / "luxonis_abc").exists()
     with pytest.raises(ValueError, match="remain below the run root"):
@@ -344,3 +490,9 @@ def test_invalid_filename_timestamp_is_reported_as_missing() -> None:
 def test_sync_delta_rejects_nonfinite_or_nonnumeric_values(value: object) -> None:
     with pytest.raises(ValueError, match="Synchronization delta"):
         resolve_sync_delta_ms("realsense_123", value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, True, "invalid"])
+def test_max_nearest_pose_delta_rejects_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError, match="Maximum nearest-pose delta"):
+        resolve_max_nearest_pose_delta_ms(value)  # type: ignore[arg-type]

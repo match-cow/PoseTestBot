@@ -12,7 +12,12 @@ import pytest
 from posetestbot.calibration import attempts as attempt_module
 from posetestbot.calibration.posegridgen import posegridgen_capabilities
 from posetestbot.calibration.target_library import generate_target_bundle
-from posetestbot.io.artifacts import ARUCO_DETECTIONS, DEPTH_DIR, RGB_DIR
+from posetestbot.io.artifacts import (
+    ARUCO_DETECTIONS,
+    DEPTH_DIR,
+    FRAME_METADATA_JSONL,
+    RGB_DIR,
+)
 from posetestbot.jobs.runner import ResourceBusyError
 from posetestbot.pipeline.run_config import (
     create_run_config,
@@ -41,9 +46,7 @@ class FakeRunner:
 def _configuration() -> dict:
     value = copy.deepcopy(posegridgen_capabilities()["defaults"])
     value["page"]["orientation"] = "landscape"
-    value["board"].update(
-        {"rows": 2, "columns": 3, "marker_size_mm": 25.0}
-    )
+    value["board"].update({"rows": 2, "columns": 3, "marker_size_mm": 25.0})
     value["annotations"] = {
         "show_ruler": False,
         "show_parameters": False,
@@ -60,6 +63,17 @@ def _write_png(path: Path) -> None:
 def _write_camera(run_root: Path, name: str) -> None:
     _write_png(run_root / name / RGB_DIR / "1000.png")
     _write_png(run_root / name / DEPTH_DIR / "1000.png")
+    (run_root / name / FRAME_METADATA_JSONL).write_text(
+        json.dumps(
+            {
+                "frame_id": "1000.png",
+                "host_received_timestamp_ns": 1_000_000_000,
+                "sensor_timestamp_ns": 10_000_000_000,
+                "color_timestamp_domain": "global_time",
+            }
+        )
+        + "\n"
+    )
 
 
 @pytest.fixture
@@ -92,6 +106,7 @@ def calibration_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 "0": {
                     "motion": "pose_0",
                     "framename": 1000,
+                    "host_wall_timestamp_ns": 10_000_000_000,
                     "pose": {
                         "X": 0.0,
                         "Y": 0.0,
@@ -143,9 +158,97 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "ITERATIVE",
         "SQPNP",
     ]
-    assert payload["solver"]["intrinsics_policy"] == (
-        "reuse_compatible_or_factory"
+    assert payload["solver"]["intrinsics_policy"] == ("compare_factory_opencv")
+    assert [item["id"] for item in payload["solver"]["intrinsics_policies"]] == [
+        "compare_factory_opencv",
+        "reuse_compatible_or_factory",
+    ]
+    assert payload["solver"]["thresholds"] == {
+        "min_inliers": 6,
+        "min_pnp_common_inliers": 12,
+        "min_pnp_common_inlier_ratio": 0.5,
+        "max_pnp_all_point_mean_reprojection_error_px": 3.0,
+        "min_pnp_supported_markers": 4,
+        "min_pnp_supported_corners_per_marker": 3,
+        "min_pnp_grid_rows": 2,
+        "min_pnp_grid_columns": 2,
+        "min_target_marker_coverage_ratio": 0.5,
+        "min_target_row_coverage_ratio": 0.6,
+        "min_target_column_coverage_ratio": 0.6,
+        "min_accepted_views": 15,
+        "min_coverage_cells": 6,
+        "max_per_view_reprojection_error_px": 3.0,
+        "max_intrinsic_rms_reprojection_error_px": 1.5,
+        "min_motion_poses": 4,
+        "min_translation_span_mm": 20.0,
+        "min_rotation_span_deg": 5.0,
+        "min_rotation_axis_angle_deg": 2.0,
+        "min_rotation_axis_second_to_first_ratio": 0.15,
+        "max_observations_per_motion": 5,
+        "max_nearest_pose_delta_ms": 20.0,
+        "max_mean_translation_mm": 10.0,
+        "max_mean_rotation_deg": 5.0,
+        "max_outlier_ratio": 0.25,
+        "joint_individual_score_equivalence_tolerance": 0.01,
+    }
+
+
+def test_setup_rejects_camera_without_frame_timestamp_evidence(
+    calibration_client,
+) -> None:
+    client, _runner, run_root, _bundle, _library = calibration_client
+    (run_root / "realsense_1" / FRAME_METADATA_JSONL).unlink()
+
+    response = client.get(
+        "/calibration/setup", query_string={"run_root": run_root.as_posix()}
     )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    unavailable = next(
+        item
+        for item in payload["unavailable_cameras"]
+        if item["sensor_key"] == "realsense_d435:1"
+    )
+    assert "missing frame timestamp evidence" in unavailable["errors"]
+
+
+def test_setup_and_attempt_submission_exclude_disabled_camera(
+    calibration_client,
+) -> None:
+    client, runner, run_root, bundle, _library = calibration_client
+    config_path = run_root / "run_config.json"
+    config = json.loads(config_path.read_text())
+    oak = next(
+        sensor for sensor in config["capture"]["sensors"] if sensor["device_id"] == "2"
+    )
+    oak["enabled"] = False
+    oak["calibration_profile_id"] = "preserved-profile-id"
+    config_path.write_text(json.dumps(config))
+
+    setup = client.get(
+        "/calibration/setup", query_string={"run_root": run_root.as_posix()}
+    ).get_json()
+    response = client.post(
+        "/calibration/attempts",
+        json={
+            "run_root": run_root.as_posix(),
+            "mode": "eye_in_hand",
+            "sensor_keys": ["oak_d_pro:2"],
+            "target_id": bundle["target_id"],
+            "solver_policy": "auto_compare",
+            "intrinsics_policy": "compare_factory_opencv",
+        },
+    )
+
+    assert [camera["sensor_key"] for camera in setup["cameras"]] == ["realsense_d435:1"]
+    assert setup["unavailable_cameras"] == []
+    assert response.status_code == 400
+    assert "Unknown sensor key(s)" in response.get_json()["output"]
+    assert runner.submissions == []
+    persisted = json.loads(config_path.read_text())["capture"]["sensors"][1]
+    assert persisted["device_id"] == "2"
+    assert persisted["calibration_profile_id"] == "preserved-profile-id"
 
 
 def test_attempt_submission_scopes_exact_cameras_and_queues_cpu_disk_parent_job(
@@ -179,11 +282,7 @@ def test_attempt_submission_scopes_exact_cameras_and_queues_cpu_disk_parent_job(
         "scripts/run_calibration_attempt.py",
     ]
     request_path = (
-        run_root
-        / "processed"
-        / "calibration"
-        / payload["attempt_id"]
-        / "request.json"
+        run_root / "processed" / "calibration" / payload["attempt_id"] / "request.json"
     )
     saved = json.loads(request_path.read_text())
     assert saved["mode"] == "eye_to_hand"
@@ -290,13 +389,7 @@ def test_attempt_history_is_immutable_and_promotion_accepts_partial_results(
     ).get_json()["attempts"]
     assert {item["attempt_id"] for item in history} == {first_id, second_id}
     first_request = json.loads(
-        (
-            run_root
-            / "processed"
-            / "calibration"
-            / first_id
-            / "request.json"
-        ).read_text()
+        (run_root / "processed" / "calibration" / first_id / "request.json").read_text()
     )
     assert first_request["mode"] == "eye_in_hand"
 
@@ -340,9 +433,7 @@ def test_attempt_history_is_immutable_and_promotion_accepts_partial_results(
     )
 
     assert promoted.status_code == 202
-    assert promoted.get_json()["selections"] == {
-        "realsense_d435:1": candidate_id
-    }
+    assert promoted.get_json()["selections"] == {"realsense_d435:1": candidate_id}
     assert runner.submissions[-1]["resources"] == ["cpu", "disk_io"]
     assert runner.submissions[-1]["command"][-1] == "--promote"
 
@@ -411,14 +502,11 @@ def test_camera_discovery_rejects_escaped_folders_and_all_duplicate_identities(
 
     cameras = attempt_module.discover_calibration_cameras(run_root)
 
-    duplicates = [
-        item for item in cameras if item["sensor_key"] == "realsense_d435:1"
-    ]
+    duplicates = [item for item in cameras if item["sensor_key"] == "realsense_d435:1"]
     assert len(duplicates) == 2
     assert all(not item["data_ready"] for item in duplicates)
     assert all(
-        "duplicate stable sensor identity" in item["errors"]
-        for item in duplicates
+        "duplicate stable sensor identity" in item["errors"] for item in duplicates
     )
     escaped = next(item for item in cameras if item["sensor_key"] == "oak_d_pro:2")
     assert escaped["data_ready"] is False

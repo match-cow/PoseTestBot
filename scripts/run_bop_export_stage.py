@@ -52,6 +52,7 @@ from posetestbot.io.manifest import (
     write_run_manifest,
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 from posetestbot.pose_templates.selection import (
     load_pose_template_selection,
     prepare_object_instances,
@@ -78,7 +79,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--split", default="test", help="BOP split folder name.")
     parser.add_argument(
-        "--objectless", action="store_true",
+        "--objectless",
+        action="store_true",
         help="Export RGB-D and camera metadata with explicitly empty object data.",
     )
     parser.add_argument(
@@ -140,16 +142,26 @@ def default_output_folder(run_root: Path, explicit_output_folder: str | None) ->
     return run_root / BOP_DIR
 
 
-def discover_exportable_sensor_folders(input_folder: Path) -> list[Path]:
+def discover_exportable_sensor_folders(
+    input_folder: Path,
+    *,
+    run_root: Path | None = None,
+) -> list[Path]:
     if not input_folder.is_dir():
         raise FileNotFoundError(f"Synchronized input folder not found: {input_folder}")
     sensors = [
         child
         for child in sorted(input_folder.iterdir())
-        if child.is_dir() and (child / RGB_DIR).is_dir() and (child / DEPTH_DIR).is_dir()
+        if child.is_dir()
+        and (child / RGB_DIR).is_dir()
+        and (child / DEPTH_DIR).is_dir()
     ]
+    if run_root is not None:
+        sensors = filter_enabled_sensor_folders(run_root, sensors)
     if not sensors:
-        raise FileNotFoundError(f"No synchronized RGB-D sensor folders in {input_folder}")
+        raise FileNotFoundError(
+            f"No synchronized RGB-D sensor folders in {input_folder}"
+        )
     return sensors
 
 
@@ -174,7 +186,10 @@ def main() -> None:
             raise FileExistsError(
                 f"BOP dataset already exists: {output_folder}; pass --overwrite"
             )
-        sensor_folders = discover_exportable_sensor_folders(input_folder)
+        sensor_folders = discover_exportable_sensor_folders(
+            input_folder,
+            run_root=run_root if args.input_folder is None else None,
+        )
         calibration_profiles = (
             load_profile_collection(calibration_profiles_path)
             if calibration_profiles_path is not None
@@ -350,8 +365,8 @@ def main() -> None:
                 output_folder / export.scene_folder
             )
         if targets_path is not None:
-            artifacts[targets_filename(args.split)] = (
-                output_folder / targets_filename(args.split)
+            artifacts[targets_filename(args.split)] = output_folder / targets_filename(
+                args.split
             )
             artifacts[BOP_TARGETS_BOP19] = output_folder / BOP_TARGETS_BOP19
         if multiview_targets_path is not None:

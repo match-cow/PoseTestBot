@@ -29,7 +29,9 @@ from posetestbot.io.manifest import (
     write_run_manifest,
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pipeline.sensor_selection import enabled_sensor_folder_names
 from posetestbot.pose_templates.selection import prepare_object_instances
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -48,7 +50,8 @@ def parse_args() -> argparse.Namespace:
         help="Folder containing synchronized sensor folders. Defaults to <run_root>/processed/synchronized.",
     )
     parser.add_argument(
-        "--objectless", action="store_true",
+        "--objectless",
+        action="store_true",
         help="Prepare camera inputs with explicit empty object metadata.",
     )
     parser.add_argument(
@@ -74,7 +77,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def synchronized_input_folder(run_root: Path, explicit_input_folder: str | None) -> Path:
+def synchronized_input_folder(
+    run_root: Path, explicit_input_folder: str | None
+) -> Path:
     if explicit_input_folder:
         return Path(explicit_input_folder)
     rectified = run_root / PROCESSED_DIR / "rectified"
@@ -83,10 +88,19 @@ def synchronized_input_folder(run_root: Path, explicit_input_folder: str | None)
     return run_root / PROCESSED_DIR / SYNCHRONIZED_DIR
 
 
-def synchronized_sensor_names(input_folder: Path) -> list[str]:
+def synchronized_sensor_names(
+    input_folder: Path,
+    *,
+    sensor_names: tuple[str, ...] | None = None,
+) -> list[str]:
     if not input_folder.is_dir():
         raise FileNotFoundError(f"Synchronized input folder not found: {input_folder}")
-    return [child.name for child in sorted(input_folder.iterdir()) if child.is_dir()]
+    selected_names = set(sensor_names) if sensor_names is not None else None
+    return [
+        child.name
+        for child in sorted(input_folder.iterdir())
+        if child.is_dir() and (selected_names is None or child.name in selected_names)
+    ]
 
 
 def derived_camera_transform_path(run_root: Path) -> Path:
@@ -97,10 +111,12 @@ def camera_transformations_from_calibration_profiles(
     *,
     input_folder: Path,
     calibration_profiles_path: Path,
+    sensor_names: tuple[str, ...] | None = None,
 ) -> dict[str, dict[str, object]]:
     profiles = load_profile_collection(calibration_profiles_path)
     return blenderproc_camera_transform_map_from_profiles(
-        profiles, synchronized_sensor_names(input_folder)
+        profiles,
+        synchronized_sensor_names(input_folder, sensor_names=sensor_names),
     )
 
 
@@ -111,6 +127,7 @@ def run_prepare(
     subdir: str,
     object_instances: dict | None = None,
     run_root: Path | None = None,
+    sensor_names: tuple[str, ...] | None = None,
 ) -> dict[str, Path]:
     prepared = prepare_sensor_folders(
         input_folder=input_folder,
@@ -118,6 +135,7 @@ def run_prepare(
         subdir=subdir,
         object_instances=object_instances,
         run_root=run_root,
+        sensor_names=sensor_names,
     )
     return {f"{item.sensor_name}:{subdir}": item.output_folder for item in prepared}
 
@@ -126,8 +144,13 @@ def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
     input_folder = synchronized_input_folder(run_root, args.input_folder)
+    sensor_names = (
+        enabled_sensor_folder_names(run_root) if args.input_folder is None else None
+    )
     camera_transformations_path = Path(args.camera_transformations)
-    calibration_profiles = Path(args.calibration_profiles) if args.calibration_profiles else None
+    calibration_profiles = (
+        Path(args.calibration_profiles) if args.calibration_profiles else None
+    )
 
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="blenderproc_prepare", status="running")
@@ -151,6 +174,7 @@ def main() -> None:
             camera_transformations = camera_transformations_from_calibration_profiles(
                 input_folder=input_folder,
                 calibration_profiles_path=calibration_profiles,
+                sensor_names=sensor_names,
             )
             stage_artifacts[CALIBRATION_PROFILES] = calibration_profiles
         else:
@@ -164,6 +188,7 @@ def main() -> None:
             subdir=args.subdir,
             object_instances=object_instances,
             run_root=run_root,
+            sensor_names=sensor_names,
         )
         if calibration_profiles is not None:
             transform_path = write_camera_transformations(

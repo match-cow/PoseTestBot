@@ -168,8 +168,49 @@ RealSense udev rules on the lab host.
 Check visibility:
 
 ```bash
+uv run python scripts/sensor_status.py --json
+```
+
+For the separate three-RealSense service/full-capture maintenance milestone,
+require all three SDK-addressable devices explicitly:
+
+```bash
 uv run python scripts/sensor_status.py --expected realsense_d435=3 --check-expected
 ```
+
+The expected count is based on cameras addressable through `pyrealsense2`.
+RealSense devices seen only through USB descriptors remain in the status output
+for troubleshooting, but do not pass capture-readiness checks. SDK-enumerated
+cameras with a known `usb_type_descriptor` below USB 3 also fail readiness and
+capture-plan preflight. Older status records that do not contain transport
+metadata remain readable; a fresh status check is required before real capture.
+
+Before capture, require every enabled/selected serial to be SDK-addressable and
+to report a 3.x-or-newer descriptor when the transport version is known. All
+three configured serials are required only for the separate three-camera
+service/full-capture milestone; a disabled serial remains recorded but is
+excluded from the current run. A USB2 fallback can be caused by a
+marginal/non-SuperSpeed cable, port, connector, hub power, or an overcommitted
+USB controller. Reseat or power-cycle only the affected USB connection without
+moving its camera mount, use known-good SuperSpeed paths, and rerun the status
+command. `lsusb -t` is useful read-only topology evidence, but the SDK
+descriptor and successful stream warmup remain the capture gates.
+
+When supported by the installed SDK and camera, status also records
+`firmware_version` and the SDK's `recommended_firmware_version`. A numeric
+difference produces a troubleshooting warning only; it does not weaken USB
+readiness or prove that firmware caused a transport failure. PoseTestBot never
+flashes camera firmware. Any persistent firmware change requires a separately
+reviewed maintenance procedure and explicit device-specific authorization.
+
+The **Devices** page labels each camera **Capture-ready**, **Not
+capture-ready**, or **Disconnected** and shows the readiness reason. A camera
+that is not ready cannot start a preview or snapshot or be newly selected for a
+run; if it was already selected, it can still be deselected. In **Workflow →
+Run Setup**, the **Enabled for capture and calibration** checkbox retains a
+disabled camera's identity and metadata while excluding it from work. Keep at
+least one camera enabled, then regenerate capture-plan and preflight artifacts
+after any enable/disable change.
 
 ### OAK-D Pro
 
@@ -329,10 +370,12 @@ Recommended local validation:
 ```bash
 bash -n scripts/install.sh
 bash scripts/install.sh --help
-bash scripts/install.sh --check-only --with-posegridgen
+bash scripts/install.sh --check-only \
+  --with-posegridgen --with-posetemplatecreator
 cd frontend && bun run typecheck && bun run lint && bun run build
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_runtime_status.py tests/test_hardware_status.py
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_console_playwright.py
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 UV_CACHE_DIR=/tmp/uv-cache uv build
 git diff --check

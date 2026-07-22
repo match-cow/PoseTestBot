@@ -34,6 +34,9 @@ DATASET_MODE_OPTION_STAGES = (
     "blenderproc_render",
     "bop_export",
 )
+EXECUTION_GATE_OPTION_KEYS = frozenset(
+    {"allow_cameras", "allow_real_robot"}
+)
 
 LAB_REALSENSE_SERIALS = (
     "825412070181",
@@ -211,6 +214,14 @@ def normalize_inverted(value: Any) -> bool:
     )
 
 
+def normalize_sensor_enabled(value: Any) -> bool:
+    """Return a sensor participation flag without truthy-string coercion."""
+
+    if isinstance(value, bool):
+        return value
+    raise ValueError("Sensor enabled must be a literal JSON boolean")
+
+
 def _validate_sensor_orientation(sensor_type: SensorType | str, inverted: bool) -> None:
     normalized = sensor_type if isinstance(sensor_type, SensorType) else SensorType(sensor_type)
     if inverted and normalized != SensorType.REALSENSE_D435:
@@ -281,7 +292,7 @@ def sensor_config_from_mapping(
         device_id=device_id,
         display_name=display_name,
         mounting_mode=mounting_mode,
-        enabled=bool(value.get("enabled", True)),
+        enabled=normalize_sensor_enabled(value.get("enabled", True)),
         calibration_profile_id=calibration_profile_id,
         inverted=inverted,
         metadata=dict(metadata),
@@ -450,6 +461,22 @@ def create_run_config(
     return config
 
 
+def _persisted_execution_gate(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key in EXECUTION_GATE_OPTION_KEYS:
+                return key
+            nested = _persisted_execution_gate(item)
+            if nested is not None:
+                return nested
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            nested = _persisted_execution_gate(item)
+            if nested is not None:
+                return nested
+    return None
+
+
 def fixed_transform_from_mapping(value: Mapping[str, Any]) -> FixedFrameTransform:
     quaternion = value.get("rotation_quaternion_wxyz")
     translation = value.get("translation_mm")
@@ -595,6 +622,7 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
     sensors = capture.get("sensors")
     if not isinstance(sensors, list) or not sensors:
         raise ValueError("Run config capture.sensors must be a non-empty list")
+    enabled_sensor_count = 0
     for index, sensor in enumerate(sensors):
         if not isinstance(sensor, Mapping):
             raise ValueError(f"Run config sensor {index} must be an object")
@@ -602,8 +630,15 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         normalize_mounting_mode(str(sensor.get("mounting_mode", "")))
         if not str(sensor.get("device_id", "")).strip():
             raise ValueError(f"Run config sensor {index} device_id must not be empty")
+        try:
+            enabled = normalize_sensor_enabled(sensor.get("enabled", True))
+        except ValueError as exc:
+            raise ValueError(f"Run config sensor {index} enabled must be a boolean") from exc
+        enabled_sensor_count += int(enabled)
         inverted = normalize_inverted(sensor.get("inverted", False))
         _validate_sensor_orientation(sensor_type, inverted)
+    if enabled_sensor_count == 0:
+        raise ValueError("Run config must enable at least one capture sensor")
 
     pipeline = value.get("pipeline")
     if not isinstance(pipeline, Mapping):
@@ -614,6 +649,12 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
     options = pipeline.get("options", {})
     if not isinstance(options, Mapping):
         raise ValueError("Run config pipeline.options must be an object")
+    persisted_gate = _persisted_execution_gate(options)
+    if persisted_gate is not None:
+        raise ValueError(
+            f"Run config pipeline.options must not persist execution gate: "
+            f"{persisted_gate}"
+        )
     build_sequence_plan(
         sequence_id=sequence_id,
         run_root=str(value.get("run_root", ".")),
@@ -671,6 +712,13 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
                 ),
             }
         )
+    capture = value.get("capture")
+    if isinstance(capture, Mapping):
+        sensors = capture.get("sensors")
+        if isinstance(sensors, list):
+            for sensor in sensors:
+                if isinstance(sensor, dict):
+                    sensor.setdefault("enabled", True)
     value.setdefault("calibration_target", None)
     if value.get("schema_version") == SCHEMA_VERSION:
         value.setdefault("pose_template", None)

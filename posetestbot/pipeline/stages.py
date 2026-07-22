@@ -148,8 +148,7 @@ def normalize_stage_options(
     unknown_names = sorted(set(provided) - known_names)
     if unknown_names:
         raise ValueError(
-            "Unknown pipeline option(s) for "
-            f"{stage.id}: {', '.join(unknown_names)}"
+            f"Unknown pipeline option(s) for {stage.id}: {', '.join(unknown_names)}"
         )
 
     normalized: dict[str, Any] = {}
@@ -222,7 +221,9 @@ def list_pipeline_stages(
     registry: Mapping[str, PipelineStageSpec] | None = None,
 ) -> list[dict[str, Any]]:
     specs = PIPELINE_STAGES if registry is None else registry
-    return [stage.to_dict() for stage in sorted(specs.values(), key=lambda item: item.id)]
+    return [
+        stage.to_dict() for stage in sorted(specs.values(), key=lambda item: item.id)
+    ]
 
 
 def get_pipeline_stage(
@@ -421,7 +422,7 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             "Validate capture_plan.json command shape, real robot safety, "
             "script availability, and optional sensor readiness."
         ),
-        resources=("disk_io",),
+        resources=("camera", "disk_io"),
         parameters=(
             PipelineParameter(
                 name="allow_real_robot",
@@ -452,7 +453,7 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             "Select all full-capture commands without "
             "starting robot or camera processes."
         ),
-        resources=("disk_io",),
+        resources=("camera", "disk_io"),
         parameters=(
             PipelineParameter(
                 name="allow_cameras",
@@ -513,19 +514,31 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="timeout_s",
                 flag="--timeout-s",
                 kind="float",
-                default=30.0,
+                default=300.0,
             ),
             PipelineParameter(
                 name="startup_wait_s",
                 flag="--startup-wait",
                 kind="float",
-                default=0.2,
+                default=15.0,
             ),
             PipelineParameter(
                 name="terminate_timeout_s",
                 flag="--terminate-timeout-s",
                 kind="float",
                 default=2.0,
+            ),
+            PipelineParameter(
+                name="receive_start_timeout_s",
+                flag="--receive-start-timeout-s",
+                kind="float",
+                default=120.0,
+            ),
+            PipelineParameter(
+                name="receive_idle_timeout_s",
+                flag="--receive-idle-timeout-s",
+                kind="float",
+                default=60.0,
             ),
             PipelineParameter(
                 name="no_write_plan_if_missing",
@@ -692,7 +705,10 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         resources=("disk_io",),
         parameters=(
             PipelineParameter(
-                name="observations", flag="--observations", kind="path", path_scope="run"
+                name="observations",
+                flag="--observations",
+                kind="path",
+                path_scope="run",
             ),
             PipelineParameter(
                 name="min_observations",
@@ -748,7 +764,10 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 path_scope="run",
             ),
             PipelineParameter(
-                name="observations", flag="--observations", kind="path", path_scope="run"
+                name="observations",
+                flag="--observations",
+                kind="path",
+                path_scope="run",
             ),
             PipelineParameter(
                 name="min_observations",
@@ -916,6 +935,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 help="Timestamp source used for frame-to-robot matching.",
             ),
             PipelineParameter(
+                name="robot_timestamp_source",
+                flag="--robot-timestamp-source",
+                choices=("host_received", "host_wall", "filename"),
+                help="Explicit clock-compatible robot-pose timestamp source.",
+            ),
+            PipelineParameter(
                 name="no_copy",
                 flag="--no-copy",
                 kind="bool",
@@ -961,6 +986,11 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="require_timestamp_source",
                 flag="--require-timestamp-source",
                 choices=("host_received", "host_wall", "sensor", "filename"),
+            ),
+            PipelineParameter(
+                name="require_robot_timestamp_source",
+                flag="--require-robot-timestamp-source",
+                choices=("host_received", "host_wall", "filename"),
             ),
             PipelineParameter(name="json", flag="--json", kind="bool", default=False),
         ),
@@ -1073,7 +1103,9 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 kind="path",
                 path_scope="run",
             ),
-            PipelineParameter(name="save_images", flag="--save-images", kind="bool", default=False),
+            PipelineParameter(
+                name="save_images", flag="--save-images", kind="bool", default=False
+            ),
         ),
     ),
     "intrinsic_calibration": PipelineStageSpec(
@@ -1083,13 +1115,42 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         description="Wrap factory color intrinsics or calibrate from stored grid detections.",
         resources=("cpu", "disk_io"),
         parameters=(
-            PipelineParameter(name="mode", flag="--mode", choices=("factory", "calibrate"), default="factory"),
-            PipelineParameter(name="calibration_target", flag="--calibration-target", kind="path", path_scope="run"),
-            PipelineParameter(name="input_root", flag="--input-root", kind="path", path_scope="run"),
-            PipelineParameter(name="min_accepted_views", flag="--min-accepted-views", kind="int", default=15),
-            PipelineParameter(name="min_coverage_cells", flag="--min-coverage-cells", kind="int", default=6),
-            PipelineParameter(name="max_view_error_px", flag="--max-view-error-px", kind="float", default=3.0),
-            PipelineParameter(name="max_rms_px", flag="--max-rms-px", kind="float", default=1.5),
+            PipelineParameter(
+                name="mode",
+                flag="--mode",
+                choices=("factory", "calibrate"),
+                default="factory",
+            ),
+            PipelineParameter(
+                name="calibration_target",
+                flag="--calibration-target",
+                kind="path",
+                path_scope="run",
+            ),
+            PipelineParameter(
+                name="input_root", flag="--input-root", kind="path", path_scope="run"
+            ),
+            PipelineParameter(
+                name="min_accepted_views",
+                flag="--min-accepted-views",
+                kind="int",
+                default=15,
+            ),
+            PipelineParameter(
+                name="min_coverage_cells",
+                flag="--min-coverage-cells",
+                kind="int",
+                default=6,
+            ),
+            PipelineParameter(
+                name="max_view_error_px",
+                flag="--max-view-error-px",
+                kind="float",
+                default=3.0,
+            ),
+            PipelineParameter(
+                name="max_rms_px", flag="--max-rms-px", kind="float", default=1.5
+            ),
         ),
     ),
     "aruco_pose": PipelineStageSpec(
@@ -1099,9 +1160,21 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         description="Solve grid-to-camera poses from detections and native intrinsics.",
         resources=("cpu", "disk_io"),
         parameters=(
-            PipelineParameter(name="calibration_target", flag="--calibration-target", kind="path", path_scope="run"),
-            PipelineParameter(name="intrinsic_profiles", flag="--intrinsic-profiles", kind="path", path_scope="run"),
-            PipelineParameter(name="input_root", flag="--input-root", kind="path", path_scope="run"),
+            PipelineParameter(
+                name="calibration_target",
+                flag="--calibration-target",
+                kind="path",
+                path_scope="run",
+            ),
+            PipelineParameter(
+                name="intrinsic_profiles",
+                flag="--intrinsic-profiles",
+                kind="path",
+                path_scope="run",
+            ),
+            PipelineParameter(
+                name="input_root", flag="--input-root", kind="path", path_scope="run"
+            ),
         ),
     ),
     "camera_rectification": PipelineStageSpec(
@@ -1111,10 +1184,24 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         description="Transactionally rectify synchronized RGB and aligned depth.",
         resources=("cpu", "disk_io"),
         parameters=(
-            PipelineParameter(name="intrinsic_profiles", flag="--intrinsic-profiles", kind="path", path_scope="run"),
-            PipelineParameter(name="input_root", flag="--input-root", kind="path", path_scope="run"),
-            PipelineParameter(name="output_root", flag="--output-root", kind="path", path_scope="output"),
-            PipelineParameter(name="overwrite", flag="--overwrite", kind="bool", default=False),
+            PipelineParameter(
+                name="intrinsic_profiles",
+                flag="--intrinsic-profiles",
+                kind="path",
+                path_scope="run",
+            ),
+            PipelineParameter(
+                name="input_root", flag="--input-root", kind="path", path_scope="run"
+            ),
+            PipelineParameter(
+                name="output_root",
+                flag="--output-root",
+                kind="path",
+                path_scope="output",
+            ),
+            PipelineParameter(
+                name="overwrite", flag="--overwrite", kind="bool", default=False
+            ),
             PipelineParameter(name="json", flag="--json", kind="bool", default=False),
         ),
     ),
@@ -1158,7 +1245,10 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         resources=("cpu", "disk_io"),
         parameters=(
             PipelineParameter(
-                name="input_folder", flag="--input-folder", kind="path", path_scope="run"
+                name="input_folder",
+                flag="--input-folder",
+                kind="path",
+                path_scope="run",
             ),
             PipelineParameter(
                 name="objectless", flag="--objectless", kind="bool", default=False
@@ -1189,7 +1279,10 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         resources=("render", "disk_io"),
         parameters=(
             PipelineParameter(
-                name="input_folder", flag="--input-folder", kind="path", path_scope="run"
+                name="input_folder",
+                flag="--input-folder",
+                kind="path",
+                path_scope="run",
             ),
             PipelineParameter(
                 name="render_script",
@@ -1219,10 +1312,16 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         resources=("disk_io",),
         parameters=(
             PipelineParameter(
-                name="input_folder", flag="--input-folder", kind="path", path_scope="run"
+                name="input_folder",
+                flag="--input-folder",
+                kind="path",
+                path_scope="run",
             ),
             PipelineParameter(
-                name="output_folder", flag="--output-folder", kind="path", path_scope="output"
+                name="output_folder",
+                flag="--output-folder",
+                kind="path",
+                path_scope="output",
             ),
             PipelineParameter(name="split", flag="--split"),
             PipelineParameter(

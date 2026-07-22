@@ -21,11 +21,14 @@ project.
 - Fixed real lab iiwa profile with explicit execution safety gates.
 - Capture planning, preflight, and supervised capture execution.
 - RealSense, OAK-D Pro, and ZED 2i sensor registry/status/capture contracts.
+- Run-scoped camera enable/disable controls that retain configured camera
+  identity and calibration metadata while excluding disabled cameras from work.
 - Non-destructive synchronization under `processed/synchronized/`.
 - Sync quality reporting.
 - Pinned PoseGridGen target preview/generation, immutable target bundles,
   legacy ArUcoGridGen import, split marker detection/pose solving,
-  optional RealSense color intrinsic calibration, explicit hand-eye/known-grid
+  factory-vs-OpenCV RealSense color intrinsic comparison, explicit
+  hand-eye/known-grid
   extrinsic solving, selection-gated promotion, and derived RGB-D rectification.
 - Pinned PoseTemplateCreator CAD catalog, exact full-pose slicing, immutable
   printable pose templates, run placement, and per-instance object GT.
@@ -105,6 +108,16 @@ For the managed pose-template workflow, create the run with
 `--dataset-mode pose_template`, then select and confirm an immutable template
 in the console's **Workflow → Ground Truth** phase. See
 [`docs/POSETEMPLATECREATOR_OBJECT_GT.md`](docs/POSETEMPLATECREATOR_OBJECT_GT.md).
+
+The **Workflow → Run Setup** camera list has an **Enabled for capture and
+calibration** checkbox for each configured camera. Disabling a camera retains
+its identity, alias, mounting/orientation metadata, and calibration-profile
+selection in `run_config.json`; it excludes that camera from capture planning
+and preflight, calibration, rewrite-gate expectations, and the Cell scene. At
+least one camera must remain enabled. Regenerate any already-written capture
+plan and preflight after changing this selection so their evidence matches the
+current run configuration.
+
 For example, a measured flange-to-TCP edge can be recorded at creation time:
 
 ```bash
@@ -146,6 +159,20 @@ uv run python scripts/run_capture_execution_plan.py working_data/real_run \
 uv run python scripts/run_capture_execution_stage.py working_data/real_run \
   --allow-cameras --allow-real-robot --include-sensors
 ```
+
+The supervised receiver gets those acknowledgements only in its runtime
+command; they are never stored in `capture_plan.json` or a plan-only sequence.
+Its default first-packet and inter-packet timeouts are 120 and 60 seconds, and
+the supervisor default is 300 seconds. Before receiver bind or `START`, every
+selected camera has 15 seconds to publish at least three valid, committed
+`frame_metadata.jsonl` records. Override these bounds with `--startup-wait`,
+`--receive-start-timeout-s`, `--receive-idle-timeout-s`, and `--timeout-s` when
+the reviewed motion program requires different bounds.
+Direct `start_iiwa.py` and `scripts/pose_receiver_udp_json.py` invocations also
+require both fresh acknowledgement flags. Prefer the supervised capture stage
+for coordinated camera startup and cleanup. The receiver refuses to bind or
+send START when `raw_robot_ee_poses.json` already exists and preserves failed
+or canceled streams as unique `raw_robot_ee_poses.partial.*.json` evidence.
 
 ## Synchronization And Quality
 
@@ -190,11 +217,81 @@ The default **Auto compare — recommended** policy compares IPPE, ITERATIVE, an
 SQPNP using a common robust point mask and LM refinement, then compares Tsai,
 Park, Horaud, Andreff, Daniilidis, Shah, and Li robot-camera solutions with
 deterministic robust-closure outlier rejection and leave-one-pose-out
-validation. Passing requires at least six
-inliers, at most 10 mm mean translation residual, at most 5° mean rotation
-residual, and at most 25% outliers. Recommendations remain inactive until the
-operator accepts them; per-camera overrides and partial multi-camera promotion
-are supported.
+validation. Each attempt also compares the captured RealSense factory color
+projection with a manual OpenCV intrinsic fit. Both candidates and their
+matrix/distortion deltas remain in `intrinsic_comparison.json`; the captured
+factory profile is retained whenever its projection is OpenCV-compatible, and
+the manual fit remains comparison evidence. RealSense
+`inverse_brown_conrady` is forward-OpenCV-compatible only when every recorded
+distortion coefficient is finite and exactly zero, where both directions
+reduce to the same pinhole projection. Nonzero inverse coefficients are never
+passed to OpenCV as forward distortion. When the factory projection is
+unusable, the manual fit activates only after its 15-view, 6/9 coverage, 3 px
+per-view, 1.5 px RMS, five-view held-out, and parameter-plausibility gates pass;
+factory and manual evidence are retained either way.
+
+For RealSense calibration, synchronization pairs each color frame's sensor
+exposure timestamp with the robot pose's host-wall timestamp. Every camera
+timestamp must be present in the SDK `global_time` domain, every robot pose must
+have `host_wall_timestamp_ns`, the manual offset is fixed at zero, timestamp
+fallback is forbidden, and frames farther than 20 ms from the nearest pose are
+excluded with evidence.
+
+Target poses require at least 12 common corner inliers, 50% support, four
+markers with at least three supported corners each spanning two target rows and
+columns, and at most 3 px whole-board mean reprojection error. Across accepted
+views, at least 50% of target markers and 60% of target rows and columns must be
+covered (`calib00`: 18/35 markers, 3/5 rows, 5/7 columns). Final passing also
+requires at least 15 accepted views, 6/9 image-centroid cells, four distinct
+motion poses, at least 20 mm translation span and 5° rotation span, rotations
+of at least 2° with rotation-axis second/first singular ratio at least 0.15,
+at least six hand-eye inliers, at most 10 mm mean translation residual, at most
+5° mean rotation residual, at most 25% motion-balanced outliers, and at most
+25% outliers within any repeated motion. Raw outlier density remains evidence,
+not a promotion gate. Solver fitting uses at most five evenly spaced frames per
+motion, then validates every accepted frame with motion-balanced
+residual/outlier evidence. For two or more cameras estimating the same
+stationary companion frame, ranking evaluates only complete bundles that use
+the same PnP and extrinsic method for every camera. Every individual candidate
+must pass and the maximum pairwise companion closure must be at most 10 mm and
+5°. The best mean individual score establishes a quality baseline; bundles
+within 0.01 normalized score are treated as quality-equivalent and ranked by
+their normalized pairwise companion closure. Bundles outside that band remain
+ordered by individual quality, so a poor per-camera solution cannot win on
+closure alone. Deterministic numeric and method tie-breaks finish the ordering.
+Normalized ranking values are rounded to six decimals before comparison; this
+already corresponds to only 0.00001 mm for a translation-only difference or
+0.000005° for a rotation-only difference. Smaller solver dust therefore falls
+through to the canonical PnP/extrinsic method order.
+If no common bundle passes, every recommendation and promotion fails closed;
+an explicit override must still select one complete recorded passing bundle.
+Single-camera ranking is unchanged. Recommendations remain inactive until the
+operator accepts them.
+
+The 2026-07-21 `calib00` campaign retained RealSense `033422071805` as disabled
+configuration and completed physical acquisition and calibration with the two
+enabled cameras. Immutable attempt `3c4a0b7b765f44bd9cc37fffc48fb321`
+promoted the complete `IPPE + Horaud` bundle. Camera `825412070181` uses
+profile `825412070181_eye_in_hand_IPPE_horaud_3c4a0b7b` with camera-to-flange
+translation `[5.062439, -251.370725, 74.046213]` mm and WXYZ quaternion
+`[0.68773742, -0.10903413, -0.13392413, -0.70511923]`; camera
+`923322072633` uses profile
+`923322072633_eye_in_hand_IPPE_horaud_3c4a0b7b` with translation
+`[8.952679, 260.870281, 74.983681]` mm and quaternion
+`[0.70485080, 0.11024180, 0.07467657, -0.69674638]`. Their independently
+estimated stationary-target companion transforms close within 3.612 mm and
+0.277 degrees. Held-out mean residuals are 3.129 mm / 0.491 degrees and
+3.332 mm / 0.427 degrees, with 652/652 and 655/656 inliers respectively.
+
+The factory color projections were retained because their recorded
+`inverse_brown_conrady` coefficients are exactly zero. The manual OpenCV fits
+remain immutable comparison evidence: factory/manual held-out RMS was
+1.194/0.967 px for `825412070181` and 1.322/1.013 px for `923322072633`.
+Depth scale and depth-to-color alignment remain factory SDK provenance, not a
+depth recalibration. A saved-data depth-plane diagnostic found a range-dependent
+metric-depth anomaly on `923322072633`; use the promoted RGB eye-in-hand
+extrinsic, but keep metric depth from that camera explicitly unvalidated until
+a later cable/firmware and depth-specific check.
 
 The **Calibration Targets** page previews and fits PoseGridGen ArUco boards and
 stores immutable bundles below
@@ -361,15 +458,29 @@ page renders the HRI template, base/flange/TCP proxies, calibrated cameras,
 pose-template instances, calibration target, and exact recorded trajectories
 in right-handed Z-up millimetres.
 Missing frame edges remain visibly unresolved, and a component/provenance list
-remains available without WebGL. It remembers the selected run, system/light/dark theme,
-and manual IIWA target in the browser. Physical capture remains separate from
+remains available without WebGL. For each resolved camera that list includes
+the exact calibration profile identity, camera-to-parent 4 × 4 matrix, WXYZ
+quaternion, millimetre translation, stationary-target companion transform when
+estimated, quality, solver, common-bundle promotion, target, and intrinsic and
+synchronization provenance. It remembers the selected run,
+system/light/dark theme, and manual IIWA target in the browser. The Devices
+page distinguishes **Capture-ready**, **Not capture-ready**, and
+**Disconnected** cameras and shows a human-readable readiness reason. It
+blocks preview, snapshot, and new run selection for cameras that are not ready,
+while still allowing a previously selected unavailable camera to be
+deselected.
+
+Physical capture remains separate from
 ordinary stage forms: current preflight evidence is required, camera previews
 are stopped first, and two fresh acknowledgements send `allow_cameras` and
 `allow_real_robot` together in that one request. A non-plan-only capture
 sequence is rejected by `/pipeline/run-config`; use Advanced Capture instead.
 Manual **Start IIWA** controls also require a fresh target confirmation plus
-both execution acknowledgements; **Stop IIWA** remains available without
-motion-start gates.
+both execution acknowledgements. **Stop IIWA** remains available without
+motion-start gates, but it is not a safety stop and cannot interrupt active
+motion. In the operator-reported running calibration program it exits the
+waiting program and requires a manual application restart, so do not use it
+between calibration captures.
 
 The checked-in `posetestbot/web/static/ui/` build is what Flask and installed
 wheels serve, so Bun is not a runtime dependency. Frontend development uses the
@@ -463,6 +574,7 @@ Recommended local validation:
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 git diff --check
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_console_playwright.py
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
 ```
 

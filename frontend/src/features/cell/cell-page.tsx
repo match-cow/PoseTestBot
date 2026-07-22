@@ -44,6 +44,94 @@ function statusColor(status: CellEntity["status"]) {
   return "#38bdf8"
 }
 
+function finiteNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function fixed(value: unknown, digits: number) {
+  return finiteNumber(value)?.toFixed(digits) ?? "—"
+}
+
+function number(value: unknown, digits: number, suffix = "") {
+  const formatted = fixed(value, digits)
+  return formatted === "—" ? formatted : `${formatted}${suffix}`
+}
+
+function vector(values: readonly unknown[] | null | undefined, digits: number) {
+  return values?.map((value) => fixed(value, digits)).join(", ") ?? "—"
+}
+
+function Detail({ label, value }: { label: string; value: React.ReactNode }) {
+  return <div><span className="text-muted-foreground">{label}</span><div className="mt-1 break-all font-mono text-[10px]">{value}</div></div>
+}
+
+function Matrix({ values, testId = "cell-calibration-matrix" }: { values: readonly (readonly unknown[])[]; testId?: string }) {
+  return <pre data-testid={testId} className="overflow-x-auto rounded bg-muted p-3 text-[9px] leading-5">{values.map((row) => row.map((value) => fixed(value, 6).padStart(12)).join(" ")).join("\n")}</pre>
+}
+
+function SelectionDetails({ entity }: { entity: CellEntity | null }) {
+  if (!entity) return <div className="py-6 text-center text-sm text-muted-foreground"><Box className="mx-auto mb-2 size-5" />Nothing selected</div>
+  const calibration = entity.calibration
+  const solver = calibration?.evidence.promotion_solver_provenance
+  const solverLabel = solver?.pnp_method || solver?.extrinsic_method
+    ? [solver.pnp_method, solver.extrinsic_method].filter(Boolean).join(" + ")
+    : null
+  return <div className="space-y-4 text-xs">
+    <div className="flex items-center justify-between gap-2"><span className="text-sm font-semibold">{entity.label}</span><StatusBadge status={entity.status} /></div>
+    <div><span className="text-muted-foreground">Type</span><div>{titleCase(entity.type)}</div></div>
+    {entity.unresolved_reason && <div className="rounded border border-destructive/30 bg-destructive/5 p-3 text-destructive">{entity.unresolved_reason}</div>}
+    {entity.transform && !calibration && <div className="space-y-3 rounded border p-3">
+      <div className="font-semibold">Entity transform</div>
+      <Detail label="Frame" value={`${entity.id} → ${entity.transform.parent_frame ?? "root"}`} />
+      <Detail label="Translation mm" value={vector(entity.transform.translation_mm, 3)} />
+      <Detail label="Quaternion WXYZ" value={vector(entity.transform.rotation_quaternion_wxyz, 7)} />
+    </div>}
+    {calibration && <div data-testid="cell-calibration-evidence" className="space-y-4 rounded border border-success/30 p-3">
+      <div className="flex items-center justify-between gap-2"><div><div className="font-semibold">Calibration extrinsic</div><div className="mt-1 font-mono text-[10px]" data-testid="cell-calibration-transform-frames">{calibration.extrinsics.from} → {calibration.extrinsics.to}</div></div><StatusBadge status={calibration.status} /></div>
+      <Matrix values={calibration.extrinsics.matrix} />
+      <div className="grid grid-cols-1 gap-3">
+        <Detail label="Quaternion WXYZ" value={vector(calibration.extrinsics.rotation_quaternion_wxyz, 7)} />
+        <Detail label="Translation mm" value={vector(calibration.extrinsics.translation_mm, 4)} />
+      </div>
+      {calibration.companion_transform && <div data-testid="cell-calibration-companion" className="space-y-3 border-t pt-3">
+        <div><div className="font-semibold">Companion transform estimate</div><div className="mt-1 font-mono text-[10px]" data-testid="cell-calibration-companion-frames">{calibration.companion_transform.from} → {calibration.companion_transform.to}</div></div>
+        <Matrix values={calibration.companion_transform.matrix} testId="cell-calibration-companion-matrix" />
+        <Detail label="Quaternion WXYZ" value={vector(calibration.companion_transform.rotation_quaternion_wxyz, 7)} />
+        <Detail label="Translation mm" value={vector(calibration.companion_transform.translation_mm, 4)} />
+      </div>}
+      <div className="grid grid-cols-2 gap-2 border-t pt-3">
+        <Detail label="Observations / inliers" value={`${calibration.quality.num_observations} / ${calibration.quality.num_inliers}`} />
+        <Detail label="Mean reprojection" value={number(calibration.quality.mean_reprojection_error_px, 3, " px")} />
+        <Detail label="Max reprojection" value={number(calibration.quality.max_reprojection_error_px, 3, " px")} />
+        <Detail label="Outlier count" value={calibration.quality.outlier_count ?? "—"} />
+        <Detail label="Outlier ratio" value={number(calibration.quality.outlier_ratio, 4)} />
+        <Detail label="Held-out translation" value={number(calibration.quality.residual_translation_mm, 3, " mm")} />
+        <Detail label="Held-out rotation" value={number(calibration.quality.residual_rotation_deg, 3, "°")} />
+        <Detail label="Held-out residual summary" value={calibration.quality.held_out_residuals ? JSON.stringify(calibration.quality.held_out_residuals) : "—"} />
+      </div>
+      <div className="space-y-3 border-t pt-3">
+        <Detail label="Profile" value={calibration.profile_id} />
+        <Detail label="Mount" value={`${calibration.mounting_mode} · ${calibration.rig_position}`} />
+        <Detail label="Method" value={calibration.evidence.method ?? "—"} />
+        <Detail label="Calibration dataset" value={calibration.evidence.calibration_dataset_id ?? "—"} />
+        <Detail label="Sync offset" value={number(calibration.evidence.sync_delta_ms, 3, " ms")} />
+        <Detail label="Promoted solver" value={solverLabel ?? "—"} />
+        <Detail label="Promotion attempt" value={calibration.evidence.promotion_attempt_id ?? "—"} />
+        <Detail label="Promotion candidate" value={calibration.evidence.promotion_candidate_id ?? "—"} />
+        <Detail label="Multi-camera bundle" value={calibration.evidence.promotion_multi_camera_bundle_id ?? "—"} />
+        <Detail label="Target / intrinsic" value={`${calibration.evidence.target_id ?? "—"} / ${calibration.evidence.intrinsic_profile_id ?? "—"}`} />
+        <Detail label="Calibrated" value={calibration.evidence.calibrated_at ?? "—"} />
+        <Detail label="Promoted" value={calibration.evidence.promoted_at ?? "—"} />
+        <Detail label="Operator / promoted by" value={`${calibration.evidence.operator ?? "—"} / ${calibration.evidence.promoted_by ?? "—"}`} />
+        <Detail label="Profile source" value={calibration.evidence.profile_source} />
+      </div>
+    </div>}
+    <details className="rounded border"><summary className="cursor-pointer p-2 font-medium">Raw provenance</summary><pre data-testid="cell-raw-provenance" className="max-h-48 overflow-auto border-t bg-muted p-3 text-[10px]">{JSON.stringify({ entity: entity.provenance, calibration: entity.calibration ?? null }, null, 2)}</pre></details>
+  </div>
+}
+
 class MeshBoundary extends Component<{ children: React.ReactNode; fallback: React.ReactNode }, { failed: boolean }> {
   state = { failed: false }
   static getDerivedStateFromError() { return { failed: true } }
@@ -250,7 +338,7 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
       </Card>
 
       <div className="space-y-4"><Card><CardHeader><CardTitle className="text-base">Visibility layers</CardTitle></CardHeader><CardContent className="grid grid-cols-2 gap-2">{LAYERS.map((layer) => <Label key={layer} className="flex items-center gap-2 rounded border p-2 text-xs"><Checkbox checked={visible.has(layer)} onCheckedChange={() => toggleLayer(layer)} />{titleCase(layer)}</Label>)}<Label className="col-span-2 flex items-center gap-2 rounded border p-2 text-xs"><Checkbox checked={trajectory} onCheckedChange={(value) => setTrajectory(value === true)} /><Route className="size-3.5" />Recorded trajectory</Label></CardContent></Card>
-        <Card><CardHeader><CardTitle className="text-base">Selection details</CardTitle><CardDescription>Click a component in the scene.</CardDescription></CardHeader><CardContent>{selected ? <div className="space-y-3 text-xs"><div className="flex items-center justify-between"><span className="font-semibold text-sm">{selected.label}</span><StatusBadge status={selected.status} /></div><div><span className="text-muted-foreground">Type</span><div>{titleCase(selected.type)}</div></div>{selected.transform && <div><span className="text-muted-foreground">Translation mm</span><div className="font-mono">{selected.transform.translation_mm.map((value) => value.toFixed(2)).join(", ")}</div></div>}<pre className="max-h-48 overflow-auto rounded bg-muted p-3 text-[10px]">{JSON.stringify(selected.provenance, null, 2)}</pre></div> : <div className="py-6 text-center text-sm text-muted-foreground"><Box className="mx-auto mb-2 size-5" />Nothing selected</div>}</CardContent></Card>
+        <Card><CardHeader><CardTitle className="text-base">Selection details</CardTitle><CardDescription>Click a component in the scene.</CardDescription></CardHeader><CardContent><SelectionDetails entity={selected} /></CardContent></Card>
         <Card><CardHeader><CardTitle className="text-base">Dataset contents</CardTitle><CardDescription>{scene.object_selection.objectless ? "Objectless RGB-D run" : `${scene.object_selection.instance_count} pose-template instance(s)`}</CardDescription></CardHeader><CardContent className="max-h-80 space-y-2 overflow-auto">{scene.entities.map((entity) => <button key={entity.id} type="button" className="flex w-full items-center gap-2 rounded border px-3 py-2 text-left text-xs hover:bg-muted" onClick={() => setSelected(entity)}>{entity.type === "camera" ? <Camera className="size-3.5" /> : entity.status === "unresolved" ? <EyeOff className="size-3.5 text-destructive" /> : <Eye className="size-3.5" />}<span className="min-w-0 flex-1 truncate">{entity.label}</span><StatusBadge status={entity.status} /></button>)}</CardContent></Card>
       </div>
     </div>

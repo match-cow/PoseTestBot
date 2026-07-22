@@ -15,7 +15,6 @@ from pytransform3d.transform_manager import TransformManager
 
 from posetestbot.calibration.profiles import (
     CalibrationProfile,
-    CalibrationStatus,
     load_profile_collection,
     select_valid_profile_for_sensor,
 )
@@ -30,6 +29,8 @@ from posetestbot.io.artifacts import (
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.pose_templates.selection import load_pose_template_selection
+from posetestbot.sensors.contracts import MountingMode, SensorType
+from posetestbot.sensors.registry import sensor_folder_name
 
 SCENE_SCHEMA_VERSION = "cell_scene.v1"
 TIMELINE_SCHEMA_VERSION = "cell_timeline.v1"
@@ -76,8 +77,9 @@ def _entity(
     provenance: Mapping[str, Any],
     reason: str | None = None,
     geometry: Mapping[str, Any] | None = None,
+    calibration: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    value = {
         "id": entity_id,
         "type": entity_type,
         "label": label,
@@ -87,6 +89,9 @@ def _entity(
         "geometry": dict(geometry or {}),
         "provenance": dict(provenance),
     }
+    if calibration is not None:
+        value["calibration"] = dict(calibration)
+    return value
 
 
 def _kuka_pose(value: Mapping[str, Any]) -> np.ndarray:
@@ -111,17 +116,22 @@ def _matched_timeline(sensor_folder: Path) -> list[dict[str, Any]]:
     values = _read_mapping(sensor_folder / MATCH_ROBOT_EE_POSES)
     poses: list[dict[str, Any]] = []
     for filename, record in values.items():
-        if not isinstance(record, Mapping) or not isinstance(record.get("robot_ee_pose"), Mapping):
+        if not isinstance(record, Mapping) or not isinstance(
+            record.get("robot_ee_pose"), Mapping
+        ):
             raise ValueError(f"Invalid matched robot pose record {filename!r}")
         try:
             frame_index = int(Path(str(filename)).stem)
         except ValueError as exc:
-            raise ValueError(f"Matched pose frame must have a numeric stem: {filename!r}") from exc
+            raise ValueError(
+                f"Matched pose frame must have a numeric stem: {filename!r}"
+            ) from exc
         poses.append(
             {
                 "frame_index": frame_index,
                 "frame_id": str(filename),
-                "timestamp_ns": record.get("frame_timestamp_ns") or record.get("timestamp_ns"),
+                "timestamp_ns": record.get("frame_timestamp_ns")
+                or record.get("timestamp_ns"),
                 "motion": record.get("motion"),
                 "matrix": _kuka_pose(record["robot_ee_pose"]),
             }
@@ -146,7 +156,8 @@ def _raw_timeline(path: Path) -> list[dict[str, Any]]:
             {
                 "frame_index": frame_index,
                 "frame_id": str(record.get("framename") or key),
-                "timestamp_ns": record.get("host_received_timestamp_ns") or record.get("host_wall_timestamp_ns"),
+                "timestamp_ns": record.get("host_received_timestamp_ns")
+                or record.get("host_wall_timestamp_ns"),
                 "motion": record.get("motion"),
                 "matrix": _kuka_pose(pose),
             }
@@ -154,33 +165,66 @@ def _raw_timeline(path: Path) -> list[dict[str, Any]]:
     return sorted(poses, key=lambda item: item["frame_index"])
 
 
-def _timeline_sources(run_root: Path, config: Mapping[str, Any]) -> list[dict[str, Any]]:
-    candidates = [run_root / PROCESSED_DIR / "rectified", run_root / PROCESSED_DIR / SYNCHRONIZED_DIR]
+def _timeline_sources(
+    run_root: Path, config: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    candidates = [
+        run_root / PROCESSED_DIR / "rectified",
+        run_root / PROCESSED_DIR / SYNCHRONIZED_DIR,
+    ]
     input_root = next((path for path in candidates if path.is_dir()), None)
-    folders = [] if input_root is None else [path for path in input_root.iterdir() if path.is_dir()]
-    order: list[str] = []
+    enabled_names: list[str] = []
     for sensor in config.get("capture", {}).get("sensors", []):
-        if not isinstance(sensor, Mapping):
+        if not isinstance(sensor, Mapping) or sensor.get("enabled", True) is not True:
             continue
-        device_id = str(sensor.get("device_id", ""))
-        sensor_type = str(sensor.get("sensor_type", ""))
-        for folder in folders:
-            if folder.name not in order and (device_id in folder.name or sensor_type.split("_")[0] in folder.name):
-                order.append(folder.name)
-    order.extend(folder.name for folder in sorted(folders) if folder.name not in order)
+        enabled_names.append(
+            sensor_folder_name(
+                str(sensor.get("sensor_type", "")),
+                str(sensor.get("device_id", "")),
+            )
+        )
+    folders_by_name = (
+        {
+            path.name: path
+            for path in input_root.iterdir()
+            if path.is_dir() and path.name in set(enabled_names)
+        }
+        if input_root is not None
+        else {}
+    )
     sources: list[dict[str, Any]] = []
-    for name in order:
-        folder = next(folder for folder in folders if folder.name == name)
+    for name in enabled_names:
+        folder = folders_by_name.get(name)
+        if folder is None:
+            continue
         path = folder / MATCH_ROBOT_EE_POSES
         if path.is_file():
-            sources.append({"id": f"sensor:{name}", "label": name, "source": path, "kind": "synchronized", "poses": _matched_timeline(folder)})
+            sources.append(
+                {
+                    "id": f"sensor:{name}",
+                    "label": name,
+                    "source": path,
+                    "kind": "synchronized",
+                    "poses": _matched_timeline(folder),
+                }
+            )
     if sources:
         return sources
     raw_candidates = [run_root / RAW_ROBOT_EE_POSES]
-    raw_candidates.extend(sorted(run_root.glob(f"*/{RAW_ROBOT_EE_POSES}")))
+    raw_candidates.extend(
+        run_root / name / RAW_ROBOT_EE_POSES for name in enabled_names
+    )
     raw = next((path for path in raw_candidates if path.is_file()), None)
     if raw is not None:
-        return [{"id": "raw:robot", "label": "Raw robot poses", "source": raw, "kind": "raw", "poses": _raw_timeline(raw)}]
+        return [
+            {
+                "id": "raw:robot",
+                "label": "Raw robot poses",
+                "source": raw,
+                "kind": "raw",
+                "poses": _raw_timeline(raw),
+            }
+        ]
     return []
 
 
@@ -214,26 +258,235 @@ def _preview(poses: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(poses) <= MAX_PREVIEW_POSES:
         indices = list(range(len(poses)))
     else:
-        indices = sorted({round(i * (len(poses) - 1) / (MAX_PREVIEW_POSES - 1)) for i in range(MAX_PREVIEW_POSES)})
+        indices = sorted(
+            {
+                round(i * (len(poses) - 1) / (MAX_PREVIEW_POSES - 1))
+                for i in range(MAX_PREVIEW_POSES)
+            }
+        )
     return [_pose_payload(poses[index], index) for index in indices]
 
 
-def _profiles(run_root: Path, config: Mapping[str, Any], warnings: list[dict[str, str]]) -> list[CalibrationProfile]:
+def _profiles(
+    run_root: Path,
+    config: Mapping[str, Any],
+    warnings: list[dict[str, str]],
+) -> tuple[list[CalibrationProfile], Path]:
     value = config.get("calibration_profiles")
-    candidates: list[Path] = []
     if isinstance(value, str) and value:
         raw = Path(value)
-        candidates.extend([raw, run_root / raw] if not raw.is_absolute() else [raw])
-    candidates.append(run_root / "calibration_profiles.json")
-    path = next((candidate for candidate in candidates if candidate.is_file()), None)
-    if path is None:
-        warnings.append({"code": "missing_calibration_profiles", "message": "No calibration profile collection is available; cameras remain unresolved."})
-        return []
+        try:
+            path = _resolve_profile_collection_path(run_root, raw)
+        except ValueError as exc:
+            warnings.append(
+                {"code": "invalid_calibration_profiles", "message": str(exc)}
+            )
+            return [], raw
+    else:
+        path = (run_root / "calibration_profiles.json").resolve()
+    if not path.is_file():
+        warnings.append(
+            {
+                "code": "missing_calibration_profiles",
+                "message": (
+                    "No calibration profile collection is available at "
+                    f"{path}; cameras remain unresolved."
+                ),
+            }
+        )
+        return [], path
     try:
-        return load_profile_collection(path)
+        return load_profile_collection(path), path
     except (OSError, ValueError) as exc:
         warnings.append({"code": "invalid_calibration_profiles", "message": str(exc)})
-        return []
+        return [], path
+
+
+def _resolve_profile_collection_path(run_root: Path, raw: Path) -> Path:
+    """Resolve an explicit collection path without guessing between two files."""
+
+    if raw.is_absolute():
+        return raw.resolve()
+
+    roots = (run_root.resolve(), Path.cwd().resolve())
+    candidates: list[Path] = []
+    for base in roots:
+        candidate = (base / raw).resolve()
+        if candidate == base or base not in candidate.parents:
+            continue
+        if candidate.is_file() and candidate not in candidates:
+            candidates.append(candidate)
+
+    if len(candidates) > 1:
+        locations = ", ".join(path.as_posix() for path in candidates)
+        raise ValueError(
+            f"Ambiguous calibration profile path {raw.as_posix()!r}; "
+            f"it resolves to multiple files: {locations}"
+        )
+    if candidates:
+        return candidates[0]
+
+    # Prefer the run-relative spelling for a useful missing-file diagnostic. The
+    # cwd-relative spelling is considered above whenever it actually exists.
+    return (run_root.resolve() / raw).resolve()
+
+
+def _profile_for_sensor(
+    profiles: list[CalibrationProfile],
+    sensor: Mapping[str, Any],
+    sensor_name: str,
+) -> CalibrationProfile:
+    mounting_mode = MountingMode(str(sensor.get("mounting_mode") or "eye_in_hand"))
+    sensor_type = SensorType(str(sensor.get("sensor_type")))
+    device_id = str(sensor.get("device_id", ""))
+    exact_profiles = [
+        profile
+        for profile in profiles
+        if profile.sensor_type == sensor_type and profile.sensor_id == device_id
+    ]
+    configured_profile_id = sensor.get("calibration_profile_id")
+    if configured_profile_id:
+        matches = [
+            profile
+            for profile in profiles
+            if profile.profile_id == str(configured_profile_id)
+        ]
+        if not matches:
+            raise KeyError(
+                f"Configured profile {configured_profile_id!r} does not exist"
+            )
+        profile = matches[0]
+        if profile.sensor_type != sensor_type or profile.sensor_id != device_id:
+            raise KeyError(
+                f"Configured profile {configured_profile_id!r} does not match "
+                f"sensor identity {sensor_type.value}:{device_id}"
+            )
+        # Reuse the canonical identity/status matcher on the exact pinned profile.
+        # This prevents a pin for another camera or mounting mode from being rendered.
+        return select_valid_profile_for_sensor(
+            [profile],
+            sensor_name,
+            mounting_mode=mounting_mode,
+        )
+    return select_valid_profile_for_sensor(
+        exact_profiles,
+        sensor_name,
+        mounting_mode=mounting_mode,
+    )
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _optional_int(value: Any) -> int | None:
+    parsed = _optional_float(value)
+    if parsed is None or not parsed.is_integer():
+        return None
+    return int(parsed)
+
+
+def _optional_calibration_transform(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        from_frame = str(value["from"])
+        to_frame = str(value["to"])
+        transform = _matrix(
+            value["rotation_quaternion_wxyz"],
+            value["translation_mm"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not from_frame or not to_frame:
+        return None
+    return {
+        "from": from_frame,
+        "to": to_frame,
+        "matrix": np.asarray(transform, dtype=float).tolist(),
+        "rotation_quaternion_wxyz": pr.quaternion_from_matrix(
+            transform[:3, :3]
+        ).tolist(),
+        "translation_mm": transform[:3, 3].tolist(),
+    }
+
+
+def _calibration_evidence(
+    profile: CalibrationProfile,
+    transform: np.ndarray,
+    profile_path: Path,
+) -> dict[str, Any]:
+    metadata = profile.metadata
+    solver = metadata.get("promotion_solver_provenance")
+    held_out = metadata.get("held_out_residuals")
+    return {
+        "profile_id": profile.profile_id,
+        "schema_version": profile.schema_version,
+        "status": profile.status.value,
+        "mounting_mode": profile.mounting_mode.value,
+        "rig_position": profile.rig_position,
+        "extrinsics": {
+            "from": profile.extrinsics.from_frame.value,
+            "to": profile.extrinsics.to_frame.value,
+            "matrix": np.asarray(transform, dtype=float).tolist(),
+            "rotation_quaternion_wxyz": list(
+                profile.extrinsics.rotation_quaternion_wxyz
+            ),
+            "translation_mm": list(profile.extrinsics.translation_mm),
+        },
+        "companion_transform": _optional_calibration_transform(
+            metadata.get("companion_transform")
+        ),
+        "quality": {
+            "num_observations": profile.quality.num_observations,
+            "num_inliers": profile.quality.num_inliers,
+            "mean_reprojection_error_px": _optional_float(
+                profile.quality.mean_reprojection_error_px
+            ),
+            "max_reprojection_error_px": _optional_float(
+                profile.quality.max_reprojection_error_px
+            ),
+            "residual_translation_mm": _optional_float(
+                profile.quality.residual_translation_mm
+            ),
+            "residual_rotation_deg": _optional_float(
+                profile.quality.residual_rotation_deg
+            ),
+            "outlier_count": _optional_int(metadata.get("outlier_count")),
+            "outlier_ratio": _optional_float(metadata.get("outlier_ratio")),
+            "held_out_residuals": dict(held_out)
+            if isinstance(held_out, Mapping)
+            else None,
+            "notes": profile.quality.notes,
+        },
+        "evidence": {
+            "profile_source": profile_path.as_posix(),
+            "method": profile.method,
+            "calibration_dataset_id": profile.calibration_dataset_id,
+            "target_type": profile.target_type.value,
+            "target_id": metadata.get("target_id"),
+            "calibrated_at": profile.calibrated_at,
+            "operator": profile.operator,
+            "sync_delta_ms": _optional_float(profile.sync_delta_ms),
+            "promotion_attempt_id": metadata.get("promotion_attempt_id"),
+            "promotion_candidate_id": metadata.get("promotion_candidate_id"),
+            "promotion_multi_camera_bundle_id": metadata.get(
+                "promotion_multi_camera_bundle_id"
+            ),
+            "promotion_solver_provenance": (
+                dict(solver) if isinstance(solver, Mapping) else None
+            ),
+            "promoted_at": metadata.get("promoted_at"),
+            "promoted_by": metadata.get("promoted_by"),
+            "intrinsic_profile_id": metadata.get("intrinsic_profile_id"),
+        },
+    }
 
 
 def _bop_export_provenance(
@@ -330,45 +583,160 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
             warnings.append({"code": "invalid_fixed_transform", "message": str(exc)})
 
     timelines = _timeline_sources(root, config)
-    first_pose = timelines[0]["poses"][0]["matrix"] if timelines and timelines[0]["poses"] else None
+    first_pose = (
+        timelines[0]["poses"][0]["matrix"]
+        if timelines and timelines[0]["poses"]
+        else None
+    )
     entities = [
-        _entity("template_base", "reference_frame", "Template base", transform=_identity(None), status="planned", provenance={"source": "run_config.frames.dataset_reference_frame"}, geometry={"kind": "axes", "size_mm": 100}),
-        _entity("hri_template", "template", "HRI cell template", transform=_identity("template_base"), status="planned", provenance={"source": "packaged_hri_template"}, geometry={"kind": "svg_plane", "width_mm": 420, "height_mm": 297, "asset_url": "/assets/cell/template_HRI_LBR_all_center_v2.svg", "mapping": "center=template_base;right=+X;down=+Y"}),
+        _entity(
+            "template_base",
+            "reference_frame",
+            "Template base",
+            transform=_identity(None),
+            status="planned",
+            provenance={"source": "run_config.frames.dataset_reference_frame"},
+            geometry={"kind": "axes", "size_mm": 100},
+        ),
+        _entity(
+            "hri_template",
+            "template",
+            "HRI cell template",
+            transform=_identity("template_base"),
+            status="planned",
+            provenance={"source": "packaged_hri_template"},
+            geometry={
+                "kind": "svg_plane",
+                "width_mm": 420,
+                "height_mm": 297,
+                "asset_url": "/assets/cell/template_HRI_LBR_all_center_v2.svg",
+                "mapping": "center=template_base;right=+X;down=+Y",
+            },
+        ),
     ]
 
-    for frame, label, kind in (("physical_robot_base", "Physical robot base", "robot_base"), ("tcp", "Robot TCP", "tcp")):
+    for frame, label, kind in (
+        ("physical_robot_base", "Physical robot base", "robot_base"),
+        ("tcp", "Robot TCP", "tcp"),
+    ):
         parent = "robot_flange" if frame == "tcp" else "template_base"
         try:
             transform = manager.get_transform(frame, parent)
         except KeyError:
-            entities.append(_entity(frame, kind, label, transform=None, status="unresolved", reason=f"No fixed transform resolves {frame} to {parent}", provenance={"source": "run_config.frames.fixed_transforms"}, geometry={"kind": kind}))
+            entities.append(
+                _entity(
+                    frame,
+                    kind,
+                    label,
+                    transform=None,
+                    status="unresolved",
+                    reason=f"No fixed transform resolves {frame} to {parent}",
+                    provenance={"source": "run_config.frames.fixed_transforms"},
+                    geometry={"kind": kind},
+                )
+            )
         else:
-            entities.append(_entity(frame, kind, label, transform=_transform_dict(transform, parent), status="planned", provenance={"source": fixed_sources.get(frame, {}).get("source", "run_config.frames.fixed_transforms")}, geometry={"kind": kind}))
+            entities.append(
+                _entity(
+                    frame,
+                    kind,
+                    label,
+                    transform=_transform_dict(transform, parent),
+                    status="planned",
+                    provenance={
+                        "source": fixed_sources.get(frame, {}).get(
+                            "source", "run_config.frames.fixed_transforms"
+                        )
+                    },
+                    geometry={"kind": kind},
+                )
+            )
 
     if first_pose is not None:
         manager.add_transform("robot_flange", "template_base", first_pose)
         first_pose = manager.get_transform("robot_flange", "template_base")
-    entities.append(_entity("robot_flange", "robot_flange", "Robot flange", transform=_transform_dict(first_pose, "template_base") if first_pose is not None else None, status="recorded" if first_pose is not None else "unresolved", reason=None if first_pose is not None else "No synchronized or raw flange pose timeline is available", provenance={"source": Path(timelines[0]["source"]).as_posix() if timelines else None}, geometry={"kind": "flange_proxy"}))
+    entities.append(
+        _entity(
+            "robot_flange",
+            "robot_flange",
+            "Robot flange",
+            transform=_transform_dict(first_pose, "template_base")
+            if first_pose is not None
+            else None,
+            status="recorded" if first_pose is not None else "unresolved",
+            reason=None
+            if first_pose is not None
+            else "No synchronized or raw flange pose timeline is available",
+            provenance={
+                "source": Path(timelines[0]["source"]).as_posix() if timelines else None
+            },
+            geometry={"kind": "flange_proxy"},
+        )
+    )
 
-    profiles = _profiles(root, config, warnings)
+    profiles, profile_path = _profiles(root, config, warnings)
     for sensor in config.get("capture", {}).get("sensors", []):
-        if not isinstance(sensor, Mapping) or not sensor.get("enabled", True):
+        if not isinstance(sensor, Mapping) or sensor.get("enabled", True) is not True:
             continue
         key = _sensor_key(sensor)
         label = str(sensor.get("display_name") or key)
         try:
-            profile = select_valid_profile_for_sensor(profiles, key)
-            if profile.status != CalibrationStatus.VALID:
-                raise ValueError("profile is not valid")
-            parent = "robot_flange" if profile.mounting_mode.value == "eye_in_hand" else "template_base"
-            transform = _matrix(profile.extrinsics.rotation_quaternion_wxyz, profile.extrinsics.translation_mm)
+            profile = _profile_for_sensor(profiles, sensor, key)
+            parent = (
+                "robot_flange"
+                if profile.mounting_mode.value == "eye_in_hand"
+                else "template_base"
+            )
+            transform = _matrix(
+                profile.extrinsics.rotation_quaternion_wxyz,
+                profile.extrinsics.translation_mm,
+            )
             manager.add_transform(f"camera:{key}", parent, transform)
             resolved = manager.get_transform(f"camera:{key}", parent)
             intrinsics = profile.rectified_intrinsics or profile.intrinsics
-            geometry = {"kind": "camera_frustum", "width": intrinsics.width, "height": intrinsics.height, "fx": intrinsics.cam_k[0], "fy": intrinsics.cam_k[4], "cx": intrinsics.cam_k[2], "cy": intrinsics.cam_k[5], "depth_mm": 180}
-            entities.append(_entity(f"camera:{key}", "camera", label, transform=_transform_dict(resolved, parent), status="planned", provenance={"profile_id": profile.profile_id, "schema_version": profile.schema_version}, geometry=geometry))
+            geometry = {
+                "kind": "camera_frustum",
+                "width": intrinsics.width,
+                "height": intrinsics.height,
+                "fx": intrinsics.cam_k[0],
+                "fy": intrinsics.cam_k[4],
+                "cx": intrinsics.cam_k[2],
+                "cy": intrinsics.cam_k[5],
+                "depth_mm": 180,
+            }
+            entities.append(
+                _entity(
+                    f"camera:{key}",
+                    "camera",
+                    label,
+                    transform=_transform_dict(resolved, parent),
+                    status="planned",
+                    provenance={
+                        "source": profile_path.as_posix(),
+                        "profile_id": profile.profile_id,
+                        "schema_version": profile.schema_version,
+                    },
+                    geometry=geometry,
+                    calibration=_calibration_evidence(
+                        profile,
+                        resolved,
+                        profile_path,
+                    ),
+                )
+            )
         except (KeyError, ValueError) as exc:
-            entities.append(_entity(f"camera:{key}", "camera", label, transform=None, status="unresolved", reason=f"No valid calibration profile: {exc}", provenance={"source": "calibration_profiles"}, geometry={"kind": "camera_frustum"}))
+            entities.append(
+                _entity(
+                    f"camera:{key}",
+                    "camera",
+                    label,
+                    transform=None,
+                    status="unresolved",
+                    reason=f"No valid calibration profile: {exc}",
+                    provenance={"source": profile_path.as_posix()},
+                    geometry={"kind": "camera_frustum"},
+                )
+            )
 
     encoded_root = quote(root.as_posix(), safe="")
     pose_selection = None
@@ -427,7 +795,9 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
             placement = target.get("placement")
             if not isinstance(placement, Mapping):
                 raise ValueError("Calibration target has no known placement")
-            matrix = _matrix(placement["rotation_quaternion_wxyz"], placement["translation_mm"])
+            matrix = _matrix(
+                placement["rotation_quaternion_wxyz"], placement["translation_mm"]
+            )
             parent = str(placement.get("to", "template_base"))
             manager.add_transform("calibration_target", parent, matrix)
             matrix = manager.get_transform("calibration_target", parent)
@@ -442,17 +812,47 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                 "marker_separation_mm": target.get("marker_separation"),
                 "square_length_mm": target.get("square_length"),
             }
-            entities.append(_entity("calibration_target", "calibration_target", "Calibration target", transform=_transform_dict(matrix, parent), status="planned", provenance={"source": target_path.as_posix()}, geometry=geometry))
+            entities.append(
+                _entity(
+                    "calibration_target",
+                    "calibration_target",
+                    "Calibration target",
+                    transform=_transform_dict(matrix, parent),
+                    status="planned",
+                    provenance={"source": target_path.as_posix()},
+                    geometry=geometry,
+                )
+            )
         except (KeyError, OSError, ValueError, json.JSONDecodeError) as exc:
-            entities.append(_entity("calibration_target", "calibration_target", "Calibration target", transform=None, status="unresolved", reason=str(exc), provenance={"source": target_path.as_posix()}, geometry={"kind": "calibration_target"}))
+            entities.append(
+                _entity(
+                    "calibration_target",
+                    "calibration_target",
+                    "Calibration target",
+                    transform=None,
+                    status="unresolved",
+                    reason=str(exc),
+                    provenance={"source": target_path.as_posix()},
+                    geometry={"kind": "calibration_target"},
+                )
+            )
 
-    timeline_meta = [_timeline_metadata(item, default=index == 0) for index, item in enumerate(timelines)]
+    timeline_meta = [
+        _timeline_metadata(item, default=index == 0)
+        for index, item in enumerate(timelines)
+    ]
     bop_export_provenance = _bop_export_provenance(
         root, warnings, str(config.get("dataset_mode", "objectless")), pose_selection
     )
     return {
         "schema_version": SCENE_SCHEMA_VERSION,
-        "coordinate_system": {"units": "millimetres", "handedness": "right", "up_axis": "+Z", "reference_frame": "template_base", "transform_semantics": "entity_to_parent"},
+        "coordinate_system": {
+            "units": "millimetres",
+            "handedness": "right",
+            "up_axis": "+Z",
+            "reference_frame": "template_base",
+            "transform_semantics": "entity_to_parent",
+        },
         "run_root": root.as_posix(),
         "entities": entities,
         "warnings": warnings,
@@ -462,8 +862,12 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
         "object_selection": {
             "objectless": config.get("dataset_mode") == "objectless",
             "dataset_mode": config.get("dataset_mode", "objectless"),
-            "instance_count": len(pose_selection["instances"]) if pose_selection is not None else 0,
-            "pose_template": template_provenance if pose_selection is not None else None,
+            "instance_count": len(pose_selection["instances"])
+            if pose_selection is not None
+            else 0,
+            "pose_template": template_provenance
+            if pose_selection is not None
+            else None,
             "bop_export": bop_export_provenance,
         },
     }
@@ -497,5 +901,7 @@ def cell_timeline_page(
         "total": len(poses),
         "next_offset": offset + len(page) if offset + len(page) < len(poses) else None,
         "previous_offset": max(0, offset - limit) if offset > 0 else None,
-        "poses": [_pose_payload(item, offset + index) for index, item in enumerate(page)],
+        "poses": [
+            _pose_payload(item, offset + index) for index, item in enumerate(page)
+        ],
     }

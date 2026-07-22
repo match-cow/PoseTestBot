@@ -21,6 +21,7 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
+from posetestbot.pipeline.sensor_selection import enabled_sensor_folder_names
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,7 +46,8 @@ def parse_args() -> argparse.Namespace:
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--object-name", action="append", default=None)
     selection.add_argument(
-        "--objectless", action="store_true",
+        "--objectless",
+        action="store_true",
         help="Write a successful skipped plan without invoking BlenderProc.",
     )
     parser.add_argument(
@@ -56,7 +58,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def synchronized_input_folder(run_root: Path, explicit_input_folder: str | None) -> Path:
+def synchronized_input_folder(
+    run_root: Path, explicit_input_folder: str | None
+) -> Path:
     if explicit_input_folder:
         return Path(explicit_input_folder)
     return run_root / PROCESSED_DIR / SYNCHRONIZED_DIR
@@ -66,15 +70,23 @@ def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
     input_folder = synchronized_input_folder(run_root, args.input_folder)
+    sensor_names = (
+        enabled_sensor_folder_names(run_root) if args.input_folder is None else None
+    )
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="blenderproc_render", status="running")
     write_run_manifest(manifest, run_root)
     try:
-        jobs = [] if args.objectless else discover_render_jobs(
-            input_folder=input_folder,
-            render_script=Path(args.render_script),
-            subdir=args.subdir,
-            blenderproc_executable=args.blenderproc,
+        jobs = (
+            []
+            if args.objectless
+            else discover_render_jobs(
+                input_folder=input_folder,
+                render_script=Path(args.render_script),
+                subdir=args.subdir,
+                blenderproc_executable=args.blenderproc,
+                sensor_names=sensor_names,
+            )
         )
         plan_path = write_render_plan(
             run_root,

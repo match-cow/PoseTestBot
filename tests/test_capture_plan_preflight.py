@@ -177,6 +177,81 @@ def test_capture_plan_preflight_includes_sensor_diagnostics_on_failures(
     assert zed_check["details"]["diagnostics"][0]["code"] == "sdk_unavailable"
 
 
+def test_capture_plan_preflight_blocks_realsense_usb2_fallback(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-realsense-usb2"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+    )
+    write_run_config(run_root, config)
+    write_capture_plan_with_manifest(run_root, config.to_dict())
+
+    def usb2_sensor_status() -> dict:
+        transport_diagnostic = {
+            "code": "realsense_usb_below_superspeed",
+            "severity": "error",
+            "message": "RealSense 123 is connected below SuperSpeed.",
+            "devices": [
+                {
+                    "device_id": "123",
+                    "reason": "usb_connection_below_superspeed",
+                    "usb_type_descriptor": "2.1",
+                    "usb_major": 2,
+                }
+            ],
+        }
+        return {
+            "schema_version": "sensor_status.v1",
+            "generated_at": "2026-07-21T00:00:00+00:00",
+            "total_connected": 1,
+            "total_capture_ready": 0,
+            "all_expected_connected": False,
+            "families": [
+                {
+                    "sensor_type": "realsense_d435",
+                    "display_name": "Intel RealSense D435",
+                    "sdk_module": "pyrealsense2",
+                    "sdk_available": True,
+                    "connected_count": 1,
+                    "capture_ready_count": 0,
+                    "devices": [
+                        {
+                            "sensor_type": "realsense_d435",
+                            "device_id": "123",
+                            "display_name": "RealSense 123",
+                            "connected": True,
+                            # Simulate an older status producer that has
+                            # transport metadata but no capture_ready flag.
+                            "metadata": {"usb_type_descriptor": "2.1"},
+                        }
+                    ],
+                    "diagnostics": [transport_diagnostic],
+                }
+            ],
+        }
+
+    report = build_capture_plan_preflight(
+        run_root,
+        allow_real_robot=True,
+        collect_sensors=usb2_sensor_status,
+    )
+
+    check = next(
+        item
+        for item in report["checks"]
+        if item["name"] == "sensor:realsense_d435:123"
+    )
+    assert report["overall_status"] == "error"
+    assert check["status"] == "error"
+    assert check["message"] == "Configured device 123 is not capture-ready."
+    assert check["details"]["connected_devices"] == []
+    assert check["details"]["diagnostics"][0]["code"] == (
+        "realsense_usb_below_superspeed"
+    )
+
+
 def test_capture_plan_preflight_errors_for_real_robot_without_override(
     tmp_path: Path,
 ) -> None:
@@ -249,6 +324,31 @@ def test_capture_plan_preflight_blocks_nonempty_sensor_folder(
     checks = {check["name"]: check for check in report["checks"]}
     assert checks["sensor_output_folder:realsense_123"]["status"] == "error"
     assert checks["sensor_output_folder:realsense_123"]["details"]["child_count"] == 1
+
+
+def test_capture_plan_preflight_blocks_even_empty_sensor_folder(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-existing-empty-folder"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+    )
+    write_run_config(run_root, config)
+    (run_root / "realsense_123").mkdir()
+
+    report = build_capture_plan_preflight(
+        run_root,
+        include_sensor_status=False,
+        write_plan_if_missing=False,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    output_check = checks["sensor_output_folder:realsense_123"]
+    assert report["overall_status"] == "error"
+    assert output_check["status"] == "error"
+    assert output_check["details"]["child_count"] == 0
+    assert "Use a new run root" in output_check["message"]
 
 
 def test_capture_plan_preflight_blocks_existing_raw_robot_pose_artifact(

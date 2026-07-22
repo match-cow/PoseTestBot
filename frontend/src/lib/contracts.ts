@@ -56,6 +56,8 @@ export interface SensorDevice {
   effective_display_name?: string
   alias?: string
   connected?: boolean
+  capture_ready?: boolean
+  capture_readiness_reason?: string | null
   live_rgb_preview_supported?: boolean
   inverted?: boolean
   mounting_mode?: string
@@ -71,6 +73,7 @@ export interface SensorStatus {
     [key: string]: unknown
   }>
   total_connected: number
+  total_capture_ready?: number
   all_expected_connected?: boolean
   [key: string]: unknown
 }
@@ -272,6 +275,62 @@ export interface CellTransform {
   rotation_quaternion_wxyz: [number, number, number, number]
 }
 
+export interface CellCalibrationEvidence {
+  profile_id: string
+  schema_version: string
+  status: "valid"
+  mounting_mode: "eye_in_hand" | "static"
+  rig_position: string
+  extrinsics: {
+    from: string
+    to: string
+    matrix: number[][]
+    rotation_quaternion_wxyz: [number, number, number, number]
+    translation_mm: [number, number, number]
+  }
+  companion_transform: {
+    from: string
+    to: string
+    matrix: number[][]
+    rotation_quaternion_wxyz: [number, number, number, number]
+    translation_mm: [number, number, number]
+  } | null
+  quality: {
+    num_observations: number
+    num_inliers: number
+    mean_reprojection_error_px: number | null
+    max_reprojection_error_px: number | null
+    residual_translation_mm: number | null
+    residual_rotation_deg: number | null
+    outlier_count: number | null
+    outlier_ratio: number | null
+    held_out_residuals: Record<string, JsonValue> | null
+    notes: string | null
+  }
+  evidence: {
+    profile_source: string
+    method: string | null
+    calibration_dataset_id: string | null
+    target_type: string
+    target_id: string | null
+    calibrated_at: string | null
+    operator: string | null
+    sync_delta_ms: number | null
+    promotion_attempt_id: string | null
+    promotion_candidate_id: string | null
+    promotion_multi_camera_bundle_id: string | null
+    promotion_solver_provenance: {
+      solver_policy?: string
+      pnp_method?: string
+      extrinsic_method?: string
+      [key: string]: JsonValue | undefined
+    } | null
+    promoted_at: string | null
+    promoted_by: string | null
+    intrinsic_profile_id: string | null
+  }
+}
+
 export interface CellEntity {
   id: string
   type: string
@@ -281,6 +340,7 @@ export interface CellEntity {
   unresolved_reason: string | null
   geometry: Record<string, JsonValue>
   provenance: Record<string, JsonValue>
+  calibration?: CellCalibrationEvidence
 }
 
 export interface CellTimelineMetadata {

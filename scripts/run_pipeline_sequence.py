@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from posetestbot.io.artifacts import PIPELINE_SEQUENCE_PLAN
@@ -15,8 +16,10 @@ from posetestbot.io.manifest import (
 )
 from posetestbot.pipeline.sequences import (
     PIPELINE_SEQUENCES,
+    SEQUENCE_EXECUTION_ACK_ENV,
     build_sequence_plan,
     execute_sequence_plan,
+    validate_sequence_execution_options,
     write_sequence_plan,
 )
 
@@ -74,13 +77,50 @@ def load_options(*, options_json: str | None, options_file: str | None) -> dict:
     return options
 
 
+def merge_ephemeral_acknowledgements(options: dict) -> dict:
+    raw_value = os.environ.pop(SEQUENCE_EXECUTION_ACK_ENV, None)
+    if raw_value is None:
+        return options
+    loaded = json.loads(raw_value)
+    if not isinstance(loaded, dict):
+        raise ValueError(
+            f"{SEQUENCE_EXECUTION_ACK_ENV} must contain a JSON object"
+        )
+    merged: dict = {}
+    for key, value in options.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"Pipeline sequence options for {key!r} must be an object")
+        merged[key] = dict(value)
+    for group, values in loaded.items():
+        if not isinstance(values, dict) or any(
+            key not in {"allow_cameras", "allow_real_robot"}
+            or value is not True
+            for key, value in values.items()
+        ):
+            raise ValueError(
+                f"{SEQUENCE_EXECUTION_ACK_ENV} contains invalid acknowledgements"
+            )
+        group_options = dict(merged.get(group, {}))
+        group_options.update(values)
+        merged[group] = group_options
+    return merged
+
+
 def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
-    options = load_options(
-        options_json=args.options_json,
-        options_file=args.options_file,
+    options = merge_ephemeral_acknowledgements(
+        load_options(
+            options_json=args.options_json,
+            options_file=args.options_file,
+        )
     )
+
+    if not args.plan_only:
+        validate_sequence_execution_options(
+            sequence_id=args.sequence,
+            options=options,
+        )
 
     plan = build_sequence_plan(
         sequence_id=args.sequence,

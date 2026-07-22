@@ -142,6 +142,26 @@ def test_send_start_omits_wildcard_receiver_ip(
     assert sent == [(message, "172.31.1.147", 30300)]
 
 
+def test_direct_start_cli_requires_both_fresh_acknowledgements() -> None:
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "start_iiwa.py",
+            "--ip_robot",
+            "192.0.2.10",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        env={**os.environ, "UV_CACHE_DIR": "/tmp/uv-cache"},
+    )
+
+    assert result.returncode == 1
+    assert "fresh --allow-real-robot and --allow-cameras" in result.stdout
+
+
 @pytest.mark.parametrize(
     ("script", "arguments", "retired_flag"),
     [

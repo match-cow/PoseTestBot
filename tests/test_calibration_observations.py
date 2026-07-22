@@ -19,6 +19,7 @@ from posetestbot.io.artifacts import (
     DATASET_MANIFEST,
 )
 from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
     create_run_config,
     sensor_config_from_token,
     write_run_config,
@@ -28,9 +29,7 @@ from posetestbot.pipeline.run_config import (
 def write_aruco_fixture(run_root: Path) -> Path:
     config = create_run_config(
         run_root=run_root,
-        sensors=(
-            sensor_config_from_token("realsense:123:static:Static RealSense"),
-        ),
+        sensors=(sensor_config_from_token("realsense:123:static:Static RealSense"),),
         sequence_id="sync_aruco_calibration_observations",
     )
     write_run_config(run_root, config)
@@ -114,6 +113,44 @@ def test_build_calibration_observations_extracts_valid_frames(tmp_path: Path) ->
     ]
     assert observation["target_to_camera"]["translation"] == [10.0, 20.0, 30.0]
     assert report["rejected"][0]["reason"] == "insufficient_markers"
+
+
+def test_default_observation_discovery_ignores_disabled_camera_outputs(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-disabled"
+    enabled_path = write_aruco_fixture(run_root)
+    disabled_path = enabled_path.parent.parent / "realsense_999" / enabled_path.name
+    disabled_path.parent.mkdir(parents=True)
+    disabled_path.write_text(enabled_path.read_text())
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig("realsense_d435", "123", "Enabled"),
+                SensorRunConfig("realsense_d435", "999", "Disabled", enabled=False),
+            ),
+            sequence_id="sync_aruco_calibration_observations",
+        ),
+    )
+
+    discovered = discover_calibration_pose_outputs(run_root)
+    default_report = build_calibration_observations(
+        run_root,
+        min_marker_count=4,
+        min_observations=1,
+    )
+    explicit_report = build_calibration_observations(
+        run_root,
+        aruco_paths=[disabled_path],
+        min_marker_count=4,
+        min_observations=1,
+    )
+
+    assert discovered == [enabled_path]
+    assert [item["device_id"] for item in default_report["sensors"]] == ["123"]
+    assert [item["device_id"] for item in explicit_report["sensors"]] == ["999"]
 
 
 def test_build_calibration_observations_records_target_metadata(
@@ -305,7 +342,9 @@ def test_write_calibration_observations_updates_manifest(tmp_path: Path) -> None
     assert report["overall_status"] == "ok"
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(
-        stage for stage in manifest["stages"] if stage["name"] == "calibration_observations"
+        stage
+        for stage in manifest["stages"]
+        if stage["name"] == "calibration_observations"
     )
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][CALIBRATION_OBSERVATIONS] == CALIBRATION_OBSERVATIONS
@@ -372,8 +411,7 @@ def test_calibration_observations_cli_writes_report(tmp_path: Path) -> None:
     )
 
     assert (
-        "Calibration observations: ok (1 usable / 2 frames, 1 sensors)"
-        in result.stdout
+        "Calibration observations: ok (1 usable / 2 frames, 1 sensors)" in result.stdout
     )
     assert (run_root / CALIBRATION_OBSERVATIONS).is_file()
     data = json.loads((run_root / CALIBRATION_OBSERVATIONS).read_text())

@@ -8,17 +8,28 @@ import cv2
 import numpy as np
 
 from posetestbot.io.artifacts import (
+    CAM_K,
+    CAMERA_DATA_JSON,
     CAMERA_JSON,
     DEPTH_DIR,
     FRAME_METADATA_JSONL,
     RGB_DIR,
 )
+from posetestbot.calibration.intrinsics import (
+    factory_intrinsic_profile,
+    projection_is_opencv_compatible,
+)
+from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
 from posetestbot.sensors.contracts import SensorType
 from posetestbot.sensors.discovery import (
     _parse_realsense_lsusb_devices,
     discover_realsense_d435,
 )
-from posetestbot.sensors.realsense import capture_realsense_rgbd
+from posetestbot.sensors.realsense import (
+    _intrinsics_for_orientation,
+    camera_intrinsics_from_realsense,
+    capture_realsense_rgbd,
+)
 
 
 class FakeIntrinsics:
@@ -28,10 +39,20 @@ class FakeIntrinsics:
     ppy = 240.0
     width = 1280
     height = 720
+    coeffs = (0.1, -0.02, 0.003, -0.004, 0.005)
+    model = "distortion.brown_conrady"
+
+
+class FakeDepthIntrinsics(FakeIntrinsics):
+    fx = 111.0
+    fy = 112.0
+    coeffs = (0.9, 0.8, 0.7, 0.6, 0.5)
+    model = "distortion.inverse_brown_conrady"
 
 
 class FakeFrameProfile:
-    intrinsics = FakeIntrinsics()
+    def __init__(self, *, color: bool):
+        self.intrinsics = FakeIntrinsics() if color else FakeDepthIntrinsics()
 
     def as_video_stream_profile(self):
         return self
@@ -40,7 +61,7 @@ class FakeFrameProfile:
 class FakeFrame:
     def __init__(self, index: int, *, color: bool):
         self.index = index
-        self.profile = FakeFrameProfile()
+        self.profile = FakeFrameProfile(color=color)
         self.color = color
 
     def get_data(self):
@@ -222,6 +243,12 @@ def test_capture_realsense_rgbd_writes_frames_without_preview(tmp_path) -> None:
     assert len(list((tmp_path / RGB_DIR).glob("*.png"))) == 2
     assert len(list((tmp_path / DEPTH_DIR).glob("*.png"))) == 2
     assert (tmp_path / CAMERA_JSON).is_file()
+    camera_data = json.loads((tmp_path / CAMERA_DATA_JSON).read_text())
+    assert camera_data["K"][0][0] == 600.0
+    assert camera_data["distortion"] == [0.1, -0.02, 0.003, -0.004, 0.005]
+    assert camera_data["distortion_model"] == "brown_conrady"
+    assert camera_data["projection_source"] == "realsense_sdk_color_stream"
+    assert len((tmp_path / "cam_K.txt").read_text().splitlines()) == 4
     records = [
         json.loads(line)
         for line in (tmp_path / FRAME_METADATA_JSONL).read_text().splitlines()
@@ -230,6 +257,51 @@ def test_capture_realsense_rgbd_writes_frames_without_preview(tmp_path) -> None:
     assert records[0]["sensor_id"] == "825412070181"
     assert records[0]["inverted"] is False
     assert records[0]["image_rotation_degrees"] == 0
+
+
+def test_host_received_timestamp_is_sampled_before_alignment(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    state = {"phase": "created"}
+
+    class PhasePipeline(FakePipeline):
+        def wait_for_frames(self):
+            frames = super().wait_for_frames()
+            state["phase"] = "sdk_returned"
+            return frames
+
+    class PhaseAlign(FakeAlign):
+        def process(self, frames):
+            state["phase"] = "aligned"
+            return super().process(frames)
+
+    class PhaseRS(FakeRS):
+        def pipeline(self):
+            self.pipeline_instance = PhasePipeline(self.device)
+            return self.pipeline_instance
+
+        def align(self, stream):
+            return PhaseAlign(stream)
+
+    def monotonic_ns() -> int:
+        assert state["phase"] == "sdk_returned"
+        state["phase"] = "timestamped"
+        return 123_456_789
+
+    monkeypatch.setattr(
+        "posetestbot.sensors.realsense.time.monotonic_ns",
+        monotonic_ns,
+    )
+
+    capture_realsense_rgbd(
+        tmp_path,
+        max_frames=1,
+        rs_module=PhaseRS(),
+    )
+
+    record = json.loads((tmp_path / FRAME_METADATA_JSONL).read_text())
+    assert record["host_received_timestamp_ns"] == 123_456_789
 
 
 def test_capture_realsense_rgbd_preview_is_optional(tmp_path) -> None:
@@ -272,7 +344,9 @@ def test_capture_realsense_rgbd_honors_graceful_stop_between_frames(tmp_path) ->
     assert len((tmp_path / FRAME_METADATA_JSONL).read_text().splitlines()) == 1
 
 
-def test_capture_realsense_rgbd_inverted_rotates_frames_and_intrinsics(tmp_path) -> None:
+def test_capture_realsense_rgbd_inverted_rotates_frames_and_intrinsics(
+    tmp_path,
+) -> None:
     summary = capture_realsense_rgbd(
         tmp_path,
         device_id="123",
@@ -309,6 +383,9 @@ def test_capture_realsense_rgbd_inverted_rotates_frames_and_intrinsics(tmp_path)
         0.0,
         1.0,
     ]
+    assert camera["distortion"] == [0.1, -0.02, -0.003, 0.004, 0.005]
+    assert camera["distortion_model"] == "brown_conrady"
+    assert camera["projection_source"] == ("realsense_sdk_color_stream_rotated_180")
     records = [
         json.loads(line)
         for line in (tmp_path / FRAME_METADATA_JSONL).read_text().splitlines()
@@ -316,6 +393,82 @@ def test_capture_realsense_rgbd_inverted_rotates_frames_and_intrinsics(tmp_path)
     assert records[0]["inverted"] is True
     assert records[0]["image_rotation_degrees"] == 180
     assert records[0]["orientation"] == "inverted"
+
+
+def test_inverse_sdk_distortion_is_preserved_but_not_misapplied_to_opencv(
+    tmp_path,
+) -> None:
+    sdk_intrinsics = SimpleNamespace(
+        fx=600.0,
+        fy=601.0,
+        ppx=320.0,
+        ppy=240.0,
+        width=1280,
+        height=720,
+        coeffs=(0.1, -0.02, 0.003, -0.004, 0.005),
+        model="distortion.inverse_brown_conrady",
+    )
+    native = camera_intrinsics_from_realsense(sdk_intrinsics, 1.0)
+    inverted = _intrinsics_for_orientation(native, inverted=True)
+
+    assert inverted.distortion_model == "inverse_brown_conrady"
+    assert inverted.distortion == (0.1, -0.02, -0.003, 0.004, 0.005)
+    write_legacy_camera_sidecars(tmp_path, inverted)
+
+    assert len((tmp_path / CAM_K).read_text().splitlines()) == 3
+    profile = factory_intrinsic_profile(tmp_path)
+    assert profile["native"]["distortion"] == [
+        0.1,
+        -0.02,
+        -0.003,
+        0.004,
+        0.005,
+    ]
+    assert profile["native"]["distortion_model"] == "inverse_brown_conrady"
+    assert profile["source"]["opencv_projection_compatible"] is False
+    assert profile["source"]["rectification_available"] is False
+    assert profile["rectified"] is None
+    assert projection_is_opencv_compatible(profile["native"]) is False
+
+
+def test_exact_zero_inverse_distortion_is_model_invariant_for_opencv(
+    tmp_path,
+) -> None:
+    sdk_intrinsics = SimpleNamespace(
+        fx=600.0,
+        fy=601.0,
+        ppx=320.0,
+        ppy=240.0,
+        width=1280,
+        height=720,
+        coeffs=(0.0, -0.0, 0.0, 0.0, 0.0),
+        model="distortion.inverse_brown_conrady",
+    )
+    native = camera_intrinsics_from_realsense(sdk_intrinsics, 1.0)
+    write_legacy_camera_sidecars(tmp_path, native)
+
+    profile = factory_intrinsic_profile(tmp_path)
+
+    assert profile["native"]["distortion_model"] == "inverse_brown_conrady"
+    assert profile["native"]["distortion"] == [0.0] * 5
+    assert projection_is_opencv_compatible(profile["native"]) is True
+    assert profile["source"]["opencv_projection_compatible"] is True
+    assert profile["source"]["opencv_projection_compatibility_basis"] == (
+        "exact_zero_distortion_is_model_invariant"
+    )
+    assert profile["source"]["rectification_available"] is True
+    assert profile["source"]["rectification_unavailable_reason"] is None
+    assert profile["rectified"] is not None
+    assert profile["rectified"]["distortion"] == [0.0] * 5
+    assert (
+        projection_is_opencv_compatible(
+            {
+                "distortion_model": "kannala_brandt4",
+                "distortion": [0.0] * 5,
+            }
+        )
+        is False
+    )
 
 
 def test_discover_realsense_d435_reads_mocked_sdk_devices(monkeypatch) -> None:

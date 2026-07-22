@@ -9,6 +9,7 @@ from posetestbot.pipeline.preflight import (
     write_run_preflight_report,
 )
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
+from posetestbot.pipeline.run_config import SensorRunConfig
 
 
 def fake_robot_status() -> dict:
@@ -76,6 +77,34 @@ def write_config(
 
 def test_runtime_requirements_are_acquisition_only() -> None:
     assert STAGE_RUNTIME_REQUIREMENTS == {"blenderproc_render": ("blenderproc",)}
+
+
+def test_run_preflight_counts_only_enabled_sensors(tmp_path: Path) -> None:
+    run_root = tmp_path / "two-enabled-one-disabled"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig("realsense_d435", "1", "First"),
+                SensorRunConfig("realsense_d435", "2", "Second"),
+                SensorRunConfig("realsense_d435", "3", "Offline", enabled=False),
+            ),
+            sequence_id="sync_to_bop_dry_run",
+        ),
+    )
+
+    report = build_run_preflight(
+        run_root,
+        include_sensor_status=False,
+        include_runtime_status=False,
+        collect_robot=fake_robot_status,
+    )
+
+    check = next(item for item in report["checks"] if item["name"] == "run_config")
+    assert check["details"]["configured_sensor_count"] == 3
+    assert check["details"]["enabled_sensor_count"] == 2
+    assert check["details"]["sensor_counts"] == {"realsense_d435": 2}
 
 
 def test_preflight_warns_for_optional_missing_runtime_without_required_stage(
