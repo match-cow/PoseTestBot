@@ -16,6 +16,7 @@ from posetestbot.jobs.runner import (
     FAILED,
     QUEUED,
     SUCCEEDED,
+    JobRecord,
     LocalJobRunner,
     ResourceBusyError,
     SERVICE_VISIBILITY,
@@ -51,6 +52,115 @@ def test_local_job_runner_records_failed_command(tmp_path: Path) -> None:
     assert finished.status == FAILED
     assert finished.returncode == 7
     assert "nope" in runner.log_text(job.id)
+
+
+def test_local_job_runner_bounds_large_unbroken_output(tmp_path: Path) -> None:
+    runner = LocalJobRunner(
+        tmp_path / "jobs",
+        max_log_bytes=4096,
+        max_tail_line_chars=128,
+    )
+
+    job = runner.submit(
+        name="large-output",
+        command=[
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('x' * 100_000)",
+        ],
+    )
+    finished = runner.wait(job.id, timeout=5)
+
+    assert finished.status == SUCCEEDED
+    log_path = Path(finished.log_path)
+    assert log_path.stat().st_size <= 4096
+    assert "job log truncated" in runner.log_text(job.id)
+    assert all(len(line) <= 150 for line in finished.tail)
+    assert any("line truncated" in line for line in finished.tail)
+    assert (log_path.parent / "job.json").stat().st_size < 10_000
+
+
+def test_local_job_runner_bounds_legacy_persisted_tail(tmp_path: Path) -> None:
+    job_root = tmp_path / "jobs"
+    job_dir = job_root / "legacy-large-tail"
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "id": "legacy-large-tail",
+                "name": "legacy",
+                "command": [sys.executable, "-c", "pass"],
+                "cwd": None,
+                "status": SUCCEEDED,
+                "created_at": "2026-07-22T00:00:00+00:00",
+                "log_path": (job_dir / "log.txt").as_posix(),
+                "tail": ["discarded", "y" * 1000],
+            }
+        )
+    )
+
+    loaded = LocalJobRunner(
+        job_root,
+        tail_limit=1,
+        max_tail_line_chars=128,
+    ).get("legacy-large-tail")
+
+    assert len(loaded.tail) == 1
+    assert len(loaded.tail[0]) <= 150
+    assert loaded.tail[0].endswith("… [line truncated]")
+
+
+def test_local_job_runner_bounds_total_tail_size(tmp_path: Path) -> None:
+    runner = LocalJobRunner(
+        tmp_path / "jobs",
+        tail_limit=200,
+        max_tail_line_chars=128,
+        max_tail_chars=512,
+    )
+
+    job = runner.submit(
+        name="many-lines",
+        command=[
+            sys.executable,
+            "-c",
+            "print(('z' * 100 + '\\n') * 100, end='')",
+        ],
+    )
+    finished = runner.wait(job.id, timeout=5)
+
+    assert finished.status == SUCCEEDED
+    assert sum(len(line) for line in finished.tail) <= 512
+    assert len(finished.tail) < 100
+
+
+def test_local_job_runner_throttles_tail_metadata_writes_for_output_flood(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = LocalJobRunner(tmp_path / "jobs")
+    original_persist = runner._persist_job
+    persist_calls = 0
+
+    def counted_persist(job: JobRecord) -> None:
+        nonlocal persist_calls
+        persist_calls += 1
+        original_persist(job)
+
+    monkeypatch.setattr(runner, "_persist_job", counted_persist)
+    job = runner.submit(
+        name="many-fast-lines",
+        command=[
+            sys.executable,
+            "-c",
+            "print(('line\\n') * 20_000, end='')",
+        ],
+    )
+    finished = runner.wait(job.id, timeout=10)
+
+    assert finished.status == SUCCEEDED
+    assert persist_calls < 100
+    persisted = json.loads((Path(finished.log_path).parent / "job.json").read_text())
+    assert persisted["status"] == SUCCEEDED
+    assert persisted["tail"][-1] == "Command completed successfully."
 
 
 def test_local_job_runner_can_cancel_running_command(tmp_path: Path) -> None:

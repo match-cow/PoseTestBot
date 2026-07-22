@@ -30,30 +30,6 @@ def test_monitor_command_uses_fixed_webrtc_capture_defaults(tmp_path: Path) -> N
     assert command[command.index("--fps") + 1] == "30"
 
 
-def test_monitor_usb_selection_uses_ugreen_identity(monkeypatch) -> None:
-    candidate = V4L2NodeCandidate(
-        "/dev/video18",
-        interface="00",
-        capabilities=":capture:",
-    )
-    seen: list[tuple[str, str]] = []
-
-    def candidates(vendor_id: str, product_id: str):
-        seen.append((vendor_id, product_id))
-        return [candidate]
-
-    monkeypatch.setattr(v4l2_preview, "candidates_for_usb_id", candidates)
-
-    selection = v4l2_preview.select_usb_rgb_node(
-        "0c45",
-        "2283",
-        format_reader=lambda _path: ("MJPG",),
-    )
-
-    assert seen == [("0c45", "2283")]
-    assert selection.path == "/dev/video18"
-
-
 def test_open_v4l2_capture_requests_mjpeg_and_one_frame_buffer(monkeypatch) -> None:
     class FakeCapture:
         def __init__(self) -> None:

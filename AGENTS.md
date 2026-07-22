@@ -12,6 +12,11 @@ and metric reporting belong in a separate consumer repo.
 - Run scripts as `uv run python ...`.
 - Add dependencies with `uv add ...`; do not hand-edit dependency locks unless
   a tool-generated update is impossible.
+- This host keeps GitHub CLI credentials in the user keyring. A failed
+  `gh auth status` inside the sandbox can be a sandbox/keyring visibility false
+  negative. Before reporting that GitHub authentication is invalid, rerun the
+  same read-only authentication check outside the sandbox; do not ask the
+  operator to log in again based only on the sandboxed result.
 - Browser UI regressions should use Playwright tests. Keep Playwright in the dev
   dependency group, and install browser binaries only when explicitly requested.
 - Production frontend builds and localhost-only Playwright regressions are
@@ -37,6 +42,13 @@ and metric reporting belong in a separate consumer repo.
   only copy of frames.
 - Keep completed status current in `docs/REWRITE_PROGRESS.md` and unfinished
   work in `docs/REWRITE_REMAINING_WORK.md`.
+- A name containing `legacy` does not by itself make code removable. Keep the
+  compatibility readers and entry points named in the remaining-work plan until
+  that plan records a migration and sunset decision.
+- Before deleting or renaming a tracked file, search production code, tests,
+  docs, packaging manifests, and installer checks for references. Rebuild the
+  checked-in frontend with Vite; never hand-edit or selectively retain hashed
+  files below `posetestbot/web/static/ui/assets/`.
 
 ## Current Lab Hardware
 
@@ -90,12 +102,14 @@ Keep or extend these areas:
 - `scripts/run_aruco_stage.py` and `posetestbot.aruco.coverage` as calibration
   target support.
 - BlenderProc preparation/render planning for optional dataset GT/masks.
-- `posetestbot.pose_templates.*` catalog, exact slicing, immutable bundle,
+- `posetestbot.pose_templates.catalog` as the JSON-backed Workpiece Catalogue
+  persistence, identity, lifecycle, and metadata portability contract.
+- The remaining `posetestbot.pose_templates.*` exact slicing, immutable bundle,
   run-selection, and object-instance preparation contracts.
 - `scripts/run_bop_export_stage.py` and `posetestbot.bop.writer`.
 - Flask operator APIs for jobs, capture status, hardware/sensor/runtime
-  status, run config, preflight, calibration, sync quality, and pipeline
-  sequence submission.
+  status, run config, preflight, calibration, the `/workpieces` catalogue,
+  sync quality, and pipeline sequence submission.
 
 Do not reintroduce downstream estimator/evaluator behavior here:
 
@@ -135,15 +149,63 @@ Do not reintroduce downstream estimator/evaluator behavior here:
   `candidate_profiles.json`, the selected target bundle, and explicit promotion
   evidence.
 - BlenderProc render plan artifact: `blenderproc_render_plan.json`.
-- Pose-template artifacts: global `object_catalog/object_catalog.json`, global
-  immutable `pose_templates/<uuid>/pose_template_bundle.json`, run-owned
-  `pose_template_selection.json`, and `object_instances.json`.
+- Workpiece Catalogue artifacts: global
+  `object_catalog/object_catalog.json`, retained UUID-addressed assets below
+  `object_catalog/objects/<uuid>/`, canonical geometry revisions and derived
+  `pose_template_orientation_analysis.json` and bounded
+  `pose_template_orientation_thumbnail.json` caches below each object's
+  `derived/` directory, numbered manifest snapshots below
+  `object_catalog/revisions/`, and deletion tombstones in the catalog JSON.
+- Pose-template artifacts: global immutable
+  `pose_templates/<uuid>/pose_template_bundle.json`, exact
+  `pose_template_preview.json`, bounded `pose_template_thumbnail.json`,
+  run-owned `pose_template_selection.json`, its hidden durable
+  `.pose_template_selection.transaction.json` journal while replacement is in
+  progress, and `object_instances.json`.
 - BOP export artifacts: `bop/bop_export_manifest.json`,
   `bop/posetestbot_bop_frame_map.json`, `bop/test_targets_bop19.json`,
   `bop/models/models_info.json`, pose-template
   `bop/posetestbot_pose_template.json` and `bop/posetestbot_instance_map.json`, optional
   `bop/posetestbot_multiview_targets.json`, and optional
   `bop/posetestbot_coco_annotations.json`.
+
+## Workpiece Catalogue Contracts
+
+The persistent catalogue root is normally `working_data/object_catalog/`.
+`object_catalog.v1` retains stable UUID and BOP `obj_id` identity while adding
+editable `name`, `alias`, `description`, `tags`, `groups`, and `attributes`
+metadata. Source CAD, canonical PLY, and optional PNG texture assets live in
+each workpiece's UUID directory and are referenced by catalog-relative path,
+size, and SHA-256.
+
+Serialize every catalogue mutation across threads and processes, write an
+atomic numbered revision before replacing the current manifest, and never
+reuse a UUID or BOP `obj_id`. Archive is reversible. Permanent deletion is
+allowed only for an archived workpiece after explicit confirmation and only
+when no pose-template bundle references it. Fail closed if any published
+bundle cannot be validated, serialize bundle publication with catalogue
+deletion, commit the tombstone before removing assets, and retain the
+tombstone. Record asset-cleanup status and errors in that tombstone; a repeated
+confirmed delete of the retired UUID must safely retry pending cleanup.
+
+Workpiece JSON export/import is metadata-only. The JSON does not embed CAD,
+canonical PLY, or texture bytes, and import updates matching local UUIDs while
+reporting records whose managed assets are absent as skipped. Preserve or move
+the complete managed asset tree separately when binary portability is needed.
+Queue CAD inspection/conversion through `LocalJobRunner`; it is CPU/disk work
+and must not open cameras or command the robot. The legacy
+`/pose-templates/catalog` APIs remain supported for compatibility, while new
+operator work belongs under `/workpieces`.
+
+Treat metre/millimetre correction as a new canonical geometry revision. It
+requires an archived workpiece, explicit confirmation/operator provenance, and
+an expected revision/hash compare-and-swap. Regenerate from the retained source
+at the cumulative source-to-mm scale, preserve every earlier canonical version,
+and never rewrite existing pose-template or run snapshots. Stable-orientation
+analysis is a reproducible cache bound to the canonical hash and implementation
+revision; its compact thumbnail is a separately bounded card-read cache with
+the same provenance binding. Do not record either mutable cache as an immutable
+catalogue asset.
 
 ## Sensor Contracts
 
@@ -202,6 +264,15 @@ Use `uv` for tests:
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 git diff --check
-UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest -m playwright \
+  tests/test_web_console_playwright.py tests/test_web_preview_playwright.py
 UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium  # only if browser binaries are missing
 ```
+
+The default pytest selection excludes the explicitly marked Playwright modules
+so a normal `uv sync --all-groups` checkout does not require optional Chromium.
+Keep each test tied to a distinct production contract, public boundary, or
+failure mode; consolidate cases whose setup and assertions are strictly
+subsumed by stronger coverage. A browser screenshot is regression evidence only
+when it has a golden/pixel comparison or meaningful UI assertions—successfully
+writing an image and checking its dimensions is not sufficient.

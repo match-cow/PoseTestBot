@@ -42,7 +42,6 @@ from posetestbot.io.artifacts import (
 SCHEMA_VERSION = "bop_export_manifest.v3"
 FRAME_MAP_SCHEMA_VERSION = "posetestbot_bop_frame_map.v2"
 DATASET_INFO_SCHEMA_VERSION = "posetestbot_bop_dataset_info.v1"
-SAFE_OBJECT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
 @dataclass(frozen=True)

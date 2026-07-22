@@ -114,7 +114,7 @@ def test_frame_stem_from_host_wall_ns_uses_legacy_milliseconds() -> None:
     assert frame_stem_from_host_wall_ns(1_234_567_890) == "1235"
 
 
-def test_write_legacy_camera_sidecars_uses_estimator_formats(
+def test_write_legacy_camera_sidecars_writes_numeric_calibration_formats(
     tmp_path: Path,
 ) -> None:
     intrinsics = CameraIntrinsics(

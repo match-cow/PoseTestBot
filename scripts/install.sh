@@ -228,7 +228,7 @@ install_posetemplatecreator() {
   fi
   command_exists git || die "git is required for --with-posetemplatecreator."
   local checkout="${REPO_ROOT}/third_party/PoseTemplateCreator"
-  local revision="450747bfee0e50b76f72ab38e1d0d04643124e02"
+  local revision="97ddb9b7b756912deb8c2d2d6dde186b461e5d9d"
   if [[ "${CHECK_ONLY}" != true ]]; then
     log "Initializing the pinned PoseTemplateCreator source checkout."
     run git submodule update --init --checkout third_party/PoseTemplateCreator
@@ -301,6 +301,7 @@ verify_web_console() {
   compgen -G "${ui_root}/assets/*.css" >/dev/null || die "Bundled web UI has no CSS asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/cell-page-*.js" >/dev/null || die "Bundled web UI has no lazy Cell asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/calibration-targets-page-*.js" >/dev/null || die "Bundled web UI has no lazy Calibration Targets asset. Run scripts/install.sh --with-web-build."
+  compgen -G "${ui_root}/assets/workpieces-page-*.js" >/dev/null || die "Bundled web UI has no lazy Workpiece Catalogue asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/pose-templates-page-*.js" >/dev/null || die "Bundled web UI has no lazy Pose Templates asset. Run scripts/install.sh --with-web-build."
   [[ -f "${cell_asset}" ]] || die "Bundled Cell template is missing ${cell_asset}."
   log "Bundled operator-console assets are present."
@@ -329,12 +330,12 @@ modules = [
     "flask",
     "depthai",
     "matplotlib",
+    "networkx",
     "numpy",
     "PIL",
     "pydantic",
     "reportlab",
     "scipy",
-    "tqdm",
     "pytransform3d",
     "trimesh",
     "posetestbot.web.app",

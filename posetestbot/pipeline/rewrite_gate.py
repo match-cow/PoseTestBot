@@ -321,28 +321,6 @@ def _png_count(path: Path) -> int:
     return len(list(path.glob("*.png")))
 
 
-def _numeric_pose_file_count(path: Path) -> int:
-    if not path.is_dir():
-        return 0
-    count = 0
-    for child in path.iterdir():
-        if not child.is_file():
-            continue
-        try:
-            int(child.stem)
-        except ValueError:
-            continue
-        count += 1
-    return count
-
-
-def _artifact_path(root: Path, value: object) -> Path | None:
-    if not isinstance(value, str) or not value:
-        return None
-    path = Path(value)
-    return path if path.is_absolute() else root / path
-
-
 def _bop_export_readiness_checks(
     root: Path,
     *,
@@ -1974,7 +1952,7 @@ def _rewrite_status_next_actions(
             actions.append(
                 _action(
                     gate_id=gate_id,
-                    label="Re-export BOP dataset with models",
+                    label="Re-export BOP targets and model metadata",
                     command=[
                         "uv",
                         "run",
@@ -1984,8 +1962,8 @@ def _rewrite_status_next_actions(
                         "--overwrite",
                     ],
                     reason=(
-                        "Rebuild BOP targets and model metadata from the object "
-                        "registry used by acquisition exports."
+                        "Rebuild BOP targets and model metadata from the run's "
+                        "immutable pose-template selection or objectless contract."
                     ),
                     blocks_on=blocker_names,
                 )

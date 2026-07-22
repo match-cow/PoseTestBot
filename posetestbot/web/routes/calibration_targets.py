@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from posetestbot.calibration.posegridgen import (
 from posetestbot.calibration.target_library import (
     CalibrationTargetConflict,
     PLACEMENT_MODES,
+    POSEGRIDGEN_SOURCE,
     _FILE_CONTRACT,
     default_target_library_root,
     delete_target_bundle,
@@ -27,6 +29,7 @@ from posetestbot.calibration.target_library import (
     validate_bundle_placement,
     validate_target_bundle,
 )
+from posetestbot.calibration.target_preview import render_target_preview_png
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.jobs.runner import ResourceBusyError
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
@@ -265,6 +268,32 @@ def calibration_target_select(target_id: str):
     except ValueError as exc:
         return jsonify({"output": str(exc)}), 400
     return jsonify({"job": job.to_dict(), "job_id": job.id}), 202
+
+
+@calibration_targets_bp.get("/calibration-targets/bundles/<target_id>/preview.png")
+def calibration_target_bundle_preview(target_id: str):
+    try:
+        bundle = validate_target_bundle(
+            default_target_library_root() / target_id,
+            library_root=default_target_library_root(),
+        )
+        with open(Path(bundle["bundle_path"]) / POSEGRIDGEN_SOURCE) as handle:
+            source_manifest = json.load(handle)
+        payload = render_target_preview_png(
+            bundle["target"], source_manifest=source_manifest
+        )
+    except FileNotFoundError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"output": str(exc)}), 400
+    return Response(
+        payload,
+        mimetype="image/png",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "ETag": f'"{bundle["configuration_sha256"]}"',
+        },
+    )
 
 
 @calibration_targets_bp.get(

@@ -7,6 +7,7 @@ loaded.  In particular, the upstream FastAPI application is never imported.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import importlib.util
 import os
 import subprocess
@@ -20,9 +21,10 @@ from typing import Any
 import numpy as np
 
 
-POSETEMPLATECREATOR_REVISION = "450747bfee0e50b76f72ab38e1d0d04643124e02"
+POSETEMPLATECREATOR_REVISION = "97ddb9b7b756912deb8c2d2d6dde186b461e5d9d"
+LEGACY_POSETEMPLATECREATOR_REVISION = "450747bfee0e50b76f72ab38e1d0d04643124e02"
 POSETEMPLATECREATOR_RELATIVE_PATH = Path("third_party/PoseTemplateCreator")
-ADAPTER_VERSION = "posetestbot_posetemplatecreator_adapter.v1"
+ADAPTER_VERSION = "posetestbot_posetemplatecreator_adapter.v2"
 _PRIVATE_PACKAGE = f"_posetestbot_posetemplatecreator_{POSETEMPLATECREATOR_REVISION[:12]}"
 _MODULES = ("constants", "models", "mesh", "scene", "render")
 _REQUIRED_FILES = tuple(Path("backend") / f"{name}.py" for name in _MODULES)
@@ -74,6 +76,63 @@ class PoseTemplateCreatorBackend:
             "watertight": bool(mesh.is_watertight),
         }
         return payload, metadata
+
+    def provenance(self) -> dict[str, Any]:
+        """Return the exact implementation versions behind derived geometry."""
+
+        dependencies: dict[str, str] = {}
+        for distribution in ("numpy", "scipy", "trimesh", "networkx"):
+            try:
+                dependencies[distribution] = importlib.metadata.version(distribution)
+            except importlib.metadata.PackageNotFoundError:
+                dependencies[distribution] = "unavailable"
+        return {
+            "adapter_version": ADAPTER_VERSION,
+            "upstream_name": "PoseTemplateCreator",
+            "upstream_revision": self.revision,
+            "dependencies": dependencies,
+        }
+
+    def orientation_artifacts(self, filename: str, data: bytes) -> dict[str, Any]:
+        """Extract deterministic stable orientations and one bounded source mesh.
+
+        The public adapter result intentionally uses compact PoseTestBot field
+        names while retaining the upstream matrices and contours without
+        modification.  The source mesh is expressed in the catalogue model's
+        millimetre coordinate frame; each ``source_to_placed`` rigid transform
+        grounds that source mesh on the corresponding stable base.
+        """
+
+        safe_name = self.safe_filename(filename)
+        source_sha256 = hashlib.sha256(data).hexdigest()
+        with _BACKEND_LOCK:
+            extraction = self.mesh.extract_orientations_with_preview(safe_name, data)
+        orientations: list[dict[str, Any]] = []
+        for footprint in extraction.orientations:
+            value = footprint.model_dump(mode="json")
+            if value["source_sha256"] != source_sha256:
+                raise PoseTemplateCreatorUnavailable(
+                    "PoseTemplateCreator returned orientation geometry for a different source"
+                )
+            orientations.append(
+                {
+                    "label": value["orientation_label"],
+                    "probability": value["orientation_probability"],
+                    "source_to_placed": value["source_to_placed"],
+                    "slice_z_mm": value["slice_z_mm"],
+                    "contours": value["contours"],
+                }
+            )
+        return {
+            "source_filename": safe_name,
+            "source_sha256": source_sha256,
+            "orientations": orientations,
+            "preview_mesh": extraction.preview_mesh.model_dump(mode="json"),
+            "provenance": self.provenance(),
+        }
+
+    # A readable alias for callers that do not persist the returned artifacts.
+    analyze_orientations = orientation_artifacts
 
     def posed_contours(self, filename: str, data: bytes, matrix: np.ndarray) -> list[list[dict[str, float]]]:
         transform = np.asarray(matrix, dtype=float)
@@ -229,6 +288,7 @@ def load_posetemplatecreator_backend(
             required = (
                 (backend.mesh, "_load_mesh"),
                 (backend.mesh, "_closed_contours"),
+                (backend.mesh, "extract_orientations_with_preview"),
                 (backend.scene, "build_scene"),
                 (backend.render, "render_pdf"),
             )
@@ -273,6 +333,17 @@ def posetemplatecreator_status(checkout: str | Path | None = None) -> dict[str, 
                     "faces": int(backend.constants.MAX_FACES),
                     "contour_vertices": int(backend.constants.MAX_CONTOUR_VERTICES),
                     "instances": int(backend.constants.MAX_OBJECTS),
+                    "orientations_per_object": int(
+                        backend.constants.MAX_ORIENTATIONS
+                    ),
+                    "preview_vertices": int(
+                        backend.constants.MAX_PREVIEW_VERTICES
+                    ),
+                    "preview_faces": int(backend.constants.MAX_PREVIEW_FACES),
                 },
+                "coordinate_convention": (
+                    "millimetres; source_to_placed maps catalogue-model coordinates "
+                    "to a grounded stable orientation; planar template pose is applied last"
+                ),
             }
     return status

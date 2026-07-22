@@ -37,12 +37,6 @@ SENSOR_SDK_REQUIREMENTS: Mapping[SensorType, str | None] = {
     SensorType.ZED_2I: None,
 }
 
-LAB_EXPECTED_SENSOR_COUNTS: Mapping[SensorType, int] = {
-    SensorType.REALSENSE_D435: 3,
-    SensorType.OAK_D_PRO: 1,
-    SensorType.ZED_2I: 1,
-}
-
 DISCOVERERS: Mapping[SensorType, Callable[[], list[SensorDeviceInfo]]] = {
     SensorType.REALSENSE_D435: discovery.discover_realsense_d435,
     SensorType.OAK_D_PRO: discovery.discover_oak_d_pro,

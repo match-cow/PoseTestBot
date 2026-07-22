@@ -45,10 +45,12 @@ Omit `--with-posegridgen` when this checkout only needs to consume existing
 reported unavailable, while calibration readers and the bundled UI continue
 to work.
 
-Omit `--with-posetemplatecreator` when this checkout only needs to browse
-existing catalog entries, immutable pose-template bundles, and run selections.
-New CAD inspection, exact slicing, preview, and PDF generation are disabled
-until the pinned checkout is available.
+Omit `--with-posetemplatecreator` when this checkout only needs to browse,
+classify, archive, restore, export, or metadata-import existing Workpiece
+Catalogue entries and to read immutable pose-template bundles and run
+selections. Client-side catalogue PLY previews continue to work. New CAD
+inspection/conversion, exact slicing, pose-template preview, and PDF generation
+are disabled until the pinned checkout is available.
 
 Use check-only mode to inspect an already configured environment without
 installing or syncing:
@@ -139,10 +141,18 @@ generate immutable source/spec/PDF bundles, then select one for a configured
 run. The complete artifact and placement contract is documented in
 [`docs/POSEGRIDGEN_CALIBRATION_TARGETS.md`](docs/POSEGRIDGEN_CALIBRATION_TARGETS.md).
 
-### PoseTemplateCreator Object Ground Truth
+### Workpiece Catalogue and PoseTemplateCreator Object Ground Truth
 
-Managed object inspection and printable pose-template generation use the
-source checkout at `third_party/PoseTemplateCreator`:
+The bundled **Workpiece Catalogue** page stores the test-object manifest and
+UUID-addressed CAD assets below `working_data/object_catalog/`. Existing
+entries, editable metadata, archive/restore controls, JSON metadata
+import/export, bounded isometric thumbnails, and the selected object's single
+interactive bounded 3D preview do not require an additional service or
+database.
+
+Importing a new PLY/STL/OBJ (with an optional PNG texture), inspecting and
+converting its mesh, and generating printable pose templates use the source
+checkout at `third_party/PoseTemplateCreator`:
 
 ```bash
 bash scripts/install.sh --with-posetemplatecreator
@@ -150,13 +160,17 @@ bash scripts/install.sh --check-only --with-posetemplatecreator
 ```
 
 The required revision is
-`450747bfee0e50b76f72ab38e1d0d04643124e02`. PoseTestBot refuses generation
+`97ddb9b7b756912deb8c2d2d6dde186b461e5d9d`. PoseTestBot refuses generation
 when the checkout is missing, dirty, or at another revision. It privately loads
-only the upstream constants, models, secure mesh parser, exact contour slicer,
-scene, and PDF renderer; the upstream FastAPI server and React application are
-never imported or embedded. Existing immutable bundles remain readable when
-the optional checkout is unavailable. The operator and artifact workflow is
-documented in
+only the upstream constants, models, secure mesh parser, stable-orientation and
+bounded-preview extraction, exact contour slicer, scene, and PDF renderer; the
+upstream FastAPI server and React application are never imported or embedded.
+The Python environment includes NetworkX for the pinned Trimesh stable-pose
+path. Existing immutable bundles remain readable when the optional checkout is
+unavailable. Catalogue storage, lifecycle, metre/mm geometry revisions, API,
+and metadata-portability details are documented in
+[`docs/WORKPIECE_CATALOGUE.md`](docs/WORKPIECE_CATALOGUE.md). The printable
+template and object-GT workflow is documented in
 [`docs/POSETEMPLATECREATOR_OBJECT_GT.md`](docs/POSETEMPLATECREATOR_OBJECT_GT.md).
 
 ### RealSense D435
@@ -289,9 +303,12 @@ UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium
 Then run the operator-console and sensor-preview browser tests:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_console_playwright.py
-UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest -m playwright \
+  tests/test_web_console_playwright.py tests/test_web_preview_playwright.py
 ```
+
+The default `uv run pytest` selection excludes these marked browser modules, so
+ordinary tests do not require the optional Chromium download.
 
 The room-monitor coverage in that file uses an in-process synthetic aiortc
 video track. It does not open the UGREEN camera or any RGB-D acquisition
@@ -333,7 +350,9 @@ PID/start time and terminates the complete workload descendant group.
 The frontend lives in `frontend/` and follows the shadcn Vite layout with
 React, TypeScript, Tailwind, Radix primitives, HashRouter, TanStack Query,
 React Hook Form, Zod, Three.js, React Three Fiber, and Drei. Its production output is
-`posetestbot/web/static/ui/`.
+`posetestbot/web/static/ui/`. The Workpiece Catalogue's front, side, top, and
+isometric mesh previews use those bundled client-side Three.js dependencies;
+they add no server runtime or database dependency.
 
 ```bash
 cd frontend
@@ -375,8 +394,8 @@ bash scripts/install.sh --check-only \
 cd frontend && bun run typecheck && bun run lint && bun run build
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_runtime_status.py tests/test_hardware_status.py
-UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_console_playwright.py
-UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest -m playwright \
+  tests/test_web_console_playwright.py tests/test_web_preview_playwright.py
 UV_CACHE_DIR=/tmp/uv-cache uv build
 git diff --check
 ```
@@ -395,8 +414,14 @@ git diff --check
   `git submodule update --init --checkout third_party/PoseTemplateCreator`,
   confirm the checkout is clean at the pinned revision, then run
   `bash scripts/install.sh --check-only --with-posetemplatecreator`. Existing
-  immutable catalogs, bundles, and run selections remain readable without the
-  source checkout.
+  Workpiece Catalogue records/assets, immutable bundles, and run selections
+  remain readable without the source checkout; only new CAD conversion and
+  pose-template geometry/rendering actions are unavailable.
+- Workpiece catalogue metadata import reports `skipped_missing_assets`: this is
+  expected when matching UUID-addressed CAD assets are not installed locally.
+  JSON import/export never embeds or restores CAD, canonical PLY, or PNG bytes;
+  preserve or migrate the complete managed asset tree separately when binary
+  portability is required.
 - Room-monitor signaling is unavailable: inspect
   `GET /jobs?include_services=1`, confirm the managed `monitor-webrtc:ugreen`
   service is running, and inspect its `monitor_webrtc.v2` error reason. Allow

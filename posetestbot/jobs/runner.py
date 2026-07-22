@@ -30,6 +30,11 @@ TERMINAL_STATUSES = {SUCCEEDED, FAILED, CANCELED}
 OPERATOR_VISIBILITY = "operator"
 SERVICE_VISIBILITY = "service"
 JOB_VISIBILITIES = {OPERATOR_VISIBILITY, SERVICE_VISIBILITY}
+DEFAULT_MAX_LOG_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_TAIL_LINE_CHARS = 16 * 1024
+DEFAULT_MAX_TAIL_CHARS = 256 * 1024
+OUTPUT_READ_CHARS = 64 * 1024
+TAIL_PERSIST_INTERVAL_SECONDS = 0.25
 
 
 @dataclass
@@ -65,9 +70,28 @@ class JobRecord:
 class LocalJobRunner:
     """Run structured command arrays in background threads and keep job logs."""
 
-    def __init__(self, job_root: str | Path, *, tail_limit: int = 200):
+    def __init__(
+        self,
+        job_root: str | Path,
+        *,
+        tail_limit: int = 200,
+        max_log_bytes: int = DEFAULT_MAX_LOG_BYTES,
+        max_tail_line_chars: int = DEFAULT_MAX_TAIL_LINE_CHARS,
+        max_tail_chars: int = DEFAULT_MAX_TAIL_CHARS,
+    ):
+        if tail_limit < 1:
+            raise ValueError("tail_limit must be at least 1")
+        if max_log_bytes < 1024:
+            raise ValueError("max_log_bytes must be at least 1024")
+        if max_tail_line_chars < 64:
+            raise ValueError("max_tail_line_chars must be at least 64")
+        if max_tail_chars < 64:
+            raise ValueError("max_tail_chars must be at least 64")
         self.job_root = Path(job_root)
         self.tail_limit = tail_limit
+        self.max_log_bytes = max_log_bytes
+        self.max_tail_line_chars = max_tail_line_chars
+        self.max_tail_chars = max_tail_chars
         self.job_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._jobs: dict[str, JobRecord] = {}
@@ -253,8 +277,35 @@ class LocalJobRunner:
             job.started_at = utc_now_iso()
             self._persist_job(job)
 
-        with open(job.log_path, "a", buffering=1) as log:
-            log.write(f"$ {self._format_command(job.command)}\n")
+        with open(job.log_path, "ab", buffering=0) as log:
+            log_bytes = log.tell()
+            log_truncated = log_bytes >= self.max_log_bytes
+
+            def write_log(value: str) -> None:
+                nonlocal log_bytes, log_truncated
+                if log_truncated:
+                    return
+                encoded = value.encode("utf-8", errors="replace")
+                marker = (
+                    "\n[PoseTestBot job log truncated at "
+                    f"{self.max_log_bytes} bytes]\n"
+                ).encode("utf-8")
+                data_limit = max(0, self.max_log_bytes - len(marker))
+                remaining = data_limit - log_bytes
+                if len(encoded) <= remaining:
+                    log.write(encoded)
+                    log_bytes += len(encoded)
+                    return
+                if remaining > 0:
+                    log.write(encoded[:remaining])
+                    log_bytes += remaining
+                marker_remaining = self.max_log_bytes - log_bytes
+                if marker_remaining > 0:
+                    log.write(marker[:marker_remaining])
+                    log_bytes += min(len(marker), marker_remaining)
+                log_truncated = True
+
+            write_log(f"$ {self._format_command(job.command)}\n")
             try:
                 identity_path = Path(job.log_path).parent / "supervisor.json"
                 supervisor_command = [
@@ -279,6 +330,8 @@ class LocalJobRunner:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                     start_new_session=(os.name != "nt"),
                 )
@@ -312,12 +365,43 @@ class LocalJobRunner:
             self._refresh_supervisor_identity(job_id, wait_s=2.0)
 
             assert process.stdout is not None
-            for line in process.stdout:
-                log.write(line)
+            pending_tail = ""
+            pending_tail_truncated = False
+            last_tail_persisted_at = time.monotonic()
+            while True:
+                fragment = process.stdout.readline(OUTPUT_READ_CHARS)
+                if not fragment:
+                    break
+                write_log(fragment)
+                room = self.max_tail_line_chars - len(pending_tail)
+                if room > 0:
+                    pending_tail += fragment[:room]
+                if len(fragment) > room:
+                    pending_tail_truncated = True
+                if fragment.endswith("\n"):
+                    line = pending_tail.rstrip("\r\n")
+                    if pending_tail_truncated:
+                        line += "… [line truncated]"
+                    with self._lock:
+                        current = self._jobs[job_id]
+                        self._append_tail(current, line)
+                        now = time.monotonic()
+                        if (
+                            now - last_tail_persisted_at
+                            >= TAIL_PERSIST_INTERVAL_SECONDS
+                        ):
+                            self._persist_job(current)
+                            last_tail_persisted_at = now
+                    pending_tail = ""
+                    pending_tail_truncated = False
+
+            if pending_tail or pending_tail_truncated:
+                line = pending_tail.rstrip("\r\n")
+                if pending_tail_truncated:
+                    line += "… [line truncated]"
                 with self._lock:
                     current = self._jobs[job_id]
-                    self._append_tail(current, line.rstrip("\n"))
-                    self._persist_job(current)
+                    self._append_tail(current, line)
 
             returncode = process.wait()
             self._cleanup_recorded_workload(job_id, timeout_s=1.0)
@@ -340,9 +424,18 @@ class LocalJobRunner:
                 self._threads.pop(job_id, None)
 
     def _append_tail(self, job: JobRecord, line: str) -> None:
-        job.tail.append(line)
+        job.tail.append(self._bounded_tail_line(line))
         if len(job.tail) > self.tail_limit:
             del job.tail[: len(job.tail) - self.tail_limit]
+        while len(job.tail) > 1 and sum(len(item) for item in job.tail) > self.max_tail_chars:
+            del job.tail[0]
+
+    def _bounded_tail_line(self, line: str) -> str:
+        limit = min(self.max_tail_line_chars, self.max_tail_chars)
+        if len(line) <= limit:
+            return line
+        suffix = "… [line truncated]"
+        return line[: max(0, limit - len(suffix))] + suffix
 
     def _resource_holders(self, *, include_services: bool = True) -> dict[str, str]:
         holders = {}
@@ -486,6 +579,10 @@ class LocalJobRunner:
                 with open(path, "r") as f:
                     data = json.load(f)
                 job = self._job_from_dict(data)
+                persisted_tail = job.tail[-self.tail_limit :]
+                job.tail = []
+                for line in persisted_tail:
+                    self._append_tail(job, str(line))
                 self._merge_supervisor_identity(job, path.parent / "supervisor.json")
             except Exception:
                 continue

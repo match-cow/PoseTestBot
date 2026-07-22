@@ -10,7 +10,7 @@ from typing import Any
 from flask import Blueprint, jsonify, request, send_file
 
 from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
-from posetestbot.io.artifacts import RUN_CONFIG
+from posetestbot.io.artifacts import DATASET_MANIFEST, RUN_CONFIG
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.cell.scene import (
     build_cell_scene,
@@ -101,6 +101,11 @@ def discover_web_runs() -> list[dict[str, Any]]:
                 if candidate.name == "calibration_targets":
                     continue
                 if candidate.is_symlink() or not candidate.is_dir():
+                    continue
+                if not any(
+                    (candidate / artifact).is_file()
+                    for artifact in (RUN_CONFIG, DATASET_MANIFEST)
+                ):
                     continue
                 resolved = candidate.resolve()
                 if not _is_below(resolved, allowed_root):

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from flask import Blueprint, jsonify, request, send_file
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.jobs.runner import ResourceBusyError
@@ -28,10 +30,18 @@ from posetestbot.pose_templates.library import (
     BUNDLE_MANIFEST,
     TEMPLATE_PDF,
     clone_template_configuration,
-    default_template_library_root,
-    list_template_bundles,
+    load_template_bundle_detail,
+    load_template_bundle_preview,
+    load_template_thumbnail,
+    list_template_bundle_summaries,
+    resolve_template_bundle_asset,
+    resolve_template_bundle_download,
     set_template_archive_state,
-    validate_template_bundle,
+)
+from posetestbot.pose_templates.orientations import (
+    OrientationAnalysisStaleError,
+    load_catalog_orientation_analysis,
+    load_catalog_orientation_thumbnail,
 )
 from posetestbot.pose_templates.selection import (
     PoseTemplateSelectionConflict,
@@ -47,11 +57,16 @@ pose_templates_bp = Blueprint("pose_templates", __name__)
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_UPLOAD_BATCH_BYTES = 100 * 1024 * 1024
 REQUEST_ROOT = default_working_data_root() / "jobs" / "pose_template_requests"
+WORKPIECE_REQUEST_ROOT = (
+    default_working_data_root() / "jobs" / "workpiece_catalog_requests"
+)
+REQUEST_RETENTION_SECONDS = 24 * 60 * 60
 
 
 def _json() -> dict[str, Any]:
+    request.max_content_length = MAX_JSON_BYTES
     if request.content_length is not None and request.content_length > MAX_JSON_BYTES:
-        raise ValueError("Pose-template JSON request exceeds 2 MiB")
+        raise RequestEntityTooLarge()
     value = request.get_json(silent=True)
     if not isinstance(value, dict):
         raise ValueError("A JSON object is required")
@@ -59,6 +74,7 @@ def _json() -> dict[str, Any]:
 
 
 def _write_request(kind: str, value: dict[str, Any]) -> tuple[str, Path]:
+    _prune_stale_requests(kind)
     request_id = uuid.uuid4().hex
     folder = REQUEST_ROOT / kind / request_id
     folder.mkdir(parents=True, exist_ok=False)
@@ -67,20 +83,73 @@ def _write_request(kind: str, value: dict[str, Any]) -> tuple[str, Path]:
     return request_id, path
 
 
+def _prune_stale_requests(kind: str, *, request_root: Path | None = None) -> None:
+    """Bound abandoned request/result storage without touching active jobs."""
+
+    root = (request_root or REQUEST_ROOT) / kind
+    try:
+        active_ids = {
+            str(job.parameters.get("request_id"))
+            for job in job_runner.list(include_services=True)
+            if job.status not in {"succeeded", "failed", "canceled"}
+            and job.parameters.get("request_id")
+        }
+    except (AttributeError, OSError, TypeError):
+        active_ids = set()
+    cutoff = time.time() - REQUEST_RETENTION_SECONDS
+    try:
+        folders = list(root.iterdir())
+    except FileNotFoundError:
+        return
+    for folder in folders:
+        try:
+            if (
+                folder.is_dir()
+                and folder.name not in active_ids
+                and folder.stat().st_mtime < cutoff
+            ):
+                shutil.rmtree(folder)
+        except FileNotFoundError:
+            continue
+
+
 def _submit(
     *, name: str, script: str, request_path: Path, request_id: str, resources: list[str]
 ):
-    job = job_runner.submit(
-        name=name,
-        command=["uv", "run", "python", script, "--request", request_path.as_posix()],
-        cwd=APP_ROOT,
-        resources=resources,
-        parameters={"request_id": request_id, "request_path": request_path.as_posix()},
-    )
-    return jsonify({"job": job.to_dict(), "job_id": job.id, "request_id": request_id}), 202
+    try:
+        job = job_runner.submit(
+            name=name,
+            command=[
+                "uv",
+                "run",
+                "python",
+                script,
+                "--request",
+                request_path.as_posix(),
+            ],
+            cwd=APP_ROOT,
+            resources=resources,
+            parameters={
+                "request_id": request_id,
+                "request_path": request_path.as_posix(),
+            },
+        )
+    except Exception:
+        shutil.rmtree(request_path.parent, ignore_errors=True)
+        raise
+    return jsonify(
+        {"job": job.to_dict(), "job_id": job.id, "request_id": request_id}
+    ), 202
 
 
 def _error(exc: Exception):
+    if isinstance(exc, RequestEntityTooLarge):
+        message = (
+            "Pose-template JSON request exceeds 2 MiB"
+            if request.mimetype == "application/json"
+            else "Upload exceeds the 100 MiB batch limit"
+        )
+        return jsonify({"output": message}), 413
     if isinstance(exc, PoseTemplateSelectionConflict):
         return jsonify({"output": str(exc), "blockers": exc.blockers}), 409
     if isinstance(exc, ResourceBusyError):
@@ -89,9 +158,13 @@ def _error(exc: Exception):
         return jsonify({"output": str(exc)}), 404
     if isinstance(exc, PoseTemplateCreatorUnavailable):
         return jsonify({"output": str(exc)}), 409
+    if isinstance(exc, OrientationAnalysisStaleError):
+        return jsonify({"output": str(exc), "analysis_required": True}), 409
     code = getattr(exc, "code", None)
     if code:
-        return jsonify({"errors": [{"code": code, "message": getattr(exc, "message", str(exc))}]}), 422
+        return jsonify(
+            {"errors": [{"code": code, "message": getattr(exc, "message", str(exc))}]}
+        ), 422
     return jsonify({"output": str(exc)}), 400
 
 
@@ -120,8 +193,12 @@ def catalog_detail(catalog_uuid: str):
 def catalog_upload():
     folder: Path | None = None
     try:
-        if request.content_length is not None and request.content_length > MAX_UPLOAD_BATCH_BYTES + 1024 * 1024:
-            raise ValueError("Upload exceeds the 100 MiB batch limit")
+        request.max_content_length = MAX_UPLOAD_BATCH_BYTES + 1024 * 1024
+        if (
+            request.content_length is not None
+            and request.content_length > MAX_UPLOAD_BATCH_BYTES + 1024 * 1024
+        ):
+            raise RequestEntityTooLarge()
         cad = request.files.get("cad")
         textures = request.files.getlist("texture")
         if cad is None or not cad.filename:
@@ -131,8 +208,11 @@ def catalog_upload():
         backend = load_posetemplatecreator_backend()
         safe_name = backend.safe_filename(cad.filename)
         backend.file_format(safe_name)
+        _prune_stale_requests(
+            "catalog_upload", request_root=WORKPIECE_REQUEST_ROOT
+        )
         request_id = uuid.uuid4().hex
-        folder = REQUEST_ROOT / "catalog_upload" / request_id
+        folder = WORKPIECE_REQUEST_ROOT / "catalog_upload" / request_id
         folder.mkdir(parents=True, exist_ok=False)
         cad_path = folder / safe_name
         cad.save(cad_path)
@@ -145,7 +225,9 @@ def catalog_upload():
                 raise ValueError("Texture must be PNG")
             texture_path = folder / "texture.png"
             textures[0].save(texture_path)
-        total = cad_path.stat().st_size + (texture_path.stat().st_size if texture_path else 0)
+        total = cad_path.stat().st_size + (
+            texture_path.stat().st_size if texture_path else 0
+        )
         if total > MAX_UPLOAD_BATCH_BYTES:
             raise ValueError("Upload exceeds the 100 MiB batch limit")
         value = {
@@ -154,6 +236,7 @@ def catalog_upload():
             "cad_path": cad_path.as_posix(),
             "texture_path": texture_path.as_posix() if texture_path else None,
             "catalog_root": default_catalog_root().as_posix(),
+            "cleanup_request_folder": True,
         }
         request_path = folder / "request.json"
         atomic_write_json(request_path, value)
@@ -203,28 +286,120 @@ def catalog_asset(catalog_uuid: str, kind: str):
         return _error(exc)
 
 
+@pose_templates_bp.get("/pose-templates/workpieces/<catalog_uuid>/orientations")
+@pose_templates_bp.get("/pose-templates/catalog/<catalog_uuid>/orientations")
+def workpiece_orientations(catalog_uuid: str):
+    """Return only a hash-current, revision-current orientation analysis."""
+
+    try:
+        return jsonify(load_catalog_orientation_analysis(catalog_uuid))
+    except FileNotFoundError:
+        return (
+            jsonify(
+                {
+                    "output": "Stable orientations have not been analyzed for this workpiece.",
+                    "analysis_required": True,
+                }
+            ),
+            404,
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@pose_templates_bp.get(
+    "/pose-templates/workpieces/<catalog_uuid>/orientation-thumbnail"
+)
+@pose_templates_bp.get("/pose-templates/catalog/<catalog_uuid>/orientation-thumbnail")
+def workpiece_orientation_thumbnail(catalog_uuid: str):
+    """Serve one bounded default orientation for catalogue/list cards."""
+
+    try:
+        return jsonify(load_catalog_orientation_thumbnail(catalog_uuid))
+    except FileNotFoundError:
+        return (
+            jsonify(
+                {
+                    "output": "A compact 3D preview has not been prepared for this workpiece.",
+                    "analysis_required": True,
+                }
+            ),
+            404,
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@pose_templates_bp.post("/pose-templates/workpieces/<catalog_uuid>/orientations")
+@pose_templates_bp.post("/pose-templates/catalog/<catalog_uuid>/orientations")
+def analyze_workpiece_orientations(catalog_uuid: str):
+    """Queue CPU/disk-heavy stable-pose and footprint extraction."""
+
+    try:
+        item = get_catalog_object(catalog_uuid, verify_assets=False)
+        request_id, request_path = _write_request(
+            "orientations",
+            {
+                "catalog_uuid": item["catalog_uuid"],
+                "catalog_root": item["catalog_root"],
+            },
+        )
+        return _submit(
+            name="pose_template_orientation_analysis",
+            script="scripts/run_pose_template_orientation_analysis.py",
+            request_path=request_path,
+            request_id=request_id,
+            resources=[
+                "cpu",
+                "disk_io",
+                f"workpiece_catalog:{item['catalog_uuid']}",
+            ],
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
 @pose_templates_bp.post("/pose-templates/preview")
 @pose_templates_bp.post("/pose-templates/validate")
 def preview():
+    request_path: Path | None = None
     try:
         value = _json()
         configuration = value.get("configuration")
         if not isinstance(configuration, dict):
             raise ValueError("configuration must be an object")
         request_kind = "validate" if request.path.endswith("/validate") else "preview"
-        request_id, request_path = _write_request(request_kind, {"configuration": configuration})
-        output = request_path.parent / "preview.json"
-        job = job_runner.submit(
-            name=("pose_template_validation" if request_kind == "validate" else "pose_template_preview"),
-            command=[
-                "uv", "run", "python", "scripts/run_pose_template_preview.py",
-                "--request", request_path.as_posix(), "--output", output.as_posix(),
-            ],
-            cwd=APP_ROOT,
-            resources=["cpu", "disk_io"],
-            parameters={"request_id": request_id, "result": output.as_posix()},
+        request_id, request_path = _write_request(
+            request_kind, {"configuration": configuration}
         )
-        return jsonify({"job": job.to_dict(), "job_id": job.id, "request_id": request_id}), 202
+        output = request_path.parent / "preview.json"
+        try:
+            job = job_runner.submit(
+                name=(
+                    "pose_template_validation"
+                    if request_kind == "validate"
+                    else "pose_template_preview"
+                ),
+                command=[
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/run_pose_template_preview.py",
+                    "--request",
+                    request_path.as_posix(),
+                    "--output",
+                    output.as_posix(),
+                ],
+                cwd=APP_ROOT,
+                resources=["cpu", "disk_io"],
+                parameters={"request_id": request_id, "result": output.as_posix()},
+            )
+        except Exception:
+            shutil.rmtree(request_path.parent, ignore_errors=True)
+            raise
+        return jsonify(
+            {"job": job.to_dict(), "job_id": job.id, "request_id": request_id}
+        ), 202
     except Exception as exc:
         return _error(exc)
 
@@ -238,7 +413,10 @@ def preview_result(request_id: str):
         request_kind = "validate" if "/validate/" in request.path else "preview"
         path = REQUEST_ROOT / request_kind / request_id / "preview.json"
         with open(path, "r", encoding="utf-8") as handle:
-            return jsonify(json.load(handle))
+            value = json.load(handle)
+        response = jsonify(value)
+        shutil.rmtree(path.parent, ignore_errors=True)
+        return response
     except Exception as exc:
         return _error(exc)
 
@@ -250,7 +428,10 @@ def generate():
         configuration = value.get("configuration")
         if not isinstance(configuration, dict):
             raise ValueError("configuration must be an object")
-        request_value = {"configuration": configuration, "cloned_from": value.get("cloned_from")}
+        request_value = {
+            "configuration": configuration,
+            "cloned_from": value.get("cloned_from"),
+        }
         request_id, request_path = _write_request("generate", request_value)
         return _submit(
             name="pose_template_generate",
@@ -266,18 +447,62 @@ def generate():
 @pose_templates_bp.get("/pose-templates/library")
 def library_list():
     return jsonify(
-        {"schema_version": "pose_template_library.v1", "templates": list_template_bundles()}
+        {
+            "schema_version": "pose_template_library.v1",
+            "templates": list_template_bundle_summaries(),
+        }
     )
 
 
 @pose_templates_bp.get("/pose-templates/library/<template_uuid>")
 def library_detail(template_uuid: str):
     try:
-        return jsonify(
-            validate_template_bundle(
-                default_template_library_root() / template_uuid,
-                library_root=default_template_library_root(),
-            )
+        return jsonify(load_template_bundle_detail(template_uuid))
+    except Exception as exc:
+        return _error(exc)
+
+
+@pose_templates_bp.get("/pose-templates/library/<template_uuid>/preview")
+def library_preview(template_uuid: str):
+    """Serve the hash-verified immutable JSON preview stored in the bundle."""
+
+    try:
+        return jsonify(load_template_bundle_preview(template_uuid))
+    except Exception as exc:
+        return _error(exc)
+
+
+@pose_templates_bp.get("/pose-templates/library/<template_uuid>/thumbnail")
+def library_thumbnail(template_uuid: str):
+    """Serve a bounded footprint without loading full card preview payloads."""
+
+    try:
+        return jsonify(load_template_thumbnail(template_uuid))
+    except Exception as exc:
+        return _error(exc)
+
+
+@pose_templates_bp.get(
+    "/pose-templates/library/<template_uuid>/assets/<instance_uuid>/<kind>"
+)
+@pose_templates_bp.get(
+    "/pose-templates/library/<template_uuid>/instances/<instance_uuid>/assets/<kind>"
+)
+def library_asset(template_uuid: str, instance_uuid: str, kind: str):
+    """Serve a verified immutable per-instance mesh or texture snapshot."""
+
+    try:
+        path = resolve_template_bundle_asset(template_uuid, instance_uuid, kind)
+        media_types = {
+            "canonical_ply": "application/octet-stream",
+            "texture": "image/png",
+        }
+        return send_file(
+            path,
+            mimetype=media_types.get(kind, "application/octet-stream"),
+            as_attachment=False,
+            download_name=path.name,
+            conditional=True,
         )
     except Exception as exc:
         return _error(exc)
@@ -298,7 +523,8 @@ def library_action(template_uuid: str, action: str):
             if value.get("display_name"):
                 configuration["display_name"] = str(value["display_name"])
             request_id, request_path = _write_request(
-                "generate", {"configuration": configuration, "cloned_from": template_uuid}
+                "generate",
+                {"configuration": configuration, "cloned_from": template_uuid},
             )
             return _submit(
                 name="pose_template_clone",
@@ -315,15 +541,13 @@ def library_action(template_uuid: str, action: str):
 @pose_templates_bp.get("/pose-templates/library/<template_uuid>/download/<kind>")
 def library_download(template_uuid: str, kind: str):
     try:
-        bundle = validate_template_bundle(
-            default_template_library_root() / template_uuid,
-            library_root=default_template_library_root(),
-        )
         names = {"pdf": TEMPLATE_PDF, "manifest": BUNDLE_MANIFEST}
         if kind not in names:
             raise KeyError("Unknown template download")
-        path = Path(bundle["bundle_path"]) / names[kind]
-        return send_file(path, as_attachment=True, download_name=path.name, conditional=True)
+        path = resolve_template_bundle_download(template_uuid, kind)
+        return send_file(
+            path, as_attachment=True, download_name=names[kind], conditional=True
+        )
     except Exception as exc:
         return _error(exc)
 
@@ -358,11 +582,14 @@ def run_selection_update():
         placement = value.get("placement")
         if not isinstance(placement, dict):
             raise ValueError("placement must be a transform object")
+        confirmed = value.get("confirmed", False)
+        if type(confirmed) is not bool:
+            raise ValueError("confirmed must be a boolean")
         request_value = {
             "run_root": run_root.as_posix(),
             "template_uuid": value.get("template_uuid"),
             "placement": placement,
-            "confirmed": bool(value.get("confirmed", False)),
+            "confirmed": confirmed,
             "operator": value.get("operator"),
         }
         request_id, request_path = _write_request("select", request_value)

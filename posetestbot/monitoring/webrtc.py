@@ -41,7 +41,6 @@ from posetestbot.sensors.v4l2_preview import (
 
 MONITOR_STATUS_NAME = "monitor_webrtc_status.json"
 MONITOR_STATUS_SCHEMA = "monitor_webrtc.v2"
-LEGACY_MONITOR_STATUS_SCHEMA = "monitor_webrtc.v1"
 DEFAULT_MONITOR_ROOT = Path("working_data") / "monitor_webrtc"
 UGREEN_USB_VENDOR_ID = "0c45"
 UGREEN_USB_PRODUCT_ID = "2283"

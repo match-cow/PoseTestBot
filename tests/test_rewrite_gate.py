@@ -605,6 +605,19 @@ def test_rewrite_status_uses_three_real_data_gate_ids(tmp_path: Path) -> None:
     assert "rewrite_foundationpose_runtime.v1" not in gate_ids
 
 
+def test_rewrite_status_recommendations_use_current_object_contract(
+    tmp_path: Path,
+) -> None:
+    report = build_rewrite_status_report(
+        tmp_path / "status-run",
+        gate_ids=(BOP_EXPORT_READINESS_GATE_ID,),
+    )
+    recommendations = json.dumps(report["next_actions"])
+
+    assert "pose-template selection or objectless contract" in recommendations
+    assert "object registry" not in recommendations
+
+
 def test_retired_fake_gate_id_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unknown rewrite gate"):
         build_gate_report(

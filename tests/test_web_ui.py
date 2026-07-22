@@ -27,11 +27,17 @@ def test_ui_run_discovery_is_contained_safe_and_newest_first(
     older = allowed / "older"
     newer = allowed / "newer"
     invalid = allowed / "invalid"
+    jobs = allowed / "jobs"
+    object_catalog = allowed / "object_catalog"
     outside = tmp_path / "outside"
     _write_valid_run(older, sequence="sync_aruco")
     _write_valid_run(newer, sequence="real_full_capture_validation")
     invalid.mkdir()
     (invalid / "run_config.json").write_text("{not json\n")
+    jobs.mkdir()
+    (jobs / "job.json").write_text("{}\n")
+    object_catalog.mkdir()
+    (object_catalog / "object_catalog.json").write_text("{}\n")
     outside.mkdir()
     (allowed / "escape").symlink_to(outside, target_is_directory=True)
     os.utime(older, (1_700_000_000, 1_700_000_000))
@@ -48,6 +54,8 @@ def test_ui_run_discovery_is_contained_safe_and_newest_first(
     paths = [item["path"] for item in payload["runs"]]
     assert (allowed / "escape").as_posix() not in paths
     assert outside.as_posix() not in paths
+    assert jobs.as_posix() not in paths
+    assert object_catalog.as_posix() not in paths
     assert paths.index(newer.as_posix()) < paths.index(older.as_posix())
     records = {item["name"]: item for item in payload["runs"]}
     assert records["newer"]["sequence"] == "real_full_capture_validation"
@@ -89,6 +97,9 @@ def test_spa_index_and_hashed_assets_are_served() -> None:
 
     assert response.status_code == 200
     assert response.headers["Cache-Control"].startswith("no-cache")
+    assert '<div id="root"></div>' in html
+    assert "cdn.jsdelivr.net" not in html
+    assert "bootstrap" not in html.lower()
     assert asset_paths
     for asset_path in asset_paths:
         asset = client.get(asset_path)

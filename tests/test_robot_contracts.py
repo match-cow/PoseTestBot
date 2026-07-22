@@ -30,17 +30,6 @@ def test_robot_profile_defaults_to_real_lab_robot(monkeypatch: pytest.MonkeyPatc
     assert profile.receiver_port == DEFAULT_RECEIVER_PORT
 
 
-def test_robot_profile_real_lab_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("POSETESTBOT_ROBOT_IP", raising=False)
-    monkeypatch.delenv("POSETESTBOT_RECEIVER_IP", raising=False)
-
-    profile = robot_profile()
-
-    assert profile.mode == "real"
-    assert profile.robot_ip == LAB_ROBOT_IP
-    assert profile.receiver_ip == LAB_ROBOT_RECEIVER_IP
-
-
 def test_robot_profile_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSETESTBOT_ROBOT_IP", "172.31.1.200")
     monkeypatch.setenv("POSETESTBOT_ROBOT_PORT", "30301")

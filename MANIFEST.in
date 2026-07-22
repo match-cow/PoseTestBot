@@ -7,6 +7,8 @@ include frontend/tsconfig.app.json
 include frontend/tsconfig.json
 include frontend/tsconfig.node.json
 include frontend/vite.config.ts
+include THIRD_PARTY_NOTICES.md
+include third_party/PoseTemplateCreator/LICENSE
 graft frontend/src
 recursive-include posetestbot/web/static/cell *.svg
 prune frontend/node_modules

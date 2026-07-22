@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query"
-import { createContext, useContext, useMemo, useState } from "react"
+import { createContext, useContext, useEffect, useMemo, useState } from "react"
 import { api } from "@/lib/api"
 import type { Bootstrap, RunIndexItem } from "@/lib/contracts"
 
@@ -8,6 +8,7 @@ interface OperatorContextValue {
   bootstrap: Bootstrap
   runs: RunIndexItem[]
   selectedRun: string
+  selectedRunEpoch: number
   selectRun: (path: string) => boolean
   robotTarget: RobotTarget
   setRobotTarget: (target: RobotTarget) => void
@@ -39,7 +40,11 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     queryFn: () => api<{ runs: RunIndexItem[] }>("/ui/runs"),
     enabled: Boolean(bootstrapQuery.data),
   })
-  const [selectedOverride, setSelectedOverride] = useState(() => localStorage.getItem("posetestbot.selectedRun") ?? "")
+  const [selectedOverride, setSelectedOverride] = useState(() => ({
+    path: localStorage.getItem("posetestbot.selectedRun") ?? "",
+    restored: true,
+    epoch: 0,
+  }))
   const [robotOverride, setRobotOverride] = useState<RobotTarget | null>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem("posetestbot.robotTarget") ?? "null") as Partial<RobotTarget> | null
@@ -51,9 +56,19 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
 
   const bootstrap = bootstrapQuery.data
   const runs = useMemo(() => runsQuery.data?.runs ?? [], [runsQuery.data])
+  const restoredSelectionIsStale = selectedOverride.restored
+    && Boolean(selectedOverride.path)
+    && Boolean(runsQuery.data)
+    && !runs.some((run) => run.path === selectedOverride.path)
+  useEffect(() => {
+    if (!restoredSelectionIsStale) return
+    localStorage.removeItem("posetestbot.selectedRun")
+  }, [restoredSelectionIsStale])
   const selectedRun = bootstrap
-    ? selectedOverride && isContained(selectedOverride, bootstrap.allowed_run_roots)
-      ? selectedOverride
+    ? selectedOverride.path
+      && !restoredSelectionIsStale
+      && isContained(selectedOverride.path, bootstrap.allowed_run_roots)
+      ? selectedOverride.path
       : runs.find((run) => run.config_valid)?.path ?? bootstrap.default_run_root
     : ""
   const robotTarget = robotOverride ?? bootstrap?.robot ?? null
@@ -68,7 +83,7 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
 
   const selectRun = (path: string) => {
     if (!isContained(path, bootstrap.allowed_run_roots)) return false
-    setSelectedOverride(path)
+    setSelectedOverride((current) => ({ path, restored: false, epoch: current.epoch + 1 }))
     localStorage.setItem("posetestbot.selectedRun", path)
     return true
   }
@@ -77,7 +92,7 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem("posetestbot.robotTarget", JSON.stringify(target))
   }
 
-  return <OperatorContext.Provider value={{ bootstrap, runs, selectedRun, selectRun, robotTarget, setRobotTarget }}>{children}</OperatorContext.Provider>
+  return <OperatorContext.Provider value={{ bootstrap, runs, selectedRun, selectedRunEpoch: selectedOverride.epoch, selectRun, robotTarget, setRobotTarget }}>{children}</OperatorContext.Provider>
 }
 
 export function useOperator() {

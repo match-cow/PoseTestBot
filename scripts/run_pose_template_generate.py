@@ -18,7 +18,18 @@ def main() -> None:
     result = generate_template_bundle(
         value["configuration"], cloned_from=value.get("cloned_from")
     )
-    print(json.dumps(result, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "template_uuid": result["template_uuid"],
+                "display_name": result["display_name"],
+                "instance_count": len(result["instances"]),
+                "bundle_sha256": result["bundle_sha256"],
+                "bundle_path": result["bundle_path"],
+            },
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":

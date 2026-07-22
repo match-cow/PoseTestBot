@@ -50,7 +50,11 @@ from posetestbot.io.manifest import (
     set_manifest_artifact,
     upsert_stage,
 )
-from posetestbot.pipeline.run_config import load_run_config_for_run_root, validate_run_config
+from posetestbot.pipeline.run_config import (
+    load_run_config_for_run_root,
+    run_config_lock,
+    validate_run_config,
+)
 
 
 BUNDLE_SCHEMA_VERSION = "calibration_target_bundle.v1"
@@ -579,6 +583,23 @@ def _promote_paths(promotions: list[tuple[Path, Path]]) -> None:
 
 
 def select_target_bundle(
+    *,
+    run_root: str | Path,
+    target_id: str,
+    placement_mode: str,
+    library_root: str | Path | None = None,
+) -> dict[str, Any]:
+    root = Path(run_root).resolve()
+    with run_config_lock(root):
+        return _select_target_bundle_locked(
+            run_root=root,
+            target_id=target_id,
+            placement_mode=placement_mode,
+            library_root=library_root,
+        )
+
+
+def _select_target_bundle_locked(
     *,
     run_root: str | Path,
     target_id: str,

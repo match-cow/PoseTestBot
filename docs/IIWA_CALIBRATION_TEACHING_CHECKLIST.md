@@ -168,14 +168,19 @@ and LL/LC/LR = lower-left/lower-center/lower-right.
 
 ## Capture Acceptance — Operator Run Only
 
-The current `calib00` campaign completed physical acquisition with two enabled
-RealSense cameras while retaining the temporarily unavailable camera as
-disabled configuration. Attempt `3c4a0b7b765f44bd9cc37fffc48fb321`
-subsequently promoted the complete `IPPE + Horaud` bundle for serials
-`825412070181` and `923322072633`. The pairwise stationary-target closure is
-3.612 mm / 0.277 degrees. This is calibration evidence for the reduced
-two-camera run only; it is not three-camera service/full-capture acceptance or
-Sunrise commissioning evidence.
+The retained 2026-07-22 repeat completed physical acquisition and eye-in-hand
+calibration for all three RealSense cameras. Attempt
+`12e6a40eff444b889870597b787bf016` promoted the complete `IPPE + Shah` bundle,
+with maximum three-camera stationary-target closure of 7.104 mm / 0.421° and
+passing 10/10 full-capture plus 3/3 calibration-validation gates. See the
+[dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md) for
+the run roots, transforms, intrinsic comparison, and candidate quality.
+
+That retained run proves its recorded capture and calibration outcome. It does
+not identify the exact deployed Sunrise application/revision or replace the
+Workbench compile, offline path, T1, and reviewer evidence required by this
+commissioning checklist. No iiwa `STOP` command was sent during the retained
+campaign.
 
 - [ ] Obtain explicit operator authorization.
 - [ ] Pass both PoseTestBot execution gates: `--allow-real-robot` and
@@ -235,26 +240,23 @@ Sunrise commissioning evidence.
   ID and camera-to-parent matrix/quaternion/translation with matching target,
   intrinsic, synchronization, solver, quality, and promotion provenance.
 - [x] Confirm the prior high-error RealSense `825412070181` result did not
-  recur: current factory/manual held-out RMS is 1.194/0.967 px and promoted
-  mean reprojection is 1.035 px. Trajectory variance was not treated as a
-  correction.
+  recur in the retained three-camera repeat: factory/manual held-out RMS is
+  1.230/0.964 px and promoted mean reprojection is 1.040 px. Trajectory
+  variance was not treated as a correction.
 - [ ] Revalidate metric depth on RealSense `923322072633` after cable/firmware
   maintenance. The promoted RGB extrinsic remains valid, but saved depth-plane
   checks showed a range-dependent scale anomaly and factory depth
   scale/alignment is explicitly not recalibrated.
 
-The hard calibration timing gates pass for both enabled cameras. The overall
-sync report's warning is only the sub-0.8 whole-capture match ratio
-(652/936 and 656/951 frames); frames outside the robot-motion intervals are not
-calibration observations.
+The retained repeat's promoted candidate quality is summarized below. These
+artifact-derived values are historical run evidence, not substitutes for the
+blank operator/reviewer commissioning fields in this document.
 
-| Camera / serial | Run state | Accepted views | Coverage cells | Factory held-out max per-view RMS (px) | Manual-fit RMS / selection | Extremes detected | Sync quality | Reviewer / date |
-| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
-| RealSense `033422071805` | disabled, retained | — | — | — | — | excluded | excluded | hardware follow-up pending |
-| RealSense `825412070181` | enabled, promoted | 652 | 7/9 | 1.432 factory held-out | 0.973 train / 0.967 held-out; factory retained | yes | sensor global-time to host-wall, max 15.442 ms, no fallback | automated artifact validation / 2026-07-21 |
-| RealSense `923322072633` | enabled, promoted | 656 | 6/9 | 1.910 factory held-out | 0.988 train / 1.013 held-out; factory retained | yes | sensor global-time to host-wall, max 17.094 ms, no fallback | automated artifact validation / 2026-07-21 |
-| | | | | | | | | |
-| | | | | | | | | |
+| Camera / serial | Observations / inliers | Mean reprojection | Held-out translation | Held-out rotation |
+| --- | ---: | ---: | ---: | ---: |
+| RealSense `033422071805` | 606 / 605 | 1.183 px | 3.052 mm | 0.628° |
+| RealSense `825412070181` | 608 / 608 | 1.040 px | 3.241 mm | 0.473° |
+| RealSense `923322072633` | 610 / 610 | 1.095 px | 3.226 mm | 0.425° |
 
 ## Final Disposition
 
@@ -264,8 +266,8 @@ calibration observations.
 | Offline commissioning approved | ☐ |
 | T1 commissioning approved | ☐ |
 | Supervised trial accepted | ☐ |
-| Two-camera calibration promotion | `3c4a0b7b765f44bd9cc37fffc48fb321`, `IPPE + Horaud`, 2 valid profiles |
-| Reduced-run rewrite gates | full capture 9/9; calibration validation 3/3 |
+| Latest three-camera calibration promotion | `12e6a40eff444b889870597b787bf016`, `IPPE + Shah`, 3 valid profiles |
+| Latest calibration-run rewrite gates | full capture 10/10; calibration validation 3/3 |
 | Metric-depth disposition | `923322072633` depth-specific validation pending |
 | Frames requiring retouch | |
 | Paths invalidated by retouch | |

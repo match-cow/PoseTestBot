@@ -9,6 +9,7 @@ import trimesh
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.pose_templates.catalog import import_catalog_object
 from posetestbot.pose_templates.library import generate_template_bundle
+from posetestbot.pose_templates.orientations import analyze_catalog_orientations
 from posetestbot.web.app import create_app
 from posetestbot.web.routes import pose_templates as routes
 
@@ -93,12 +94,65 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
     assert client.get(
         f"/pose-templates/catalog/{record['catalog_uuid']}/assets/canonical_ply"
     ).status_code == 200
-    assert client.get("/pose-templates/library").get_json()["templates"][0][
+    library_response = client.get("/pose-templates/library")
+    assert library_response.get_json()["templates"][0]["template_uuid"] == bundle[
         "template_uuid"
-    ] == bundle["template_uuid"]
+    ]
+    assert library_response.get_json()["templates"][0]["instance_count"] == 1
+    assert library_response.get_json()["templates"][0]["thumbnail"]["stored"] is True
+    assert b'"nominal_contours"' not in library_response.data
+    assert b'"compensated_contours"' not in library_response.data
+    assert b'"preview_meshes"' not in library_response.data
     assert client.get(
         f"/pose-templates/library/{bundle['template_uuid']}/download/pdf"
     ).data.startswith(b"%PDF")
+    stored_preview = client.get(
+        f"/pose-templates/library/{bundle['template_uuid']}/preview"
+    )
+    assert stored_preview.status_code == 200
+    assert stored_preview.get_json()["schema_version"] == "pose_template_preview.v1"
+    stored_thumbnail = client.get(
+        f"/pose-templates/library/{bundle['template_uuid']}/thumbnail"
+    )
+    assert stored_thumbnail.status_code == 200
+    assert stored_thumbnail.get_json()["schema_version"] == "pose_template_thumbnail.v1"
+    assert stored_thumbnail.get_json()["template_uuid"] == bundle["template_uuid"]
+    assert b'"preview_meshes"' not in stored_thumbnail.data
+    immutable_mesh = client.get(
+        f"/pose-templates/library/{bundle['template_uuid']}/assets/"
+        "11111111-1111-4111-8111-111111111111/canonical_ply"
+    )
+    assert immutable_mesh.status_code == 200
+
+    missing_orientations = client.get(
+        f"/pose-templates/workpieces/{record['catalog_uuid']}/orientations"
+    )
+    assert missing_orientations.status_code == 404
+    assert missing_orientations.get_json()["analysis_required"] is True
+    orientation_job = client.post(
+        f"/pose-templates/workpieces/{record['catalog_uuid']}/orientations"
+    )
+    assert orientation_job.status_code == 202
+    assert runner.submissions[-1]["name"] == "pose_template_orientation_analysis"
+    assert runner.submissions[-1]["command"][3] == (
+        "scripts/run_pose_template_orientation_analysis.py"
+    )
+    assert f"workpiece_catalog:{record['catalog_uuid']}" in runner.submissions[-1][
+        "resources"
+    ]
+    analyze_catalog_orientations(
+        record["catalog_uuid"], catalog_root=working / "object_catalog"
+    )
+    thumbnail = client.get(
+        f"/pose-templates/workpieces/{record['catalog_uuid']}/orientation-thumbnail"
+    )
+    assert thumbnail.status_code == 200
+    assert (
+        thumbnail.get_json()["schema_version"]
+        == "pose_template_orientation_thumbnail.v1"
+    )
+    assert b'"contours"' not in thumbnail.data
+    assert len(thumbnail.data) < 64 * 1024
 
     upload = client.post(
         "/pose-templates/catalog/upload",
@@ -116,6 +170,17 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
     assert preview.status_code == 202
     assert runner.submissions[-1]["name"] == "pose_template_preview"
     assert runner.submissions[-1]["resources"] == ["cpu", "disk_io"]
+    preview_result = Path(runner.submissions[-1]["parameters"]["result"])
+    preview_result.write_text('{"schema_version":"pose_template_preview.v1"}')
+    consumed = client.get(
+        f"/pose-templates/preview/{preview.get_json()['request_id']}"
+    )
+    assert consumed.status_code == 200
+    assert consumed.get_json()["schema_version"] == "pose_template_preview.v1"
+    assert not preview_result.parent.exists()
+    assert client.get(
+        f"/pose-templates/preview/{preview.get_json()['request_id']}"
+    ).status_code == 404
 
     validation = client.post(
         "/pose-templates/validate", json={"configuration": configuration}

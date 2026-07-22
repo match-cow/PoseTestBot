@@ -112,6 +112,7 @@ from posetestbot.io.manifest import (
 )
 from posetestbot.pipeline.run_config import (
     load_run_config_for_run_root,
+    run_config_lock,
     validate_run_config,
 )
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
@@ -4310,6 +4311,14 @@ def _transactional_replace(
 
 
 def promote_calibration_attempt(
+    run_root: str | Path, attempt_id: str
+) -> dict[str, Any]:
+    root = Path(run_root).resolve()
+    with run_config_lock(root):
+        return _promote_calibration_attempt_locked(root, attempt_id)
+
+
+def _promote_calibration_attempt_locked(
     run_root: str | Path, attempt_id: str
 ) -> dict[str, Any]:
     root = Path(run_root)

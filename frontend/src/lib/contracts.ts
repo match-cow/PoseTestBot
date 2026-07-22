@@ -231,18 +231,78 @@ export interface CatalogObject {
   catalog_uuid: string
   obj_id: number
   name: string
+  alias: string | null
   description: string | null
+  tags: string[]
+  groups: string[]
+  attributes: Record<string, string>
   source_filename: string
   source_format: string
+  source_sha256?: string
+  canonical_ply_sha256?: string
+  geometry_revision?: number
+  source_to_mm_scale?: number
+  geometry_revisions?: Array<Record<string, JsonValue>>
   state: "active" | "archived"
+  created_at: string
+  updated_at: string
   extraction: { vertices: number; faces: number; bounds_mm: number[][]; watertight: boolean }
-  assets: Record<string, { path: string; sha256: string; media_type?: string }>
+  assets: Record<string, { path: string; sha256: string; size_bytes?: number; media_type?: string }>
+  usage?: {
+    template_count: number
+    templates: Array<{ template_uuid: string; display_name: string; state: "active" | "archived" }>
+  }
+}
+
+export type Matrix4x4 = [
+  [number, number, number, number],
+  [number, number, number, number],
+  [number, number, number, number],
+  [number, number, number, number],
+]
+
+export interface PoseTemplatePreviewMesh {
+  vertices: Array<[number, number, number]>
+  faces: Array<[number, number, number]>
+}
+
+export type PoseTemplateContour =
+  | Array<{ x_mm: number; y_mm: number }>
+  | { points: Array<{ x_mm: number; y_mm: number }> }
+
+export interface PoseTemplateOrientation {
+  orientation_id: string
+  rank?: number
+  label: string
+  probability: number
+  source_to_placed: Matrix4x4
+  slice_z_mm: number
+  contours: PoseTemplateContour[]
+}
+
+export interface PoseTemplateOrientationAnalysis {
+  schema_version: "pose_template_orientation_analysis.v1"
+  catalog_uuid: string
+  source_filename?: string
+  source_sha256?: string
+  orientations: PoseTemplateOrientation[]
+  preview_mesh: PoseTemplatePreviewMesh
+}
+
+export interface PoseTemplateOrientationThumbnail {
+  schema_version: "pose_template_orientation_thumbnail.v1"
+  catalog_uuid: string
+  catalog?: { catalog_uuid?: string; name?: string; obj_id?: number }
+  source?: { canonical_ply_sha256?: string; geometry_revision?: number }
+  preview_mesh: PoseTemplatePreviewMesh
+  orientation: Pick<PoseTemplateOrientation, "orientation_id" | "label" | "probability" | "slice_z_mm" | "source_to_placed"> & { rank: number }
 }
 
 export interface PoseTemplateInstanceDraft {
   instance_uuid: string
   catalog_uuid: string
-  pose: { x_mm: number; y_mm: number; z_mm: number; roll_deg: number; pitch_deg: number; yaw_deg: number }
+  orientation_id: string
+  pose: { x_mm: number; y_mm: number; rotation_deg: number }
 }
 
 export interface PoseTemplateBundle {
@@ -252,7 +312,21 @@ export interface PoseTemplateBundle {
   created_at: string
   bundle_sha256: string
   archive: { state: "active" | "archived" }
-  instances: Array<{ instance_uuid: string; catalog: { name: string; obj_id: number } }>
+  page?: { size?: string; orientation?: string; width_mm?: number; height_mm?: number; origin_from_lower_left_mm?: [number, number] }
+  print_compensation?: { x_scale: number; y_scale: number }
+  configuration?: {
+    page?: { size?: string; orientation?: string; width_mm?: number; height_mm?: number; origin_from_lower_left_mm?: [number, number] }
+    print_compensation?: { x_scale: number; y_scale: number }
+  }
+  instance_count?: number
+  thumbnail?: { schema_version: "pose_template_thumbnail.v1"; stored: boolean }
+  instances: Array<{
+    instance_uuid: string
+    catalog_uuid?: string
+    orientation_id?: string
+    catalog: { catalog_uuid?: string; name: string; obj_id: number }
+    pose_template_from_object?: { matrix: Matrix4x4 }
+  }>
 }
 
 export interface PoseTemplatePreview {
@@ -260,12 +334,60 @@ export interface PoseTemplatePreview {
   valid: boolean
   configuration_sha256: string
   page?: { width_mm: number; height_mm: number }
+  configuration?: {
+    page?: { origin_from_lower_left_mm?: [number, number] }
+    print_compensation?: { x_scale: number; y_scale: number }
+  }
   instances: Array<{
     instance_uuid: string
-    catalog: { name: string; obj_id: number }
+    catalog_uuid?: string
+    orientation_id?: string
+    catalog: { catalog_uuid?: string; name: string; obj_id: number }
+    pose_template_from_object?: { matrix: Matrix4x4 }
+    preview_mesh_sha256?: string | null
     compensated_contours: Array<Array<{ x_mm: number; y_mm: number }>>
   }>
+  preview_meshes?: Record<string, PoseTemplatePreviewMesh>
   errors: Array<{ instance_uuid?: string; code: string; message: string }>
+}
+
+export interface PoseTemplateThumbnail {
+  schema_version: "pose_template_thumbnail.v1"
+  template_uuid: string
+  valid: boolean
+  page: { width_mm: number; height_mm: number }
+  configuration: {
+    page: {
+      size?: string | null
+      orientation?: string | null
+      origin_from_lower_left_mm: [number, number]
+      print_compensation_origin: "page_center" | string
+    }
+    print_compensation: { x_scale: number; y_scale: number }
+  }
+  instances: Array<{
+    instance_uuid: string
+    catalog: { catalog_uuid?: string; name?: string; obj_id?: number }
+    compensated_contours: Array<Array<{ x_mm: number; y_mm: number }>>
+    primary_contour_source_index: number
+    approximation: {
+      truncated: boolean
+      source_contours: number
+      included_contours: number
+      source_points: number
+      included_points: number
+    }
+  }>
+  approximation: {
+    approximate: boolean
+    truncated: boolean
+    strategy: string
+    source_contours: number
+    included_contours: number
+    source_points: number
+    included_points: number
+    limits: { instances: number; contours: number; points: number; points_per_contour: number }
+  }
 }
 
 export interface CellTransform {

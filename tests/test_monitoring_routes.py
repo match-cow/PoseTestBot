@@ -108,6 +108,7 @@ def test_start_queues_dedicated_webrtc_worker(client, monkeypatch, tmp_path: Pat
     assert response.status_code == 202
     submission = runner.submitted[0]
     assert submission["resources"] == ["monitoring_camera:0c45:2283"]
+    assert submission["parameters"]["monitor_webcam"] is True
     assert submission["parameters"]["monitor_webrtc"] is True
     assert submission["parameters"]["transport"] == "webrtc"
     command = submission["command"]
@@ -115,6 +116,8 @@ def test_start_queues_dedicated_webrtc_worker(client, monkeypatch, tmp_path: Pat
     assert command[command.index("--width") + 1] == "640"
     assert command[command.index("--height") + 1] == "480"
     assert command[command.index("--fps") + 1] == "30"
+    assert command[command.index("--vendor-id") + 1] == "0c45"
+    assert command[command.index("--product-id") + 1] == "2283"
 
 
 def test_get_status_does_not_expose_private_signaling_port(

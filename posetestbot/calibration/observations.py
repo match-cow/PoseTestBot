@@ -10,7 +10,6 @@ from typing import Any, Mapping
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.calibration.profiles import sensor_identity_from_folder_name
 from posetestbot.calibration.targets import (
-    DEFAULT_TARGET_SPEC,
     normalize_calibration_target_spec,
     target_identity,
     validate_target_identity,
@@ -35,7 +34,6 @@ from posetestbot.sensors.registry import sensor_folder_name
 
 
 SCHEMA_VERSION = "calibration_observations.v1"
-DEFAULT_BOARD = DEFAULT_TARGET_SPEC
 TARGET_SOURCE_FILES = {
     "aruco_grid": (ARUCO_POSE_ESTIMATION, CALIBRATION_TARGET_POSE_ESTIMATION),
     "charuco": (

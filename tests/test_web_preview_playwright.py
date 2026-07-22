@@ -29,6 +29,8 @@ from posetestbot.monitoring.webrtc import (
 )
 
 
+pytestmark = pytest.mark.playwright
+
 SENSOR_A = "realsense_d435:825412070181"
 SENSOR_B = "realsense_d435:923322072633"
 SENSOR_C = "realsense_d435:944122070001"

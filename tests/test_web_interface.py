@@ -17,7 +17,6 @@ from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.web import legacy as web_legacy
 from posetestbot.web.app import _PreviewPollLogFilter
-from posetestbot.web.routes import monitoring as web_monitoring
 from posetestbot.web.routes import sensors as web_sensors
 
 
@@ -43,19 +42,6 @@ def write_png(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     image = np.zeros((8, 8, 3), dtype=np.uint8)
     assert cv2.imwrite(path.as_posix(), image)
-
-
-def test_index_serves_bundled_spa_without_cdn_dependencies() -> None:
-    client = app.test_client()
-
-    response = client.get("/")
-    html = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert '<div id="root"></div>' in html
-    assert "/static/ui/assets/index-" in html
-    assert "cdn.jsdelivr.net" not in html
-    assert "bootstrap" not in html.lower()
 
 
 def test_index_uses_theme_aware_cow_branding_assets() -> None:
@@ -97,19 +83,6 @@ def test_ui_bootstrap_includes_robot_control_defaults() -> None:
     assert "/tmp" in payload["allowed_run_roots"]
 
 
-def test_pipeline_sequence_api_lists_acquisition_sequences_only() -> None:
-    client = app.test_client()
-
-    response = client.get("/pipeline/sequences")
-    sequence_ids = {item["id"] for item in response.get_json()["sequences"]}
-
-    assert response.status_code == 200
-    assert "real_full_capture_validation" in sequence_ids
-    assert "capture_to_bop_dataset_dry_run" in sequence_ids
-    assert "fake_capture_to_bop_dataset_dry_run" not in sequence_ids
-    assert "foundationpose_runtime_to_bop_eval" not in sequence_ids
-
-
 def test_preview_poll_log_filter_only_hides_sensor_preview_successes() -> None:
     poll_filter = _PreviewPollLogFilter()
 
@@ -133,66 +106,6 @@ def test_preview_poll_log_filter_only_hides_sensor_preview_successes() -> None:
     )
 
 
-def test_ugreen_sidebar_monitor_queues_webrtc_worker(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    class FakeJob:
-        id = "webcam-job"
-        status = "queued"
-        message = None
-
-        def __init__(self, parameters: dict):
-            self.parameters = parameters
-
-        def to_dict(self):
-            return {
-                "id": self.id,
-                "status": self.status,
-                "message": self.message,
-                "parameters": self.parameters,
-            }
-
-    class FakeRunner:
-        def __init__(self):
-            self.submitted = []
-
-        def list(self):
-            return []
-
-        def submit(self, **kwargs):
-            self.submitted.append(kwargs)
-            return FakeJob(dict(kwargs["parameters"]))
-
-    fake_runner = FakeRunner()
-    monkeypatch.setattr(web_monitoring, "job_runner", fake_runner)
-    monkeypatch.setattr(
-        web_monitoring,
-        "monitor_stream_root",
-        lambda: tmp_path / "webcam-monitor",
-    )
-    client = app.test_client()
-
-    response = client.post("/monitoring/webcam")
-
-    assert response.status_code == 202
-    submission = fake_runner.submitted[0]
-    assert submission["resources"] == ["monitoring_camera:0c45:2283"]
-    assert submission["parameters"]["monitor_webcam"] is True
-    command = submission["command"]
-    assert command[:4] == [
-        "uv",
-        "run",
-        "python",
-        "scripts/run_monitor_webrtc.py",
-    ]
-    assert command[command.index("--fps") + 1] == "30"
-    assert command[command.index("--width") + 1] == "640"
-    assert command[command.index("--height") + 1] == "480"
-    assert command[command.index("--vendor-id") + 1] == "0c45"
-    assert command[command.index("--product-id") + 1] == "2283"
-
-
 def test_pipeline_stage_and_sequence_endpoints_hide_downstream_ids() -> None:
     client = app.test_client()
 
@@ -206,7 +119,9 @@ def test_pipeline_stage_and_sequence_endpoints_hide_downstream_ids() -> None:
     assert "metric_report_export" not in stage_ids
     assert "fake_capture_to_bop_dataset_dry_run" not in sequence_ids
     assert "real_full_capture_validation" in sequence_ids
+    assert "capture_to_bop_dataset_dry_run" in sequence_ids
     assert "foundationpose_to_bop_eval_dry_run" not in sequence_ids
+    assert "foundationpose_runtime_to_bop_eval" not in sequence_ids
 
 
 def test_start_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
@@ -729,15 +644,6 @@ def test_overview_endpoint_treats_missing_run_config_as_empty_setup(tmp_path: Pa
     assert payload["config"] is None
     assert payload["config_error"] is None
     assert payload["steps"] == []
-
-
-def test_web_rejects_run_roots_outside_configured_boundaries() -> None:
-    response = app.test_client().get(
-        "/ui/overview", query_string={"run_root": "/etc"}
-    )
-
-    assert response.status_code == 400
-    assert "allowed root" in response.get_json()["output"]
 
 
 def test_web_rejects_run_root_symlink_escape(tmp_path: Path) -> None:

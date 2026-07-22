@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+
+import fcntl
 
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.config import RobotProfile, robot_profile
@@ -37,6 +42,10 @@ DATASET_MODE_OPTION_STAGES = (
 EXECUTION_GATE_OPTION_KEYS = frozenset(
     {"allow_cameras", "allow_real_robot"}
 )
+RUN_CONFIG_LOCK = ".run_config.lock"
+
+_RUN_CONFIG_LOCK = threading.RLock()
+_RUN_CONFIG_LOCK_STATE = threading.local()
 
 LAB_REALSENSE_SERIALS = (
     "825412070181",
@@ -56,6 +65,48 @@ SENSOR_TYPE_ALIASES = {
     "zed2i": SensorType.ZED_2I,
     "zed_2i": SensorType.ZED_2I,
 }
+
+
+@contextmanager
+def run_config_lock(run_root: str | Path):
+    """Serialize run-config transactions across threads and processes.
+
+    Pose-template selection performs a read-modify-write of ``run_config.json``.
+    Keeping that transaction on the same lock as ordinary config replacement
+    prevents either writer from observing or promoting an intermediate version.
+    """
+
+    with _RUN_CONFIG_LOCK:
+        root = Path(run_root).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        lock_path = root / RUN_CONFIG_LOCK
+        held = getattr(_RUN_CONFIG_LOCK_STATE, "locks", None)
+        if held is None:
+            held = {}
+            _RUN_CONFIG_LOCK_STATE.locks = held
+        depth = int(held.get(lock_path, 0))
+        if depth:
+            held[lock_path] = depth + 1
+            try:
+                yield root
+            finally:
+                held[lock_path] -= 1
+            return
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(lock_path, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "a+b", closefd=False) as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                held[lock_path] = 1
+                try:
+                    yield root
+                finally:
+                    held.pop(lock_path, None)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -664,8 +715,8 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
 
 
 def write_run_config(run_root: str | Path, config: PoseTestBotRunConfig) -> Path:
-    path = Path(run_root) / RUN_CONFIG
-    return atomic_write_json(path, config.to_dict())
+    with run_config_lock(run_root) as root:
+        return atomic_write_json(root / RUN_CONFIG, config.to_dict())
 
 
 def write_run_config_with_manifest(

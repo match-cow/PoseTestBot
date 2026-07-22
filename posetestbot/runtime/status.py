@@ -6,8 +6,7 @@ import importlib.util
 import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable
 
 SCHEMA_VERSION = "runtime_status.v1"
 
@@ -44,22 +43,6 @@ def module_available(module_name: str) -> bool:
         return importlib.util.find_spec(module_name) is not None
     except (ImportError, ModuleNotFoundError, ValueError):
         return False
-
-
-def _truthy_path(value: str | Path | None) -> Path | None:
-    if value is None or str(value).strip() == "":
-        return None
-    return Path(value).expanduser()
-
-
-def _path_check(name: str, path: Path | None, *, hint: str) -> RuntimeCheck:
-    exists = bool(path and path.exists())
-    return RuntimeCheck(
-        name=name,
-        ok=exists,
-        value=path.as_posix() if path else None,
-        hint=None if exists else hint,
-    )
 
 
 def _which_check(
@@ -150,9 +133,6 @@ def zed_sdk_status() -> RuntimeStatus:
 
 def collect_runtime_status(
     *,
-    env: Mapping[str, str] | None = None,
-    cwd: Path | None = None,
-    home: Path | None = None,
     which: Callable[[str], str | None] = shutil.which,
 ) -> dict:
     runtimes = [

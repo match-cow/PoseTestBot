@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from posetestbot.runtime import status as runtime_status
 
 
-def test_collect_runtime_status_reports_acquisition_runtimes(monkeypatch, tmp_path: Path) -> None:
+def test_collect_runtime_status_reports_acquisition_runtimes(monkeypatch) -> None:
     monkeypatch.setattr(
         runtime_status,
         "module_available",
@@ -13,9 +11,6 @@ def test_collect_runtime_status_reports_acquisition_runtimes(monkeypatch, tmp_pa
     )
 
     status = runtime_status.collect_runtime_status(
-        env={},
-        cwd=tmp_path,
-        home=tmp_path,
         which=lambda executable: f"/usr/bin/{executable}",
     )
 
@@ -29,14 +24,10 @@ def test_collect_runtime_status_reports_acquisition_runtimes(monkeypatch, tmp_pa
 
 def test_collect_runtime_status_reports_missing_acquisition_prerequisites(
     monkeypatch,
-    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(runtime_status, "module_available", lambda _: False)
 
     status = runtime_status.collect_runtime_status(
-        env={},
-        cwd=tmp_path,
-        home=tmp_path,
         which=lambda _: None,
     )
 

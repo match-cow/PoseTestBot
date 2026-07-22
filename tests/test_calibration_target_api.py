@@ -4,6 +4,8 @@ import copy
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 
 from posetestbot.calibration.posegridgen import posegridgen_capabilities
@@ -170,6 +172,22 @@ def test_bundle_listing_downloads_and_traversal_rejection(target_client) -> None
     assert listing.status_code == 200
     assert listing.get_json()["bundles"][0]["target_id"] == bundle["target_id"]
 
+    preview = client.get(
+        f"/calibration-targets/bundles/{bundle['target_id']}/preview.png"
+    )
+    assert preview.status_code == 200
+    assert preview.mimetype == "image/png"
+    assert preview.data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert preview.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert preview.headers["ETag"] == f'"{bundle["configuration_sha256"]}"'
+    image = cv2.imdecode(np.frombuffer(preview.data, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    assert image.shape[1] > image.shape[0]
+    dark_y, dark_x = np.where(image < 128)
+    assert dark_x.min() > 0
+    assert dark_y.min() > 0
+    assert dark_x.max() < image.shape[1] - 1
+    assert dark_y.max() < image.shape[0] - 1
+
     for artifact, mimetype in (
         ("source", "application/json"),
         ("target", "application/json"),
@@ -184,6 +202,10 @@ def test_bundle_listing_downloads_and_traversal_rejection(target_client) -> None
         f"/calibration-targets/bundles/{bundle['target_id']}/download/other"
     ).status_code == 404
     assert client.get("/calibration-targets/bundles/../download/pdf").status_code in {400, 404}
+    assert client.get("/calibration-targets/bundles/../preview.png").status_code in {
+        400,
+        404,
+    }
     assert client.get("/artifacts").status_code == 404
 
 

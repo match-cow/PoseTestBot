@@ -1,11 +1,12 @@
 # Acquisition Rewrite Remaining Work
 
-Last reviewed: 2026-07-21
+Last reviewed: 2026-07-22
 
 This is the only repository-owned planning document for unfinished rewrite
 work. Completed design plans are retained in Git history, not as live plans.
-Operator contracts remain in the focused calibration-target, pose-template,
-iiwa teaching, installation, and README documents.
+Operator contracts remain in the focused calibration-target,
+[Workpiece Catalogue](WORKPIECE_CATALOGUE.md), pose-template, iiwa teaching,
+installation, and README documents.
 
 ## Boundary
 
@@ -33,9 +34,18 @@ The rewrite already provides:
   RealSense timebase/intrinsic compatibility gates, deterministic common-
   bundle multi-camera ranking, explicit validation/promotion, and derived
   rectification;
-- managed PoseTemplateCreator catalog/bundles, run-owned placement and
-  instance evidence, BlenderProc 2.8.0 identity validation, and BOP v3
-  provenance sidecars;
+- a dedicated JSON-backed Workpiece Catalogue page and `/workpieces` API with
+  queued CAD upload, editable labels/tags/groups/attributes, client-side
+  previews, tag/group/state filtering, revisioned/locked mutations, guarded
+  archive/delete with retryable cleanup evidence, audited metre/mm geometry
+  correction, metadata import/export, stale request cleanup, and stable
+  UUID/BOP identity;
+- managed PoseTemplateCreator stable-orientation bundles sourced from filtered
+  active catalogue workpieces, exact slice/layout validation, bounded catalogue
+  and template thumbnails, target-specific artifact verification, interactive
+  selected-template 3D previews, strict bundle/selection validation, durable
+  selection recovery, run-owned placement and instance snapshots, BlenderProc
+  2.8.0 identity validation, and BOP v3 provenance sidecars;
 - a packaged React operator console and scoped Flask APIs; and
 - the three acquisition-only gates: `rewrite_full_capture.v1`,
   `rewrite_calibration_validation.v1`, and
@@ -56,6 +66,14 @@ wheel and sdist containing the complete pose-template/UI surface, and an
 installed-wheel Flask smoke. Optional BlenderProc and `pyzed.sl` were not
 available on the audit host; that is non-blocking for ordinary development but
 must be resolved for the relevant real-data milestones below.
+
+The current three-RealSense `calib00` confirmation run passes the full-capture
+gate at 10/10 and calibration-validation gate at 3/3. Its complete retained
+evidence is summarized in
+[EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md).
+This closes the three-camera calibration dependency, but not the combined
+camera-service lifecycle acceptance in P1, the five-sensor capture in P2, the
+controller commissioning evidence below, or the real BOP acceptance in P4.
 
 ## P0 — Safety and Capture-Contract Hardening
 
@@ -178,31 +196,24 @@ Depends on P0 and on an operator-ready robot/camera cell.
 ### Calibration evidence and promotion
 
 The initial 2026-07-21 live preflight for
-`working_data/eye_in_hand_calib00_20260721_163559` stopped before `START`:
-RealSense `033422071805` had lost its SuperSpeed/UVC interfaces, and its USB2
-fallback failed kernel configuration with error `-28` (insufficient bandwidth).
-A host reboot reproduced the transport failure, so software restart alone was
-not remediation. For the current calibration campaign the operator explicitly
-disabled that camera, retained its full run-config identity and mounting/
-orientation/profile metadata, regenerated the plans, and completed physical
-acquisition with the two enabled RealSense cameras. The new immutable
-attempt `3c4a0b7b765f44bd9cc37fffc48fb321` promoted the complete common
-`IPPE + Horaud` bundle. It produced 652/652 and 655/656 inliers, held-out means
-of 3.129 mm / 0.491 degrees and 3.332 mm / 0.427 degrees, and 3.612 mm /
-0.277 degrees stationary-companion closure. The exact camera-to-flange and
-grid-to-template-base transforms and promotion provenance are exposed in Cell.
-Both `rewrite_full_capture.v1` (9/9) and
-`rewrite_calibration_validation.v1` (3/3) are ready on this reduced-camera run.
+`working_data/eye_in_hand_calib00_20260721_163559` stopped before `START` after
+RealSense `033422071805` lost its SuperSpeed/UVC interfaces. The subsequent
+two-camera promotion remains an independent baseline, but it was superseded by
+two preserved three-camera runs on 2026-07-22. The confirmation run
+`working_data/eye_in_hand_calib00_3cam_repeat_20260722_1202` promoted immutable
+attempt `12e6a40eff444b889870597b787bf016` with a complete common
+`IPPE + Shah` bundle. It produced 605/606, 608/608, and 610/610 inliers,
+held-out means of 3.052 mm / 0.628 degrees, 3.241 mm / 0.473 degrees, and
+3.226 mm / 0.425 degrees, and 7.104 mm / 0.421 degrees maximum
+stationary-companion closure. Exact transforms and promotion provenance are
+exposed in Cell. `rewrite_full_capture.v1` is 10/10 ready and
+`rewrite_calibration_validation.v1` is 3/3 ready for all three cameras.
 
-This reduced calibration camera set does not close P1/P2 hardware acceptance:
-reseat, flip, or replace the disabled camera's SuperSpeed cable/connector path
-and require exact SDK enumeration of all three serials for the three-camera
-service and full-capture milestones. Status and capture-plan preflight reject
-an enabled SDK-enumerated RealSense whose known `usb_type_descriptor` has a
-major version below 3, preventing a future USB2 fallback from satisfying
-readiness. Disabled cameras remain visible configuration/diagnostic evidence
-but are excluded from capture/preflight, calibration, Cell, and rewrite-gate
-expectations.
+Status and capture-plan preflight continue to reject an enabled
+SDK-enumerated RealSense whose known `usb_type_descriptor` has a major version
+below 3, preventing a future USB2 fallback from satisfying readiness. Disabled
+cameras remain visible configuration/diagnostic evidence but are excluded from
+capture/preflight, calibration, Cell, and rewrite-gate expectations.
 
 - [x] For the current eye-in-hand campaign, use the actual printed and measured
   `calib00` bundle (`15b49f67-7cf5-4c00-9e7f-914aa6ed5da0`):
@@ -236,8 +247,8 @@ expectations.
   robot host-wall timestamps, zero manual offset, no fallback, and at most
   20 ms nearest-pose delta.
 - [x] Confirm the historical high reprojection error on RealSense
-  `825412070181` did not recur: factory/manual held-out RMS is 1.194/0.967 px
-  and promoted-candidate mean reprojection is 1.035 px. Trajectory variation
+  `825412070181` did not recur: factory/manual held-out RMS is 1.230/0.964 px
+  and promoted-candidate mean reprojection is 1.040 px. Trajectory variation
   was not treated as a correction.
 - [x] Review every PnP/extrinsic result. For the enabled cameras require a
   complete common bundle using the same PnP and extrinsic method, with every
@@ -258,12 +269,15 @@ expectations.
 
 ## P4 — Real Pose-Template, BlenderProc, and BOP v3 Acceptance
 
-The promoted-calibration dependency is satisfied by the two-camera `calib00`
-attempt. Real BlenderProc 2.8.0 and BOP acceptance remain outstanding for an
-appropriate dataset run.
+The promoted-calibration dependency is satisfied by the repeated three-camera
+`calib00` attempt. Real BlenderProc 2.8.0 and BOP acceptance remain outstanding
+for an appropriate dataset run.
 
-- [ ] Import/inspect the real CAD and texture assets, generate an immutable
-  printable template, print/measure it, and confirm the full
+- [ ] Import/inspect and classify the real CAD and texture assets through
+  **Workpiece Catalogue**, exercise name/tag/group filters, verify the compact
+  and interactive identification previews and millimetre dimensions, choose
+  reviewed stable orientations, generate an immutable printable template from
+  active workpieces, print/measure it, and confirm the full
   `template_base_from_pose_template` placement for a new pose-template run.
 - [ ] Include at least one duplicate physical instance if duplicate-category
   behavior is part of the intended dataset. Verify exact slicing, immutable
@@ -292,10 +306,16 @@ These tasks are useful but do not replace the real-data gates.
   BOP/sync readers can be retired. Until a data migration policy exists, they
   remain supported readers rather than dead code. The object-registry path was
   retired on 2026-07-21; object-bearing runs now require pose-template bundles.
-- [ ] Reduce the lazy Cell production chunk (about 937 kB minified in the
-  2026-07-21 build) if operator load time or deployment limits justify it.
-  Preserve the WebGL-free fallback and add a bundle-size assertion before
-  treating this as a release gate.
+- [ ] Reduce the shared lazy Three.js/OrbitControls production chunk (about
+  909 kB minified in the 2026-07-22 build) if operator load time or deployment
+  limits justify it. Preserve the WebGL-free fallback and add a bundle-size
+  assertion before treating this as a release gate.
+- [ ] If operators need one-file cross-host catalogue portability, design a
+  verified binary bundle format that contains the manifest plus CAD, canonical
+  PLY, and texture bytes. Current JSON export/import is intentionally
+  metadata-only and skips workpieces whose UUID-addressed assets are absent on
+  the importing host; normal filesystem backup of the managed asset tree is
+  the current binary-preservation path.
 
 ## Repository Exit Criteria
 
@@ -308,14 +328,18 @@ bash scripts/install.sh --check-only \
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 cd frontend && bun run typecheck && bun run lint && bun run build
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest -m playwright \
+  tests/test_web_console_playwright.py tests/test_web_preview_playwright.py
 git diff --check
 ```
 
-Run both Playwright modules outside the sandbox only when localhost socket
+The default pytest selection excludes the marked Playwright modules. Run the
+explicit browser command outside the sandbox only when localhost socket
 restrictions require the standing authorization. Build a wheel and sdist to a
 temporary directory, install the wheel without dependencies into a temporary
-environment, and verify the Flask app, pose-template routes, and exact bundled
-asset set.
+environment, and verify the Flask app, `/workpieces` APIs, retained legacy
+pose-template catalogue routes, pose-template generation/selection routes, the
+Workpiece Catalogue page, and the exact bundled asset set.
 
 Rewrite completion additionally requires acceptance evidence from P1–P4 and
 all three rewrite gates passing on the intended real dataset. Ordinary

@@ -4,12 +4,12 @@ version = "0.1.0"
 description = "Acquisition, calibration, synchronization, and BOP export for multi-camera robot datasets"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "third_party/PoseTemplateCreator/LICENSE"]
 dependencies = [
     "opencv-python>=4.11.0.86",
     "pyrealsense2>=2.55.1.6486",
     "flask>=2.0.0",
     "depthai>=3,<4",
-    "tqdm>=4.67.1",
     "pytransform3d>=3.14.1",
     "trimesh>=4.12.2",
     "aiortc>=1.14.0",
@@ -22,10 +22,11 @@ dependencies = [
     "scipy>=1.14,<2",
     "pillow>=11,<13",
     "reportlab>=4.2,<6",
+    "networkx>=3.6,<4",
 ]
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
@@ -62,3 +63,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["-m", "not playwright"]
+markers = [
+    "playwright: localhost browser regressions that require an installed Chromium binary",
+]

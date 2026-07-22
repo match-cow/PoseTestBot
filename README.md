@@ -30,8 +30,13 @@ project.
   factory-vs-OpenCV RealSense color intrinsic comparison, explicit
   hand-eye/known-grid
   extrinsic solving, selection-gated promotion, and derived RGB-D rectification.
-- Pinned PoseTemplateCreator CAD catalog, exact full-pose slicing, immutable
-  printable pose templates, run placement, and per-instance object GT.
+- Persistent JSON-backed Workpiece Catalogue with retained CAD assets, editable
+  labels/tags/groups/attributes, 3D identification previews, lifecycle controls,
+  revisioned metre/millimetre correction, and metadata import/export.
+- Pinned PoseTemplateCreator stable grounded orientations, bounded isometric
+  previews, exact footprint/layout validation, immutable printable pose
+  templates sourced from filtered active catalogue workpieces, preview-rich run
+  placement, and per-instance object GT.
 - BlenderProc preparation/render planning for optional GT and masks.
 - BOP dataset export, model metadata, targets, frame maps, and optional
   multiview/COCO sidecars.
@@ -101,12 +106,15 @@ New run configs also make the robot stream frames explicit:
 can describe flange-to-TCP or template-base-to-physical-base transforms. Older
 real-profile configs without frame metadata remain readable and receive a
 `legacy_frames_inferred` warning; fake-profile configs are rejected.
-New runs are objectless by default. Object-bearing runs use the Pose Templates
-page or pose-template CLIs to select an immutable bundle, resolve its physical
-instances, and retain stable catalog UUID and BOP `obj_id` provenance.
+New runs are objectless by default. Add and classify test objects on the
+**Workpiece Catalogue** page, then use active workpieces on the **Pose
+Templates** page or through the pose-template CLIs to create and select an
+immutable bundle. Object-bearing runs resolve its physical instances and retain
+stable catalog UUID and BOP `obj_id` provenance.
 For the managed pose-template workflow, create the run with
 `--dataset-mode pose_template`, then select and confirm an immutable template
 in the console's **Workflow → Ground Truth** phase. See
+[`docs/WORKPIECE_CATALOGUE.md`](docs/WORKPIECE_CATALOGUE.md) and
 [`docs/POSETEMPLATECREATOR_OBJECT_GT.md`](docs/POSETEMPLATECREATOR_OBJECT_GT.md).
 
 The **Workflow → Run Setup** camera list has an **Enabled for capture and
@@ -268,30 +276,27 @@ an explicit override must still select one complete recorded passing bundle.
 Single-camera ranking is unchanged. Recommendations remain inactive until the
 operator accepts them.
 
-The 2026-07-21 `calib00` campaign retained RealSense `033422071805` as disabled
-configuration and completed physical acquisition and calibration with the two
-enabled cameras. Immutable attempt `3c4a0b7b765f44bd9cc37fffc48fb321`
-promoted the complete `IPPE + Horaud` bundle. Camera `825412070181` uses
-profile `825412070181_eye_in_hand_IPPE_horaud_3c4a0b7b` with camera-to-flange
-translation `[5.062439, -251.370725, 74.046213]` mm and WXYZ quaternion
-`[0.68773742, -0.10903413, -0.13392413, -0.70511923]`; camera
-`923322072633` uses profile
-`923322072633_eye_in_hand_IPPE_horaud_3c4a0b7b` with translation
-`[8.952679, 260.870281, 74.983681]` mm and quaternion
-`[0.70485080, 0.11024180, 0.07467657, -0.69674638]`. Their independently
-estimated stationary-target companion transforms close within 3.612 mm and
-0.277 degrees. Held-out mean residuals are 3.129 mm / 0.491 degrees and
-3.332 mm / 0.427 degrees, with 652/652 and 655/656 inliers respectively.
+The 2026-07-22 confirmation campaign completed capture and calibration with all
+three configured RealSense cameras. Immutable attempt
+`12e6a40eff444b889870597b787bf016` promoted the complete common
+`IPPE + Shah` bundle with 605/606, 608/608, and 610/610 inliers. Held-out means
+were 3.052 mm / 0.628 degrees, 3.241 mm / 0.473 degrees, and 3.226 mm /
+0.425 degrees; maximum three-camera stationary-companion closure was 7.104 mm
+/ 0.421 degrees. The run passes `rewrite_full_capture.v1` at 10/10 and
+`rewrite_calibration_validation.v1` at 3/3. Exact transforms, repeatability,
+and promotion evidence are retained in
+[`docs/EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md`](docs/EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md).
 
 The factory color projections were retained because their recorded
 `inverse_brown_conrady` coefficients are exactly zero. The manual OpenCV fits
 remain immutable comparison evidence: factory/manual held-out RMS was
-1.194/0.967 px for `825412070181` and 1.322/1.013 px for `923322072633`.
-Depth scale and depth-to-color alignment remain factory SDK provenance, not a
-depth recalibration. A saved-data depth-plane diagnostic found a range-dependent
-metric-depth anomaly on `923322072633`; use the promoted RGB eye-in-hand
-extrinsic, but keep metric depth from that camera explicitly unvalidated until
-a later cable/firmware and depth-specific check.
+1.260/1.019 px for `033422071805`, 1.230/0.964 px for `825412070181`, and
+1.268/0.998 px for `923322072633`. Depth scale and depth-to-color alignment
+remain factory SDK provenance, not a depth recalibration. A saved-data
+depth-plane diagnostic found a range-dependent metric-depth anomaly on
+`923322072633`; use the promoted RGB eye-in-hand extrinsic, but keep metric
+depth from that camera explicitly unvalidated until a later cable/firmware and
+depth-specific check.
 
 The **Calibration Targets** page previews and fits PoseGridGen ArUco boards and
 stores immutable bundles below
@@ -348,6 +353,46 @@ Rectification writes only below `processed/rectified/<sensor>/`, using linear
 RGB and nearest-neighbor aligned-depth remapping. BlenderProc preparation and
 BOP export prefer that tree when present. `run_aruco_stage.py` remains the
 factory-intrinsics compatibility wrapper.
+
+## Workpiece Catalogue
+
+The operator console's **Workpiece Catalogue** page is the persistent source
+of test-object identity. Upload PLY, STL, or OBJ CAD plus an optional PNG
+texture; the local job runner inspects the mesh and retains the original file,
+a canonical PLY, hashes, and texture below
+`working_data/object_catalog/objects/<catalog_uuid>/`. Operators can edit the
+workpiece name, alias, description, tags, groups, and custom scalar key/value
+attributes, search or filter the catalogue, and use bounded isometric card
+thumbnails plus one orbitable bounded 3D detail view for identification. Cards
+and the detail view read a separately bounded, geometry-hash-bound orientation
+thumbnail; ranked orientations and exact contours remain in the full derived
+analysis used by the template editor.
+
+The catalogue manifest remains portable JSON at
+`working_data/object_catalog/object_catalog.json`. Mutations are serialized
+across web and worker processes, each committed state receives an atomic
+numbered revision, and stable UUID/BOP `obj_id` values are never reused.
+Archiving is reversible. Permanent deletion additionally requires an archived
+record, explicit confirmation, and no references from any pose-template
+bundle; an unreadable bundle also blocks deletion. Bundle publication and
+catalogue deletion share one cross-process lock, and the tombstone manifest is
+committed before unreferenced assets are removed. Tombstones retain asset
+cleanup status and bounded error evidence, so a repeated confirmed delete can
+retry an interrupted cleanup without reviving the retired identity.
+
+JSON export/import is deliberately metadata-only. Exported JSON records asset
+references and hashes but does not embed CAD, canonical PLY, or texture bytes;
+import updates matching locally installed workpieces and reports absent local
+assets as skipped. Export remains available for metadata recovery when an asset
+is corrupt, while import skips the affected entry and continues with intact
+records. Pose Templates selects only active workpieces from this same catalogue,
+then immutable bundles and run selections preserve complete snapshots. New
+bundle manifests keep card metadata bounded and place exact contours in the
+hash-verified preview instead of duplicating them in every instance record.
+Cards use the bounded template thumbnail; a selected version loads the exact
+interactive preview. Selection is a strictly validated, journaled transaction
+that recovers the prior run state after an interrupted promotion. See
+[`docs/WORKPIECE_CATALOGUE.md`](docs/WORKPIECE_CATALOGUE.md).
 
 ## BOP Dataset Export
 
@@ -453,10 +498,12 @@ and an installed command uses its current working directory. CLI tools continue
 to accept explicit paths.
 
 The bundled console has desktop routes for Dashboard, Devices, Cell,
-Calibration Targets, Pose Templates, Workflow, and Jobs. The read-only Cell
-page renders the HRI template, base/flange/TCP proxies, calibrated cameras,
-pose-template instances, calibration target, and exact recorded trajectories
-in right-handed Z-up millimetres.
+Calibration Targets, Workpiece Catalogue, Pose Templates, Workflow, and Jobs.
+The catalogue entry appears directly below Calibration Targets and above Pose
+Templates. The read-only Cell page renders the HRI template,
+base/flange/TCP proxies, calibrated cameras, pose-template instances,
+calibration target, and exact recorded trajectories in right-handed Z-up
+millimetres.
 Missing frame edges remain visibly unresolved, and a component/provenance list
 remains available without WebGL. For each resolved camera that list includes
 the exact calibration profile identity, camera-to-parent 4 × 4 matrix, WXYZ
@@ -521,12 +568,32 @@ Important endpoints:
 - `GET|POST /calibration/attempts`
 - `GET /calibration/attempts/<attempt_id>`
 - `POST /calibration/attempts/<attempt_id>/promote`
+- `GET /workpieces/status`
+- `GET /workpieces/catalog`
+- `GET /workpieces/catalog/<catalog_uuid>`
+- `POST /workpieces/catalog/upload`
+- `PATCH /workpieces/catalog/<catalog_uuid>`
+- `POST /workpieces/catalog/<catalog_uuid>/unit-corrections`
+- `POST /workpieces/catalog/<catalog_uuid>/archive`
+- `POST /workpieces/catalog/<catalog_uuid>/restore`
+- `DELETE /workpieces/catalog/<catalog_uuid>`
+- `GET /workpieces/catalog/<catalog_uuid>/assets/<kind>`
+- `GET /workpieces/catalog/export`
+- `POST /workpieces/catalog/import`
 - `GET /pose-templates/status`
 - `GET /pose-templates/catalog`
 - `POST /pose-templates/catalog/upload`
+- `GET|POST /pose-templates/workpieces/<catalog_uuid>/orientations`
+- `GET /pose-templates/workpieces/<catalog_uuid>/orientation-thumbnail`
 - `POST /pose-templates/preview`
+- `POST /pose-templates/validate`
 - `POST /pose-templates/generate`
 - `GET /pose-templates/library`
+- `GET /pose-templates/library/<template_uuid>`
+- `GET /pose-templates/library/<template_uuid>/preview`
+- `GET /pose-templates/library/<template_uuid>/thumbnail`
+- `GET /pose-templates/library/<template_uuid>/assets/<instance_uuid>/<kind>`
+- `GET /pose-templates/library/<template_uuid>/download/<kind>`
 - `GET|POST /pose-templates/runs/selection`
 - `POST /hardware/status`
 - `GET|POST /run-config`
@@ -536,6 +603,11 @@ Important endpoints:
 - `GET /capture/jobs`
 - `GET /capture/status`
 - `POST /capture/jobs/<job_id>/stop`
+
+The older `/pose-templates/catalog...` read/upload/archive/restore/asset APIs
+remain available for compatibility. New catalogue management uses
+`/workpieces`; pose-template preview, generation, library, and run-selection
+APIs remain under `/pose-templates`.
 
 ## Rewrite Gates
 
@@ -574,9 +646,12 @@ Recommended local validation:
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 git diff --check
-UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_console_playwright.py
-UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_web_preview_playwright.py
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest -m playwright \
+  tests/test_web_console_playwright.py tests/test_web_preview_playwright.py
 ```
+
+The default test selection excludes the explicitly marked Playwright modules;
+install Chromium and use `-m playwright` when running browser coverage.
 
 The single source of truth for unfinished rewrite work is
 [`docs/REWRITE_REMAINING_WORK.md`](docs/REWRITE_REMAINING_WORK.md).

@@ -40,10 +40,7 @@ from posetestbot.io.artifacts import (
 )
 from posetestbot.pipeline.preflight import run_preflight_queue_summary
 from posetestbot.pipeline.rewrite_gate import build_rewrite_status_report
-from posetestbot.pipeline.run_config import (
-    sequence_plan_from_run_config,
-    validate_run_config,
-)
+from posetestbot.pipeline.run_config import validate_run_config
 from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 from posetestbot.pipeline.stages import build_pipeline_job
 
@@ -403,17 +400,6 @@ def _has_blenderproc_prepared(run_root: Path) -> bool:
         (sensor / "blenderproc" / "objects.json").is_file()
         for sensor in _synchronized_sensor_dirs(run_root)
     )
-
-
-def _run_config_sequence_has_stage(run_root: Path, stage_id: str) -> bool:
-    value = _json_if_present(run_root / RUN_CONFIG)
-    if not isinstance(value, Mapping):
-        return False
-    try:
-        plan = sequence_plan_from_run_config(value)
-    except Exception:
-        return False
-    return any(step.stage_id == stage_id for step in plan.steps)
 
 
 def _stage_recommendation(

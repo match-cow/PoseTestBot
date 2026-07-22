@@ -9,6 +9,14 @@ Its Workbench contract is reduced to exactly nine persistent 3 × 3 raster
 frames below `/PoseTestBot/TemplateBase`. `CalibrationCenter` is one of those
 nine frames and anchors both phases.
 
+A separate retained 2026-07-22 physical repeat successfully captured and
+promoted eye-in-hand calibration for all three RealSense cameras; see the
+[dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md). That
+run validates its recorded acquisition and calibration artifacts, but it does
+not establish which Sunrise application/revision was deployed or supply the
+Workbench, offline-path, T1, and reviewer evidence required to commission this
+source candidate.
+
 The six A/B/C orientation variants are no longer Workbench frames. Sunrise
 generates their nine motion legs with zero-translation `linRel` transformations
 relative to the taught center. The depth phase and its two frames are removed.
@@ -132,10 +140,13 @@ converted to radians before transformation. It includes:
   cell schematic;
 - the joint-space-path caveat and full teaching-aid safety disclaimer.
 
-No flange axis is described as a camera optical axis because no validated
-camera-to-flange transform is supplied. The historical
-`/HRC_Hub/Template_Base` A1 sweep is not overlaid because no transform to
-`/PoseTestBot/TemplateBase` is available.
+No flange axis is described as a camera optical axis because this teaching plot
+does not consume run-specific promoted camera-to-flange transforms. The latest
+three-camera transforms remain in the
+[dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md) and
+its retained run artifacts. The historical `/HRC_Hub/Template_Base` A1 sweep
+is not overlaid because no transform to `/PoseTestBot/TemplateBase` is
+available.
 
 Matplotlib is a direct project dependency. Regenerate both committed outputs
 without opening hardware:
@@ -160,14 +171,19 @@ changes must be revalidated before physical capture. Physical T1 validation
 and capture are operator-run work. Repository tests never access the robot or
 cameras.
 
-For every required camera, the supervised trial must demonstrate at least 15
-accepted views, 6/9 coverage cells, strong extreme detections, per-view
+For every required camera, a future supervised trial must demonstrate at least
+15 accepted views, 6/9 coverage cells, strong extreme detections, per-view
 reprojection no greater than 3 px, sufficient motion diversity, and passing
 synchronization quality. A manual OpenCV intrinsic fallback additionally
 requires no greater than 1.5 px training RMS plus its held-out and plausibility
-gates; that RMS is not a factory-profile requirement. Continue to investigate
-the prior high-error RealSense `825412070181` separately; trajectory variance
-alone does not resolve its reprojection discrepancy.
+gates; that RMS is not a factory-profile requirement.
+
+The retained three-camera repeat met the applicable RGB calibration gates and
+did not reproduce the earlier high-error result for RealSense `825412070181`:
+its promoted mean reprojection was 1.040 px. This is completed run evidence, not
+controller commissioning evidence. Factory SDK depth scale and depth-to-color
+alignment were not recalibrated, so the separate metric-depth validation item
+remains open.
 
 ## Limits and Assumptions
 

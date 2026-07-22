@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { Activity, Bot, Boxes, ChevronDown, FlaskConical, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, Moon, Plus, Sun, Workflow } from "lucide-react"
+import { Activity, Bot, Boxes, ChevronDown, FlaskConical, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, Moon, PackageSearch, Plus, Sun, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -15,10 +15,11 @@ import { cn } from "@/lib/utils"
 const navigation = [
   { to: "/dashboard", label: "Dashboard", icon: Gauge },
   { to: "/devices", label: "Devices", icon: Bot },
-  { to: "/cell", label: "Cell", icon: Boxes },
   { to: "/calibration-targets", label: "Calibration Targets", icon: Grid3X3 },
+  { to: "/workpieces", label: "Workpiece Catalogue", icon: PackageSearch },
   { to: "/pose-templates", label: "Pose Templates", icon: LayoutTemplate },
   { to: "/workflow/setup", label: "Workflow", icon: Workflow, match: "/workflow" },
+  { to: "/cell", label: "Cell View", icon: Boxes },
   { to: "/jobs", label: "Jobs", icon: ListChecks },
 ]
 

@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from flask import Flask, jsonify, request
 from werkzeug.datastructures import ImmutableMultiDict
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from posetestbot.pipeline.sequences import get_pipeline_sequence
 from posetestbot.pipeline.stages import get_pipeline_stage
@@ -50,6 +51,7 @@ INPUT_PATH_FIELDS = {
     "target_to_reference_path",
 }
 CALIBRATION_TARGET_MAX_REQUEST_BYTES = 256 * 1024
+CATALOG_AND_TEMPLATE_MAX_JSON_BYTES = 2 * 1024 * 1024
 
 
 def parse_strict_bool(value: Any, *, name: str, default: bool | None = None) -> bool:
@@ -273,17 +275,39 @@ def _normalize_query_arguments() -> None:
 def install_request_security(app: Flask) -> None:
     @app.before_request
     def validate_request_boundaries():
-        if (
-            request.path.startswith("/calibration-targets/")
-            and request.content_length is not None
-            and request.content_length > CALIBRATION_TARGET_MAX_REQUEST_BYTES
+        request_limit: int | None = None
+        limit_message = "Request body exceeds this endpoint's size limit"
+        if request.path.startswith("/calibration-targets/"):
+            request_limit = CALIBRATION_TARGET_MAX_REQUEST_BYTES
+            limit_message = "Calibration-target request exceeds 256 KiB"
+        elif request.is_json and request.path.startswith(
+            ("/workpieces/", "/pose-templates/")
         ):
-            return jsonify({"output": "Calibration-target request exceeds 256 KiB"}), 413
+            request_limit = CATALOG_AND_TEMPLATE_MAX_JSON_BYTES
+            limit_message = "JSON request exceeds 2 MiB"
+        if request_limit is not None:
+            # This must run before get_json(). Read at most one byte beyond the
+            # accepted size so unknown-length WSGI streams cannot be silently
+            # truncated into an invalid JSON document and reported as a 400.
+            request.max_content_length = request_limit + 1
+            if (
+                request.content_length is not None
+                and request.content_length > request_limit
+            ):
+                return jsonify({"output": limit_message}), 413
+            try:
+                if len(request.get_data(cache=True)) > request_limit:
+                    return jsonify({"output": limit_message}), 413
+            except RequestEntityTooLarge:
+                return jsonify({"output": limit_message}), 413
+            request.max_content_length = request_limit
         try:
             _normalize_query_arguments()
             data = request.get_json(silent=True)
             if isinstance(data, dict):
                 _normalize_json_payload(data)
+        except RequestEntityTooLarge:
+            return jsonify({"output": limit_message}), 413
         except (TypeError, ValueError) as exc:
             return jsonify({"output": str(exc)}), 400
         return None

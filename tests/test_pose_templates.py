@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import sys
+import uuid
 from pathlib import Path
 
 import cv2
@@ -17,15 +20,27 @@ from posetestbot.pipeline.run_config import (
 )
 from posetestbot.pose_templates import adapter
 from posetestbot.pose_templates.catalog import (
+    correct_catalog_object_units,
     import_catalog_object,
     load_catalog,
     set_catalog_object_state,
 )
 from posetestbot.pose_templates.library import (
+    THUMBNAIL_MAX_CONTOURS,
+    THUMBNAIL_MAX_POINTS,
+    _hash_json,
     build_template_preview,
+    build_template_thumbnail,
+    clone_template_configuration,
     generate_template_bundle,
+    load_template_thumbnail,
     set_template_archive_state,
     validate_template_bundle,
+)
+from posetestbot.pose_templates.orientations import (
+    OrientationAnalysisStaleError,
+    analyze_catalog_orientations,
+    load_catalog_orientation_analysis,
 )
 from posetestbot.pose_templates.selection import (
     PoseTemplateSelectionConflict,
@@ -124,26 +139,9 @@ def test_source_status_states_and_private_import_isolation(
     assert "backend" not in sys.modules
 
 
-def test_catalog_is_transactional_archivable_and_never_reuses_ids(tmp_path: Path) -> None:
-    catalog, first = managed_box(tmp_path)
-    assert first["obj_id"] == 1
-    assert first["source_sha256"] != first["canonical_ply_sha256"]
-    archived = set_catalog_object_state(first["catalog_uuid"], state="archived", catalog_root=catalog)
-    assert archived["state"] == "archived"
-    restored = set_catalog_object_state(first["catalog_uuid"], state="active", catalog_root=catalog)
-    assert restored["obj_id"] == 1
-    second = import_catalog_object(
-        name="Other",
-        cad_path=mesh_file(tmp_path / "other.ply", extents=(8, 8, 8)),
-        catalog_root=catalog,
-    )
-    assert second["obj_id"] == 2
-    value = load_catalog(catalog)
-    assert value["next_obj_id"] == 3
-    assert len(list((catalog / "revisions").glob("*.json"))) >= 4
-
-
-def test_full_pose_preview_compensation_and_immutable_bundle(tmp_path: Path) -> None:
+def test_legacy_full_pose_preview_compensation_and_immutable_bundle(
+    tmp_path: Path,
+) -> None:
     catalog, record = managed_box(tmp_path)
     config = template_configuration(record["catalog_uuid"])
     preview = build_template_preview(config, catalog_root=catalog)
@@ -157,13 +155,30 @@ def test_full_pose_preview_compensation_and_immutable_bundle(tmp_path: Path) -> 
     )
     nominal_point = first["nominal_contours"][0][0]
     print_point = first["compensated_contours"][0][0]
-    assert print_point["x_mm"] == pytest.approx(nominal_point["x_mm"] * 1.01)
-    assert print_point["y_mm"] == pytest.approx(nominal_point["y_mm"] * 0.99)
+    # Upstream scales template content about the physical page centre. A3
+    # landscape is 420 x 297 mm and the template origin is at (15, 15) mm.
+    assert print_point["x_mm"] == pytest.approx(
+        210 + (15 + nominal_point["x_mm"] - 210) * 1.01 - 15
+    )
+    assert print_point["y_mm"] == pytest.approx(
+        148.5 + (15 + nominal_point["y_mm"] - 148.5) * 0.99 - 15
+    )
 
     library = tmp_path / "library"
     bundle = generate_template_bundle(config, catalog_root=catalog, library_root=library)
     assert bundle["schema_version"] == "pose_template_bundle.v1"
     assert (Path(bundle["bundle_path"]) / "pose_template.pdf").read_bytes().startswith(b"%PDF")
+    thumbnail_path = Path(bundle["bundle_path"]) / "pose_template_thumbnail.json"
+    thumbnail_bytes = thumbnail_path.read_bytes()
+    thumbnail = json.loads(thumbnail_bytes)
+    assert thumbnail["schema_version"] == "pose_template_thumbnail.v1"
+    assert thumbnail["template_uuid"] == bundle["template_uuid"]
+    assert bundle["files"]["thumbnail"] == "pose_template_thumbnail.json"
+    assert hashlib.sha256(thumbnail_bytes).hexdigest() == bundle["hashes"]["thumbnail"]
+    thumbnail_path.write_text('{"tampered":true}')
+    with pytest.raises(ValueError, match="thumbnail is missing or was modified"):
+        validate_template_bundle(bundle["bundle_path"], library_root=library)
+    thumbnail_path.write_bytes(thumbnail_bytes)
     set_catalog_object_state(record["catalog_uuid"], state="archived", catalog_root=catalog)
     set_template_archive_state(bundle["template_uuid"], state="archived", library_root=library)
     assert validate_template_bundle(bundle["bundle_path"], library_root=library)["archive"]["state"] == "archived"
@@ -176,6 +191,331 @@ def test_full_pose_preview_compensation_and_immutable_bundle(tmp_path: Path) -> 
     manifest.write_text(json.dumps(tampered))
     with pytest.raises(ValueError, match="manifest hash mismatch"):
         validate_template_bundle(bundle["bundle_path"], library_root=library)
+
+
+def test_template_thumbnail_is_deterministically_bounded_and_keeps_every_primary(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+
+    def contour(radius: float, count: int) -> list[dict[str, float]]:
+        return [
+            {
+                "x_mm": radius * np.cos(2 * np.pi * index / count),
+                "y_mm": radius * np.sin(2 * np.pi * index / count),
+            }
+            for index in range(count)
+        ]
+
+    instances = [
+        {
+            "instance_uuid": str(uuid.UUID(int=index + 1)),
+            "catalog": {"catalog_uuid": str(uuid.UUID(int=1000 + index)), "name": f"Part {index}", "obj_id": index + 1},
+            # Put the exterior second to prove primary selection is area-based.
+            "compensated_contours": [contour(2, 73), contour(10, 97), contour(1, 61)],
+        }
+        for index in range(200)
+    ]
+    preview = {
+        "schema_version": "pose_template_preview.v1",
+        "valid": True,
+        "page": {"width_mm": 420, "height_mm": 297},
+        "configuration": {
+            "page": {
+                "size": "A3",
+                "orientation": "landscape",
+                "origin_from_lower_left_mm": [15, 15],
+                "print_compensation_origin": "page_center",
+            },
+            "print_compensation": {"x_scale": 1.01, "y_scale": 0.99},
+        },
+        "instances": instances,
+    }
+
+    first = build_template_thumbnail(preview)
+    second = build_template_thumbnail(preview)
+
+    assert first == second
+    assert len(first["instances"]) == 200
+    assert all(item["compensated_contours"] for item in first["instances"])
+    assert all(item["primary_contour_source_index"] == 1 for item in first["instances"])
+    assert first["approximation"]["included_contours"] <= THUMBNAIL_MAX_CONTOURS
+    assert first["approximation"]["included_points"] <= THUMBNAIL_MAX_POINTS
+    assert first["approximation"]["truncated"] is True
+    assert all(item["approximation"]["truncated"] for item in first["instances"])
+    assert first["configuration"]["page"]["origin_from_lower_left_mm"] == [15, 15]
+    assert first["configuration"]["print_compensation"] == {
+        "x_scale": 1.01,
+        "y_scale": 0.99,
+    }
+
+
+def test_legacy_bundle_thumbnail_fallback_does_not_mutate_bundle(tmp_path: Path) -> None:
+    catalog, record = managed_box(tmp_path)
+    library = tmp_path / "library"
+    bundle = generate_template_bundle(
+        template_configuration(record["catalog_uuid"]),
+        catalog_root=catalog,
+        library_root=library,
+    )
+    bundle_root = Path(bundle["bundle_path"])
+    manifest_path = bundle_root / "pose_template_bundle.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"].pop("thumbnail")
+    manifest["hashes"].pop("thumbnail")
+    manifest["bundle_sha256"] = _hash_json(
+        {key: value for key, value in manifest.items() if key != "bundle_sha256"}
+    )
+    manifest_path.write_text(json.dumps(manifest))
+    (bundle_root / "pose_template_thumbnail.json").unlink()
+
+    thumbnail = load_template_thumbnail(bundle["template_uuid"], library_root=library)
+
+    assert thumbnail["schema_version"] == "pose_template_thumbnail.v1"
+    assert thumbnail["template_uuid"] == bundle["template_uuid"]
+    assert len(thumbnail["instances"]) == 2
+    assert not (bundle_root / "pose_template_thumbnail.json").exists()
+    assert "thumbnail" not in validate_template_bundle(
+        bundle_root, library_root=library
+    )["files"]
+
+
+def test_page_centred_compensation_rejects_geometry_clipped_by_media_box(
+    tmp_path: Path,
+) -> None:
+    catalog, record = managed_box(tmp_path)
+    configuration = {
+        "display_name": "Compensated edge",
+        "page": {"size": "A3", "orientation": "landscape"},
+        "print_compensation": {"x_scale": 1.5, "y_scale": 1.0},
+        "instances": [
+            {
+                "instance_uuid": "11111111-1111-4111-8111-111111111111",
+                "catalog_uuid": record["catalog_uuid"],
+                "pose": {
+                    "x_mm": 380,
+                    "y_mm": 50,
+                    "z_mm": 0,
+                    "roll_deg": 0,
+                    "pitch_deg": 0,
+                    "yaw_deg": 0,
+                },
+            }
+        ],
+    }
+
+    preview = build_template_preview(configuration, catalog_root=catalog)
+
+    assert preview["fit"]["objects"][0]["fits"] is True
+    assert preview["valid"] is False
+    assert preview["errors"][0]["code"] == "compensated_outside_page"
+    assert preview["errors"][0]["bounds"]["max_x_mm"] > 420
+    with pytest.raises(ValueError, match="page-centred print compensation"):
+        generate_template_bundle(
+            configuration,
+            catalog_root=catalog,
+            library_root=tmp_path / "library",
+        )
+
+
+def test_bundle_validation_rejects_symlinked_asset_ancestor(tmp_path: Path) -> None:
+    catalog, record = managed_box(tmp_path)
+    library = tmp_path / "library"
+    bundle = generate_template_bundle(
+        template_configuration(record["catalog_uuid"]),
+        catalog_root=catalog,
+        library_root=library,
+    )
+    bundle_root = Path(bundle["bundle_path"])
+    instance_uuid = bundle["instances"][0]["instance_uuid"]
+    managed_instance = bundle_root / "assets" / instance_uuid
+    outside = tmp_path / "outside-instance"
+    shutil.copytree(managed_instance, outside)
+    shutil.rmtree(managed_instance)
+    managed_instance.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must not contain symlinks"):
+        validate_template_bundle(bundle_root, library_root=library)
+
+
+def test_stable_orientation_cache_and_planar_pose_compose_ground_truth(
+    tmp_path: Path,
+) -> None:
+    catalog, record = managed_box(tmp_path)
+    analysis = analyze_catalog_orientations(
+        record["catalog_uuid"], catalog_root=catalog
+    )
+    assert analysis["schema_version"] == "pose_template_orientation_analysis.v1"
+    assert analysis["source"]["canonical_ply_sha256"] == record["canonical_ply_sha256"]
+    assert 1 <= len(analysis["orientations"]) <= 24
+    assert len(analysis["preview_mesh"]["vertices"]) <= 160
+    assert len(analysis["preview_mesh"]["faces"]) <= 256
+    selected = analysis["orientations"][1]
+    configuration = {
+        "display_name": "Stable box",
+        "instances": [
+            {
+                "instance_uuid": "11111111-1111-4111-8111-111111111111",
+                "catalog_uuid": record["catalog_uuid"],
+                "orientation_id": selected["orientation_id"],
+                "pose": {"x_mm": 40, "y_mm": 35, "rotation_deg": 25},
+            }
+        ],
+    }
+    preview = build_template_preview(configuration, catalog_root=catalog)
+    assert preview["valid"] is True
+    assert preview["configuration"]["instances"][0]["placement_mode"] == "stable_orientation"
+    assert preview["instances"][0]["orientation"]["orientation_id"] == selected["orientation_id"]
+    assert record["canonical_ply_sha256"] in preview["preview_meshes"]
+    planar = matrix_from_xyz_rpy(
+        x_mm=40,
+        y_mm=35,
+        z_mm=0,
+        roll_deg=0,
+        pitch_deg=0,
+        yaw_deg=25,
+    )
+    np.testing.assert_allclose(
+        preview["instances"][0]["pose_template_from_object"]["matrix"],
+        planar @ np.asarray(selected["source_to_placed"]),
+    )
+    assert preview["_layout_request"]["objects"][0]["pose"] == {
+        "x_mm": 40.0,
+        "y_mm": 35.0,
+        "rotation_deg": 25.0,
+    }
+    assert preview["_layout_request"]["objects"][0]["contours"] == selected["contours"]
+
+    cache_path = (catalog / record["assets"]["canonical_ply"]["path"]).with_name(
+        "pose_template_orientation_analysis.json"
+    )
+    stale = json.loads(cache_path.read_text())
+    stale["source"]["canonical_ply_sha256"] = "0" * 64
+    cache_path.write_text(json.dumps(stale))
+    with pytest.raises(OrientationAnalysisStaleError, match="canonical geometry changed"):
+        load_catalog_orientation_analysis(record["catalog_uuid"], catalog_root=catalog)
+
+
+def test_corrected_geometry_orientation_cache_can_be_regenerated(
+    tmp_path: Path,
+) -> None:
+    catalog, record = managed_box(tmp_path)
+    original_analysis = analyze_catalog_orientations(
+        record["catalog_uuid"], catalog_root=catalog
+    )
+    library = tmp_path / "library"
+    bundle = generate_template_bundle(
+        {
+            "display_name": "Before unit correction",
+            "instances": [
+                {
+                    "instance_uuid": "11111111-1111-4111-8111-111111111111",
+                    "catalog_uuid": record["catalog_uuid"],
+                    "orientation_id": original_analysis["orientations"][0][
+                        "orientation_id"
+                    ],
+                    "pose": {"x_mm": 40, "y_mm": 40, "rotation_deg": 0},
+                }
+            ],
+        },
+        catalog_root=catalog,
+        library_root=library,
+    )
+    set_catalog_object_state(
+        record["catalog_uuid"], state="archived", catalog_root=catalog
+    )
+    corrected = correct_catalog_object_units(
+        record["catalog_uuid"],
+        conversion="millimeter_to_meter",
+        confirm=True,
+        operator="pytest",
+        expected_geometry_revision=1,
+        expected_canonical_sha256=record["canonical_ply_sha256"],
+        catalog_root=catalog,
+    )
+
+    first = load_catalog_orientation_analysis(
+        record["catalog_uuid"], catalog_root=catalog
+    )
+    second = analyze_catalog_orientations(
+        record["catalog_uuid"], catalog_root=catalog
+    )
+
+    assert first["source"]["canonical_ply_sha256"] == corrected[
+        "canonical_ply_sha256"
+    ]
+    assert second["source"]["canonical_ply_sha256"] == corrected[
+        "canonical_ply_sha256"
+    ]
+    loaded = load_catalog(catalog)
+    assert "orientation_analysis" not in loaded["objects"][0]["assets"]
+    assert "orientation_analysis" not in loaded["objects"][0][
+        "geometry_revisions"
+    ][-1]
+    set_catalog_object_state(
+        record["catalog_uuid"], state="active", catalog_root=catalog
+    )
+    with pytest.raises(ValueError, match="different geometry revision"):
+        clone_template_configuration(
+            bundle["template_uuid"],
+            library_root=library,
+            catalog_root=catalog,
+        )
+
+
+def test_legacy_upstream_revision_bundle_remains_readable(tmp_path: Path) -> None:
+    catalog, record = managed_box(tmp_path)
+    library = tmp_path / "library"
+    bundle = generate_template_bundle(
+        template_configuration(record["catalog_uuid"]),
+        catalog_root=catalog,
+        library_root=library,
+    )
+    manifest_path = Path(bundle["bundle_path"]) / "pose_template_bundle.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["source"] = {
+        "name": "PoseTemplateCreator",
+        "revision": adapter.LEGACY_POSETEMPLATECREATOR_REVISION,
+        "adapter_version": "posetestbot_posetemplatecreator_adapter.v1",
+    }
+    for instance in manifest["configuration"]["instances"]:
+        instance.pop("placement_mode")
+    for instance in manifest["instances"]:
+        instance.pop("placement_mode")
+        instance.pop("orientation")
+        instance.pop("preview_mesh_sha256")
+    manifest["hashes"]["configuration"] = hashlib.sha256(
+        json.dumps(
+            manifest["configuration"],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+    unhashed = {key: value for key, value in manifest.items() if key != "bundle_sha256"}
+    manifest["bundle_sha256"] = hashlib.sha256(
+        json.dumps(
+            unhashed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    loaded = validate_template_bundle(bundle["bundle_path"], library_root=library)
+    assert loaded["source"]["revision"] == adapter.LEGACY_POSETEMPLATECREATOR_REVISION
+    assert "placement_mode" not in loaded["configuration"]["instances"][0]
+    cloned = clone_template_configuration(
+        bundle["template_uuid"], library_root=library, catalog_root=catalog
+    )
+    cloned_preview = build_template_preview(cloned, catalog_root=catalog)
+    assert cloned_preview["valid"] is True
+    assert all(
+        item["placement_mode"] == "legacy_arbitrary_pose"
+        for item in cloned_preview["configuration"]["instances"]
+    )
 
 
 def test_selection_resolution_blockers_and_object_instances(tmp_path: Path) -> None:
