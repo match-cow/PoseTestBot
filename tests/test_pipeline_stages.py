@@ -88,8 +88,15 @@ def test_capture_execution_uses_calibration_receiver_timeouts(
 
     assert job.parameters["options"]["receive_start_timeout_s"] == 120.0
     assert job.parameters["options"]["receive_idle_timeout_s"] == 60.0
+    assert job.parameters["options"]["camera_startup_attempts"] == 3
+    assert job.parameters["options"]["camera_startup_retry_delay_s"] == 1.0
     assert job.command[job.command.index("--receive-start-timeout-s") + 1] == "120.0"
     assert job.command[job.command.index("--receive-idle-timeout-s") + 1] == "60.0"
+    assert job.command[job.command.index("--camera-startup-attempts") + 1] == "3"
+    assert (
+        job.command[job.command.index("--camera-startup-retry-delay-s") + 1]
+        == "1.0"
+    )
 
 
 def test_rewrite_gate_choices_are_acquisition_only(tmp_path: Path) -> None:

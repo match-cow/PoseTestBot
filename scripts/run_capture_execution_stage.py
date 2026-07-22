@@ -9,6 +9,8 @@ from pathlib import Path
 
 from posetestbot.pipeline.capture_execution import (
     DEFAULT_CAMERA_READINESS_TIMEOUT_S,
+    DEFAULT_CAMERA_STARTUP_ATTEMPTS,
+    DEFAULT_CAMERA_STARTUP_RETRY_DELAY_S,
     DEFAULT_CAPTURE_EXECUTION_TIMEOUT_S,
     run_capture_execution,
 )
@@ -52,10 +54,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_CAMERA_READINESS_TIMEOUT_S,
         help=(
-            "Maximum seconds to wait for every camera to publish the required "
-            "valid committed frame_metadata.jsonl records before starting the "
-            "pose receiver."
+            "Maximum seconds per startup attempt to wait for the current camera "
+            "to publish the required valid committed frame_metadata.jsonl records."
         ),
+    )
+    parser.add_argument(
+        "--camera-startup-attempts",
+        type=int,
+        default=DEFAULT_CAMERA_STARTUP_ATTEMPTS,
+        help=(
+            "Maximum startup attempts per camera. A retry is allowed only when "
+            "the failed attempt left no sensor output evidence."
+        ),
+    )
+    parser.add_argument(
+        "--camera-startup-retry-delay-s",
+        type=float,
+        default=DEFAULT_CAMERA_STARTUP_RETRY_DELAY_S,
+        help="Seconds to wait between safe camera startup attempts.",
     )
     parser.add_argument(
         "--terminate-timeout-s",
@@ -98,6 +114,8 @@ def main() -> None:
         include_sensor_status=include_sensor_status,
         timeout_s=args.timeout_s,
         startup_wait_s=args.startup_wait,
+        camera_startup_attempts=args.camera_startup_attempts,
+        camera_startup_retry_delay_s=args.camera_startup_retry_delay_s,
         terminate_timeout_s=args.terminate_timeout_s,
         receive_start_timeout_s=args.receive_start_timeout_s,
         receive_idle_timeout_s=args.receive_idle_timeout_s,

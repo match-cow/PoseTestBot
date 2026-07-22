@@ -139,14 +139,19 @@ def configured_run(tmp_path: Path, name: str = "run") -> tuple[Path, dict]:
     return run_root, config.to_dict()
 
 
-def mark_sensor_ready(run_root: Path, *, record_count: int = 3) -> None:
-    sensor_folder = run_root / "realsense_123"
+def mark_sensor_ready(
+    run_root: Path,
+    *,
+    device_id: str = "123",
+    record_count: int = 3,
+) -> None:
+    sensor_folder = run_root / f"realsense_{device_id}"
     sensor_folder.mkdir(parents=True, exist_ok=True)
     records = [
         {
             "schema_version": "frame_metadata.v1",
             "sensor_type": "realsense_d435",
-            "sensor_id": "123",
+            "sensor_id": device_id,
             "frame_index": index,
             "frame_id": f"{index}.png",
             "rgb_path": f"rgb/{index}.png",
@@ -160,6 +165,20 @@ def mark_sensor_ready(run_root: Path, *, record_count: int = 3) -> None:
     (sensor_folder / FRAME_METADATA_JSONL).write_text(
         "".join(f"{json.dumps(record)}\n" for record in records)
     )
+
+
+def fake_realsense_status(*device_ids: str) -> dict:
+    status = fake_sensor_status()
+    status["families"][0]["devices"] = [
+        {
+            "device_id": device_id,
+            "display_name": f"RealSense {device_id}",
+            "connected": True,
+            "capture_ready": True,
+        }
+        for device_id in device_ids
+    ]
+    return status
 
 
 def test_capture_execution_plan_selects_full_capture_roles(tmp_path: Path) -> None:
@@ -630,6 +649,253 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
     assert "--allow-real-robot" not in persisted_receiver["command"]
 
 
+def test_capture_execution_starts_cameras_sequentially_after_each_is_ready(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    device_ids = ("111", "222", "333")
+    run_root = tmp_path / "sequential-camera-startup"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=tuple(
+                sensor_config_from_token(
+                    f"realsense:{device_id}:eye_in_hand:RealSense {device_id}"
+                )
+                for device_id in device_ids
+            ),
+        ),
+    )
+    events: list[str] = []
+    waiting_for_readiness: list[str] = []
+
+    def fake_popen(command, **kwargs):
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            assert not waiting_for_readiness
+            assert all(
+                (run_root / f"realsense_{device_id}" / FRAME_METADATA_JSONL).is_file()
+                for device_id in device_ids
+            )
+            events.append("receiver")
+            (run_root / RAW_ROBOT_EE_POSES).write_text(
+                json.dumps({"0": {"motion": "circ_far", "pose": {"X": 1}}})
+            )
+            return FakeBackgroundProcess(list(command), kwargs["stdout"])
+        device_id = command[command.index("--device") + 1]
+        assert not waiting_for_readiness
+        events.append(f"start:{device_id}")
+        waiting_for_readiness.append(device_id)
+        return FakePersistentProcess(list(command), kwargs["stdout"])
+
+    def fake_sleep(_delay):
+        if not waiting_for_readiness:
+            return
+        device_id = waiting_for_readiness.pop()
+        mark_sensor_ready(run_root, device_id=device_id)
+        events.append(f"ready:{device_id}")
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -15
+
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.time.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    _report_path, report = run_capture_execution(
+        run_root,
+        allow_cameras=True,
+        allow_real_robot=True,
+        collect_sensors=lambda: fake_realsense_status(*device_ids),
+        timeout_s=5,
+    )
+
+    assert report["status"] == "succeeded"
+    assert events == [
+        "start:111",
+        "ready:111",
+        "start:222",
+        "ready:222",
+        "start:333",
+        "ready:333",
+        "receiver",
+    ]
+    camera_processes = [
+        process for process in report["processes"] if process["role"] == "sensor_capture"
+    ]
+    assert [process["name"] for process in camera_processes] == [
+        "realsense_111",
+        "realsense_222",
+        "realsense_333",
+    ]
+    assert [process["startup_attempt"] for process in camera_processes] == [1, 1, 1]
+    assert all(process["readiness_record_count"] == 3 for process in camera_processes)
+    strategy = report["capture_execution_plan"]["execution_strategy"]
+    assert strategy["camera_startup_attempts"] == 3
+    assert "start one sensor child" in strategy["start_order"]
+    assert report["camera_readiness_contract"]["deadline_scope"] == (
+        "per_camera_startup_attempt"
+    )
+    assert "never sends an iiwa STOP" in report["robot_stop_policy"]
+
+
+def test_capture_execution_retries_pristine_camera_startup_then_succeeds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root, _config = configured_run(tmp_path, "camera-retry-success")
+    camera_spawn_count = 0
+    receiver_spawn_count = 0
+
+    def fake_popen(command, **kwargs):
+        nonlocal camera_spawn_count, receiver_spawn_count
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_spawn_count += 1
+            assert camera_spawn_count == 2
+            (run_root / RAW_ROBOT_EE_POSES).write_text(
+                json.dumps({"0": {"motion": "circ_far", "pose": {"X": 1}}})
+            )
+            return FakeBackgroundProcess(list(command), kwargs["stdout"])
+        camera_spawn_count += 1
+        if camera_spawn_count == 2:
+            mark_sensor_ready(run_root)
+        return FakePersistentProcess(list(command), kwargs["stdout"])
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -15
+
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    _report_path, report = run_capture_execution(
+        run_root,
+        allow_cameras=True,
+        allow_real_robot=True,
+        collect_sensors=fake_sensor_status,
+        timeout_s=5,
+        startup_wait_s=0,
+        camera_startup_retry_delay_s=0,
+    )
+
+    assert report["status"] == "succeeded"
+    assert camera_spawn_count == 2
+    assert receiver_spawn_count == 1
+    camera_processes = [
+        process for process in report["processes"] if process["role"] == "sensor_capture"
+    ]
+    assert [process["startup_attempt"] for process in camera_processes] == [1, 2]
+    assert camera_processes[0]["termination_reason"] == (
+        "startup_readiness_timeout_retry"
+    )
+    assert camera_processes[0]["output_mutated"] is False
+    assert camera_processes[1]["readiness_record_count"] == 3
+    assert len({process["log_file"] for process in camera_processes}) == 2
+    assert camera_processes[0]["log_file"].endswith("_attempt_01.log")
+    assert camera_processes[1]["log_file"].endswith("_attempt_02.log")
+
+
+def test_capture_execution_exhausts_bounded_pristine_startup_retries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root, _config = configured_run(tmp_path, "camera-retry-exhausted")
+    camera_spawn_count = 0
+    receiver_commands: list[list[str]] = []
+
+    def fake_popen(command, **kwargs):
+        nonlocal camera_spawn_count
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_commands.append(list(command))
+            raise AssertionError("receiver must not start after retry exhaustion")
+        camera_spawn_count += 1
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        process.returncode = 7
+        return process
+
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.time.sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="exhausted 3 startup attempt"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=fake_sensor_status,
+            camera_startup_retry_delay_s=0,
+        )
+
+    assert camera_spawn_count == 3
+    assert receiver_commands == []
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    camera_processes = [
+        process for process in report["processes"] if process["role"] == "sensor_capture"
+    ]
+    assert [process["startup_attempt"] for process in camera_processes] == [1, 2, 3]
+    assert [process["termination_reason"] for process in camera_processes] == [
+        "startup_exit_retry",
+        "startup_exit_retry",
+        "exited_before_receiver_start",
+    ]
+    assert all(process["output_mutated"] is False for process in camera_processes)
+    assert len({process["log_file"] for process in camera_processes}) == 3
+
+
+def test_capture_execution_does_not_retry_after_partial_sensor_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root, _config = configured_run(tmp_path, "camera-partial-no-retry")
+    camera_spawn_count = 0
+    receiver_commands: list[list[str]] = []
+
+    def fake_popen(command, **kwargs):
+        nonlocal camera_spawn_count
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_commands.append(list(command))
+            raise AssertionError("receiver must not start after partial camera output")
+        camera_spawn_count += 1
+        mark_sensor_ready(run_root, record_count=1)
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        process.returncode = 9
+        return process
+
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.time.sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="preserving partial raw evidence"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=fake_sensor_status,
+            camera_startup_retry_delay_s=0,
+        )
+
+    assert camera_spawn_count == 1
+    assert receiver_commands == []
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    camera_processes = [
+        process for process in report["processes"] if process["role"] == "sensor_capture"
+    ]
+    assert len(camera_processes) == 1
+    assert camera_processes[0]["startup_attempt"] == 1
+    assert camera_processes[0]["readiness_record_count"] == 1
+    assert camera_processes[0]["output_mutated"] is True
+    assert camera_processes[0]["termination_reason"] == (
+        "startup_partial_output_no_retry"
+    )
+    assert (run_root / "realsense_123" / FRAME_METADATA_JSONL).is_file()
+
+
 def test_capture_execution_never_starts_receiver_without_first_frame_metadata(
     tmp_path: Path,
     monkeypatch,
@@ -663,6 +929,7 @@ def test_capture_execution_never_starts_receiver_without_first_frame_metadata(
             allow_real_robot=True,
             collect_sensors=fake_sensor_status,
             startup_wait_s=0,
+            camera_startup_attempts=1,
         )
 
     assert receiver_commands == []
@@ -708,6 +975,7 @@ def test_capture_execution_never_starts_receiver_with_only_one_metadata_record(
             allow_real_robot=True,
             collect_sensors=fake_sensor_status,
             startup_wait_s=0,
+            camera_startup_attempts=1,
         )
 
     assert receiver_commands == []
@@ -744,6 +1012,7 @@ def test_capture_execution_monitors_camera_exit_during_readiness_window(
             allow_cameras=True,
             allow_real_robot=True,
             collect_sensors=fake_sensor_status,
+            camera_startup_attempts=1,
         )
 
     assert receiver_commands == []
@@ -914,6 +1183,151 @@ def test_capture_execution_fails_on_nonzero_camera_exit_after_receiver(
     assert report["status"] == "failed"
     assert camera["returncode"] == 9
     assert camera["status"] == "failed"
+
+
+def test_capture_execution_defers_camera_spawn_signal_until_child_is_tracked(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root, _config = configured_run(tmp_path, "camera-spawn-signal")
+    spawned: list[FakePersistentProcess] = []
+    terminated: list[FakePersistentProcess] = []
+    receiver_commands: list[list[str]] = []
+
+    def fake_popen(command, **kwargs):
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_commands.append(list(command))
+            raise AssertionError("receiver must not start after camera cancellation")
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        spawned.append(process)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return process
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -signal.SIGTERM
+        terminated.append(process)
+
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="canceled by SIGTERM"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=fake_sensor_status,
+        )
+
+    assert len(spawned) == 1
+    assert terminated == spawned
+    assert receiver_commands == []
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    assert report["status"] == "canceled"
+    assert len(report["processes"]) == 1
+    assert report["processes"][0]["role"] == "sensor_capture"
+    assert report["processes"][0]["startup_attempt"] == 1
+    assert report["processes"][0]["status"] == "terminated"
+    assert report["processes"][0]["termination_reason"] == (
+        "cancellation_cleanup"
+    )
+
+
+def test_capture_execution_deferred_signal_wins_over_camera_spawn_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root, _config = configured_run(tmp_path, "camera-spawn-signal-and-error")
+    camera_spawn_count = 0
+
+    def fake_popen(command, **kwargs):
+        nonlocal camera_spawn_count
+        del kwargs
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            raise AssertionError("receiver must not start after camera cancellation")
+        camera_spawn_count += 1
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise OSError("simulated Popen failure after deferred signal")
+
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.time.sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="canceled by SIGTERM"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=fake_sensor_status,
+            camera_startup_retry_delay_s=0,
+        )
+
+    assert camera_spawn_count == 1
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    assert report["status"] == "canceled"
+    assert len(report["processes"]) == 1
+    assert report["processes"][0]["status"] == "canceled"
+    assert report["processes"][0]["termination_reason"] == (
+        "not_spawned_during_cancellation_cleanup"
+    )
+
+
+def test_capture_execution_defers_receiver_spawn_signal_until_child_is_tracked(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root, _config = configured_run(tmp_path, "receiver-spawn-signal")
+    spawned: list[FakePersistentProcess] = []
+    terminated: list[FakePersistentProcess] = []
+    receiver_spawn_count = 0
+
+    def fake_popen(command, **kwargs):
+        nonlocal receiver_spawn_count
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        spawned.append(process)
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_spawn_count += 1
+            os.kill(os.getpid(), signal.SIGTERM)
+        else:
+            mark_sensor_ready(run_root)
+        return process
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -signal.SIGTERM
+        terminated.append(process)
+
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="canceled by SIGTERM"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=fake_sensor_status,
+            timeout_s=5,
+        )
+
+    assert receiver_spawn_count == 1
+    assert len(spawned) == 2
+    assert terminated == spawned
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    assert report["status"] == "canceled"
+    assert len(report["processes"]) == 2
+    receiver = next(
+        process
+        for process in report["processes"]
+        if process["role"] == "robot_pose_receiver"
+    )
+    assert receiver["status"] == "terminated"
+    assert receiver["termination_reason"] == "cancellation_cleanup"
+    assert not (run_root / RAW_ROBOT_EE_POSES).exists()
 
 
 def test_capture_execution_sigterm_cancels_every_spawned_process(

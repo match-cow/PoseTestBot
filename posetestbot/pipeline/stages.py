@@ -523,6 +523,18 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 default=15.0,
             ),
             PipelineParameter(
+                name="camera_startup_attempts",
+                flag="--camera-startup-attempts",
+                kind="int",
+                default=3,
+            ),
+            PipelineParameter(
+                name="camera_startup_retry_delay_s",
+                flag="--camera-startup-retry-delay-s",
+                kind="float",
+                default=1.0,
+            ),
+            PipelineParameter(
                 name="terminate_timeout_s",
                 flag="--terminate-timeout-s",
                 kind="float",
