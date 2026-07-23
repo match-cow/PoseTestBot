@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +29,7 @@ from posetestbot.pipeline.run_config import (
     write_run_config,
 )
 from posetestbot.sync.non_destructive import (
+    SyncResult,
     resolve_frame_timestamp,
     resolve_max_nearest_pose_delta_ms,
     resolve_sync_delta_ms,
@@ -350,6 +353,88 @@ def test_sensor_exposure_timestamp_pairs_explicitly_with_robot_wall_clock(
     }
 
 
+def test_profile_bound_sync_enforces_domain_fallback_and_provenance(
+    tmp_path: Path,
+) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+    records = [
+        json.loads(line)
+        for line in (sensor_folder / FRAME_METADATA_JSONL).read_text().splitlines()
+    ]
+    for record in records:
+        record["sensor_timestamp_ns"] = record["host_wall_timestamp_ns"]
+        record["color_timestamp_domain"] = "global_time"
+    write_jsonl(sensor_folder / FRAME_METADATA_JSONL, records)
+    calibration_sync = {
+        "schema_version": "calibration_sync_policy.v1",
+        "source": "selected_calibration_profile",
+        "selection_artifact": "calibration_profile_selection.json",
+        "bundle_sha256": "a" * 64,
+        "calibration_profiles": {
+            "relative_path": "processed/calibration_inputs/a/calibration_profiles.json",
+            "sha256": "b" * 64,
+        },
+        "sensor": {
+            "sensor_key": "realsense_d435:123",
+            "sensor_folder": "realsense_123",
+            "profile_id": "profile-123",
+            "sync_delta_ms": 0.0,
+            "frame_timestamp_source": "sensor",
+            "robot_timestamp_source": "host_wall",
+            "required_frame_timestamp_domain": "global_time",
+            "timestamp_fallback_allowed": False,
+            "max_nearest_pose_delta_ms": 20.0,
+        },
+    }
+
+    result = synchronize_sensor_folder(
+        sensor_folder,
+        run_root=run_root,
+        sync_delta=0,
+        timestamp_source="sensor",
+        robot_timestamp_source="host_wall",
+        max_nearest_pose_delta_ms=20.0,
+        required_frame_timestamp_domain="global_time",
+        timestamp_fallback_allowed=False,
+        calibration_sync=calibration_sync,
+    )
+
+    report = json.loads(Path(result.report_path).read_text())
+    assert report["required_frame_timestamp_domain"] == "global_time"
+    assert report["timestamp_fallback_allowed"] is False
+    assert report["timestamp_fallback_count"] == 0
+    assert report["calibration_sync"] == calibration_sync
+
+    records[0]["color_timestamp_domain"] = "hardware_clock"
+    write_jsonl(sensor_folder / FRAME_METADATA_JSONL, records)
+    with pytest.raises(ValueError, match="required 'global_time'"):
+        synchronize_sensor_folder(
+            sensor_folder,
+            run_root=run_root,
+            sync_delta=0,
+            timestamp_source="sensor",
+            robot_timestamp_source="host_wall",
+            required_frame_timestamp_domain="global_time",
+            timestamp_fallback_allowed=False,
+            calibration_sync=calibration_sync,
+        )
+
+    records[0]["color_timestamp_domain"] = "global_time"
+    records[0].pop("sensor_timestamp_ns")
+    write_jsonl(sensor_folder / FRAME_METADATA_JSONL, records)
+    with pytest.raises(ValueError, match="without fallback"):
+        synchronize_sensor_folder(
+            sensor_folder,
+            run_root=run_root,
+            sync_delta=0,
+            timestamp_source="sensor",
+            robot_timestamp_source="host_wall",
+            required_frame_timestamp_domain="global_time",
+            timestamp_fallback_allowed=False,
+            calibration_sync=calibration_sync,
+        )
+
+
 def test_sensor_timestamp_requires_explicit_compatible_robot_clock() -> None:
     with pytest.raises(ValueError, match="requires an explicit"):
         resolve_timestamp_pair("sensor", None)
@@ -476,6 +561,133 @@ def test_synchronize_run_accepts_only_an_explicit_subset_and_output_root(
     assert not (output_root / "luxonis_abc").exists()
     with pytest.raises(ValueError, match="remain below the run root"):
         synchronize_run(run_root, sensor_folders=[tmp_path / "outside"])
+
+
+def test_run_sync_cli_applies_selected_profile_policy_per_exact_camera(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "sync_run_non_destructive.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "test_sync_run_non_destructive_script",
+        script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    sync_script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sync_script)
+
+    run_root = tmp_path / "selected-run"
+    run_root.mkdir()
+    (run_root / "run_config.json").write_text("{}\n")
+    sensors = [
+        {
+            "sensor_key": f"realsense_d435:{device_id}",
+            "sensor_name": f"realsense_{device_id}",
+            "sensor_folder": f"realsense_{device_id}",
+            "sensor_type": "realsense_d435",
+            "device_id": device_id,
+            "profile_id": f"profile-{device_id}",
+            "robot_pose_time_offset_ms": -delta,
+            "sync_delta_ms": delta,
+            "frame_timestamp_source": "sensor",
+            "robot_timestamp_source": "host_wall",
+            "required_frame_timestamp_domain": "global_time",
+            "timestamp_fallback_allowed": False,
+            "max_nearest_pose_delta_ms": threshold,
+            "timing_source": f"processed/calibration/{device_id}/offset.json",
+            "timing_policy": "auto_offset",
+            "timing_status": "applied",
+        }
+        for device_id, delta, threshold in (
+            ("camera-A", -70.0, 20.0),
+            ("camera-B", -85.0, 12.5),
+        )
+    ]
+    policy = {
+        "schema_version": "calibration_sync_policy.v1",
+        "source": "selected_calibration_profile",
+        "selection_artifact": "calibration_profile_selection.json",
+        "bundle_sha256": "a" * 64,
+        "calibration_profiles": {
+            "relative_path": "processed/calibration_inputs/a/calibration_profiles.json",
+            "sha256": "b" * 64,
+        },
+        "sensors": sensors,
+    }
+    calls: list[dict] = []
+
+    def fake_synchronize_run(root, **kwargs):
+        calls.append({"root": Path(root), **kwargs})
+        sensor_folder = Path(kwargs["sensor_folders"][0])
+        return [
+            SyncResult(
+                sensor_folder=sensor_folder.as_posix(),
+                output_folder=(
+                    run_root / "processed" / "synchronized" / sensor_folder.name
+                ).as_posix(),
+                matched_poses_path=(
+                    run_root / f"{sensor_folder.name}-matched.json"
+                ).as_posix(),
+                report_path=(run_root / f"{sensor_folder.name}-sync.json").as_posix(),
+                total_frames=10,
+                matched_frames=10,
+                dropped_frames=0,
+            )
+        ]
+
+    monkeypatch.setattr(
+        sync_script,
+        "parse_args",
+        lambda: SimpleNamespace(
+            run_root=run_root.as_posix(),
+            output_root=None,
+            sensor_folder=None,
+            sync_delta=None,
+            timestamp_source=None,
+            robot_timestamp_source=None,
+            no_copy=False,
+        ),
+    )
+    monkeypatch.setattr(
+        sync_script,
+        "resolve_calibration_profile_sync_policy",
+        lambda _run_root: policy,
+    )
+    monkeypatch.setattr(sync_script, "synchronize_run", fake_synchronize_run)
+
+    sync_script.main()
+
+    assert [call["sensor_folders"][0].name for call in calls] == [
+        "realsense_camera-A",
+        "realsense_camera-B",
+    ]
+    assert [call["sync_delta"] for call in calls] == [-70.0, -85.0]
+    assert [call["max_nearest_pose_delta_ms"] for call in calls] == [20.0, 12.5]
+    assert all(call["timestamp_source"] == "sensor" for call in calls)
+    assert all(call["robot_timestamp_source"] == "host_wall" for call in calls)
+    assert all(call["timestamp_fallback_allowed"] is False for call in calls)
+    assert calls[0]["calibration_sync"]["sensor"] == sensors[0]
+    assert calls[1]["calibration_sync"]["sensor"] == sensors[1]
+
+    calls.clear()
+    monkeypatch.setattr(
+        sync_script,
+        "parse_args",
+        lambda: SimpleNamespace(
+            run_root=run_root.as_posix(),
+            output_root=None,
+            sensor_folder=None,
+            sync_delta="0",
+            timestamp_source=None,
+            robot_timestamp_source=None,
+            no_copy=False,
+        ),
+    )
+    with pytest.raises(ValueError, match="remove manual synchronization options"):
+        sync_script.main()
+    assert calls == []
 
 
 def test_invalid_filename_timestamp_is_reported_as_missing() -> None:

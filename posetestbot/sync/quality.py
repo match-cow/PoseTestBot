@@ -144,6 +144,15 @@ def _sensor_summary(
         "timestamp_pair_provenance_audited": pair_audited,
         "sync_delta_ms": report.get("sync_delta_ms"),
         "max_nearest_pose_delta_ms": report.get("max_nearest_pose_delta_ms"),
+        "required_frame_timestamp_domain": report.get(
+            "required_frame_timestamp_domain"
+        ),
+        "timestamp_fallback_allowed": report.get("timestamp_fallback_allowed"),
+        "calibration_sync": (
+            dict(report["calibration_sync"])
+            if isinstance(report.get("calibration_sync"), Mapping)
+            else None
+        ),
         "nearest_pose_delta_rejection_count": int(
             report.get("nearest_pose_delta_rejection_count", 0) or 0
         ),
@@ -171,6 +180,7 @@ def _sensor_checks(
     max_nearest_pose_delta_ms: float | None,
     require_timestamp_source: str | None,
     require_robot_timestamp_source: str | None,
+    expected_calibration_sync: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
     name = str(sensor["sensor_name"])
     checks: list[dict[str, Any]] = []
@@ -234,7 +244,7 @@ def _sensor_checks(
         checks.append(
             _check(
                 f"sync_nearest_pose_delta:{name}",
-                "ok" if ok else "warning",
+                "ok" if ok else ("error" if expected_calibration_sync else "warning"),
                 (
                     f"{name} max nearest-pose delta is {max_delta_ns} ns."
                     if ok
@@ -326,6 +336,75 @@ def _sensor_checks(
                 },
             )
         )
+    if expected_calibration_sync is not None:
+        actual_calibration_sync = sensor.get("calibration_sync")
+        expected_sensor = expected_calibration_sync.get("sensor")
+        expected_delta = (
+            expected_sensor.get("sync_delta_ms")
+            if isinstance(expected_sensor, Mapping)
+            else None
+        )
+        expected_frame_source = (
+            expected_sensor.get("frame_timestamp_source")
+            if isinstance(expected_sensor, Mapping)
+            else None
+        )
+        expected_robot_source = (
+            expected_sensor.get("robot_timestamp_source")
+            if isinstance(expected_sensor, Mapping)
+            else None
+        )
+        expected_threshold = (
+            expected_sensor.get("max_nearest_pose_delta_ms")
+            if isinstance(expected_sensor, Mapping)
+            else None
+        )
+        expected_domain = (
+            expected_sensor.get("required_frame_timestamp_domain")
+            if isinstance(expected_sensor, Mapping)
+            else None
+        )
+        expected_fallback = (
+            expected_sensor.get("timestamp_fallback_allowed")
+            if isinstance(expected_sensor, Mapping)
+            else None
+        )
+        operational_values_match = (
+            sensor.get("sync_delta_ms") == expected_delta
+            and sensor.get("requested_frame_timestamp_source") == expected_frame_source
+            and sensor.get("robot_timestamp_source") == expected_robot_source
+            and sensor.get("max_nearest_pose_delta_ms") == expected_threshold
+            and sensor.get("required_frame_timestamp_domain") == expected_domain
+            and sensor.get("timestamp_fallback_allowed") == expected_fallback
+        )
+        provenance_matches = isinstance(actual_calibration_sync, Mapping) and dict(
+            actual_calibration_sync
+        ) == dict(expected_calibration_sync)
+        timing_ok = provenance_matches and operational_values_match
+        checks.append(
+            _check(
+                f"sync_calibration_timing:{name}",
+                "ok" if timing_ok else "error",
+                (
+                    f"{name} used the hash-bound timing from calibration profile "
+                    f"{expected_sensor.get('profile_id')}."
+                    if timing_ok and isinstance(expected_sensor, Mapping)
+                    else (
+                        f"{name} synchronization does not match the selected "
+                        "calibration profile timing."
+                    )
+                ),
+                details={
+                    "expected": dict(expected_calibration_sync),
+                    "actual": (
+                        dict(actual_calibration_sync)
+                        if isinstance(actual_calibration_sync, Mapping)
+                        else actual_calibration_sync
+                    ),
+                    "operational_values_match": operational_values_match,
+                },
+            )
+        )
     return checks
 
 
@@ -339,24 +418,85 @@ def _required_source_for_sensor(
     return value
 
 
+def _number_for_sensor(
+    value: float | Mapping[str, float] | None,
+    sensor_name: str,
+) -> float | None:
+    if isinstance(value, Mapping):
+        selected = value.get(sensor_name)
+        return float(selected) if selected is not None else None
+    return value
+
+
+def calibration_sync_provenance(
+    policy: Mapping[str, Any],
+    sensor: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the exact profile-timing evidence embedded in one sync report."""
+
+    calibration_profiles = policy.get("calibration_profiles")
+    return {
+        "schema_version": policy.get("schema_version"),
+        "source": policy.get("source"),
+        "selection_artifact": policy.get("selection_artifact"),
+        "bundle_sha256": policy.get("bundle_sha256"),
+        "calibration_profiles": (
+            dict(calibration_profiles)
+            if isinstance(calibration_profiles, Mapping)
+            else calibration_profiles
+        ),
+        "sensor": dict(sensor),
+    }
+
+
+def _calibration_sync_by_sensor(
+    policy: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if policy is None:
+        return {}
+    raw_sensors = policy.get("sensors")
+    if not isinstance(raw_sensors, list):
+        raise ValueError("calibration_sync_policy.sensors must be a list")
+    result: dict[str, dict[str, Any]] = {}
+    for sensor in raw_sensors:
+        if not isinstance(sensor, Mapping):
+            raise ValueError("calibration_sync_policy sensor rows must be objects")
+        sensor_name = sensor.get("sensor_folder")
+        if not isinstance(sensor_name, str) or not sensor_name:
+            raise ValueError(
+                "calibration_sync_policy sensors require canonical sensor_folder"
+            )
+        if sensor_name in result:
+            raise ValueError(
+                f"calibration_sync_policy duplicates sensor folder {sensor_name}"
+            )
+        result[sensor_name] = calibration_sync_provenance(policy, sensor)
+    return result
+
+
 def build_sync_quality_report(
     run_root: str | Path,
     *,
     min_match_ratio: float = 0.8,
     max_dropped_frames: int | None = None,
-    max_nearest_pose_delta_ms: float | None = 50.0,
+    max_nearest_pose_delta_ms: float | Mapping[str, float] | None = 50.0,
     require_timestamp_source: str | Mapping[str, str] | None = None,
     require_robot_timestamp_source: str | Mapping[str, str] | None = None,
     report_paths: Iterable[str | Path] | None = None,
+    calibration_sync_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not 0.0 <= min_match_ratio <= 1.0:
         raise ValueError("min_match_ratio must be between 0 and 1")
     if max_dropped_frames is not None and max_dropped_frames < 0:
         raise ValueError("max_dropped_frames cannot be negative")
-    if max_nearest_pose_delta_ms is not None and max_nearest_pose_delta_ms < 0:
+    if isinstance(max_nearest_pose_delta_ms, Mapping):
+        if any(float(value) < 0 for value in max_nearest_pose_delta_ms.values()):
+            raise ValueError("max_nearest_pose_delta_ms cannot be negative")
+    elif max_nearest_pose_delta_ms is not None and max_nearest_pose_delta_ms < 0:
         raise ValueError("max_nearest_pose_delta_ms cannot be negative")
 
     root = Path(run_root)
+    expected_calibration_sync = _calibration_sync_by_sensor(calibration_sync_policy)
     reports_were_discovered = report_paths is None
     paths = (
         discover_sync_reports(root)
@@ -406,12 +546,17 @@ def build_sync_quality_report(
                     sensor,
                     min_match_ratio=min_match_ratio,
                     max_dropped_frames=max_dropped_frames,
-                    max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+                    max_nearest_pose_delta_ms=_number_for_sensor(
+                        max_nearest_pose_delta_ms, sensor_name
+                    ),
                     require_timestamp_source=_required_source_for_sensor(
                         require_timestamp_source, sensor_name
                     ),
                     require_robot_timestamp_source=_required_source_for_sensor(
                         require_robot_timestamp_source, sensor_name
+                    ),
+                    expected_calibration_sync=expected_calibration_sync.get(
+                        sensor_name
                     ),
                 )
             )
@@ -424,6 +569,36 @@ def build_sync_quality_report(
                     details={"path": resolved.as_posix()},
                 )
             )
+
+    if expected_calibration_sync:
+        actual_sensor_names = {str(sensor["sensor_name"]) for sensor in sensors}
+        expected_sensor_names = set(expected_calibration_sync)
+        coverage_ok = actual_sensor_names == expected_sensor_names
+        checks.append(
+            _check(
+                "sync_calibration_timing_coverage",
+                "ok" if coverage_ok else "error",
+                (
+                    "Synchronization reports cover every selected calibration "
+                    "timing policy exactly once."
+                    if coverage_ok
+                    else (
+                        "Synchronization report coverage does not match the "
+                        "selected calibration timing policy."
+                    )
+                ),
+                details={
+                    "expected_sensor_folders": sorted(expected_sensor_names),
+                    "actual_sensor_folders": sorted(actual_sensor_names),
+                    "missing_sensor_folders": sorted(
+                        expected_sensor_names - actual_sensor_names
+                    ),
+                    "unexpected_sensor_folders": sorted(
+                        actual_sensor_names - expected_sensor_names
+                    ),
+                },
+            )
+        )
 
     total_frames = sum(int(sensor["total_frames"]) for sensor in sensors)
     matched_frames = sum(int(sensor["matched_frames"]) for sensor in sensors)
@@ -441,7 +616,11 @@ def build_sync_quality_report(
         "overall_match_ratio": (matched_frames / total_frames) if total_frames else 0.0,
         "min_match_ratio": min_match_ratio,
         "max_dropped_frames": max_dropped_frames,
-        "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
+        "max_nearest_pose_delta_ms": (
+            dict(max_nearest_pose_delta_ms)
+            if isinstance(max_nearest_pose_delta_ms, Mapping)
+            else max_nearest_pose_delta_ms
+        ),
         "require_timestamp_source": (
             dict(require_timestamp_source)
             if isinstance(require_timestamp_source, Mapping)
@@ -452,12 +631,88 @@ def build_sync_quality_report(
             if isinstance(require_robot_timestamp_source, Mapping)
             else require_robot_timestamp_source
         ),
+        "calibration_sync_policy": (
+            dict(calibration_sync_policy)
+            if calibration_sync_policy is not None
+            else None
+        ),
         "sensors": sensors,
     }
 
 
 def sync_quality_report_path(run_root: str | Path) -> Path:
     return Path(run_root) / SYNC_QUALITY_REPORT
+
+
+def verify_profile_bound_sync_evidence(
+    run_root: str | Path,
+    calibration_sync_policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recheck derived sync reports against the selected calibration timing.
+
+    The saved run-level report is required as operator evidence, but downstream
+    stages also rebuild its strict timing checks from the current per-camera
+    reports. This prevents a stale or manually produced quality report from
+    authorizing rectification/export.
+    """
+
+    root = Path(run_root)
+    path = sync_quality_report_path(root)
+    if not path.is_file():
+        raise FileNotFoundError(
+            "Profile-bound synchronization requires sync_quality_report.json"
+        )
+    saved = _read_json(path)
+    if saved.get("calibration_sync_policy") != dict(calibration_sync_policy):
+        raise ValueError(
+            "Saved sync quality evidence is not bound to the selected "
+            "calibration timing policy"
+        )
+    policy_sensors = calibration_sync_policy.get("sensors")
+    if not isinstance(policy_sensors, list):
+        raise ValueError("calibration_sync_policy.sensors must be a list")
+    frame_sources: dict[str, str] = {}
+    robot_sources: dict[str, str] = {}
+    nearest_thresholds: dict[str, float] = {}
+    for sensor in policy_sensors:
+        if not isinstance(sensor, Mapping):
+            raise ValueError("calibration_sync_policy sensor rows must be objects")
+        folder = str(sensor["sensor_folder"])
+        frame_sources[folder] = str(sensor["frame_timestamp_source"])
+        robot_sources[folder] = str(sensor["robot_timestamp_source"])
+        nearest_thresholds[folder] = float(sensor["max_nearest_pose_delta_ms"])
+
+    rebuilt = build_sync_quality_report(
+        root,
+        min_match_ratio=float(saved.get("min_match_ratio", 0.8)),
+        max_dropped_frames=(
+            int(saved["max_dropped_frames"])
+            if saved.get("max_dropped_frames") is not None
+            else None
+        ),
+        max_nearest_pose_delta_ms=nearest_thresholds,
+        require_timestamp_source=frame_sources,
+        require_robot_timestamp_source=robot_sources,
+        calibration_sync_policy=calibration_sync_policy,
+    )
+    failures = [
+        str(check.get("message"))
+        for check in rebuilt["checks"]
+        if check.get("status") == "error"
+    ]
+    if failures:
+        raise ValueError(
+            "Profile-bound synchronization evidence failed: " + "; ".join(failures)
+        )
+    if saved.get("overall_status") == "error":
+        raise ValueError("Saved sync quality evidence has error status")
+    return {
+        "sync_quality_report": _relative(path, root),
+        "overall_status": rebuilt["overall_status"],
+        "bundle_sha256": calibration_sync_policy.get("bundle_sha256"),
+        "sensor_count": rebuilt["sensor_count"],
+        "sensors": rebuilt["sensors"],
+    }
 
 
 def write_sync_quality_report(
@@ -473,9 +728,10 @@ def write_sync_quality_report_with_manifest(
     *,
     min_match_ratio: float = 0.8,
     max_dropped_frames: int | None = None,
-    max_nearest_pose_delta_ms: float | None = 50.0,
+    max_nearest_pose_delta_ms: float | Mapping[str, float] | None = 50.0,
     require_timestamp_source: str | Mapping[str, str] | None = None,
     require_robot_timestamp_source: str | Mapping[str, str] | None = None,
+    calibration_sync_policy: Mapping[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     run_root_path = Path(run_root)
     manifest = load_or_create_run_manifest(run_root_path)
@@ -489,6 +745,7 @@ def write_sync_quality_report_with_manifest(
             max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
             require_timestamp_source=require_timestamp_source,
             require_robot_timestamp_source=require_robot_timestamp_source,
+            calibration_sync_policy=calibration_sync_policy,
         )
         path = write_sync_quality_report(run_root_path, report)
         upsert_stage(

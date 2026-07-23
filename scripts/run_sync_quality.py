@@ -7,6 +7,10 @@ import argparse
 import json
 from pathlib import Path
 
+from posetestbot.io.artifacts import RUN_CONFIG
+from posetestbot.sync.calibration_policy import (
+    resolve_calibration_profile_sync_policy,
+)
 from posetestbot.sync.quality import (
     build_sync_quality_report,
     write_sync_quality_report_with_manifest,
@@ -35,8 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-nearest-pose-delta-ms",
         type=float,
-        default=50.0,
-        help="Warn when max nearest robot-pose delta is above this threshold.",
+        default=None,
+        help=(
+            "Manual nearest-pose threshold. Selected calibration runs always "
+            "use their immutable per-camera thresholds."
+        ),
     )
     parser.add_argument(
         "--no-nearest-pose-threshold",
@@ -68,23 +75,78 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    max_delta = (
-        None if args.no_nearest_pose_threshold else args.max_nearest_pose_delta_ms
+    run_root = Path(args.run_root)
+    calibration_sync_policy = (
+        resolve_calibration_profile_sync_policy(run_root)
+        if (run_root / RUN_CONFIG).is_file()
+        else None
     )
+    if calibration_sync_policy is not None:
+        manual_overrides = [
+            flag
+            for flag, active in (
+                (
+                    "--max-nearest-pose-delta-ms",
+                    args.max_nearest_pose_delta_ms is not None,
+                ),
+                ("--no-nearest-pose-threshold", args.no_nearest_pose_threshold),
+                (
+                    "--require-timestamp-source",
+                    args.require_timestamp_source is not None,
+                ),
+                (
+                    "--require-robot-timestamp-source",
+                    args.require_robot_timestamp_source is not None,
+                ),
+            )
+            if active
+        ]
+        if manual_overrides:
+            raise ValueError(
+                "Runs with a selected calibration verify its hash-bound "
+                "per-camera timing; remove manual timing options: "
+                + ", ".join(manual_overrides)
+            )
+        sensors = calibration_sync_policy["sensors"]
+        max_delta = {
+            sensor["sensor_folder"]: sensor["max_nearest_pose_delta_ms"]
+            for sensor in sensors
+        }
+        required_frame_sources = {
+            sensor["sensor_folder"]: sensor["frame_timestamp_source"]
+            for sensor in sensors
+        }
+        required_robot_sources = {
+            sensor["sensor_folder"]: sensor["robot_timestamp_source"]
+            for sensor in sensors
+        }
+    else:
+        max_delta = (
+            None
+            if args.no_nearest_pose_threshold
+            else (
+                args.max_nearest_pose_delta_ms
+                if args.max_nearest_pose_delta_ms is not None
+                else 50.0
+            )
+        )
+        required_frame_sources = args.require_timestamp_source
+        required_robot_sources = args.require_robot_timestamp_source
     report_args = {
         "min_match_ratio": args.min_match_ratio,
         "max_dropped_frames": args.max_dropped_frames,
         "max_nearest_pose_delta_ms": max_delta,
-        "require_timestamp_source": args.require_timestamp_source,
-        "require_robot_timestamp_source": (args.require_robot_timestamp_source),
+        "require_timestamp_source": required_frame_sources,
+        "require_robot_timestamp_source": required_robot_sources,
+        "calibration_sync_policy": calibration_sync_policy,
     }
 
     if args.no_write:
-        report = build_sync_quality_report(Path(args.run_root), **report_args)
+        report = build_sync_quality_report(run_root, **report_args)
         path = None
     else:
         path, report = write_sync_quality_report_with_manifest(
-            Path(args.run_root),
+            run_root,
             **report_args,
         )
 

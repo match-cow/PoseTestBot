@@ -83,6 +83,21 @@ from posetestbot.calibration.targets import (
     target_identity,
     validate_target_identity,
 )
+from posetestbot.calibration.time_offset import (
+    DEFAULT_POLICY as DEFAULT_SYNCHRONIZATION_POLICY,
+    DEFAULT_REFERENCE_PNP_METHOD,
+    IMPLEMENTATION_REVISION as TIME_OFFSET_IMPLEMENTATION_REVISION,
+    POLICIES as SYNCHRONIZATION_POLICIES,
+    SCHEMA_VERSION as TIME_OFFSET_SEARCH_SCHEMA_VERSION,
+    SUPPORTED_IMPLEMENTATION_REVISIONS as TIME_OFFSET_SUPPORTED_REVISIONS,
+    apply_sensor_time_offset,
+    estimate_sensor_time_offset,
+    failed_sensor_result,
+    fixed_zero_sensor_result,
+    offset_values as time_offset_values,
+    search_configuration as time_offset_search_configuration,
+    sign_convention as time_offset_sign_convention,
+)
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     ARUCO_DETECTIONS,
@@ -105,6 +120,7 @@ from posetestbot.io.artifacts import (
     RGB_DIR,
     RUN_CONFIG,
     SYNC_QUALITY_REPORT,
+    TIME_OFFSET_SEARCH,
 )
 from posetestbot.io.manifest import (
     discover_sensor_records,
@@ -117,7 +133,12 @@ from posetestbot.pipeline.run_config import (
     validate_run_config,
 )
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
-from posetestbot.sync.non_destructive import load_frame_metadata, synchronize_run
+from posetestbot.sync.non_destructive import (
+    indexed_robot_poses,
+    load_frame_metadata,
+    load_robot_poses,
+    synchronize_run,
+)
 from posetestbot.sync.quality import build_sync_quality_report
 
 
@@ -187,6 +208,7 @@ INTRINSICS_POLICIES = {
 PHASES = (
     ("prepare_data", "Prepare data"),
     ("estimate_target_poses", "Estimate target poses"),
+    ("estimate_time_offsets", "Estimate time alignment"),
     ("compare_robot_camera_solutions", "Compare robot-camera solutions"),
     ("validate_and_rank", "Validate and rank"),
 )
@@ -389,6 +411,10 @@ def validate_attempt_id(attempt_id: str) -> str:
 
 def calibration_attempt_root(run_root: str | Path, attempt_id: str) -> Path:
     return Path(run_root) / ATTEMPT_DIRECTORY / validate_attempt_id(attempt_id)
+
+
+def _attempt_artifact_reference(attempt_id: str, filename: str) -> str:
+    return (ATTEMPT_DIRECTORY / validate_attempt_id(attempt_id) / filename).as_posix()
 
 
 def _sensor_key(sensor_type: str, device_id: str) -> str:
@@ -641,6 +667,29 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                 {"id": policy_id, "label": label}
                 for policy_id, label in INTRINSICS_POLICIES.items()
             ],
+            "synchronization": {
+                "default_policy": "auto_offset",
+                "policies": [
+                    {
+                        "id": "auto_offset",
+                        "label": "Auto-estimate robot-pose offset — recommended",
+                        "description": (
+                            "Estimate effective per-camera latency with "
+                            "motion-disjoint cross-validation."
+                        ),
+                    },
+                    {
+                        "id": "fixed_zero",
+                        "label": "Use captured timestamps (0 ms)",
+                        "description": (
+                            "Pair camera and robot evidence without an inferred "
+                            "time offset."
+                        ),
+                    },
+                ],
+                "search": time_offset_search_configuration(),
+                "sign_convention": time_offset_sign_convention(),
+            },
             "thresholds": {
                 "min_inliers": 6,
                 "min_pnp_common_inliers": DEFAULT_MIN_PNP_COMMON_INLIERS,
@@ -735,8 +784,7 @@ def validate_attempt_request(
     mounting_mismatches = [
         str(camera["sensor_key"])
         for camera in selected_cameras
-        if str(camera.get("current_mounting_mode") or "")
-        != expected_mounting_mode
+        if str(camera.get("current_mounting_mode") or "") != expected_mounting_mode
     ]
     if mounting_mismatches:
         raise ValueError(
@@ -781,6 +829,12 @@ def validate_attempt_request(
         raise ValueError(
             "intrinsics_policy must be one of: " + ", ".join(INTRINSICS_POLICIES)
         )
+    synchronization_policy = str(value.get("synchronization_policy", "auto_offset"))
+    if synchronization_policy not in SYNCHRONIZATION_POLICIES:
+        raise ValueError(
+            "synchronization_policy must be one of: "
+            + ", ".join(SYNCHRONIZATION_POLICIES)
+        )
     pnp_methods = value.get("pnp_methods", list(PNP_METHOD_ORDER))
     extrinsic_methods = value.get("extrinsic_methods", list(EXTRINSIC_METHOD_ORDER))
     if not isinstance(pnp_methods, list) or not pnp_methods:
@@ -802,6 +856,14 @@ def validate_attempt_request(
     if unsupported_extrinsic:
         raise ValueError(
             "Unsupported extrinsic method(s): " + ", ".join(unsupported_extrinsic)
+        )
+    if (
+        synchronization_policy == "auto_offset"
+        and DEFAULT_REFERENCE_PNP_METHOD not in pnp_methods
+    ):
+        raise ValueError(
+            "auto_offset synchronization requires the fixed reference PnP "
+            f"method {DEFAULT_REFERENCE_PNP_METHOD}"
         )
     return {
         "mode": mode,
@@ -828,6 +890,11 @@ def validate_attempt_request(
         "pnp_methods": pnp_methods,
         "extrinsic_methods": extrinsic_methods,
         "intrinsics_policy": intrinsics_policy,
+        "synchronization_policy": synchronization_policy,
+        "synchronization_search": time_offset_search_configuration(),
+        "synchronization_implementation_revision": (
+            TIME_OFFSET_IMPLEMENTATION_REVISION
+        ),
     }
 
 
@@ -907,6 +974,20 @@ def _update_progress(
     message: str | None = None,
 ) -> dict[str, Any]:
     progress = _read_json(attempt_root / PROGRESS_FILE)
+    recorded_phases = {
+        str(item.get("id")): item
+        for item in progress.get("phases", [])
+        if isinstance(item, Mapping) and item.get("id")
+    }
+    progress["phases"] = [
+        {
+            **dict(recorded_phases.get(phase_id, {})),
+            "id": phase_id,
+            "label": label,
+            "status": str(recorded_phases.get(phase_id, {}).get("status") or "pending"),
+        }
+        for phase_id, label in PHASES
+    ]
     if status is not None:
         progress["status"] = status
     if phase is not None:
@@ -2030,7 +2111,11 @@ def _prepare_attempt_data(
                         "Recorded calibration timestamp policy no longer matches "
                         f"{sensor_key}: {key}"
                     )
-    output_root = attempt_root / "processed" / "synchronized"
+    # Retain the zero-offset image/PnP workspace separately.  The accepted
+    # per-sensor offsets are materialized later under processed/synchronized;
+    # reusing that folder would delete the detections and source-frame mapping
+    # that make the search reproducible.
+    output_root = attempt_root / "processed" / "preparation_synchronized"
     synchronized: dict[str, Path] = {}
     sync_reports = []
     selected_by_path = {
@@ -2317,6 +2402,11 @@ def _estimate_target_poses(
         for frame_id, detection in sorted(detections.get("frames", {}).items()):
             frame_record: dict[str, Any] = {
                 "frame_id": frame_id,
+                "source_frame_id": (
+                    matched.get(frame_id, {}).get("source_frame_id")
+                    if isinstance(matched.get(frame_id), Mapping)
+                    else None
+                ),
                 "marker_count": int(detection.get("marker_count", 0)),
                 "image_centroid_px": detection.get("image_centroid_px"),
                 "image_coverage_cell": _coverage_cell(
@@ -2382,6 +2472,17 @@ def _estimate_target_poses(
                     {
                         "observation_id": f"{sensor_key}:{method}:{frame_id}",
                         "frame_id": frame_id,
+                        "source_frame_id": matched_pose.get("source_frame_id"),
+                        "image_timestamp_ns": matched_pose.get("image_timestamp_ns"),
+                        "initial_matched_robot_pose_index": matched_pose.get(
+                            "matched_robot_pose_index"
+                        ),
+                        "initial_robot_timestamp_ns": matched_pose.get(
+                            "robot_timestamp_ns"
+                        ),
+                        "initial_nearest_robot_delta_ns": matched_pose.get(
+                            "nearest_robot_delta_ns"
+                        ),
                         "motion": matched_pose.get("motion"),
                         "robot_ee_pose": dict(matched_pose["robot_ee_pose"]),
                         "target_to_camera": selected["transform"],
@@ -2575,30 +2676,468 @@ def _calibration_observation_report(
     }
 
 
+def _estimate_and_apply_time_offsets(
+    run_root: Path,
+    attempt_root: Path,
+    request_value: Mapping[str, Any],
+    observations: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, list[dict[str, Any]]]],
+]:
+    policy = str(
+        request_value.get(
+            "synchronization_policy",
+            DEFAULT_SYNCHRONIZATION_POLICY,
+        )
+    )
+    timestamp_policy = request_value.get("timestamp_policy")
+    search = request_value.get("synchronization_search")
+    search_configuration = (
+        dict(search)
+        if isinstance(search, Mapping)
+        else time_offset_search_configuration()
+    )
+    implementation_revision = str(
+        request_value.get(
+            "synchronization_implementation_revision",
+            TIME_OFFSET_IMPLEMENTATION_REVISION,
+        )
+    )
+    if implementation_revision not in TIME_OFFSET_SUPPORTED_REVISIONS:
+        raise ValueError(
+            "Unsupported calibration time-offset implementation revision: "
+            f"{implementation_revision}"
+        )
+    max_nearest_pose_delta_ms = float(search_configuration["max_nearest_pose_delta_ms"])
+    if not math.isfinite(max_nearest_pose_delta_ms) or max_nearest_pose_delta_ms <= 0.0:
+        raise ValueError(
+            "Calibration time-offset max nearest-pose delta must be positive"
+        )
+    sensor_metadata = {
+        str(item["sensor_key"]): item for item in request_value["sensors"]
+    }
+    adjusted: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    sensor_results: list[dict[str, Any]] = []
+    failed: list[str] = []
+    for sensor_key in request_value["sensor_keys"]:
+        by_method = observations[sensor_key]
+        reference_observations = list(by_method.get(DEFAULT_REFERENCE_PNP_METHOD, ()))
+        sensor = sensor_metadata[sensor_key]
+        if policy == "fixed_zero":
+            sensor_result = fixed_zero_sensor_result(
+                sensor_key=sensor_key,
+                observation_count=max(
+                    (len(items) for items in by_method.values()),
+                    default=0,
+                ),
+            )
+            adjusted[sensor_key] = {
+                method: [dict(item) for item in items]
+                for method, items in by_method.items()
+            }
+        else:
+            try:
+                if not reference_observations:
+                    raise ValueError(
+                        f"{sensor_key}: auto-sync reference observations are missing"
+                    )
+                sensor_policy = _timestamp_policy_for_sensor(
+                    timestamp_policy
+                    if isinstance(timestamp_policy, Mapping)
+                    else _attempt_timestamp_policy(request_value["sensors"]),
+                    sensor,
+                )
+                sensor_folder = run_root / str(sensor["folder"])
+                robot_records = indexed_robot_poses(
+                    load_robot_poses(run_root, sensor_folder),
+                    timestamp_source=str(sensor_policy["robot_timestamp_source"]),
+                )
+                sensor_result, _reference_adjusted = estimate_sensor_time_offset(
+                    reference_observations,
+                    sensor_key=sensor_key,
+                    robot_records=robot_records,
+                    mode=str(request_value["mode"]),
+                    offsets_ms=time_offset_values(
+                        float(
+                            search_configuration["minimum_robot_pose_time_offset_ms"]
+                        ),
+                        float(
+                            search_configuration["maximum_robot_pose_time_offset_ms"]
+                        ),
+                        float(search_configuration["step_ms"]),
+                    ),
+                    methods=tuple(
+                        str(item)
+                        for item in search_configuration["reference_extrinsic_methods"]
+                    ),
+                    max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+                    max_observations_per_motion=int(
+                        search_configuration["max_observations_per_motion"]
+                    ),
+                    max_search_motions=int(
+                        search_configuration["maximum_search_motion_count"]
+                    ),
+                    min_motions_per_fold=int(
+                        search_configuration[
+                            "minimum_motion_count_per_cross_validation_fold"
+                        ]
+                    ),
+                    min_absolute_improvement_mm=float(
+                        search_configuration[
+                            "minimum_absolute_cross_validated_improvement_mm"
+                        ]
+                    ),
+                    min_relative_improvement=float(
+                        search_configuration[
+                            "minimum_relative_cross_validated_improvement"
+                        ]
+                    ),
+                    max_rotation_degradation_deg=float(
+                        search_configuration[
+                            "maximum_cross_validated_rotation_degradation_deg"
+                        ]
+                    ),
+                    minimum_offset_stability_ms=float(
+                        search_configuration["minimum_offset_stability_ms"]
+                    ),
+                )
+                selected_offset_ms = float(
+                    sensor_result["selected_robot_pose_time_offset_ms"]
+                )
+                adjusted[sensor_key] = {
+                    method: apply_sensor_time_offset(
+                        items,
+                        robot_records=robot_records,
+                        robot_pose_time_offset_ms=selected_offset_ms,
+                        max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+                    )
+                    for method, items in by_method.items()
+                }
+            except Exception as exc:
+                sensor_result = failed_sensor_result(
+                    sensor_key=sensor_key,
+                    observation_count=len(reference_observations),
+                    error=exc,
+                )
+                adjusted[sensor_key] = {}
+            if sensor_result["status"] == "failed":
+                failed.append(sensor_key)
+        sensor_result["display_name"] = sensor.get("display_name")
+        sensor_result["sensor_name"] = sensor.get("sensor_name")
+        sensor_results.append(sensor_result)
+
+    report = {
+        "schema_version": TIME_OFFSET_SEARCH_SCHEMA_VERSION,
+        "generated_at": utc_now_iso(),
+        "attempt_id": request_value["attempt_id"],
+        "policy": policy,
+        "implementation_revision": implementation_revision,
+        "offset_kind": "effective_capture_and_pose_pipeline_latency",
+        "sign_convention": time_offset_sign_convention(),
+        "search": search_configuration,
+        "status": "failed" if failed else "complete",
+        "sensor_count": len(sensor_results),
+        "failed_sensor_keys": failed,
+        "sensors": sensor_results,
+    }
+    atomic_write_json(attempt_root / TIME_OFFSET_SEARCH, report)
+    if failed:
+        raise ValueError("Auto-sync evidence failed closed for: " + ", ".join(failed))
+    return report, adjusted
+
+
+def _materialize_authoritative_synchronization(
+    run_root: Path,
+    attempt_root: Path,
+    request_value: Mapping[str, Any],
+    time_offset_search: Mapping[str, Any],
+    observations: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+) -> tuple[
+    dict[str, Path],
+    dict[str, dict[str, list[dict[str, Any]]]],
+]:
+    timestamp_policy = _calibration_timestamp_preflight(
+        run_root, request_value["sensors"]
+    )
+    result_by_sensor = {
+        str(item["sensor_key"]): item
+        for item in time_offset_search.get("sensors", [])
+        if isinstance(item, Mapping) and item.get("sensor_key")
+    }
+    expected_sensor_keys = {str(item) for item in request_value["sensor_keys"]}
+    if set(result_by_sensor) != expected_sensor_keys:
+        raise ValueError("Time-offset evidence does not cover every selected sensor")
+    try:
+        max_nearest_pose_delta_ms = float(
+            time_offset_search["search"]["max_nearest_pose_delta_ms"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Time-offset evidence lacks a valid max nearest-pose delta"
+        ) from exc
+    if not math.isfinite(max_nearest_pose_delta_ms) or max_nearest_pose_delta_ms <= 0.0:
+        raise ValueError("Time-offset evidence max nearest-pose delta must be positive")
+
+    output_root = attempt_root / "processed" / "synchronized"
+    synchronized: dict[str, Path] = {}
+    sync_reports: list[Path] = []
+    required_frame_sources: dict[str, str] = {}
+    required_robot_sources: dict[str, str] = {}
+    expected_by_sensor_name: dict[str, float] = {}
+    for sensor in request_value["sensors"]:
+        sensor_key = str(sensor["sensor_key"])
+        sensor_path = run_root / str(sensor["folder"])
+        sensor_policy = _timestamp_policy_for_sensor(timestamp_policy, sensor)
+        sensor_name = str(sensor.get("sensor_name") or sensor_path.name)
+        selected_sync_delta_ms = float(
+            result_by_sensor[sensor_key]["selected_sync_delta_ms"]
+        )
+        required_frame_sources[sensor_name] = str(
+            sensor_policy["frame_timestamp_source"]
+        )
+        required_robot_sources[sensor_name] = str(
+            sensor_policy["robot_timestamp_source"]
+        )
+        expected_by_sensor_name[sensor_name] = selected_sync_delta_ms
+        results = synchronize_run(
+            run_root,
+            sensor_folders=[sensor_path],
+            output_root=output_root,
+            sync_delta=selected_sync_delta_ms,
+            timestamp_source=sensor_policy["frame_timestamp_source"],
+            robot_timestamp_source=sensor_policy["robot_timestamp_source"],
+            copy_files=False,
+            max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+        )
+        if len(results) != 1:
+            raise ValueError(
+                f"Authoritative synchronization returned no result for {sensor_key}"
+            )
+        result = results[0]
+        synchronized[sensor_key] = Path(result.output_folder).resolve()
+        sync_reports.append(Path(result.report_path).resolve())
+
+    sync_quality = build_sync_quality_report(
+        run_root,
+        report_paths=sync_reports,
+        max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+        require_timestamp_source=required_frame_sources,
+        require_robot_timestamp_source=required_robot_sources,
+    )
+    sync_quality["calibration_attempt_policy"] = {
+        "purpose": "authoritative_calibration_solver_pairing",
+        "synchronization_policy": time_offset_search["policy"],
+        "time_offset_search": _attempt_artifact_reference(
+            str(request_value["attempt_id"]),
+            TIME_OFFSET_SEARCH,
+        ),
+        "sign_convention": time_offset_search["sign_convention"],
+        **timestamp_policy,
+        "per_sensor_offsets": {
+            sensor_key: {
+                "robot_pose_time_offset_ms": float(
+                    value["selected_robot_pose_time_offset_ms"]
+                ),
+                "sync_delta_ms": float(value["selected_sync_delta_ms"]),
+                "status": value["status"],
+            }
+            for sensor_key, value in result_by_sensor.items()
+        },
+        "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
+        "historical_per_sensor_offsets_allowed": False,
+        "auto_estimated_per_sensor_offsets": (
+            time_offset_search["policy"] == "auto_offset"
+        ),
+    }
+    checks = sync_quality.get("checks")
+    if not isinstance(checks, list):
+        checks = []
+        sync_quality["checks"] = checks
+    summaries = sync_quality.get("sensors")
+    observed_names: set[str] = set()
+    if isinstance(summaries, list):
+        for summary in summaries:
+            if not isinstance(summary, Mapping):
+                continue
+            sensor_name = str(summary.get("sensor_name") or "")
+            observed_names.add(sensor_name)
+            expected = expected_by_sensor_name.get(sensor_name)
+            try:
+                actual = float(summary["sync_delta_ms"])
+            except (KeyError, TypeError, ValueError):
+                actual = None
+            matched = (
+                expected is not None
+                and actual is not None
+                and math.isfinite(actual)
+                and math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9)
+            )
+            checks.append(
+                {
+                    "name": f"calibration_authoritative_sync_delta:{sensor_name}",
+                    "status": "ok" if matched else "error",
+                    "message": (
+                        f"{sensor_name} authoritative sync delta is {actual:g} ms."
+                        if matched
+                        else (
+                            f"{sensor_name} authoritative sync delta "
+                            f"{actual!r} does not match {expected!r} ms."
+                        )
+                    ),
+                    "details": {
+                        "actual_sync_delta_ms": actual,
+                        "expected_sync_delta_ms": expected,
+                    },
+                }
+            )
+    missing_names = sorted(set(expected_by_sensor_name) - observed_names)
+    for sensor_name in missing_names:
+        checks.append(
+            {
+                "name": f"calibration_authoritative_sync_delta:{sensor_name}",
+                "status": "error",
+                "message": "Authoritative sync-delta evidence is missing.",
+            }
+        )
+    statuses = {str(item.get("status")) for item in checks if isinstance(item, Mapping)}
+    sync_quality["overall_status"] = (
+        "error" if "error" in statuses else "warning" if "warning" in statuses else "ok"
+    )
+    atomic_write_json(attempt_root / SYNC_QUALITY_REPORT, sync_quality)
+    blocking = [
+        item
+        for item in checks
+        if isinstance(item, Mapping)
+        and (
+            item.get("status") == "error"
+            or (
+                str(item.get("name", "")).startswith("sync_nearest_pose_delta:")
+                and item.get("status") != "ok"
+            )
+        )
+    ]
+    if blocking:
+        raise ValueError(
+            "Authoritative calibration synchronization failed: "
+            + ", ".join(str(item.get("name")) for item in blocking)
+        )
+
+    remapped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for sensor_key, by_method in observations.items():
+        matched = _read_json(synchronized[sensor_key] / MATCH_ROBOT_EE_POSES)
+        source_matches: dict[str, tuple[str, Mapping[str, Any]]] = {}
+        for final_frame_id, value in matched.items():
+            if not isinstance(value, Mapping):
+                continue
+            source_frame_id = str(value.get("source_frame_id") or "")
+            if not source_frame_id:
+                continue
+            if source_frame_id in source_matches:
+                raise ValueError(
+                    f"{sensor_key}: duplicate authoritative source frame "
+                    f"{source_frame_id}"
+                )
+            source_matches[source_frame_id] = (final_frame_id, value)
+        remapped[sensor_key] = {}
+        selected = result_by_sensor[sensor_key]
+        for method, items in by_method.items():
+            remapped_items = []
+            for item in items:
+                source_frame_id = str(item.get("source_frame_id") or "")
+                final_match = source_matches.get(source_frame_id)
+                if final_match is None:
+                    continue
+                final_frame_id, match = final_match
+                if int(item["image_timestamp_ns"]) != int(match["image_timestamp_ns"]):
+                    raise ValueError(
+                        f"{sensor_key}: authoritative timestamp changed for source "
+                        f"frame {source_frame_id}"
+                    )
+                remapped_items.append(
+                    {
+                        **dict(item),
+                        "observation_id": (f"{sensor_key}:{method}:{final_frame_id}"),
+                        "frame_id": final_frame_id,
+                        "source_frame_id": source_frame_id,
+                        "motion": match["motion"],
+                        "robot_ee_pose": dict(match["robot_ee_pose"]),
+                        "image_timestamp_ns": match["image_timestamp_ns"],
+                        "robot_pose_time_offset_ms": float(
+                            selected["selected_robot_pose_time_offset_ms"]
+                        ),
+                        "sync_delta_ms": float(selected["selected_sync_delta_ms"]),
+                        "timestamp_alignment": {
+                            "frame_timestamp_ns": match["image_timestamp_ns"],
+                            "robot_pose_query_timestamp_ns": match[
+                                "delayed_timestamp_ns"
+                            ],
+                            "robot_pose_time_offset_ms": float(
+                                selected["selected_robot_pose_time_offset_ms"]
+                            ),
+                            "sync_delta_ms": float(selected["selected_sync_delta_ms"]),
+                            "matched_robot_pose_index": match[
+                                "matched_robot_pose_index"
+                            ],
+                            "robot_timestamp_ns": match["robot_timestamp_ns"],
+                            "nearest_robot_delta_ns": match["nearest_robot_delta_ns"],
+                            "source": _attempt_artifact_reference(
+                                str(request_value["attempt_id"]),
+                                TIME_OFFSET_SEARCH,
+                            ),
+                        },
+                    }
+                )
+            remapped[sensor_key][method] = remapped_items
+    return synchronized, remapped
+
+
 def _compare_solutions(
     attempt_root: Path,
     request_value: Mapping[str, Any],
     observations: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+    *,
+    time_offset_search: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    alignment_by_sensor = {
+        str(item["sensor_key"]): item
+        for item in time_offset_search["sensors"]
+        if isinstance(item, Mapping)
+    }
     candidates = []
     for sensor_key in request_value["sensor_keys"]:
         for pnp_method in request_value["pnp_methods"]:
             method_observations = observations[sensor_key][pnp_method]
             for extrinsic_method in request_value["extrinsic_methods"]:
-                candidates.append(
-                    evaluate_extrinsic_candidate(
-                        method_observations,
-                        mode=request_value["mode"],
-                        pnp_method=pnp_method,
-                        extrinsic_method=extrinsic_method,
-                        sensor_key=sensor_key,
-                        min_accepted_views=DEFAULT_MIN_ACCEPTED_VIEWS,
-                        min_coverage_cells=DEFAULT_MIN_COVERAGE_CELLS,
-                        min_motion_poses=ATTEMPT_MIN_MOTION_POSES,
-                        min_translation_span_mm=(ATTEMPT_MIN_TRANSLATION_SPAN_MM),
-                        min_rotation_span_deg=ATTEMPT_MIN_ROTATION_SPAN_DEG,
-                    )
+                candidate = evaluate_extrinsic_candidate(
+                    method_observations,
+                    mode=request_value["mode"],
+                    pnp_method=pnp_method,
+                    extrinsic_method=extrinsic_method,
+                    sensor_key=sensor_key,
+                    min_accepted_views=DEFAULT_MIN_ACCEPTED_VIEWS,
+                    min_coverage_cells=DEFAULT_MIN_COVERAGE_CELLS,
+                    min_motion_poses=ATTEMPT_MIN_MOTION_POSES,
+                    min_translation_span_mm=(ATTEMPT_MIN_TRANSLATION_SPAN_MM),
+                    min_rotation_span_deg=ATTEMPT_MIN_ROTATION_SPAN_DEG,
                 )
+                candidate["synchronization"] = {
+                    "policy": time_offset_search["policy"],
+                    "status": alignment_by_sensor[sensor_key]["status"],
+                    "robot_pose_time_offset_ms": float(
+                        alignment_by_sensor[sensor_key][
+                            "selected_robot_pose_time_offset_ms"
+                        ]
+                    ),
+                    "sync_delta_ms": float(
+                        alignment_by_sensor[sensor_key]["selected_sync_delta_ms"]
+                    ),
+                    "source": _attempt_artifact_reference(
+                        str(request_value["attempt_id"]),
+                        TIME_OFFSET_SEARCH,
+                    ),
+                }
+                candidates.append(candidate)
     report = {
         "schema_version": "calibration_extrinsic_candidates.v1",
         "generated_at": utc_now_iso(),
@@ -2646,6 +3185,19 @@ def _candidate_profile(
         else _attempt_timestamp_policy(request_value["sensors"])
     )
     sensor_timestamp_policy = _timestamp_policy_for_sensor(timestamp_policy, sensor)
+    raw_synchronization = candidate.get("synchronization")
+    synchronization = (
+        dict(raw_synchronization)
+        if isinstance(raw_synchronization, Mapping)
+        else {
+            "policy": DEFAULT_SYNCHRONIZATION_POLICY,
+            "status": "fixed_zero",
+            "robot_pose_time_offset_ms": 0.0,
+            "sync_delta_ms": ATTEMPT_SYNC_DELTA_MS,
+            "source": None,
+        }
+    )
+    selected_sync_delta_ms = float(synchronization["sync_delta_ms"])
     mounting = (
         MountingMode.EYE_IN_HAND if mode == "eye_in_hand" else MountingMode.STATIC
     )
@@ -2680,7 +3232,7 @@ def _candidate_profile(
         ),
         target_type=CalibrationTargetType.ARUCO_GRID,
         calibration_dataset_id=str(request_value["attempt_id"]),
-        sync_delta_ms=ATTEMPT_SYNC_DELTA_MS,
+        sync_delta_ms=selected_sync_delta_ms,
         method=f"auto_compare:{candidate['pnp_method']}+{candidate['extrinsic_method']}",
         status=CalibrationStatus.NEEDS_VALIDATION,
         quality=CalibrationQuality(
@@ -2712,7 +3264,8 @@ def _candidate_profile(
             "intrinsic_profile_id": intrinsic_profile["profile_id"],
             "intrinsics_policy": request_value["intrinsics_policy"],
             "synchronization": {
-                "sync_delta_ms": ATTEMPT_SYNC_DELTA_MS,
+                **synchronization,
+                "sync_delta_ms": selected_sync_delta_ms,
                 "timestamp_source": sensor_timestamp_policy["frame_timestamp_source"],
                 "frame_timestamp_source": sensor_timestamp_policy[
                     "frame_timestamp_source"
@@ -2726,6 +3279,9 @@ def _candidate_profile(
                 "timestamp_fallback_allowed": False,
                 "max_nearest_pose_delta_ms": (ATTEMPT_MAX_NEAREST_POSE_DELTA_MS),
                 "historical_per_sensor_offsets_allowed": False,
+                "auto_estimated_per_sensor_offset": (
+                    synchronization.get("policy") == "auto_offset"
+                ),
                 "sensor_key": sensor["sensor_key"],
                 "quality_report": (
                     f"processed/calibration/{request_value['attempt_id']}/"
@@ -3180,6 +3736,8 @@ def _validate_and_rank(
     request_value: Mapping[str, Any],
     candidates: Sequence[Mapping[str, Any]],
     intrinsics: Mapping[str, Mapping[str, Any]],
+    *,
+    time_offset_search: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_timestamp_policy = request_value.get("timestamp_policy")
     timestamp_policy = (
@@ -3187,8 +3745,24 @@ def _validate_and_rank(
         if isinstance(raw_timestamp_policy, Mapping)
         else _attempt_timestamp_policy(request_value["sensors"])
     )
+    if time_offset_search is None:
+        time_offset_search = {
+            "policy": "fixed_zero",
+            "sensors": [
+                fixed_zero_sensor_result(
+                    sensor_key=str(sensor_key),
+                    observation_count=0,
+                )
+                for sensor_key in request_value["sensor_keys"]
+            ],
+        }
     sensor_metadata = {
         str(item["sensor_key"]): item for item in request_value["sensors"]
+    }
+    alignment_by_sensor = {
+        str(item["sensor_key"]): item
+        for item in time_offset_search["sensors"]
+        if isinstance(item, Mapping)
     }
     profiles: list[CalibrationProfile] = []
     results = []
@@ -3260,6 +3834,7 @@ def _validate_and_rank(
                     recommendation.get("profile_id") if recommendation else None
                 ),
                 "recommendation": recommendation,
+                "time_offset_search": alignment_by_sensor[sensor_key],
                 "candidates": ranked,
             }
         )
@@ -3297,7 +3872,24 @@ def _validate_and_rank(
             "max_nearest_pose_delta_ms": (ATTEMPT_MAX_NEAREST_POSE_DELTA_MS),
             "timestamp_source": timestamp_policy["frame_timestamp_source"],
             "robot_timestamp_source": timestamp_policy["robot_timestamp_source"],
-            "sync_delta_ms": ATTEMPT_SYNC_DELTA_MS,
+            "synchronization_policy": time_offset_search["policy"],
+            "sync_delta_ms": (
+                0.0
+                if all(
+                    math.isclose(
+                        float(item["selected_sync_delta_ms"]),
+                        0.0,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
+                    for item in time_offset_search["sensors"]
+                )
+                else "per_sensor"
+            ),
+            "per_sensor_sync_delta_ms": {
+                str(item["sensor_key"]): float(item["selected_sync_delta_ms"])
+                for item in time_offset_search["sensors"]
+            },
             "max_mean_translation_mm": 10.0,
             "max_mean_rotation_deg": 5.0,
             "max_outlier_ratio": 0.25,
@@ -3357,10 +3949,6 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             synchronized,
             intrinsics,
         )
-        observation_report = _calibration_observation_report(
-            request_value, observations
-        )
-        atomic_write_json(attempt_root / CALIBRATION_OBSERVATIONS, observation_report)
         _update_progress(
             attempt_root,
             phase="estimate_target_poses",
@@ -3369,11 +3957,55 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
         )
         _update_progress(
             attempt_root,
+            phase="estimate_time_offsets",
+            phase_status="running",
+            message=(
+                "Estimating effective camera-to-robot latency on fixed "
+                "motion-disjoint evidence."
+            ),
+        )
+        time_offset_search, adjusted_observations = _estimate_and_apply_time_offsets(
+            root,
+            attempt_root,
+            request_value,
+            observations,
+        )
+        _authoritative_synchronized, observations = (
+            _materialize_authoritative_synchronization(
+                root,
+                attempt_root,
+                request_value,
+                time_offset_search,
+                adjusted_observations,
+            )
+        )
+        observation_report = _calibration_observation_report(
+            request_value, observations
+        )
+        observation_report["time_offset_search"] = _attempt_artifact_reference(
+            str(request_value["attempt_id"]),
+            TIME_OFFSET_SEARCH,
+        )
+        observation_report["synchronization_policy"] = time_offset_search["policy"]
+        atomic_write_json(attempt_root / CALIBRATION_OBSERVATIONS, observation_report)
+        _update_progress(
+            attempt_root,
+            phase="estimate_time_offsets",
+            phase_status="complete",
+            message="Authoritative camera/robot time alignment is ready.",
+        )
+        _update_progress(
+            attempt_root,
             phase="compare_robot_camera_solutions",
             phase_status="running",
             message="Evaluating every compatible PnP/extrinsic combination.",
         )
-        candidates = _compare_solutions(attempt_root, request_value, observations)
+        candidates = _compare_solutions(
+            attempt_root,
+            request_value,
+            observations,
+            time_offset_search=time_offset_search,
+        )
         _update_progress(
             attempt_root,
             phase="compare_robot_camera_solutions",
@@ -3391,6 +4023,7 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             request_value,
             candidates,
             intrinsics,
+            time_offset_search=time_offset_search,
         )
         _update_progress(
             attempt_root,
@@ -3436,6 +4069,11 @@ def load_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str,
         if (attempt_root / INTRINSIC_COMPARISON).is_file()
         else None
     )
+    time_offset_search = (
+        _read_json(attempt_root / TIME_OFFSET_SEARCH)
+        if (attempt_root / TIME_OFFSET_SEARCH).is_file()
+        else None
+    )
     return {
         "schema_version": ATTEMPT_SCHEMA_VERSION,
         "attempt_id": attempt_id,
@@ -3444,6 +4082,7 @@ def load_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str,
         "progress": progress,
         "results": ranking,
         "intrinsic_comparison": intrinsic_comparison,
+        "time_offset_search": time_offset_search,
         "promotion": promotion,
         "artifacts": {
             name: _relative(attempt_root / name, root)
@@ -3451,6 +4090,7 @@ def load_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str,
                 REQUEST_FILE,
                 PROGRESS_FILE,
                 SYNC_QUALITY_REPORT,
+                TIME_OFFSET_SEARCH,
                 INTRINSIC_COMPARISON,
                 INTRINSIC_CALIBRATION_PROFILES,
                 PNP_CANDIDATES_FILE,
@@ -3699,6 +4339,299 @@ def _promotion_selections(
     return selected
 
 
+def _promotion_time_offset_evidence(
+    attempt: Mapping[str, Any],
+) -> dict[str, Mapping[str, Any]]:
+    request_value = attempt.get("request")
+    if not isinstance(request_value, Mapping):
+        raise ValueError("Calibration attempt request evidence is missing")
+    has_explicit_policy = "synchronization_policy" in request_value
+    policy = str(
+        request_value.get("synchronization_policy", DEFAULT_SYNCHRONIZATION_POLICY)
+    )
+    report = attempt.get("time_offset_search")
+    if report is None:
+        if not has_explicit_policy:
+            return {}
+        raise ValueError("Calibration time-offset promotion evidence is missing")
+    attempt_id = str(request_value.get("attempt_id") or attempt.get("attempt_id") or "")
+    expected = {str(item) for item in request_value.get("sensor_keys", [])}
+    raw_sensors = report.get("sensors", []) if isinstance(report, Mapping) else []
+    recorded_search = request_value.get("synchronization_search")
+    recorded_revision = request_value.get("synchronization_implementation_revision")
+    if (
+        not isinstance(report, Mapping)
+        or not isinstance(recorded_search, Mapping)
+        or not isinstance(recorded_revision, str)
+        or recorded_revision not in TIME_OFFSET_SUPPORTED_REVISIONS
+        or report.get("schema_version") != TIME_OFFSET_SEARCH_SCHEMA_VERSION
+        or report.get("policy") != policy
+        or report.get("status") != "complete"
+        or report.get("attempt_id") != attempt_id
+        or report.get("implementation_revision") != recorded_revision
+        or report.get("offset_kind") != "effective_capture_and_pose_pipeline_latency"
+        or report.get("sign_convention") != time_offset_sign_convention()
+        or report.get("search") != dict(recorded_search)
+        or report.get("failed_sensor_keys") != []
+        or report.get("sensor_count") != len(expected)
+        or not isinstance(raw_sensors, list)
+        or len(raw_sensors) != len(expected)
+    ):
+        raise ValueError("Calibration time-offset promotion evidence is invalid")
+    sensors = {
+        str(item.get("sensor_key")): item
+        for item in raw_sensors
+        if isinstance(item, Mapping) and item.get("sensor_key")
+    }
+    if set(sensors) != expected:
+        raise ValueError(
+            "Calibration time-offset promotion evidence does not cover every sensor"
+        )
+    search_grid = time_offset_values(
+        float(recorded_search["minimum_robot_pose_time_offset_ms"]),
+        float(recorded_search["maximum_robot_pose_time_offset_ms"]),
+        float(recorded_search["step_ms"]),
+    )
+    minimum_offset = min(search_grid)
+    maximum_offset = max(search_grid)
+    required_auto_checks = {
+        "fixed_full_range_observation_set",
+        "cross_validation_offset_stability",
+        "reference_method_sensitivity",
+        "search_optimum_not_at_boundary",
+        "cross_validated_translation_improvement",
+        "cross_validated_rotation_guard",
+        "zero_offset_identifiability",
+    }
+    for sensor_key, item in sensors.items():
+        status = str(item.get("status") or "")
+        valid_statuses = (
+            {"applied", "kept_zero"} if policy == "auto_offset" else {"fixed_zero"}
+        )
+        if status not in valid_statuses:
+            raise ValueError(
+                f"Calibration time-offset evidence is not promotable for {sensor_key}"
+            )
+        try:
+            operator_offset = float(item["selected_robot_pose_time_offset_ms"])
+            sync_delta = float(item["selected_sync_delta_ms"])
+            candidate_offset = float(item["candidate_robot_pose_time_offset_ms"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Calibration time-offset evidence is invalid for {sensor_key}"
+            ) from exc
+        if (
+            not math.isfinite(operator_offset)
+            or not math.isfinite(sync_delta)
+            or not math.isfinite(candidate_offset)
+            or not math.isclose(
+                sync_delta,
+                -operator_offset,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ValueError(
+                f"Calibration time-offset sign evidence is inconsistent for {sensor_key}"
+            )
+        checks = item.get("checks")
+        if not isinstance(checks, list):
+            raise ValueError(
+                f"Calibration time-offset checks are missing for {sensor_key}"
+            )
+        check_by_name = {
+            str(check.get("name")): check
+            for check in checks
+            if isinstance(check, Mapping)
+        }
+        if policy == "auto_offset":
+            if not required_auto_checks.issubset(check_by_name) or any(
+                check.get("status") == "error" for check in check_by_name.values()
+            ):
+                raise ValueError(
+                    f"Auto-sync checks are not promotable for {sensor_key}"
+                )
+            if status == "applied":
+                if (
+                    math.isclose(operator_offset, 0.0, rel_tol=0.0, abs_tol=1e-9)
+                    or not math.isclose(
+                        candidate_offset,
+                        operator_offset,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
+                    or item.get("boundary_hit") is not False
+                    or not (minimum_offset < operator_offset < maximum_offset)
+                    or not any(
+                        math.isclose(
+                            operator_offset,
+                            value,
+                            rel_tol=0.0,
+                            abs_tol=1e-9,
+                        )
+                        for value in search_grid
+                    )
+                ):
+                    raise ValueError(
+                        f"Applied auto-sync offset is invalid for {sensor_key}"
+                    )
+            elif (
+                not math.isclose(operator_offset, 0.0, rel_tol=0.0, abs_tol=1e-9)
+                or not math.isclose(
+                    candidate_offset,
+                    0.0,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+                or check_by_name["zero_offset_identifiability"].get("status") != "ok"
+            ):
+                raise ValueError(
+                    f"Zero-offset auto-sync evidence is invalid for {sensor_key}"
+                )
+        elif (
+            checks
+            or not math.isclose(operator_offset, 0.0, rel_tol=0.0, abs_tol=1e-9)
+            or not math.isclose(candidate_offset, 0.0, rel_tol=0.0, abs_tol=1e-9)
+        ):
+            raise ValueError(
+                f"Fixed-zero synchronization evidence is invalid for {sensor_key}"
+            )
+    _promotion_time_offset_artifact_bindings(
+        attempt,
+        request_value,
+        sensors,
+    )
+    return sensors
+
+
+def _promotion_time_offset_artifact_bindings(
+    attempt: Mapping[str, Any],
+    request_value: Mapping[str, Any],
+    sensors: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Bind selected offsets to authoritative sync and solver observations."""
+
+    run_root = Path(str(attempt["run_root"]))
+    attempt_id = str(request_value["attempt_id"])
+    attempt_root = calibration_attempt_root(run_root, attempt_id)
+    source_reference = _attempt_artifact_reference(attempt_id, TIME_OFFSET_SEARCH)
+    quality = _read_json(attempt_root / SYNC_QUALITY_REPORT)
+    checks = quality.get("checks")
+    if (
+        quality.get("overall_status") == "error"
+        or not isinstance(checks, list)
+        or any(
+            isinstance(item, Mapping) and item.get("status") == "error"
+            for item in checks
+        )
+    ):
+        raise ValueError("Authoritative synchronization quality is not promotable")
+    policy = quality.get("calibration_attempt_policy")
+    offsets = policy.get("per_sensor_offsets") if isinstance(policy, Mapping) else None
+    if (
+        not isinstance(policy, Mapping)
+        or policy.get("synchronization_policy")
+        != request_value["synchronization_policy"]
+        or policy.get("time_offset_search") != source_reference
+        or not isinstance(offsets, Mapping)
+        or set(offsets) != set(sensors)
+    ):
+        raise ValueError("Authoritative synchronization provenance is inconsistent")
+
+    sensor_metadata = {
+        str(item["sensor_key"]): item
+        for item in request_value.get("sensors", [])
+        if isinstance(item, Mapping) and item.get("sensor_key")
+    }
+    summaries = {
+        str(item.get("sensor_name")): item
+        for item in quality.get("sensors", [])
+        if isinstance(item, Mapping) and item.get("sensor_name")
+    }
+    for sensor_key, alignment in sensors.items():
+        recorded = offsets.get(sensor_key)
+        metadata = sensor_metadata.get(sensor_key)
+        summary = (
+            summaries.get(str(metadata.get("sensor_name")))
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        if (
+            not isinstance(recorded, Mapping)
+            or recorded.get("status") != alignment.get("status")
+            or not _optional_floats_match(
+                recorded.get("robot_pose_time_offset_ms"),
+                alignment.get("selected_robot_pose_time_offset_ms"),
+            )
+            or not _optional_floats_match(
+                recorded.get("sync_delta_ms"),
+                alignment.get("selected_sync_delta_ms"),
+            )
+            or not isinstance(summary, Mapping)
+            or not _optional_floats_match(
+                summary.get("sync_delta_ms"),
+                alignment.get("selected_sync_delta_ms"),
+            )
+        ):
+            raise ValueError(
+                f"Authoritative synchronization offset is inconsistent for {sensor_key}"
+            )
+
+    observations = _read_json(attempt_root / CALIBRATION_OBSERVATIONS)
+    if observations.get("time_offset_search") != source_reference:
+        raise ValueError("Calibration observations reference invalid timing evidence")
+    identity_to_sensor = {
+        (str(item.get("sensor_type")), str(item.get("device_id"))): sensor_key
+        for sensor_key, item in sensor_metadata.items()
+    }
+    observation_counts = {sensor_key: 0 for sensor_key in sensors}
+    for observation in observations.get("observations", []):
+        if not isinstance(observation, Mapping):
+            continue
+        sensor_key = identity_to_sensor.get(
+            (
+                str(observation.get("sensor_type")),
+                str(observation.get("device_id")),
+            )
+        )
+        if sensor_key not in sensors:
+            continue
+        alignment = sensors[sensor_key]
+        timestamp_alignment = observation.get("timestamp_alignment")
+        if (
+            not isinstance(timestamp_alignment, Mapping)
+            or timestamp_alignment.get("source") != source_reference
+            or not _optional_floats_match(
+                observation.get("robot_pose_time_offset_ms"),
+                alignment.get("selected_robot_pose_time_offset_ms"),
+            )
+            or not _optional_floats_match(
+                observation.get("sync_delta_ms"),
+                alignment.get("selected_sync_delta_ms"),
+            )
+            or not _optional_floats_match(
+                timestamp_alignment.get("robot_pose_time_offset_ms"),
+                alignment.get("selected_robot_pose_time_offset_ms"),
+            )
+            or not _optional_floats_match(
+                timestamp_alignment.get("sync_delta_ms"),
+                alignment.get("selected_sync_delta_ms"),
+            )
+        ):
+            raise ValueError(
+                f"Calibration observation timing is inconsistent for {sensor_key}"
+            )
+        observation_counts[sensor_key] += 1
+    missing = sorted(
+        sensor_key for sensor_key, count in observation_counts.items() if count == 0
+    )
+    if missing:
+        raise ValueError(
+            "Calibration observation timing evidence is missing for: "
+            + ", ".join(missing)
+        )
+
+
 def create_promotion_request(
     run_root: str | Path,
     attempt_id: str,
@@ -3716,6 +4649,7 @@ def create_promotion_request(
         and prior_promotion.get("status") != "failed"
     ):
         raise ValueError("Calibration attempt already has promotion evidence")
+    _promotion_time_offset_evidence(attempt)
     selected = _promotion_selections(attempt, selections)
     joint_bundle = _revalidate_joint_promotion(attempt, selected)
     value = {
@@ -4071,6 +5005,11 @@ def _selected_profiles(
     request_value: Mapping[str, Any],
     promotion_request: Mapping[str, Any],
 ) -> list[CalibrationProfile]:
+    time_offset_by_sensor = _promotion_time_offset_evidence(attempt)
+    time_offset_source = _attempt_artifact_reference(
+        str(request_value["attempt_id"]),
+        TIME_OFFSET_SEARCH,
+    )
     joint_bundle = _revalidate_joint_promotion(
         attempt,
         {
@@ -4111,6 +5050,51 @@ def _selected_profiles(
         )
         if candidate["status"] != "passing":
             raise ValueError(f"Candidate no longer passes validation: {candidate_id}")
+        alignment = time_offset_by_sensor.get(str(sensor_key))
+        expected_sync_delta_ms = (
+            float(alignment["selected_sync_delta_ms"])
+            if alignment is not None
+            else None
+        )
+        candidate_synchronization = candidate.get("synchronization")
+        profile_synchronization = profile.metadata.get("synchronization")
+        if alignment is not None and (
+            not isinstance(candidate_synchronization, Mapping)
+            or not isinstance(profile_synchronization, Mapping)
+            or candidate_synchronization.get("source") != time_offset_source
+            or profile_synchronization.get("source") != time_offset_source
+            or candidate_synchronization.get("policy")
+            != request_value["synchronization_policy"]
+            or profile_synchronization.get("policy")
+            != request_value["synchronization_policy"]
+            or candidate_synchronization.get("status") != alignment.get("status")
+            or profile_synchronization.get("status") != alignment.get("status")
+            or not _optional_floats_match(
+                candidate_synchronization.get("robot_pose_time_offset_ms"),
+                alignment.get("selected_robot_pose_time_offset_ms"),
+            )
+            or not _optional_floats_match(
+                profile_synchronization.get("robot_pose_time_offset_ms"),
+                alignment.get("selected_robot_pose_time_offset_ms"),
+            )
+            or not _optional_floats_match(
+                candidate_synchronization.get("sync_delta_ms"),
+                expected_sync_delta_ms,
+            )
+            or not _optional_floats_match(
+                profile_synchronization.get("sync_delta_ms"),
+                expected_sync_delta_ms,
+            )
+        ):
+            raise ValueError(
+                f"Candidate {candidate_id!r} has inconsistent auto-sync provenance"
+            )
+        if alignment is not None and not _optional_floats_match(
+            profile.sync_delta_ms, expected_sync_delta_ms
+        ):
+            raise ValueError(
+                f"Candidate {candidate_id!r} profile sync delta is inconsistent"
+            )
         _promotion_transform_evidence(
             candidate,
             profile,
@@ -4144,6 +5128,21 @@ def _selected_profiles(
                     "pnp_method": candidate["pnp_method"],
                     "extrinsic_method": candidate["extrinsic_method"],
                 },
+                "promotion_synchronization_provenance": (
+                    {
+                        "source": time_offset_source,
+                        "status": alignment["status"],
+                        "robot_pose_time_offset_ms": alignment[
+                            "selected_robot_pose_time_offset_ms"
+                        ],
+                        "sync_delta_ms": alignment["selected_sync_delta_ms"],
+                    }
+                    if alignment is not None
+                    else {
+                        "source": "historical_fixed_zero",
+                        "sync_delta_ms": profile.sync_delta_ms,
+                    }
+                ),
                 "promotion_multi_camera_bundle_id": (
                     joint_bundle["bundle_id"] if joint_bundle is not None else None
                 ),
@@ -4193,6 +5192,34 @@ def _canonical_reports(
         for result in ranking["results"]
         if result.get("sensor_key") in promotion_request["selections"]
     ]
+    time_offset_search = attempt.get("time_offset_search")
+    synchronization_summary = (
+        {
+            "policy": time_offset_search.get("policy"),
+            "source": (
+                f"processed/calibration/{attempt['attempt_id']}/{TIME_OFFSET_SEARCH}"
+            ),
+            "sensors": [
+                {
+                    "sensor_key": item.get("sensor_key"),
+                    "status": item.get("status"),
+                    "robot_pose_time_offset_ms": item.get(
+                        "selected_robot_pose_time_offset_ms"
+                    ),
+                    "sync_delta_ms": item.get("selected_sync_delta_ms"),
+                }
+                for item in time_offset_search.get("sensors", [])
+                if isinstance(item, Mapping)
+                and item.get("sensor_key") in promotion_request["selections"]
+            ],
+        }
+        if isinstance(time_offset_search, Mapping)
+        else {
+            "policy": "fixed_zero",
+            "source": "historical_attempt_without_time_offset_search",
+            "sensors": [],
+        }
+    )
     selected_checks = [
         item
         for item in _read_json(attempt_root / CHECKS_FILE)["checks"]
@@ -4219,6 +5246,7 @@ def _canonical_reports(
         "profiles": all_profile_values,
         "candidates": selected_candidates,
         "comparisons": selected_results,
+        "synchronization": synchronization_summary,
         "checks": selected_checks,
     }
     multi_camera_consistency = ranking.get("multi_camera_consistency")
@@ -4250,6 +5278,7 @@ def _canonical_reports(
         "profiles": all_profile_values,
         "solutions": selected_candidates,
         "comparisons": selected_results,
+        "synchronization": synchronization_summary,
         "checks": candidate_report["checks"],
     }
     if "multi_camera_consistency" in candidate_report:
@@ -4270,6 +5299,7 @@ def _canonical_reports(
             "explicit_selection_required": True,
             "joint_bundle_id": promotion_request.get("joint_bundle_id"),
         },
+        "synchronization": synchronization_summary,
         "promotion": {
             "requested": True,
             "promoted": True,

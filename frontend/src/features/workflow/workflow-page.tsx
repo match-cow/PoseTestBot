@@ -112,6 +112,69 @@ function artifactComplete(overview: Overview | undefined, path: string) {
   return Boolean(item?.exists && ["complete", "succeeded", "ok", "warning", "valid", "ready"].includes(item.status ?? ""))
 }
 
+function signedMilliseconds(value: number) {
+  const normalized = Math.abs(value) < 0.0005 ? 0 : value
+  return `${normalized >= 0 ? "+" : ""}${normalized.toFixed(3)} ms`
+}
+
+function CalibrationSyncPolicy({ configured, calibrationSync }: { configured: boolean; calibrationSync: Overview["calibration_sync"] | undefined }) {
+  const status = configured ? calibrationSync?.status ?? "error" : "not_configured"
+  const ready = status === "ready"
+  const failure = configured && !ready
+    ? status === "error"
+      ? calibrationSync?.error ?? "The selected calibration timing policy could not be verified."
+      : "The selected calibration snapshot does not contain a usable automatic timing policy."
+    : null
+
+  return <Card data-testid="calibration-sync-policy" className={ready ? "border-success/30 bg-success/5" : failure ? "border-destructive/35 bg-destructive/5" : "border-dashed"}>
+    <CardHeader className="pb-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <CardTitle className="flex flex-wrap items-center gap-2 text-base">
+            Automatic calibration timing
+            <StatusBadge status={ready ? "ready" : failure ? "error" : "not_configured"}>{ready ? "ready" : failure ? "blocked" : "not configured"}</StatusBadge>
+          </CardTitle>
+          <CardDescription className="mt-1 max-w-4xl leading-relaxed">
+            {ready
+              ? "The per-camera offsets, timestamp sources, and match limits below are part of the selected hash-bound calibration. Dataset synchronization reuses them automatically."
+              : failure
+                ? "This dataset cannot use the selected calibration until its saved timing contract is valid."
+                : "Select a published calibration to load its saved per-camera synchronization policy."}
+          </CardDescription>
+        </div>
+        {ready && calibrationSync?.bundle_sha256 && <div className="shrink-0 text-right text-[10px] text-muted-foreground"><div className="font-semibold uppercase tracking-wide">Calibration bundle</div><div className="mt-1 font-mono">{calibrationSync.bundle_sha256.slice(0, 16)}…</div></div>}
+      </div>
+    </CardHeader>
+    <CardContent>
+      {failure && <div role="alert" className="rounded-md border border-destructive/30 bg-background/70 p-3 text-xs leading-relaxed text-destructive">{failure}</div>}
+      {ready && calibrationSync && <div className="space-y-3">
+        <div className="overflow-x-auto rounded-lg border bg-background">
+          <table className="w-full min-w-[760px] text-left text-[11px]">
+            <caption className="sr-only">Hash-bound automatic synchronization policy for each selected camera</caption>
+            <thead className="bg-muted/60 text-muted-foreground">
+              <tr>
+                <th scope="col" className="px-3 py-2">Camera and profile</th>
+                <th scope="col" className="px-3 py-2"><span className="inline-flex items-center gap-1">Robot-pose time offset <HelpTip label="robot-pose time offset">Positive means pair the frame with a robot pose recorded later. The raw timestamps are never changed.</HelpTip></span></th>
+                <th scope="col" className="px-3 py-2"><span className="inline-flex items-center gap-1">Timestamp pair <HelpTip label="calibration timestamp pair">The exact frame and robot clock fields required by this camera profile. A required camera clock domain must match, and fallback is rejected unless the profile explicitly allows it.</HelpTip></span></th>
+                <th scope="col" className="px-3 py-2"><span className="inline-flex items-center gap-1">Maximum pose gap <HelpTip label="maximum robot-pose gap">A frame is excluded when its nearest robot pose is farther away than this limit.</HelpTip></span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {calibrationSync.sensors.map((sensor) => <tr key={sensor.sensor_key} className="border-t">
+                <td className="px-3 py-2.5"><div className="font-semibold">{sensor.sensor_name}</div><div className="mt-0.5 font-mono text-[9px] text-muted-foreground">{sensor.sensor_key} · {sensor.profile_id}</div><div className="mt-0.5 font-mono text-[9px] text-muted-foreground">{sensor.sensor_folder}</div></td>
+                <td className="px-3 py-2.5 font-mono tabular-nums">{signedMilliseconds(sensor.robot_pose_time_offset_ms)}</td>
+                <td className="px-3 py-2.5"><div className="font-mono text-[10px]">{sensor.frame_timestamp_source}<span className="px-1 text-muted-foreground">→</span>{sensor.robot_timestamp_source}</div><div className="mt-0.5 text-[9px] text-muted-foreground">domain {sensor.required_frame_timestamp_domain ?? "shared host clock"} · fallback {sensor.timestamp_fallback_allowed ? "allowed" : "forbidden"}</div></td>
+                <td className="px-3 py-2.5 font-mono tabular-nums">{sensor.max_nearest_pose_delta_ms.toFixed(3)} ms</td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">Profile identity and timing provenance are checked again before export.</p>
+      </div>}
+    </CardContent>
+  </Card>
+}
+
 export function WorkflowPage() {
   const { phase } = useParams()
   const navigate = useNavigate()
@@ -157,7 +220,7 @@ export function WorkflowPage() {
     <Card className="border-dashed"><CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="text-sm font-semibold">Need an individual implementation stage?</div><p className="mt-1 text-xs text-muted-foreground">Advanced tools retain direct stage controls for diagnostics and recovery.</p></div><Button asChild variant="outline"><Link to="/workflow/advanced"><Settings2 aria-hidden="true" />Open Advanced tools</Link></Button></CardContent></Card>
   </div>
 
-  if (overview.isPending || config.isPending) return <div className="space-y-6"><Skeleton className="h-24" /><div className="grid gap-5 xl:grid-cols-[270px_minmax(0,1fr)]"><Skeleton className="h-96" /><div className="space-y-4"><Skeleton className="h-28" /><Skeleton className="h-80" /></div></div></div>
+  if (overview.isPending) return <div className="space-y-6"><Skeleton className="h-24" /><div className="grid gap-5 xl:grid-cols-[270px_minmax(0,1fr)]"><Skeleton className="h-96" /><div className="space-y-4"><Skeleton className="h-28" /><Skeleton className="h-80" /></div></div></div>
 
   const runConfig = config.data?.config ?? overview.data?.config ?? null
   const preflight = config.data?.preflight
@@ -173,11 +236,23 @@ export function WorkflowPage() {
   const syncComplete = syncQualityComplete
   const rectificationComplete = artifactComplete(overview.data, "camera_rectification_report.json")
   const calibrationPublished = localCalibration
-  const datasetCalibrationSelected = Boolean(
+  const datasetCalibrationSnapshotConfigured = Boolean(
     runConfig?.calibration_profiles
     && runConfig?.intrinsic_calibration_profiles
     && runConfig?.calibration_profile_selection?.bundle_sha256,
   )
+  const calibrationSync = overview.data?.calibration_sync
+  const datasetCalibrationSelected = Boolean(
+    datasetCalibrationSnapshotConfigured
+    && calibrationSync?.status === "ready",
+  )
+  const calibrationRequirementDescription = !datasetCalibrationSnapshotConfigured
+    ? "Choose a previously published calibration that matches every enabled camera."
+    : calibrationSync?.status === "ready"
+      ? `${calibrationSync.sensors.length} per-camera timing ${calibrationSync.sensors.length === 1 ? "policy is" : "policies are"} hash-bound, verified, and ready for automatic reuse.`
+      : calibrationSync?.status === "error"
+        ? `The selected calibration timing contract is invalid: ${calibrationSync.error ?? "verification failed without an error message."}`
+        : "The calibration snapshot is selected, but its saved automatic timing policy is not configured."
   const bopComplete = artifactComplete(overview.data, "bop/bop_export_manifest.json")
 
   const calibrationRequirements: WorkflowRequirement[] = [
@@ -188,13 +263,13 @@ export function WorkflowPage() {
   const calibrationReady = readinessSatisfied(preflight, calibrationRequirements)
   const calibrationStatuses = stepStatuses([configSaved, targetSelected, calibrationReady, captureComplete, calibrationPublished])
   const calibrationSteps: WorkflowStepDefinition[] = calibrationOutline.map((title, index) => ({
-    id: ["configure", "target", "readiness", "capture", "calculate"][index], number: index + 1, title, summary: ["Choose camera identities and acquisition settings.", "Bind the physical printed board to this run.", "Resolve all blockers in one place.", "Open cameras and authorize supervised robot motion.", "Compare candidates and explicitly publish profiles."][index], status: calibrationStatuses[index], required: true,
+    id: ["configure", "target", "readiness", "capture", "calculate"][index], number: index + 1, title, summary: ["Choose camera identities and acquisition settings.", "Bind the physical printed board to this run.", "Resolve all blockers in one place.", "Open cameras and authorize supervised robot motion.", "Estimate time alignment, compare candidates, and explicitly publish profiles."][index], status: calibrationStatuses[index], required: true,
   }))
 
   const datasetRequirements: WorkflowRequirement[] = [
     { id: "config", label: "Run configuration", description: configSaved ? "The dataset run configuration is saved." : "Save the dataset run and camera configuration first.", status: configSaved ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Open step 1" },
     { id: "cameras", label: "At least one enabled camera", description: enabledCameras.length ? `${enabledCameras.length} camera${enabledCameras.length === 1 ? " is" : "s are"} enabled for this dataset.` : "No camera is enabled for capture.", status: enabledCameras.length ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Choose cameras" },
-    { id: "calibration", label: "Hash-bound calibration snapshot selected", description: datasetCalibrationSelected ? "Both profile files and their hash-bound selection record are configured for this run. Readiness will revalidate them." : "Choose a previously published calibration that matches every enabled camera.", status: datasetCalibrationSelected ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Select calibration" },
+    { id: "calibration", label: "Calibration geometry and automatic timing verified", description: calibrationRequirementDescription, status: datasetCalibrationSelected ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Review calibration" },
     { id: "template", label: "Object placement confirmed", description: templateSelected ? "The immutable object template and measured placement are confirmed." : "Select an immutable pose template and confirm its measured physical placement.", status: templateSelected ? "met" : "missing", onFix: () => selectStep("template"), fixLabel: "Choose object template" },
   ]
   const datasetReady = readinessSatisfied(preflight, datasetRequirements)
@@ -222,7 +297,7 @@ export function WorkflowPage() {
       <CaptureGate intent="calibration" readiness={{ ready: calibrationReady, onReview: () => selectStep("readiness") }} />
     </WorkflowStepCard>
 
-    <WorkflowStepCard id="calculate" number={5} title="Calculate, review, and publish" description="Process the captured grid observations, review the recommendation for every camera, and explicitly publish only passing profiles." status={calibrationStatuses[4]} help="Publishing is deliberate: calculated candidates remain inactive until you accept the reviewed recommendations.">
+    <WorkflowStepCard id="calculate" number={5} title="Calculate, review, and publish" description="Estimate camera/robot time alignment, process the captured grid observations, review every camera, and explicitly publish only passing profiles." status={calibrationStatuses[4]} help="Publishing is deliberate: calculated candidates remain inactive until you accept the reviewed recommendations.">
       <Card className="border-primary/25 bg-primary/5"><CardContent className="py-4 text-xs leading-relaxed"><div className="flex items-center gap-2 font-semibold">Factory and OpenCV intrinsics <HelpTip label="Factory and OpenCV intrinsics">Factory is the per-camera projection supplied by the camera SDK. OpenCV is a new model fitted from this run's grid observations. Existing means an exact compatible profile was already available.</HelpTip></div><p className="mt-1 text-muted-foreground"><strong className="text-foreground">Factory</strong> stays selected when its projection is compatible. The fitted <strong className="text-foreground">OpenCV</strong> model is comparison and fallback evidence; it is activated only when factory projection is unusable and all coverage, held-out, plausibility, and error checks pass. A lower RMS alone does not make it the preferred model.</p></CardContent></Card>
       <CalibrationWorkflow />
     </WorkflowStepCard>
@@ -231,7 +306,8 @@ export function WorkflowPage() {
   if (page === "dataset") {
     return <JourneyShell journey="dataset" steps={datasetSteps} selectedStep={selectedStep} onSelectStep={selectStep}>
       <WorkflowStepCard id="configure" number={1} title="Configure cameras and select calibration" description="Choose the cameras for this recording and select a published calibration made for those exact camera identities and acquisition settings." status={datasetStatuses[0]} help="A calibration profile maps camera pixels into the shared robot/template coordinate system. It is required for an object dataset.">
-        <Card className={datasetCalibrationSelected ? "border-success/30" : "border-destructive/30"}><CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2 font-semibold">Hash-bound calibration snapshot <StatusBadge status={datasetCalibrationSelected ? "configured" : "missing"} /></div><p className="mt-1 text-xs text-muted-foreground">{datasetCalibrationSelected ? `Bundle ${runConfig?.calibration_profile_selection?.bundle_sha256.slice(0, 16)}… is bound to both run-owned profile files. Step 3 revalidates it.` : "Required: select and validate a previously published calibration below."}</p></div><HelpTip label="hash-bound calibration snapshot">Use profiles promoted from a completed camera-calibration workflow. PoseTestBot copies both profile files into this run and records their hashes; readiness then rechecks the snapshot and every enabled camera.</HelpTip></CardContent></Card>
+        <Card className={datasetCalibrationSnapshotConfigured ? "border-success/30" : "border-destructive/30"}><CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2 font-semibold">Selected calibration snapshot <StatusBadge status={datasetCalibrationSnapshotConfigured ? "configured" : "missing"} /></div><p className="mt-1 text-xs text-muted-foreground">{datasetCalibrationSnapshotConfigured ? `Bundle ${runConfig?.calibration_profile_selection?.bundle_sha256.slice(0, 16)}… is copied into this run. Geometry and timing are revalidated before capture and export.` : "Required: select and validate a previously published calibration below."}</p></div><HelpTip label="selected calibration snapshot">PoseTestBot copies both profile files into this run and records their hashes, so later source-run changes cannot alter the dataset. Readiness rechecks every enabled camera and its saved time-alignment policy.</HelpTip></CardContent></Card>
+        <CalibrationSyncPolicy configured={datasetCalibrationSnapshotConfigured} calibrationSync={calibrationSync} />
         <RunSetup intent="object_dataset" />
       </WorkflowStepCard>
 
@@ -248,7 +324,8 @@ export function WorkflowPage() {
         <CaptureGate intent="dataset" readiness={{ ready: datasetReady, onReview: () => selectStep("readiness") }} />
       </WorkflowStepCard>
 
-      <WorkflowStepCard id="sync" number={5} title="Synchronize and verify frames" description="Create derived synchronized frames, then pass the timing and match-quality gate. Raw captures are never renamed or deleted." status={datasetStatuses[4]} help="Synchronization matches each camera frame with a robot pose. The quality check catches missing matches, excessive time deltas, and incompatible timestamp sources.">
+      <WorkflowStepCard id="sync" number={5} title="Synchronize and verify frames" description="Create derived frame-to-pose matches with the selected calibration timing, then verify their quality. Raw captures remain unchanged." status={datasetStatuses[4]} help="The quality gate rejects missing matches, excessive pose gaps, incompatible timestamps, and calibration-provenance mismatches.">
+        <Card data-testid="dataset-sync-timing-contract" className={datasetCalibrationSelected ? "border-primary/30 bg-primary/5" : "border-destructive/30 bg-destructive/5"}><CardContent className="flex items-start gap-3 py-4"><Database aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-primary-strong" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2 text-sm font-semibold">Calibration timing <StatusBadge status={datasetCalibrationSelected ? "ready" : "blocked"} /><HelpTip label="automatic calibration timing">Processing uses the per-camera offset, timestamp fields, clock-domain rule, and pose-gap limit shown in Step 1. Manual values and generic defaults cannot override them, and export rechecks the evidence.</HelpTip></div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{datasetCalibrationSelected ? "The selected per-camera timing policy will be applied and verified automatically." : "Return to Step 1 and select a calibration with valid timing for every enabled camera."}</p></div></CardContent></Card>
         <DatasetProcessing runRoot={selectedRun} ready={datasetReady} captureComplete={captureComplete} syncComplete={syncComplete} syncQualityComplete={syncQualityComplete} calibrationComplete={rectificationComplete} exportComplete={bopComplete} onReviewReadiness={() => selectStep("readiness")} />
       </WorkflowStepCard>
 

@@ -78,6 +78,13 @@ Intent-level calculation snapshots the bundle below
 raw capture data are never replaced. Only explicit recommendation acceptance
 copies the selected evidence and bundle into canonical run artifacts.
 
+Calibration calculation also binds its selected target snapshot to the
+per-camera Auto time-alignment evidence; neither target geometry nor raw
+timestamps are rewritten. The operator behavior and dataset handoff are
+documented in [OPERATOR_WORKFLOWS.md](OPERATOR_WORKFLOWS.md), while the
+algorithm limits and real replay are retained in
+[EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
+
 `calibration_target.v2` makes the compensated `corners_mm` for every marker
 authoritative. The target frame is `aruco_grid`, its origin is the compensated
 outer board top-left, +X points right, +Y down, and +Z into the page. Consumers
@@ -138,7 +145,9 @@ The intent-level calculation façade consumes those saved bundles through:
 
 Attempt creation records stable sensor keys and queues one `cpu`/`disk_io`
 parent job. Promotion is a separate queued transaction and requires passing
-recommendations or explicit passing candidate IDs.
+recommendations or explicit passing candidate IDs. The parent job has five
+operator-visible phases: prepare data, estimate target poses, estimate time
+alignment, compare robot-camera solutions, and validate/rank.
 
 Request bodies are capped at 256 KiB. Generation queues `cpu` and `disk_io`;
 selection queues `disk_io`. Commands use fixed argument arrays and appear in

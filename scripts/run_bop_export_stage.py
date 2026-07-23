@@ -217,6 +217,22 @@ def main() -> None:
                 run_root,
                 expected_calibration_profiles=calibration_profiles_path,
             )
+            from posetestbot.sync.calibration_policy import (
+                resolve_calibration_profile_sync_policy,
+            )
+            from posetestbot.sync.quality import (
+                verify_profile_bound_sync_evidence,
+            )
+
+            calibration_sync_policy = resolve_calibration_profile_sync_policy(run_root)
+            if calibration_sync_policy is None:
+                raise ValueError(
+                    "Selected calibration is not bound to a synchronization policy"
+                )
+            verify_profile_bound_sync_evidence(
+                run_root,
+                calibration_sync_policy,
+            )
         if output_folder.exists() and not args.overwrite:
             raise FileExistsError(
                 f"BOP dataset already exists: {output_folder}; pass --overwrite"

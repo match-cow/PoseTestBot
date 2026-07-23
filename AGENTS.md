@@ -177,10 +177,10 @@ Do not reintroduce downstream estimator/evaluator behavior here:
   later source-run change cannot alter the dataset run.
 - Intent-level calibration attempts live under
   `processed/calibration/<attempt_id>/` and retain `request.json`,
-  `progress.json`, `intrinsic_comparison.json`, `pnp_candidates.json`,
-  `extrinsic_candidates.json`, `ranking.json`, `checks.json`,
-  `candidate_profiles.json`, the selected target bundle, and explicit promotion
-  evidence.
+  `progress.json`, `intrinsic_comparison.json`, `time_offset_search.json`,
+  `pnp_candidates.json`, `extrinsic_candidates.json`, `ranking.json`,
+  `checks.json`, `candidate_profiles.json`, the selected target bundle, and
+  explicit promotion evidence.
 - BlenderProc render plan artifact: `blenderproc_render_plan.json`.
 - Workpiece Catalogue artifacts: global
   `object_catalog/object_catalog.json`, retained UUID-addressed assets below

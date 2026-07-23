@@ -47,6 +47,8 @@ from posetestbot.io.artifacts import (
     DEPTH_DIR,
     FRAME_METADATA_JSONL,
     RGB_DIR,
+    SYNC_QUALITY_REPORT,
+    TIME_OFFSET_SEARCH,
 )
 from posetestbot.pipeline.run_config import (
     create_run_config,
@@ -103,6 +105,122 @@ def _write_capture_folder(path: Path) -> None:
     )
 
 
+def _write_fixed_zero_time_offset_evidence(
+    run_root: Path,
+    request_value: dict,
+) -> tuple[dict, str]:
+    """Write the report-backed timing evidence required by promotion."""
+
+    attempt_id = request_value["attempt_id"]
+    attempt_root = attempt_module.calibration_attempt_root(run_root, attempt_id)
+    source_reference = attempt_module._attempt_artifact_reference(
+        attempt_id,
+        TIME_OFFSET_SEARCH,
+    )
+    sensor_results = []
+    quality_sensors = []
+    observations = []
+    per_sensor_offsets = {}
+    for sensor in request_value["sensors"]:
+        sensor_key = sensor["sensor_key"]
+        result = attempt_module.fixed_zero_sensor_result(
+            sensor_key=sensor_key,
+            observation_count=1,
+        )
+        result.update(
+            {
+                "display_name": sensor.get("display_name"),
+                "sensor_name": sensor["sensor_name"],
+            }
+        )
+        sensor_results.append(result)
+        quality_sensors.append(
+            {
+                "sensor_name": sensor["sensor_name"],
+                "sensor_type": sensor["sensor_type"],
+                "sync_delta_ms": 0.0,
+            }
+        )
+        per_sensor_offsets[sensor_key] = {
+            "robot_pose_time_offset_ms": 0.0,
+            "sync_delta_ms": 0.0,
+            "status": "fixed_zero",
+        }
+        observations.append(
+            {
+                "observation_id": f"{sensor_key}:IPPE:1000.png",
+                "sensor_type": sensor["sensor_type"],
+                "device_id": sensor["device_id"],
+                "robot_pose_time_offset_ms": 0.0,
+                "sync_delta_ms": 0.0,
+                "timestamp_alignment": {
+                    "source": source_reference,
+                    "frame_timestamp_ns": 10_000_000_000,
+                    "robot_pose_query_timestamp_ns": 10_000_000_000,
+                    "robot_pose_time_offset_ms": 0.0,
+                    "sync_delta_ms": 0.0,
+                    "matched_robot_pose_index": 0,
+                    "robot_timestamp_ns": 10_000_000_000,
+                    "nearest_robot_delta_ns": 0,
+                },
+            }
+        )
+
+    report = {
+        "schema_version": attempt_module.TIME_OFFSET_SEARCH_SCHEMA_VERSION,
+        "attempt_id": attempt_id,
+        "policy": "fixed_zero",
+        "implementation_revision": request_value[
+            "synchronization_implementation_revision"
+        ],
+        "offset_kind": "effective_capture_and_pose_pipeline_latency",
+        "sign_convention": attempt_module.time_offset_sign_convention(),
+        "search": request_value["synchronization_search"],
+        "status": "complete",
+        "sensor_count": len(sensor_results),
+        "failed_sensor_keys": [],
+        "sensors": sensor_results,
+    }
+    (attempt_root / TIME_OFFSET_SEARCH).write_text(json.dumps(report))
+    (attempt_root / SYNC_QUALITY_REPORT).write_text(
+        json.dumps(
+            {
+                "schema_version": "sync_quality_report.v2",
+                "run_root": run_root.as_posix(),
+                "overall_status": "ok",
+                "sensor_count": len(quality_sensors),
+                "checks": [],
+                "sensors": quality_sensors,
+                "calibration_attempt_policy": {
+                    "purpose": "authoritative_calibration_solver_pairing",
+                    "synchronization_policy": "fixed_zero",
+                    "time_offset_search": source_reference,
+                    "sign_convention": attempt_module.time_offset_sign_convention(),
+                    "per_sensor_offsets": per_sensor_offsets,
+                    "historical_per_sensor_offsets_allowed": False,
+                    "auto_estimated_per_sensor_offsets": False,
+                },
+            }
+        )
+    )
+    (attempt_root / CALIBRATION_OBSERVATIONS).write_text(
+        json.dumps(
+            {
+                "schema_version": "calibration_observations.v1",
+                "run_root": run_root.as_posix(),
+                "attempt_id": attempt_id,
+                "overall_status": "ok",
+                "sensor_count": len(sensor_results),
+                "observation_count": len(observations),
+                "time_offset_search": source_reference,
+                "synchronization_policy": "fixed_zero",
+                "observations": observations,
+            }
+        )
+    )
+    return report, source_reference
+
+
 def _profile(
     *,
     profile_id: str,
@@ -115,6 +233,7 @@ def _profile(
     observation_count: int = 8,
     inlier_count: int = 8,
     outlier_ratio: float = 0.0,
+    sync_delta_ms: float | None = None,
 ) -> CalibrationProfile:
     intrinsics = CameraIntrinsics(
         cam_k=(600.0, 0.0, 4.0, 0.0, 600.0, 4.0, 0.0, 0.0, 1.0),
@@ -151,6 +270,7 @@ def _profile(
             residual_translation_mm=0.5,
             residual_rotation_deg=0.25,
         ),
+        sync_delta_ms=sync_delta_ms,
         metadata={
             "candidate_id": candidate_id,
             "sensor_key": f"{sensor_type.value}:{sensor_id}",
@@ -285,6 +405,166 @@ def test_promotion_outlier_evidence_rejects_tampered_aggregate() -> None:
         )
 
 
+def _report_backed_fixed_zero_attempt(tmp_path: Path) -> tuple[dict, Path]:
+    run_root = tmp_path / "run"
+    attempt_id = "a" * 32
+    attempt_root = attempt_module.calibration_attempt_root(run_root, attempt_id)
+    attempt_root.mkdir(parents=True)
+    request_value = {
+        "attempt_id": attempt_id,
+        "run_root": run_root.as_posix(),
+        "sensor_keys": ["realsense_d435:1"],
+        "sensors": [
+            {
+                "sensor_key": "realsense_d435:1",
+                "sensor_name": "realsense_1",
+                "sensor_type": "realsense_d435",
+                "device_id": "1",
+                "display_name": "D435",
+            }
+        ],
+        "synchronization_policy": "fixed_zero",
+        "synchronization_search": attempt_module.time_offset_search_configuration(),
+        "synchronization_implementation_revision": (
+            attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+        ),
+    }
+    report, _ = _write_fixed_zero_time_offset_evidence(run_root, request_value)
+    return {
+        "attempt_id": attempt_id,
+        "run_root": run_root.as_posix(),
+        "request": request_value,
+        "time_offset_search": report,
+    }, attempt_root
+
+
+def test_report_backed_fixed_zero_time_offset_evidence_is_promotable(
+    tmp_path: Path,
+) -> None:
+    attempt, _ = _report_backed_fixed_zero_attempt(tmp_path)
+
+    evidence = attempt_module._promotion_time_offset_evidence(attempt)
+
+    assert set(evidence) == {"realsense_d435:1"}
+    assert evidence["realsense_d435:1"]["status"] == "fixed_zero"
+    assert evidence["realsense_d435:1"]["selected_sync_delta_ms"] == 0.0
+
+
+def test_report_backed_applied_auto_offset_evidence_is_promotable(
+    tmp_path: Path,
+) -> None:
+    attempt, attempt_root = _report_backed_fixed_zero_attempt(tmp_path)
+    sensor_key = "realsense_d435:1"
+    attempt["request"]["synchronization_policy"] = "auto_offset"
+    report = attempt["time_offset_search"]
+    report["policy"] = "auto_offset"
+    sensor = report["sensors"][0]
+    sensor.update(
+        {
+            "status": "applied",
+            "decision": "auto_offset_applied",
+            "selected_robot_pose_time_offset_ms": 75.0,
+            "selected_sync_delta_ms": -75.0,
+            "candidate_robot_pose_time_offset_ms": 75.0,
+            "candidate_sync_delta_ms": -75.0,
+            "boundary_hit": False,
+            "checks": [
+                {"name": name, "status": "ok"}
+                for name in (
+                    "fixed_full_range_observation_set",
+                    "cross_validation_offset_stability",
+                    "reference_method_sensitivity",
+                    "search_optimum_not_at_boundary",
+                    "cross_validated_translation_improvement",
+                    "cross_validated_rotation_guard",
+                    "zero_offset_identifiability",
+                )
+            ],
+        }
+    )
+
+    quality_path = attempt_root / SYNC_QUALITY_REPORT
+    quality = json.loads(quality_path.read_text())
+    quality["sensors"][0]["sync_delta_ms"] = -75.0
+    policy = quality["calibration_attempt_policy"]
+    policy["synchronization_policy"] = "auto_offset"
+    policy["auto_estimated_per_sensor_offsets"] = True
+    policy["per_sensor_offsets"][sensor_key] = {
+        "robot_pose_time_offset_ms": 75.0,
+        "sync_delta_ms": -75.0,
+        "status": "applied",
+    }
+    quality_path.write_text(json.dumps(quality))
+
+    observations_path = attempt_root / CALIBRATION_OBSERVATIONS
+    observations = json.loads(observations_path.read_text())
+    observations["synchronization_policy"] = "auto_offset"
+    observation = observations["observations"][0]
+    observation["robot_pose_time_offset_ms"] = 75.0
+    observation["sync_delta_ms"] = -75.0
+    observation["timestamp_alignment"]["robot_pose_time_offset_ms"] = 75.0
+    observation["timestamp_alignment"]["sync_delta_ms"] = -75.0
+    observations_path.write_text(json.dumps(observations))
+
+    evidence = attempt_module._promotion_time_offset_evidence(attempt)
+
+    assert evidence[sensor_key]["status"] == "applied"
+    assert evidence[sensor_key]["selected_robot_pose_time_offset_ms"] == 75.0
+    assert evidence[sensor_key]["selected_sync_delta_ms"] == -75.0
+
+
+@pytest.mark.parametrize(
+    ("tamper_mode", "error"),
+    [
+        ("report_sign", "sign evidence is inconsistent"),
+        ("quality_offset", "Authoritative synchronization offset is inconsistent"),
+        ("observation_source", "observation timing is inconsistent"),
+        ("unsupported_revision", "time-offset promotion evidence is invalid"),
+        ("non_string_revision", "time-offset promotion evidence is invalid"),
+    ],
+)
+def test_report_backed_fixed_zero_time_offset_tampering_blocks_promotion(
+    tmp_path: Path,
+    tamper_mode: str,
+    error: str,
+) -> None:
+    attempt, attempt_root = _report_backed_fixed_zero_attempt(tmp_path)
+    sensor_key = "realsense_d435:1"
+    if tamper_mode == "report_sign":
+        attempt["time_offset_search"]["sensors"][0]["selected_sync_delta_ms"] = 1.0
+    elif tamper_mode == "quality_offset":
+        path = attempt_root / SYNC_QUALITY_REPORT
+        value = json.loads(path.read_text())
+        value["calibration_attempt_policy"]["per_sensor_offsets"][sensor_key][
+            "sync_delta_ms"
+        ] = 1.0
+        path.write_text(json.dumps(value))
+    elif tamper_mode == "observation_source":
+        path = attempt_root / CALIBRATION_OBSERVATIONS
+        value = json.loads(path.read_text())
+        value["observations"][0]["timestamp_alignment"]["source"] = (
+            "processed/calibration/other/time_offset_search.json"
+        )
+        path.write_text(json.dumps(value))
+    elif tamper_mode == "unsupported_revision":
+        attempt["request"]["synchronization_implementation_revision"] = (
+            "unsupported_revision.v0"
+        )
+        attempt["time_offset_search"]["implementation_revision"] = (
+            "unsupported_revision.v0"
+        )
+    else:
+        attempt["request"]["synchronization_implementation_revision"] = [
+            attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+        ]
+        attempt["time_offset_search"]["implementation_revision"] = [
+            attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+        ]
+
+    with pytest.raises(ValueError, match=error):
+        attempt_module._promotion_time_offset_evidence(attempt)
+
+
 @pytest.mark.parametrize(
     "tamper_mode",
     [None, "candidate_profile_transform", "promotion_status_selection"],
@@ -355,10 +635,15 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
             "mode": "eye_in_hand",
             "sensor_keys": ["realsense_d435:1"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "fixed_zero",
         },
     )
     attempt_id = request_value["attempt_id"]
     attempt_root = run_root / "processed" / "calibration" / attempt_id
+    _, time_offset_source = _write_fixed_zero_time_offset_evidence(
+        run_root,
+        request_value,
+    )
     candidate_id = "realsense_d435:1|IPPE|park"
     candidate = _profile(
         profile_id="new_d435_profile",
@@ -370,7 +655,15 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         observation_count=21,
         inlier_count=12,
         outlier_ratio=3 / 15,
+        sync_delta_ms=0.0,
     )
+    synchronization = {
+        "source": time_offset_source,
+        "policy": "fixed_zero",
+        "status": "fixed_zero",
+        "robot_pose_time_offset_ms": 0.0,
+        "sync_delta_ms": 0.0,
+    }
     candidate = replace(
         candidate,
         intrinsics=replace(
@@ -378,8 +671,13 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
             distortion_model="inverse_brown_conrady",
             projection_source="realsense_sdk_color_stream",
         ),
+        metadata={
+            **candidate.metadata,
+            "synchronization": synchronization,
+        },
     )
     candidate_evidence = _motion_balanced_candidate(candidate_id)
+    candidate_evidence["synchronization"] = synchronization
     write_profile_collection([candidate], attempt_root / "candidate_profiles.json")
     intrinsic = factory_intrinsic_profile(run_root / "realsense_1")
     write_intrinsic_profile_collection(
@@ -389,11 +687,6 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
     write_intrinsic_profile_collection(
         [unrelated_intrinsic],
         run_root / "intrinsic_calibration_profiles.json",
-    )
-    (attempt_root / CALIBRATION_OBSERVATIONS).write_text(
-        json.dumps(
-            {"schema_version": "calibration_observations.v1", "observations": []}
-        )
     )
     (attempt_root / "extrinsic_candidates.json").write_text(
         json.dumps({"candidates": [candidate_evidence]})
@@ -492,6 +785,7 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
     assert promoted.operator == "test-operator"
     assert promoted.intrinsics.distortion_model == "inverse_brown_conrady"
     assert promoted.rectified_intrinsics is not None
+    assert promoted.sync_delta_ms == 0.0
     canonical = json.loads((run_root / CALIBRATION_PROFILES).read_text())
     promoted_value = next(
         item
@@ -504,6 +798,12 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         "solver_policy": "auto_compare",
         "pnp_method": "IPPE",
         "extrinsic_method": "park",
+    }
+    assert promoted.metadata["promotion_synchronization_provenance"] == {
+        "source": time_offset_source,
+        "status": "fixed_zero",
+        "robot_pose_time_offset_ms": 0.0,
+        "sync_delta_ms": 0.0,
     }
     config = load_run_config_for_run_root(run_root)
     sensors = {

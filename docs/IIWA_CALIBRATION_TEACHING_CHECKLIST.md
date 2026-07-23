@@ -168,19 +168,20 @@ and LL/LC/LR = lower-left/lower-center/lower-right.
 
 ## Capture Acceptance — Operator Run Only
 
-The retained 2026-07-22 repeat completed physical acquisition and eye-in-hand
-calibration for all three RealSense cameras. Attempt
-`12e6a40eff444b889870597b787bf016` promoted the complete `IPPE + Shah` bundle,
-with maximum three-camera stationary-target closure of 7.104 mm / 0.421° and
-passing 10/10 full-capture plus 3/3 calibration-validation gates. See the
-[dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md) for
-the run roots, transforms, intrinsic comparison, and candidate quality.
+The retained 2026-07-23 guided campaign completed three independent physical
+acquisition and eye-in-hand calibration journeys for all three RealSense
+cameras. All three historically produced complete common bundles, with worst
+observed stationary-target closure of 7.847 mm / 1.115°. Their reusable
+top-level profiles were later retired because they predate required Auto
+time-alignment provenance. See the
+[dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md) for
+the run roots, transforms, cross-run repeatability, intrinsic comparisons, and
+candidate quality.
 
-That retained run proves its recorded capture and calibration outcome. It does
+Those retained runs prove their recorded capture and calibration outcomes. They do
 not identify the exact deployed Sunrise application/revision or replace the
 Workbench compile, offline path, T1, and reviewer evidence required by this
-commissioning checklist. No iiwa `STOP` command was sent during the retained
-campaign.
+commissioning checklist. No iiwa `STOP` command was sent during the campaign.
 
 - [ ] Obtain explicit operator authorization.
 - [ ] Pass both PoseTestBot execution gates: `--allow-real-robot` and
@@ -225,8 +226,21 @@ campaign.
     outliers within any repeated motion; retain raw outlier density as evidence,
     not a promotion gate;
   - [ ] RealSense color `sensor_timestamp_ns` in SDK `global_time`, paired to
-    robot `host_wall_timestamp_ns`, with zero manual offset, no timestamp
-    fallback, and at most 20 ms nearest-pose delta.
+    robot `host_wall_timestamp_ns`, with no timestamp fallback and at most
+    20 ms nearest-pose delta.
+- [ ] Select and retain an explicit synchronization policy. For the recommended
+  `auto_offset` policy, require at least nine eligible motion groups, three
+  fixed motion-disjoint folds, an interior/stable optimum, identifiable timing,
+  material translation improvement in every fold, and a passing rotation
+  guard. Review the complete `time_offset_search.json`; a failed search must
+  block the attempt. Use `fixed_zero` only as a deliberate captured-timestamp
+  baseline.
+- [ ] Verify the time-offset sign before promotion:
+  `robot_pose_query_time = frame_time + robot_pose_time_offset_ms` and
+  `sync_delta_ms = -robot_pose_time_offset_ms`. Positive operator values use a
+  later robot record. Treat the result as constant effective pipeline latency,
+  not hardware-clock synchronization; it uses robot motion and
+  stationary-target closure and does not require a known target placement.
 - [ ] For two or more enabled cameras estimating the same stationary companion
   frame, require one complete bundle with the same PnP and extrinsic methods
   for every camera. Require every candidate to pass and maximum pairwise
@@ -244,9 +258,9 @@ campaign.
   1.230/0.964 px and promoted mean reprojection is 1.040 px. Trajectory
   variance was not treated as a correction.
 - [ ] Revalidate metric depth on RealSense `923322072633` after cable/firmware
-  maintenance. The promoted RGB extrinsic remains valid, but saved depth-plane
-  checks showed a range-dependent scale anomaly and factory depth
-  scale/alignment is explicitly not recalibrated.
+  maintenance. Historical RGB extrinsic evidence remains in the attempt, but
+  saved depth-plane checks showed a range-dependent scale anomaly and factory
+  depth scale/alignment is explicitly not recalibrated.
 
 The retained repeat's promoted candidate quality is summarized below. These
 artifact-derived values are historical run evidence, not substitutes for the
@@ -254,9 +268,9 @@ blank operator/reviewer commissioning fields in this document.
 
 | Camera / serial | Observations / inliers | Mean reprojection | Held-out translation | Held-out rotation |
 | --- | ---: | ---: | ---: | ---: |
-| RealSense `033422071805` | 606 / 605 | 1.183 px | 3.052 mm | 0.628° |
-| RealSense `825412070181` | 608 / 608 | 1.040 px | 3.241 mm | 0.473° |
-| RealSense `923322072633` | 610 / 610 | 1.095 px | 3.226 mm | 0.425° |
+| RealSense `033422071805` | 513 / 513 | 1.215 px | 3.440 mm | 0.712° |
+| RealSense `825412070181` | 511 / 511 | 1.049 px | 3.702 mm | 0.569° |
+| RealSense `923322072633` | 509 / 509 | 1.114 px | 3.552 mm | 0.480° |
 
 ## Final Disposition
 
@@ -266,8 +280,8 @@ blank operator/reviewer commissioning fields in this document.
 | Offline commissioning approved | ☐ |
 | T1 commissioning approved | ☐ |
 | Supervised trial accepted | ☐ |
-| Latest three-camera calibration promotion | `12e6a40eff444b889870597b787bf016`, `IPPE + Shah`, 3 valid profiles |
-| Latest calibration-run rewrite gates | full capture 10/10; calibration validation 3/3 |
+| Reusable three-camera calibration | None; publish a fresh Auto time-aligned calibration |
+| Historical calibration attempt | `f1e990d3424a48ed95b266f7bf134838`, `ITERATIVE + Shah` |
 | Metric-depth disposition | `923322072633` depth-specific validation pending |
 | Frames requiring retouch | |
 | Paths invalidated by retouch | |

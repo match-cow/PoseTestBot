@@ -1044,24 +1044,66 @@ def build_full_capture_gate_report(run_root: str | Path) -> dict[str, Any]:
         )
     checks.append(check)
 
-    check, capture_plan_preflight = _json_file_check(
-        "capture_plan_preflight",
-        root / CAPTURE_PLAN_PREFLIGHT_REPORT,
+    capture_plan_preflight_path = root / CAPTURE_PLAN_PREFLIGHT_REPORT
+    capture_plan_preflight, capture_plan_preflight_error = _load_json_object(
+        capture_plan_preflight_path
     )
+    capture_plan_preflight_source = CAPTURE_PLAN_PREFLIGHT_REPORT
+    if capture_plan_preflight_error == "missing":
+        embedded_plan, embedded_plan_error = _load_json_object(
+            root / CAPTURE_EXECUTION_PLAN
+        )
+        embedded_preflight = (
+            embedded_plan.get("preflight_report")
+            if embedded_plan_error is None and embedded_plan is not None
+            else None
+        )
+        if (
+            isinstance(embedded_preflight, dict)
+            and embedded_preflight.get("schema_version")
+            == "capture_plan_preflight.v1"
+            and embedded_plan.get("preflight_status")
+            == _status_value(embedded_preflight)
+        ):
+            capture_plan_preflight = embedded_preflight
+            capture_plan_preflight_error = None
+            capture_plan_preflight_path = root / CAPTURE_EXECUTION_PLAN
+            capture_plan_preflight_source = (
+                f"{CAPTURE_EXECUTION_PLAN}:preflight_report"
+            )
+    if capture_plan_preflight_error is not None:
+        check = _check(
+            name="capture_plan_preflight",
+            path=capture_plan_preflight_path,
+            ok=False,
+            message=(
+                f"{CAPTURE_PLAN_PREFLIGHT_REPORT} is "
+                f"{capture_plan_preflight_error}."
+            ),
+        )
+    else:
+        check = _check(
+            name="capture_plan_preflight",
+            path=capture_plan_preflight_path,
+            ok=True,
+            message="Capture-plan preflight evidence exists and is valid JSON.",
+            details={"source": capture_plan_preflight_source},
+        )
     if capture_plan_preflight is not None:
         status = _status_value(capture_plan_preflight)
         ok = status in {"ok", "warning", "ready", "succeeded"}
         check = _check(
             name="capture_plan_preflight",
-            path=root / CAPTURE_PLAN_PREFLIGHT_REPORT,
+            path=capture_plan_preflight_path,
             ok=ok,
             message=(
-                "capture_plan_preflight_report.json has acceptable status."
+                "Capture-plan preflight evidence has acceptable status."
                 if ok
-                else "capture_plan_preflight_report.json must be ok or warning."
+                else "Capture-plan preflight evidence must be ok or warning."
             ),
             details={
                 "status": status,
+                "source": capture_plan_preflight_source,
                 "error_checks": _report_problem_checks(capture_plan_preflight),
                 "sensor_diagnostics": _sensor_diagnostics_from_report(
                     capture_plan_preflight

@@ -88,7 +88,9 @@ calibration has been promoted.
    cannot silently alter this dataset run. Switching an existing selection
    requires an explicit confirmation and a matching current bundle hash. Once
    capture or derived dataset material exists, start a new run instead of
-   rebinding that evidence to another calibration.
+   rebinding that evidence to another calibration. The selected profiles must
+   also contain a verified per-camera robot-pose time offset, timestamp pair,
+   clock-domain/fallback rule, and maximum pose gap.
 2. **Choose the object template and placement — required.** Select the immutable
    printed pose-template version that is physically present, enter its measured
    pose in `template_base`, and confirm the placement. Creating or editing
@@ -103,12 +105,14 @@ calibration has been promoted.
    as confirmed, clear the cell, and explicitly authorize supervised capture.
    The selected calibration and template are provenance; they do not authorize
    hardware by themselves.
-5. **Synchronize and verify frames — required.** Match camera frames to robot
-   poses in `processed/synchronized/`, run the sync-quality gate, and rectify
-   calibrated RGB-D into derived output when required by the configured output
-   sequence. Per-camera `sync_report.json` files remain with their derived
-   folders; `sync_quality_report.json` is the validated run-level completion
-   evidence. The original capture remains untouched.
+5. **Synchronize and verify frames — required.** PoseTestBot applies each
+   selected profile's saved timing automatically; manual values and generic
+   defaults cannot override it. It writes derived frame-to-pose matches below
+   `processed/synchronized/` and rejects missing matches, excessive pose gaps,
+   incompatible timestamps, or calibration-provenance differences.
+   Per-camera `sync_report.json` files and the run-level
+   `sync_quality_report.json` retain the exact applied policy. Raw capture data
+   remains untouched.
 6. **Export the BOP dataset — required.** Revalidate the selected calibration
    and template identities, then write the BOP scenes, camera data, object
    poses, models, targets, frame map, and PoseTestBot provenance sidecars.

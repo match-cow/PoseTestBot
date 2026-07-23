@@ -30,10 +30,32 @@ export interface OverviewSection {
   artifacts: Array<{ path: string; exists: boolean; status: string | null }>
 }
 
+export interface CalibrationSyncSensor {
+  sensor_key: string
+  sensor_name: string
+  sensor_folder: string
+  profile_id: string
+  robot_pose_time_offset_ms: number
+  sync_delta_ms: number
+  frame_timestamp_source: string
+  robot_timestamp_source: string
+  required_frame_timestamp_domain: string | null
+  timestamp_fallback_allowed: boolean
+  max_nearest_pose_delta_ms: number
+}
+
+export interface CalibrationSyncOverview {
+  status: "not_configured" | "ready" | "error"
+  bundle_sha256?: string
+  sensors: CalibrationSyncSensor[]
+  error?: string
+}
+
 export interface Overview {
   run_root: string
   config: RunConfig | null
   config_error: string | null
+  calibration_sync: CalibrationSyncOverview
   sidebar: OverviewSection[]
   steps: Array<{
     index: number

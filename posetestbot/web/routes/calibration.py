@@ -99,6 +99,9 @@ def calibration_attempt_create_endpoint():
                     "mode": attempt["mode"],
                     "sensor_keys": list(attempt["sensor_keys"]),
                     "target_id": attempt["target_id"],
+                    "synchronization_policy": attempt[
+                        "synchronization_policy"
+                    ],
                 },
             )
         except ResourceBusyError as exc:

@@ -173,6 +173,18 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "compare_factory_opencv",
         "reuse_compatible_or_factory",
     ]
+    synchronization = payload["solver"]["synchronization"]
+    assert synchronization["default_policy"] == "auto_offset"
+    assert [item["id"] for item in synchronization["policies"]] == [
+        "auto_offset",
+        "fixed_zero",
+    ]
+    assert synchronization["search"]["minimum_robot_pose_time_offset_ms"] == -150.0
+    assert synchronization["search"]["maximum_robot_pose_time_offset_ms"] == 150.0
+    assert synchronization["search"]["step_ms"] == 5.0
+    assert synchronization["sign_convention"]["conversion"] == (
+        "sync_delta_ms = -robot_pose_time_offset_ms"
+    )
     assert payload["solver"]["thresholds"] == {
         "min_inliers": 6,
         "min_pnp_common_inliers": 12,
@@ -299,6 +311,13 @@ def test_attempt_submission_scopes_exact_cameras_and_queues_cpu_disk_parent_job(
     assert saved["sensor_keys"] == ["oak_d_pro:2"]
     assert [item["sensor_key"] for item in saved["sensors"]] == ["oak_d_pro:2"]
     assert saved["target_mounting"]["to"] == "robot_flange"
+    assert saved["synchronization_policy"] == "auto_offset"
+    assert saved["synchronization_search"] == (
+        attempt_module.time_offset_search_configuration()
+    )
+    assert saved["synchronization_implementation_revision"] == (
+        attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+    )
 
 
 def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
@@ -355,7 +374,10 @@ def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
     assert duplicate_method.status_code == 400
     assert "must not contain duplicates" in duplicate_method.get_json()["output"]
     assert mounting_mismatch.status_code == 400
-    assert "requires cameras configured as static" in mounting_mismatch.get_json()["output"]
+    assert (
+        "requires cameras configured as static"
+        in mounting_mismatch.get_json()["output"]
+    )
     assert escaped_root.status_code == 400
     assert "allowed root" in escaped_root.get_json()["output"]
     assert runner.submissions == []
@@ -416,6 +438,13 @@ def test_attempt_history_is_immutable_and_promotion_accepts_partial_results(
         (run_root / "processed" / "calibration" / first_id / "request.json").read_text()
     )
     assert first_request["mode"] == "eye_in_hand"
+    # This fixture fabricates an old completed ranking rather than running the
+    # current five-phase job. Mark its request as historical so promotion does
+    # not accept it as a new report-backed fixed-zero attempt.
+    first_request.pop("synchronization_policy")
+    (run_root / "processed" / "calibration" / first_id / "request.json").write_text(
+        json.dumps(first_request)
+    )
 
     attempt_root = run_root / "processed" / "calibration" / first_id
     progress = json.loads((attempt_root / "progress.json").read_text())

@@ -12,10 +12,15 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
+from posetestbot.io.artifacts import RUN_CONFIG
+from posetestbot.sync.calibration_policy import (
+    resolve_calibration_profile_sync_policy,
+)
 from posetestbot.sync.non_destructive import (
     sync_result_artifacts,
     synchronize_run,
 )
+from posetestbot.sync.quality import calibration_sync_provenance
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,8 +53,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timestamp-source",
         choices=("host_received", "host_wall", "sensor", "filename"),
-        default="host_received",
-        help="Timestamp source used for matching frames to robot poses.",
+        default=None,
+        help=(
+            "Manual timestamp source. Runs with a selected calibration always "
+            "use its immutable per-camera timestamp policy."
+        ),
     )
     parser.add_argument(
         "--robot-timestamp-source",
@@ -84,20 +92,71 @@ def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
     sync_delta = load_sync_delta(args.sync_delta)
+    calibration_sync_policy = (
+        resolve_calibration_profile_sync_policy(run_root)
+        if (run_root / RUN_CONFIG).is_file()
+        else None
+    )
+    if calibration_sync_policy is not None:
+        manual_overrides = [
+            flag
+            for flag, value in (
+                ("--sync-delta", args.sync_delta),
+                ("--timestamp-source", args.timestamp_source),
+                ("--robot-timestamp-source", args.robot_timestamp_source),
+                ("--sensor-folder", args.sensor_folder),
+                ("--output-root", args.output_root),
+            )
+            if value is not None
+        ]
+        if manual_overrides:
+            raise ValueError(
+                "Runs with a selected calibration use its hash-bound per-camera "
+                "timing; remove manual synchronization options: "
+                + ", ".join(manual_overrides)
+            )
 
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="sync_run", status="running")
     write_run_manifest(manifest, run_root)
 
-    results = synchronize_run(
-        run_root,
-        sensor_folders=args.sensor_folder,
-        output_root=args.output_root,
-        sync_delta=sync_delta,
-        timestamp_source=args.timestamp_source,
-        robot_timestamp_source=args.robot_timestamp_source,
-        copy_files=not args.no_copy,
-    )
+    try:
+        if calibration_sync_policy is None:
+            results = synchronize_run(
+                run_root,
+                sensor_folders=args.sensor_folder,
+                output_root=args.output_root,
+                sync_delta=sync_delta,
+                timestamp_source=args.timestamp_source or "host_received",
+                robot_timestamp_source=args.robot_timestamp_source,
+                copy_files=not args.no_copy,
+            )
+        else:
+            results = []
+            for sensor in calibration_sync_policy["sensors"]:
+                results.extend(
+                    synchronize_run(
+                        run_root,
+                        sensor_folders=[run_root / sensor["sensor_folder"]],
+                        sync_delta=sensor["sync_delta_ms"],
+                        timestamp_source=sensor["frame_timestamp_source"],
+                        robot_timestamp_source=sensor["robot_timestamp_source"],
+                        copy_files=not args.no_copy,
+                        max_nearest_pose_delta_ms=sensor["max_nearest_pose_delta_ms"],
+                        required_frame_timestamp_domain=sensor[
+                            "required_frame_timestamp_domain"
+                        ],
+                        timestamp_fallback_allowed=sensor["timestamp_fallback_allowed"],
+                        calibration_sync=calibration_sync_provenance(
+                            calibration_sync_policy,
+                            sensor,
+                        ),
+                    )
+                )
+    except Exception as exc:
+        upsert_stage(manifest, name="sync_run", status="failed", message=str(exc))
+        write_run_manifest(manifest, run_root)
+        raise
 
     for result in results:
         sensor_name = Path(result.sensor_folder).name
@@ -123,6 +182,11 @@ def main() -> None:
         message=(
             f"Synchronized {len(results)} sensor(s): matched "
             f"{matched_frames}/{total_frames}, dropped {dropped_frames}."
+            + (
+                " Applied hash-bound per-camera calibration timing."
+                if calibration_sync_policy is not None
+                else ""
+            )
         ),
     )
     write_run_manifest(manifest, run_root)

@@ -251,6 +251,41 @@ def build_calibration_preflight(
                 )
             )
 
+        try:
+            from posetestbot.sync.calibration_policy import (
+                resolve_calibration_profile_sync_policy,
+            )
+
+            calibration_sync_policy = resolve_calibration_profile_sync_policy(
+                run_root_path
+            )
+            if calibration_sync_policy is None:
+                raise ValueError(
+                    "Run config has no hash-bound calibration timing selection"
+                )
+            checks.append(
+                _check(
+                    "calibration_profile_sync_policy",
+                    "ok",
+                    (
+                        "Selected profiles provide verified per-camera "
+                        "synchronization timing."
+                    ),
+                    details=calibration_sync_policy,
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                _check(
+                    "calibration_profile_sync_policy",
+                    "error",
+                    (
+                        "Selected calibration timing is invalid: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                )
+            )
+
     if config.get("calibration_target") is not None:
         try:
             target_selection = validate_run_target_selection(run_root_path)

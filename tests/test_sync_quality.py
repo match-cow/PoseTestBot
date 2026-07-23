@@ -4,10 +4,14 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from posetestbot.io.artifacts import DATASET_MANIFEST, SYNC_QUALITY_REPORT, SYNC_REPORT
 from posetestbot.sync.quality import (
     build_sync_quality_report,
+    calibration_sync_provenance,
     discover_sync_reports,
+    verify_profile_bound_sync_evidence,
     write_sync_quality_report_with_manifest,
 )
 
@@ -23,6 +27,7 @@ def write_sync_report(
     robot_timestamp_source: str = "host_received",
     max_delta_ns: int = 10_000_000,
     schema_version: str = "sync_report.v2",
+    calibration_sync: dict | None = None,
 ) -> Path:
     report_path = run_root / "processed" / "synchronized" / sensor_name / SYNC_REPORT
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,6 +49,17 @@ def write_sync_report(
         "motion_intervals": [{"motion": "circ_far", "pose_count": matched_frames}],
         "mean_abs_nearest_pose_delta_ns": 5_000_000,
         "max_abs_nearest_pose_delta_ns": max_delta_ns,
+        "required_frame_timestamp_domain": (
+            calibration_sync["sensor"]["required_frame_timestamp_domain"]
+            if calibration_sync
+            else None
+        ),
+        "timestamp_fallback_allowed": (
+            calibration_sync["sensor"]["timestamp_fallback_allowed"]
+            if calibration_sync
+            else True
+        ),
+        "calibration_sync": calibration_sync,
     }
     if schema_version == "sync_report.v3":
         value.update(
@@ -61,6 +77,43 @@ def write_sync_report(
         )
     report_path.write_text(json.dumps(value) + "\n")
     return report_path
+
+
+def calibration_sync_policy() -> dict:
+    return {
+        "schema_version": "calibration_sync_policy.v1",
+        "source": "selected_calibration_profile",
+        "selection_artifact": "calibration_profile_selection.json",
+        "bundle_sha256": "a" * 64,
+        "calibration_profiles": {
+            "relative_path": (
+                "processed/calibration_inputs/selected/calibration_profiles.json"
+            ),
+            "sha256": "b" * 64,
+        },
+        "sensors": [
+            {
+                "sensor_key": "realsense_d435:123",
+                "sensor_name": "realsense_123",
+                "sensor_folder": "realsense_123",
+                "sensor_type": "realsense_d435",
+                "device_id": "123",
+                "profile_id": "profile-123",
+                "robot_pose_time_offset_ms": 7.5,
+                "sync_delta_ms": -7.5,
+                "frame_timestamp_source": "host_received",
+                "robot_timestamp_source": "host_received",
+                "required_frame_timestamp_domain": None,
+                "timestamp_fallback_allowed": False,
+                "max_nearest_pose_delta_ms": 20.0,
+                "timing_source": (
+                    "processed/calibration/attempt/time_offset_search.json"
+                ),
+                "timing_policy": "auto_offset",
+                "timing_status": "applied",
+            }
+        ],
+    }
 
 
 def test_build_sync_quality_report_summarizes_sync_reports(tmp_path: Path) -> None:
@@ -202,6 +255,99 @@ def test_v2_sync_report_cannot_prove_robot_timestamp_source(
 
     assert report["overall_status"] == "error"
     assert report["sensors"][0]["timestamp_pair_provenance_audited"] is False
+
+
+def test_profile_bound_quality_requires_exact_timing_and_coverage(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    policy = calibration_sync_policy()
+    sensor = policy["sensors"][0]
+    provenance = calibration_sync_provenance(policy, sensor)
+    report_path = write_sync_report(
+        run_root,
+        schema_version="sync_report.v3",
+        calibration_sync=provenance,
+    )
+    value = json.loads(report_path.read_text())
+    value.update(
+        {
+            "sync_delta_ms": -7.5,
+            "max_nearest_pose_delta_ms": 20.0,
+        }
+    )
+    report_path.write_text(json.dumps(value) + "\n")
+
+    report = build_sync_quality_report(
+        run_root,
+        max_nearest_pose_delta_ms={"realsense_123": 20.0},
+        require_timestamp_source={"realsense_123": "host_received"},
+        require_robot_timestamp_source={"realsense_123": "host_received"},
+        calibration_sync_policy=policy,
+    )
+
+    assert report["overall_status"] == "ok"
+    assert report["calibration_sync_policy"] == policy
+    assert (
+        next(
+            check
+            for check in report["checks"]
+            if check["name"] == "sync_calibration_timing:realsense_123"
+        )["status"]
+        == "ok"
+    )
+    assert (
+        next(
+            check
+            for check in report["checks"]
+            if check["name"] == "sync_calibration_timing_coverage"
+        )["status"]
+        == "ok"
+    )
+
+    value["sync_delta_ms"] = 0.0
+    report_path.write_text(json.dumps(value) + "\n")
+    mismatched = build_sync_quality_report(
+        run_root,
+        max_nearest_pose_delta_ms={"realsense_123": 20.0},
+        require_timestamp_source={"realsense_123": "host_received"},
+        require_robot_timestamp_source={"realsense_123": "host_received"},
+        calibration_sync_policy=policy,
+    )
+    assert mismatched["overall_status"] == "error"
+
+
+def test_profile_bound_evidence_is_rebuilt_before_downstream_use(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    policy = calibration_sync_policy()
+    sensor = policy["sensors"][0]
+    report_path = write_sync_report(
+        run_root,
+        schema_version="sync_report.v3",
+        calibration_sync=calibration_sync_provenance(policy, sensor),
+    )
+    value = json.loads(report_path.read_text())
+    value["sync_delta_ms"] = -7.5
+    report_path.write_text(json.dumps(value) + "\n")
+    write_sync_quality_report_with_manifest(
+        run_root,
+        min_match_ratio=0.5,
+        max_nearest_pose_delta_ms={"realsense_123": 20.0},
+        require_timestamp_source={"realsense_123": "host_received"},
+        require_robot_timestamp_source={"realsense_123": "host_received"},
+        calibration_sync_policy=policy,
+    )
+
+    verified = verify_profile_bound_sync_evidence(run_root, policy)
+    assert verified["bundle_sha256"] == "a" * 64
+    assert verified["sensor_count"] == 1
+
+    value["calibration_sync"]["sensor"]["profile_id"] = "tampered"
+    report_path.write_text(json.dumps(value) + "\n")
+    with pytest.raises(ValueError, match="failed"):
+        verify_profile_bound_sync_evidence(run_root, policy)
 
 
 def test_build_sync_quality_report_errors_without_sync_reports(

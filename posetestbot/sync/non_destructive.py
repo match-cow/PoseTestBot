@@ -311,13 +311,20 @@ def _relative_path(path: Path, root: Path) -> str:
 
 def _sensor_sync_keys(sensor_folder_name: str) -> tuple[str, ...]:
     name = sensor_folder_name.lower()
+    exact = (
+        (sensor_folder_name, name)
+        if sensor_folder_name != name
+        else (sensor_folder_name,)
+    )
     if name.startswith("realsense"):
-        return ("realsense_d435", "realsense")
-    if name.startswith("luxonis") or name.startswith("oak"):
-        return ("oak_d_pro", "luxonis", "oak")
-    if name.startswith("zed_2i") or name.startswith("zed"):
-        return ("zed_2i", "zed")
-    return (name.split("_")[0],)
+        aliases = ("realsense_d435", "realsense")
+    elif name.startswith("luxonis") or name.startswith("oak"):
+        aliases = ("oak_d_pro", "luxonis", "oak")
+    elif name.startswith("zed_2i") or name.startswith("zed"):
+        aliases = ("zed_2i", "zed")
+    else:
+        aliases = (name.split("_")[0],)
+    return tuple(dict.fromkeys((*exact, *aliases)))
 
 
 def resolve_sync_delta_ms(
@@ -455,6 +462,9 @@ def synchronize_sensor_folder(
     robot_timestamp_source: str | None = None,
     copy_files: bool = True,
     max_nearest_pose_delta_ms: int | float | None = None,
+    required_frame_timestamp_domain: str | None = None,
+    timestamp_fallback_allowed: bool = True,
+    calibration_sync: Mapping[str, Any] | None = None,
 ) -> SyncResult:
     sensor_path = Path(sensor_folder)
     run_path = Path(run_root) if run_root is not None else sensor_path.parent
@@ -469,6 +479,17 @@ def synchronize_sensor_folder(
         if nearest_pose_threshold_ms is not None
         else None
     )
+    if required_frame_timestamp_domain is not None and (
+        not isinstance(required_frame_timestamp_domain, str)
+        or not required_frame_timestamp_domain.strip()
+    ):
+        raise ValueError(
+            "Required frame timestamp domain must be a non-empty string or null"
+        )
+    if not isinstance(timestamp_fallback_allowed, bool):
+        raise ValueError("timestamp_fallback_allowed must be a boolean")
+    if calibration_sync is not None and not isinstance(calibration_sync, Mapping):
+        raise ValueError("calibration_sync provenance must be an object")
     output_base = (
         Path(output_root)
         if output_root is not None
@@ -500,7 +521,26 @@ def synchronize_sensor_folder(
             _resolve_source_frame_path(
                 sensor_path, frame_record.get("depth_path"), DEPTH_DIR
             )
+            if (
+                required_frame_timestamp_domain is not None
+                and frame_record.get("color_timestamp_domain")
+                != required_frame_timestamp_domain
+            ):
+                raise ValueError(
+                    f"Frame {frame_record.get('frame_id')!r} in "
+                    f"{sensor_path.name} has color timestamp domain "
+                    f"{frame_record.get('color_timestamp_domain')!r}; required "
+                    f"{required_frame_timestamp_domain!r}"
+                )
             resolved = resolve_frame_timestamp(frame_record, timestamp_source)
+            if not timestamp_fallback_allowed and (
+                resolved[0] is None or resolved[1] != timestamp_source or resolved[2]
+            ):
+                raise ValueError(
+                    f"Frame {frame_record.get('frame_id')!r} in "
+                    f"{sensor_path.name} cannot prove required "
+                    f"{timestamp_source!r} timing without fallback"
+                )
             resolved_records.append((*resolved, frame_record))
         resolved_records.sort(
             key=lambda item: (item[0] is None, item[0] if item[0] is not None else 0)
@@ -700,6 +740,11 @@ def synchronize_sensor_folder(
             "timestamp_missing_count": timestamp_missing_count,
             "sync_delta_ms": sensor_sync_delta_ms,
             "max_nearest_pose_delta_ms": nearest_pose_threshold_ms,
+            "required_frame_timestamp_domain": required_frame_timestamp_domain,
+            "timestamp_fallback_allowed": timestamp_fallback_allowed,
+            "calibration_sync": (
+                dict(calibration_sync) if calibration_sync is not None else None
+            ),
             "nearest_pose_delta_rejection_count": (nearest_pose_delta_rejection_count),
             "total_frames": len(frame_records),
             "matched_frames": len(matched),
@@ -748,6 +793,9 @@ def synchronize_run(
     robot_timestamp_source: str | None = None,
     copy_files: bool = True,
     max_nearest_pose_delta_ms: int | float | None = None,
+    required_frame_timestamp_domain: str | None = None,
+    timestamp_fallback_allowed: bool = True,
+    calibration_sync: Mapping[str, Any] | None = None,
 ) -> list[SyncResult]:
     """Synchronize discovered sensors or an explicit contained subset.
 
@@ -796,6 +844,9 @@ def synchronize_run(
                 robot_timestamp_source=robot_timestamp_source,
                 copy_files=copy_files,
                 max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+                required_frame_timestamp_domain=required_frame_timestamp_domain,
+                timestamp_fallback_allowed=timestamp_fallback_allowed,
+                calibration_sync=calibration_sync,
             )
         )
 

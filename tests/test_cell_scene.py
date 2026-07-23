@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from posetestbot.calibration.profiles import (
     SCHEMA_VERSION,
@@ -228,7 +229,24 @@ def test_scene_composes_frames_sensors_and_exact_timelines(tmp_path: Path) -> No
     entities = {entity["id"]: entity for entity in scene["entities"]}
 
     assert scene["schema_version"] == "cell_scene.v1"
-    assert scene["coordinate_system"]["up_axis"] == "+Z"
+    assert scene["coordinate_system"]["up_axis"] == "-Z"
+    presentation = scene["coordinate_system"]["presentation"]
+    assert presentation["mode"] == "calibration_target_front"
+    assert presentation["presentation_only"] is True
+    assert presentation["target_frame"] == {
+        "name": "aruco_grid",
+        "origin": "compensated_outer_board_top_left",
+        "axes": {"x": "right", "y": "down", "z": "into_board"},
+    }
+    target_to_reference = np.eye(4)
+    target_to_reference[:3, 3] = [5, 6, 7]
+    target_to_display = np.asarray(presentation["matrix"]) @ target_to_reference
+    assert np.allclose(target_to_display, np.diag([1, -1, -1, 1]))
+    assert np.linalg.det(target_to_display[:3, :3]) == pytest.approx(1)
+    assert np.allclose(
+        target_to_display @ np.asarray([0, 0, -500, 1]),
+        [0, 0, 500, 1],
+    )
     assert entities["physical_robot_base"]["transform"]["translation_mm"] == [
         100.0,
         0.0,
@@ -290,6 +308,9 @@ def test_scene_composes_frames_sensors_and_exact_timelines(tmp_path: Path) -> No
         6.0,
         7.0,
     ]
+    assert entities["calibration_target"]["geometry"]["frame"] == (
+        presentation["target_frame"]
+    )
     assert len(scene["timelines"]) == 2
     assert [pose["index"] for pose in scene["trajectory_preview"]] == [0, 1, 2]
     assert scene["object_selection"]["bop_export"]["status"] == "not_exported"
@@ -337,6 +358,21 @@ def test_scene_omits_disabled_camera_even_when_a_valid_profile_exists(
     assert flange["provenance"]["source"].endswith(
         "processed/synchronized/realsense_222/match_robot_ee_poses.json"
     )
+
+
+def test_scene_retains_reference_z_up_presentation_without_grid_target(
+    tmp_path: Path,
+) -> None:
+    run_root = make_scene_run(tmp_path)
+    (run_root / "calibration_target.json").unlink()
+
+    scene = build_cell_scene(run_root)
+
+    assert scene["coordinate_system"]["up_axis"] == "+Z"
+    presentation = scene["coordinate_system"]["presentation"]
+    assert presentation["mode"] == "reference_z_up"
+    assert presentation["target_frame"] is None
+    assert np.allclose(presentation["matrix"], np.eye(4))
 
 
 def test_scene_raw_timeline_fallback_ignores_disabled_sensor_folder(

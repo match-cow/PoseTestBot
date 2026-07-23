@@ -9,13 +9,14 @@ Its Workbench contract is reduced to exactly nine persistent 3 × 3 raster
 frames below `/PoseTestBot/TemplateBase`. `CalibrationCenter` is one of those
 nine frames and anchors both phases.
 
-A separate retained 2026-07-22 physical repeat successfully captured and
-promoted eye-in-hand calibration for all three RealSense cameras; see the
-[dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md). That
-run validates its recorded acquisition and calibration artifacts, but it does
-not establish which Sunrise application/revision was deployed or supply the
-Workbench, offline-path, T1, and reviewer evidence required to commission this
-source candidate.
+A separate retained 2026-07-23 guided campaign captured three independent
+eye-in-hand calibration attempts for all three RealSense cameras; see the
+[dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
+Their reusable profile collections were later retired because they predate
+required Auto time-alignment provenance. The retained runs document historical
+acquisition and attempt evidence, but do not establish which Sunrise
+application/revision was deployed or supply the Workbench, offline-path, T1,
+and reviewer evidence required to commission this source candidate.
 
 The six A/B/C orientation variants are no longer Workbench frames. Sunrise
 generates their nine motion legs with zero-translation `linRel` transformations
@@ -141,9 +142,9 @@ converted to radians before transformation. It includes:
 - the joint-space-path caveat and full teaching-aid safety disclaimer.
 
 No flange axis is described as a camera optical axis because this teaching plot
-does not consume run-specific promoted camera-to-flange transforms. The latest
+does not consume run-specific camera-to-flange transforms. The historical
 three-camera transforms remain in the
-[dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md) and
+[dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md) and
 its retained run artifacts. The historical `/HRC_Hub/Template_Base` A1 sweep
 is not overlaid because no transform to `/PoseTestBot/TemplateBase` is
 available.

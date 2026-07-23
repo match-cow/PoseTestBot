@@ -942,9 +942,11 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             PipelineParameter(
                 name="timestamp_source",
                 flag="--timestamp-source",
-                default="host_received",
                 choices=("host_received", "host_wall", "sensor", "filename"),
-                help="Timestamp source used for frame-to-robot matching.",
+                help=(
+                    "Timestamp source used for frame-to-robot matching. Runs with "
+                    "a selected calibration use its immutable per-camera policy."
+                ),
             ),
             PipelineParameter(
                 name="robot_timestamp_source",
@@ -986,7 +988,10 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="max_nearest_pose_delta_ms",
                 flag="--max-nearest-pose-delta-ms",
                 kind="float",
-                default=50.0,
+                help=(
+                    "Manual quality threshold. Runs with a selected calibration "
+                    "use its immutable per-camera threshold."
+                ),
             ),
             PipelineParameter(
                 name="no_nearest_pose_threshold",

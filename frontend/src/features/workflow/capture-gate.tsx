@@ -77,9 +77,21 @@ export function CaptureGate({ intent = "legacy", readiness }: CaptureGateProps =
   const capture = useMutation({
     mutationFn: async () => {
       await api("/sensors/previews/stop", { method: "POST", body: "{}" })
-      return api<{ job_id: string }>("/pipeline/run", { method: "POST", body: JSON.stringify({ stage: "capture_execution", run_root: selectedRun, options: { allow_cameras: true, allow_real_robot: true, include_sensors: true, ...CALIBRATION_CAPTURE_TIMEOUTS } }) })
+      return api<{ job_id: string }>("/pipeline/run-sequence", {
+        method: "POST",
+        body: JSON.stringify({
+          sequence: "real_full_capture_validation",
+          run_root: selectedRun,
+          plan_only: false,
+          options: {
+            capture_plan_preflight: { allow_real_robot: true },
+            capture_execution_plan: { allow_cameras: true, allow_real_robot: true, include_sensors: true },
+            capture_execution: { allow_cameras: true, allow_real_robot: true, include_sensors: true, ...CALIBRATION_CAPTURE_TIMEOUTS },
+          },
+        }),
+      })
     },
-    onSuccess: (data) => { toast.success(copy.queued, { description: `Job ${data.job_id}` }); setOpen(false); setRobotAck(false); setCameraAck(false); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["capture-jobs", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] }) },
+    onSuccess: (data) => { toast.success(copy.queued, { description: `Job ${data.job_id}` }); setOpen(false); setRobotAck(false); setCameraAck(false); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["capture-jobs", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["calibration", "setup", selectedRun] }) },
     onError: (error) => toast.error("Physical capture was not queued", { description: errorMessage(error) }),
   })
   const resetOpen = (value: boolean) => { setOpen(value); setRobotAck(false); setCameraAck(false) }

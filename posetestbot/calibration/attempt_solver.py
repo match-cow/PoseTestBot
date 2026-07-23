@@ -741,6 +741,29 @@ def _closure_residuals(
     ]
 
 
+def solve_extrinsic_consensus(
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    mode: str,
+    method: str,
+    max_translation_mm: float = DEFAULT_MAX_MEAN_TRANSLATION_MM,
+    max_rotation_deg: float = DEFAULT_MAX_MEAN_ROTATION_DEG,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Solve an extrinsic transform with the production robust companion model."""
+
+    primary, _unused_companion = solve_extrinsic(
+        observations,
+        mode=mode,
+        method=method,
+    )
+    companion = _consensus_companion(
+        _companion_estimates(observations, primary, mode=mode),
+        max_translation_mm=max_translation_mm,
+        max_rotation_deg=max_rotation_deg,
+    )
+    return primary, companion
+
+
 def _pose_training_sets(
     observations: Sequence[Mapping[str, Any]],
 ) -> list[tuple[str, ...]]:

@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-22
+Last updated: 2026-07-23
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -15,12 +15,13 @@ The code rewrite is implemented across:
   protection;
 - RealSense, OAK-D Pro, and ZED 2i sensor adapters and status contracts, with
   run-scoped enable/disable selection that preserves disabled camera metadata;
-- transactional synchronization and sync-quality reporting;
+- transactional synchronization and sync-quality reporting, including strict
+  hash-bound reuse of each selected calibration profile's saved timing policy;
 - PoseGridGen targets, including immutable-library card previews rendered from
   stored marker geometry, and attempt-scoped factory-vs-OpenCV intrinsic
   evidence, whole-board PnP support gates, global-sensor-time RealSense
-  synchronization, common-bundle multi-camera extrinsic ranking, and explicit
-  promotion;
+  synchronization, calibration-attempt-only constant effective-latency search,
+  common-bundle multi-camera extrinsic ranking, and explicit promotion;
 - the dedicated Workpiece Catalogue page and `/workpieces` API, backed by the
   existing JSON/UUID asset store with editable classification, previews,
   guarded lifecycle, revisioned metre/mm correction, metadata portability, and
@@ -47,7 +48,11 @@ packaged HRI sheet only as a fallback. Promoted board placement is recovered
 from calibration-profile companion transforms; boards without promoted
 placement remain visibly marked as reference overlays. Optional robot-base and
 TCP frames are reported as not configured instead of unresolved, while cameras
-still fail closed when this run has no matching promoted profile.
+still fail closed when this run has no matching promoted profile. Calibration
+target scenes retain the canonical top-left, +X-right, +Y-down, +Z-into-board
+frame and use a presentation-only right-handed target alignment, so cameras on
+the printed/front negative-Z side appear above the grid without changing any
+stored pose or promoted calibration transform.
 
 Historical run `working_data/hot_full_capture_fixed_20260710_1351` passes the
 full-capture gate at 10/10 for three RealSense cameras. The current five-sensor
@@ -56,24 +61,43 @@ still require operator-run acceptance. That historical run used an older 10 ×
 7 / 70-marker board and insufficient hand-eye motion diversity; it is a
 preserved negative baseline, not `calib00` calibration evidence.
 
-The current `calib00` confirmation campaign completed physical acquisition
-with all three configured RealSense cameras. Immutable attempt
-`12e6a40eff444b889870597b787bf016` promoted the complete common
-`IPPE + Shah` bundle. It retained compatible factory color intrinsics and the
-bounded manual OpenCV comparisons, produced 605/606, 608/608, and 610/610
-extrinsic inliers, held-out means of 3.052 mm / 0.628 degrees, 3.241 mm / 0.473
-degrees, and 3.226 mm / 0.425 degrees, and 7.104 mm / 0.421 degrees maximum
-pairwise companion closure. Both exact camera-to-flange and
-grid-to-template-base estimates are available in the promoted profiles and
-Cell scene. The repeat agrees with the first three-camera campaign within
-5.400 mm / 0.365 degrees at worst. The retained validation record is
-[EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md).
-Factory SDK depth scale and depth-to-color alignment were not recalibrated; a
-range-dependent metric-depth anomaly on `923322072633` remains a separate
-validation item. The run-level rewrite status is 2/3 gates and 13/18 checks
-ready. Its only blocked gate is the expected BOP-export gate because this
-calibration-only run did not produce a BOP dataset; full capture is 10/10 ready
-and calibration validation is 3/3 ready.
+The `calib00` guided campaign completed three independent physical acquisition
+and calibration journeys with all three eye-in-hand RealSense cameras.
+Historical attempts `d909d13cc5944a068e8a2ec13eeedd32`,
+`3106a2b80b87444db0ac26de89bc01b3`, and
+`f1e990d3424a48ed95b266f7bf134838` each produced one complete common bundle.
+Maximum within-run stationary-companion closure was 7.847 mm / 1.115°; the
+8.642 mm / 1.099° maximum cross-run difference remains a method-confounded
+diagnostic requiring a controlled repeat. The validation record is
+[EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
+At campaign completion each run passed `rewrite_full_capture.v1` at 10/10 and
+`rewrite_calibration_validation.v1` at 3/3. The later top-level reusable
+profile collections were retired because they predate required time-alignment
+provenance; raw captures and immutable attempt evidence remain.
+
+Calibration attempts now default to per-camera Auto time alignment and retain
+the complete bounded search and fail-closed decision in
+`time_offset_search.json`. A retrospective replay selected +70 to +75 ms,
++80 to +85 ms, and +45 to +55 ms for the three cameras and reduced
+cross-validated stationary-target translation residual by 14–38% versus 0 ms.
+This is effective-latency tuning from robot motion, not hardware-clock proof,
+and it was not promoted back into the historical attempts.
+
+Object-dataset synchronization now applies the exact per-camera timing from the
+selected run-owned calibration snapshot and rejects overrides. Sync quality,
+rectification, and BOP export recheck camera coverage, values, profile identity,
+bundle hash, and timestamp provenance. The guided page exposes the policy and
+blocks readiness when it cannot be verified.
+
+The campaign also closed three defects in the guided page: a brand-new run no
+longer stalls on a missing config, recorded calibration cameras refresh after
+capture, and the physical action now submits the canonical
+`real_full_capture_validation` sequence rather than bypassing its hardware
+snapshot and preflight artifacts. The calculation card documents the observed
+10–20 minute duration and persisted background-job behavior. The
+full-capture gate accepts the immutable pre-START preflight embedded in an
+execution plan when the standalone report is absent, and rejects mismatched
+embedded status.
 
 ## 2026-07-22 Guided Operator Workflows
 
@@ -291,10 +315,12 @@ runtimes on this host.
   manifest states and unique partial evidence, and kept reusable sequence and
   capture plans free of execution authorization.
 - Hardened eye-in-hand attempts so RealSense SDK `global_time` sensor exposure
-  timestamps pair with robot host-wall timestamps at zero manual offset, with
-  no fallback and a 20 ms maximum nearest-pose delta. Added spatial/campaign
-  target support, rotation-axis rank checks before and after pruning,
-  per-motion balanced fitting, and full-input validation.
+  timestamps pair with robot host-wall timestamps, with no fallback and a
+  20 ms maximum nearest-pose delta. The original fixed-zero-only behavior is
+  retained as an explicit baseline; new guided attempts can apply the
+  evidence-gated per-camera auto offset described in Current State. Added
+  spatial/campaign target support, rotation-axis rank checks before and after
+  pruning, per-motion balanced fitting, and full-input validation.
 - Made `inverse_brown_conrady` forward-OpenCV-compatible only for finite,
   exact-zero coefficients. Compatible factory projection remains selected;
   factory/manual comparison and rejection evidence remains immutable, and a
@@ -325,8 +351,8 @@ runtimes on this host.
   execution gates before normalization.
 
 For the 2026-07-21 baseline, software validation completed. The two-camera
-physical `calib00` capture has an explicitly promoted common bundle and passing
-calibration-validation evidence:
+physical `calib00` capture produced an explicitly promoted common bundle and
+passing historical calibration-validation evidence:
 
 - 564 non-browser pytest tests, 15 operator-console Playwright tests, and 12
   preview Playwright tests passed (591 total);

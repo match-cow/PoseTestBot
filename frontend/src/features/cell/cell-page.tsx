@@ -20,6 +20,20 @@ import { useOperator } from "@/providers/operator-provider"
 const PAGE_SIZE = 2_000
 const LAYERS = ["reference_frame", "template", "robot_base", "robot_flange", "tcp", "camera", "object", "calibration_target"]
 type Preset = "perspective" | "top" | "front"
+type CellPresentation = {
+  mode: string
+  transform: CellTransform
+}
+
+const IDENTITY_PRESENTATION: CellPresentation = {
+  mode: "reference_z_up",
+  transform: {
+    semantics: "entity_to_parent",
+    parent_frame: "display",
+    translation_mm: [0, 0, 0],
+    rotation_quaternion_wxyz: [1, 0, 0, 0],
+  },
+}
 
 function hasWebGL() {
   try {
@@ -36,6 +50,12 @@ function transformProps(transform: CellTransform) {
     position: transform.translation_mm as [number, number, number],
     quaternion: new Quaternion(x, y, z, w),
   }
+}
+
+function cellPresentation(scene: CellScene): CellPresentation {
+  const raw = scene.coordinate_system.presentation as Partial<CellPresentation> | undefined
+  if (!raw || typeof raw.mode !== "string" || !raw.transform) return IDENTITY_PRESENTATION
+  return { mode: raw.mode, transform: raw.transform }
 }
 
 function statusColor(status: CellEntity["status"]) {
@@ -120,7 +140,7 @@ function SelectionDetails({ entity }: { entity: CellEntity | null }) {
         <Detail label="Mount" value={`${calibration.mounting_mode} · ${calibration.rig_position}`} />
         <Detail label="Method" value={calibration.evidence.method ?? "—"} />
         <Detail label="Calibration dataset" value={calibration.evidence.calibration_dataset_id ?? "—"} />
-        <Detail label="Sync offset" value={number(calibration.evidence.sync_delta_ms, 3, " ms")} />
+        <Detail label="Dataset sync delta" value={number(calibration.evidence.sync_delta_ms, 3, " ms")} />
         <Detail label="Promoted solver" value={solverLabel ?? "—"} />
         <Detail label="Promotion attempt" value={calibration.evidence.promotion_attempt_id ?? "—"} />
         <Detail label="Promotion candidate" value={calibration.evidence.promotion_candidate_id ?? "—"} />
@@ -208,7 +228,7 @@ function TargetGeometry({ entity, color, onSelect }: { entity: CellEntity; color
   const y = Number(bounds?.y_mm) || 0
   const markers = Array.isArray(entity.geometry.markers) ? entity.geometry.markers : []
   return <group onClick={(event) => selectEvent(event, onSelect)}>
-    <mesh position={[x + width / 2, y + height / 2, 0]} receiveShadow>
+    <mesh position={[x + width / 2, y + height / 2, 1]} receiveShadow>
       <boxGeometry args={[width + 8, height + 8, 2]} />
       <meshStandardMaterial color="#f8fafc" roughness={0.9} />
     </mesh>
@@ -220,13 +240,13 @@ function TargetGeometry({ entity, color, onSelect }: { entity: CellEntity; color
       if (!xs.length || !ys.length) return null
       const minX = Math.min(...xs); const maxX = Math.max(...xs)
       const minY = Math.min(...ys); const maxY = Math.max(...ys)
-      return <mesh key={index} position={[(minX + maxX) / 2, (minY + maxY) / 2, 1.2]}>
-        <boxGeometry args={[maxX - minX, maxY - minY, 0.8]} />
+      return <mesh key={index} position={[(minX + maxX) / 2, (minY + maxY) / 2, -0.05]}>
+        <boxGeometry args={[maxX - minX, maxY - minY, 0.1]} />
         <meshBasicMaterial color="#020617" />
       </mesh>
     })}
-    {!markers.length && <mesh position={[x + width / 2, y + height / 2, 1.2]}>
-      <boxGeometry args={[width, height, 0.8]} />
+    {!markers.length && <mesh position={[x + width / 2, y + height / 2, -0.05]}>
+      <boxGeometry args={[width, height, 0.1]} />
       <meshStandardMaterial color={color} transparent opacity={0.45} />
     </mesh>}
   </group>
@@ -319,6 +339,7 @@ function CameraRig({ preset, resetToken }: { preset: Preset; resetToken: number 
 }
 
 function CellCanvas({ scene, visible, pose, trajectory, selected, onSelect, preset, resetToken }: { scene: CellScene; visible: Set<string>; pose: CellPose | null; trajectory: boolean; selected: CellEntity | null; onSelect: (entity: CellEntity) => void; preset: Preset; resetToken: number }) {
+  const presentation = cellPresentation(scene)
   const children = useMemo(() => {
     const map = new Map<string | null, CellEntity[]>()
     for (const entity of scene.entities) {
@@ -329,13 +350,15 @@ function CellCanvas({ scene, visible, pose, trajectory, selected, onSelect, pres
     return map
   }, [scene.entities])
   const roots = children.get(null) ?? []
-  return <Canvas data-testid="cell-webgl-canvas" frameloop="demand" shadows camera={{ position: [650, -700, 520], near: 0.1, far: 10000, fov: 42, up: [0, 0, 1] }} onPointerMissed={() => selected && onSelect(selected)}>
+  return <Canvas data-testid="cell-webgl-canvas" data-presentation-mode={presentation.mode} data-presentation-quaternion={presentation.transform.rotation_quaternion_wxyz.join(",")} frameloop="demand" shadows camera={{ position: [650, -700, 520], near: 0.1, far: 10000, fov: 42, up: [0, 0, 1] }} onPointerMissed={() => selected && onSelect(selected)}>
     <color attach="background" args={["#08111f"]} />
     <ambientLight intensity={0.75} />
     <directionalLight position={[350, -250, 700]} intensity={1.8} castShadow />
     <gridHelper args={[1600, 32, "#334155", "#1e293b"]} rotation={[Math.PI / 2, 0, 0]} />
-    {roots.map((entity) => <EntityTree key={entity.id} entity={entity} childrenByParent={children} visible={visible} pose={pose} onSelect={onSelect} />)}
-    {trajectory && <Trajectory poses={scene.trajectory_preview} />}
+    <group {...transformProps(presentation.transform)}>
+      {roots.map((entity) => <EntityTree key={entity.id} entity={entity} childrenByParent={children} visible={visible} pose={pose} onSelect={onSelect} />)}
+      {trajectory && <Trajectory poses={scene.trajectory_preview} />}
+    </group>
     <CameraRig preset={preset} resetToken={resetToken} />
   </Canvas>
 }
@@ -359,6 +382,8 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
   const [preset, setPreset] = useState<Preset>("perspective")
   const [resetToken, setResetToken] = useState(0)
   const [webgl] = useState(() => hasWebGL())
+  const presentation = cellPresentation(scene)
+  const targetAligned = presentation.mode === "calibration_target_front"
 
   const timeline = scene?.timelines.find((item) => item.id === timelineId)
   const offset = Math.floor(frame / PAGE_SIZE) * PAGE_SIZE
@@ -395,7 +420,7 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
     <PageHeader eyebrow="Dataset contents" title="Cell" description="Read-only, millimetre-accurate view of the configured cell and recorded flange trajectory." />
     {(scene.warnings.length > 0 || unresolved.length > 0) && <div className="flex items-start gap-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-4 text-sm"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" /><div className="min-w-0"><div className="font-semibold">Partial cell scene</div><div className="mt-1 text-xs text-muted-foreground">{unresolvedCameras.length > 0 ? `${unresolvedCameras.length} camera${unresolvedCameras.length === 1 ? " is" : "s are"} hidden until this run has matching promoted calibration profiles. The recorded trajectory and available template evidence remain visible.` : "Available scene evidence remains visible."}</div>{otherIssues.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-xs font-medium">Show {otherIssues.length} provenance detail{otherIssues.length === 1 ? "" : "s"}</summary><ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-muted-foreground">{otherIssues.map((message, index) => <li key={index}>{message}</li>)}</ul></details>}</div></div>}
     <div className="grid grid-cols-[minmax(0,1fr)_340px] gap-5">
-      <Card className="overflow-hidden"><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>3D cell</CardTitle><CardDescription>Right-handed · Z-up · millimetres · no pose interpolation</CardDescription></div><div className="flex gap-2"><Button size="sm" variant={preset === "perspective" ? "default" : "outline"} onClick={() => setPreset("perspective")}><Focus />Perspective</Button><Button size="sm" variant={preset === "top" ? "default" : "outline"} onClick={() => setPreset("top")}><ScanLine />Top</Button><Button size="sm" variant={preset === "front" ? "default" : "outline"} onClick={() => setPreset("front")}><Crosshair />Front</Button><Button size="sm" variant="outline" aria-label="Reset cell view" onClick={() => { setPreset("perspective"); setResetToken((value) => value + 1) }}><RotateCcw /></Button></div></div></CardHeader>
+      <Card className="overflow-hidden"><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>3D cell</CardTitle><CardDescription data-testid="cell-coordinate-convention">{targetAligned ? "Target-aligned · right-handed · origin top-left · +X right · +Y down · +Z into grid · millimetres" : "Right-handed · Z-up · millimetres"} · no pose interpolation</CardDescription></div><div className="flex gap-2"><Button size="sm" variant={preset === "perspective" ? "default" : "outline"} onClick={() => setPreset("perspective")}><Focus />Perspective</Button><Button size="sm" variant={preset === "top" ? "default" : "outline"} onClick={() => setPreset("top")}><ScanLine />Top</Button><Button size="sm" variant={preset === "front" ? "default" : "outline"} onClick={() => setPreset("front")}><Crosshair />Front</Button><Button size="sm" variant="outline" aria-label="Reset cell view" onClick={() => { setPreset("perspective"); setResetToken((value) => value + 1) }}><RotateCcw /></Button></div></div></CardHeader>
         <CardContent className="p-0">{webgl ? <div className="h-[620px]"><CellCanvas scene={scene} visible={visible} pose={pose} trajectory={trajectory} selected={selected} onSelect={setSelected} preset={preset} resetToken={resetToken} /></div> : <div data-testid="cell-webgl-fallback" className="grid h-[620px] place-items-center p-10 text-center"><div><AlertTriangle className="mx-auto mb-3 size-8 text-amber-500" /><div className="font-semibold">WebGL is unavailable</div><p className="mt-2 max-w-md text-sm text-muted-foreground">The component and provenance list remains available. Use a browser with WebGL support to orbit the scene.</p></div></div>}</CardContent>
         <div className="space-y-3 border-t bg-muted/20 p-4"><div className="flex items-center gap-3"><Select value={timelineId || "none"} onValueChange={(value) => { setTimelineId(value === "none" ? "" : value); setFrame(0); setPlaying(false) }}><SelectTrigger className="w-[250px]" aria-label="Timeline"><SelectValue placeholder="No trajectory" /></SelectTrigger><SelectContent>{scene.timelines.length ? scene.timelines.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.frame_count} frames</SelectItem>) : <SelectItem value="none">No trajectory</SelectItem>}</SelectContent></Select><Button size="icon" variant="outline" aria-label={playing ? "Pause timeline" : "Play timeline"} disabled={!timeline} onClick={() => setPlaying((value) => !value)}>{playing ? <CirclePause /> : <CirclePlay />}</Button><div className="min-w-0 flex-1"><input aria-label="Frame scrubber" className="w-full accent-primary" type="range" min={0} max={Math.max(0, (timeline?.frame_count ?? 1) - 1)} value={frame} disabled={!timeline} onChange={(event) => { setFrame(Number(event.target.value)); setPlaying(false) }} /></div><div className="w-28 text-right font-mono text-xs">{timeline ? `${frame + 1} / ${timeline.frame_count}` : "No frames"}</div></div><div className="flex justify-between text-[11px] text-muted-foreground"><span>{pose ? `Exact frame ${pose.frame_id}${pose.motion ? ` · ${pose.motion}` : ""}` : timelineQuery.isFetching ? "Loading exact pose page…" : "Select a recorded frame"}</span><span>Adjacent pages prefetch automatically</span></div></div>
       </Card>

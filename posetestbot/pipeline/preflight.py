@@ -431,6 +431,42 @@ def build_run_preflight(
                 )
             )
 
+        try:
+            from posetestbot.sync.calibration_policy import (
+                resolve_calibration_profile_sync_policy,
+            )
+
+            calibration_sync_policy = resolve_calibration_profile_sync_policy(
+                run_root_path
+            )
+            if calibration_sync_policy is None:
+                raise ValueError(
+                    "Run config has no hash-bound calibration timing selection"
+                )
+            checks.append(
+                _check(
+                    "calibration_profile_sync_policy",
+                    "ok",
+                    (
+                        "Every enabled camera has verified hash-bound "
+                        "synchronization timing."
+                    ),
+                    details=calibration_sync_policy,
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                _check(
+                    "calibration_profile_sync_policy",
+                    "error",
+                    (
+                        "Selected calibration timing cannot authorize dataset "
+                        f"synchronization: {type(exc).__name__}: {exc}"
+                    ),
+                    details={"required_by_guided_workflow": guided_calibrated_dataset},
+                )
+            )
+
     calibration_inputs = _calibration_profile_inputs(
         config=config,
         plan=plan,

@@ -625,6 +625,10 @@ def test_overview_endpoint_reports_sequence_steps(tmp_path: Path) -> None:
     payload = response.get_json()
     assert response.status_code == 200
     assert payload["config"]["pipeline"]["sequence_id"] == "sync_to_bop_dry_run"
+    assert payload["calibration_sync"] == {
+        "status": "not_configured",
+        "sensors": [],
+    }
     assert any(step["stage_id"] == "sync_quality" for step in payload["steps"])
     assert any(section["id"] == "sensors" for section in payload["sidebar"])
 

@@ -207,11 +207,19 @@ Derived sync folders are written below:
 processed/synchronized/<sensor>/
 ```
 
-Synchronization is transactional and emits `sync_report.v2` per sensor plus
+Synchronization is transactional and emits `sync_report.v3` per sensor plus
 `sync_quality_report.v2` at run level. Synchronized metadata names the derived
 frame paths, retains source-frame provenance, and records any timestamp-source
 fallback. Raw frames and raw robot poses are never overwritten; start a new run
 root when capture preflight reports existing raw data.
+
+For a dataset run with a selected hash-bound calibration, these commands
+automatically apply each camera profile's saved sync delta, timestamp pair,
+required timestamp domain, fallback policy, and nearest-pose threshold.
+Per-camera reports bind the applied values to the calibration bundle/profile,
+the quality report checks exact coverage, and rectification/BOP export reject
+missing or contradictory timing evidence. Manual timing options cannot override
+a selected calibration policy.
 
 ## Calibration
 
@@ -227,9 +235,10 @@ authoritative modes:
 **Run calibration** queues one CPU/disk parent job. It never opens cameras or
 commands the robot. Only selected captured camera folders are synchronized into
 an immutable derived attempt under
-`processed/calibration/<attempt_id>/`. The four displayed phases are Prepare
-data, Estimate target poses, Compare robot-camera solutions, and Validate and
-rank. Every PnP/extrinsic combination and failure remains available for review.
+`processed/calibration/<attempt_id>/`. The five displayed phases are Prepare
+data, Estimate target poses, Estimate time alignment, Compare robot-camera
+solutions, and Validate and rank. Every PnP/extrinsic combination and failure
+remains available for review.
 
 The default **Auto compare — recommended** policy compares IPPE, ITERATIVE, and
 SQPNP using a common robust point mask and LM refinement, then compares Tsai,
@@ -248,12 +257,34 @@ unusable, the manual fit activates only after its 15-view, 6/9 coverage, 3 px
 per-view, 1.5 px RMS, five-view held-out, and parameter-plausibility gates pass;
 factory and manual evidence are retained either way.
 
-For RealSense calibration, synchronization pairs each color frame's sensor
-exposure timestamp with the robot pose's host-wall timestamp. Every camera
-timestamp must be present in the SDK `global_time` domain, every robot pose must
-have `host_wall_timestamp_ns`, the manual offset is fixed at zero, timestamp
-fallback is forbidden, and frames farther than 20 ms from the nearest pose are
-excluded with evidence.
+RealSense calibration pairs color-frame `global_time` exposure timestamps with
+robot-pose host-wall timestamps, forbids fallback, and excludes frames whose
+nearest pose is more than 20 ms away. Guided attempts default to **Auto time
+alignment**; use the explicit 0 ms baseline only after independently validating
+that capture path.
+
+Auto time alignment estimates one constant effective latency per camera:
+
+```text
+robot_pose_query_time = frame_time + robot_pose_time_offset_ms
+sync_delta_ms = -robot_pose_time_offset_ms
+```
+
+A positive operator-facing offset uses a later robot record. The bounded
+-150–150 ms search uses measured robot motion and stationary-target closure,
+does not require a known target-to-base transform, and never rewrites raw
+timestamps. Motion-disjoint consistency, improvement, boundary, ambiguity, and
+rotation guards fail closed; `time_offset_search.json` retains the complete
+decision. This estimates capture-path latency, not hardware-clock
+synchronization.
+
+Published profiles retain the accepted per-camera offset, timestamp fields,
+clock-domain rule, fallback policy, and pose-gap limit. Object-dataset runs copy
+those profiles into a hash-bound snapshot and apply the timing automatically;
+manual timing cannot override it, and synchronization quality, rectification,
+and BOP export recheck the provenance. See
+[`docs/OPERATOR_WORKFLOWS.md`](docs/OPERATOR_WORKFLOWS.md) for the operator
+contract and the dated validation record below for search details and limits.
 
 Target poses require at least 12 common corner inliers, 50% support, four
 markers with at least three supported corners each spanning two target rows and
@@ -286,27 +317,39 @@ an explicit override must still select one complete recorded passing bundle.
 Single-camera ranking is unchanged. Recommendations remain inactive until the
 operator accepts them.
 
-The 2026-07-22 confirmation campaign completed capture and calibration with all
-three configured RealSense cameras. Immutable attempt
-`12e6a40eff444b889870597b787bf016` promoted the complete common
-`IPPE + Shah` bundle with 605/606, 608/608, and 610/610 inliers. Held-out means
-were 3.052 mm / 0.628 degrees, 3.241 mm / 0.473 degrees, and 3.226 mm /
-0.425 degrees; maximum three-camera stationary-companion closure was 7.104 mm
-/ 0.421 degrees. The run passes `rewrite_full_capture.v1` at 10/10 and
-`rewrite_calibration_validation.v1` at 3/3. Exact transforms, repeatability,
-and promotion evidence are retained in
-[`docs/EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md`](docs/EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md).
+The 2026-07-23 guided campaign produced three independent real capture and
+calibration attempts for all three eye-in-hand RealSense cameras. Their
+historical 0 ms results passed the then-current run gates and reached 7.847 mm /
+1.115° maximum within-run companion closure. The 8.642 mm / 1.099° maximum
+cross-run transform difference is a diagnostic requiring a controlled repeat,
+not validated accuracy: the selected solver method changed between runs.
+Exact transforms, residuals, workflow findings, and immutable attempt evidence
+remain in
+[`docs/EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md`](docs/EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
 
-The factory color projections were retained because their recorded
-`inverse_brown_conrady` coefficients are exactly zero. The manual OpenCV fits
-remain immutable comparison evidence: factory/manual held-out RMS was
-1.260/1.019 px for `033422071805`, 1.230/0.964 px for `825412070181`, and
-1.268/0.998 px for `923322072633`. Depth scale and depth-to-color alignment
+An offline retrospective replay of the new constant-offset search over all
+nine saved camera/run combinations selected +70 to +75 ms for `033422071805`,
++80 to +85 ms for `825412070181`, and +45 to +55 ms for `923322072633`.
+Cross-validated stationary-target translation closure improved by 14–38%
+relative to 0 ms. This was saved-data analysis, not another capture, and its
+5 ms search grid is finer than the approximately 11 ms median robot-pose
+cadence. It neither proves hardware-clock accuracy nor resolves the
+method-confounded cross-run difference.
+
+The three top-level reusable profile collections were retired after this replay
+because they predate the required saved time-alignment provenance. Raw
+captures, robot poses, and immutable attempt evidence remain. A new calibration
+must pass Auto time alignment and be explicitly published before an
+object-dataset run.
+
+The compatible factory color projections were retained under the
+comparison-only policy while all 45-training/15-held-out OpenCV fits remain
+immutable evidence. Across the three runs, factory/manual held-out RMS stayed
+within 1.216–1.462 / 0.999–1.262 px. Depth scale and depth-to-color alignment
 remain factory SDK provenance, not a depth recalibration. A saved-data
 depth-plane diagnostic found a range-dependent metric-depth anomaly on
-`923322072633`; use the promoted RGB eye-in-hand extrinsic, but keep metric
-depth from that camera explicitly unvalidated until a later cable/firmware and
-depth-specific check.
+`923322072633`; metric depth from that camera remains unvalidated pending a
+later cable/firmware and depth-specific check.
 
 The **Calibration Targets** page previews and fits PoseGridGen ArUco boards and
 stores immutable bundles below

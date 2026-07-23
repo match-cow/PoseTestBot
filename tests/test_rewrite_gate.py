@@ -653,6 +653,82 @@ def test_rewrite_gate_cli_accepts_bop_export_readiness_gate(tmp_path: Path) -> N
     assert payload["overall_status"] == "ready"
 
 
+def test_full_capture_gate_accepts_embedded_pre_start_capture_plan_preflight(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "embedded-preflight"
+    run_root.mkdir()
+    write_json(
+        run_root / "capture_execution_plan.json",
+        {
+            "schema_version": "capture_execution_plan.v1",
+            "status": "ok",
+            "ready_to_execute": True,
+            "preflight_status": "ok",
+            "preflight_report": {
+                "schema_version": "capture_plan_preflight.v1",
+                "overall_status": "ok",
+                "checks": [
+                    {
+                        "name": "sensor_output_folder:realsense_1",
+                        "status": "ok",
+                        "message": "Output folder was empty before capture.",
+                    }
+                ],
+            },
+        },
+    )
+
+    from posetestbot.pipeline.rewrite_gate import build_full_capture_gate_report
+
+    report = build_full_capture_gate_report(run_root)
+
+    preflight = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "capture_plan_preflight"
+    )
+    assert preflight["status"] == "ready"
+    assert preflight["artifact"].endswith("capture_execution_plan.json")
+    assert (
+        preflight["details"]["source"]
+        == "capture_execution_plan.json:preflight_report"
+    )
+
+
+def test_full_capture_gate_rejects_mismatched_embedded_preflight_status(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "mismatched-embedded-preflight"
+    run_root.mkdir()
+    write_json(
+        run_root / "capture_execution_plan.json",
+        {
+            "schema_version": "capture_execution_plan.v1",
+            "status": "ok",
+            "ready_to_execute": True,
+            "preflight_status": "warning",
+            "preflight_report": {
+                "schema_version": "capture_plan_preflight.v1",
+                "overall_status": "ok",
+                "checks": [],
+            },
+        },
+    )
+
+    from posetestbot.pipeline.rewrite_gate import build_full_capture_gate_report
+
+    report = build_full_capture_gate_report(run_root)
+
+    preflight = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "capture_plan_preflight"
+    )
+    assert preflight["status"] == "blocked"
+    assert preflight["message"] == "capture_plan_preflight_report.json is missing."
+
+
 def test_full_capture_gate_checks_real_hardware_snapshot(tmp_path: Path) -> None:
     run_root = tmp_path / "real-run"
     config = create_run_config(run_root=run_root)

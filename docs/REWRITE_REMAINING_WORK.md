@@ -1,6 +1,6 @@
 # Acquisition Rewrite Remaining Work
 
-Last reviewed: 2026-07-22
+Last reviewed: 2026-07-23
 
 This is the only repository-owned planning document for unfinished rewrite
 work. Completed design plans are retained in Git history, not as live plans.
@@ -31,9 +31,9 @@ The rewrite already provides:
   identity and metadata;
 - transactional non-destructive synchronization and sync-quality reports;
 - PoseGridGen target bundles, attempt-scoped two-mode calibration, exact
-  RealSense timebase/intrinsic compatibility gates, deterministic common-
-  bundle multi-camera ranking, explicit validation/promotion, and derived
-  rectification;
+  RealSense timebase/intrinsic compatibility gates, evidence-gated per-camera
+  constant-offset search, deterministic common-bundle multi-camera ranking,
+  explicit validation/promotion, and derived rectification;
 - a dedicated JSON-backed Workpiece Catalogue page and `/workpieces` API with
   queued CAD upload, editable labels/tags/groups/attributes, client-side
   previews, tag/group/state filtering, revisioned/locked mutations, guarded
@@ -67,13 +67,14 @@ installed-wheel Flask smoke. Optional BlenderProc and `pyzed.sl` were not
 available on the audit host; that is non-blocking for ordinary development but
 must be resolved for the relevant real-data milestones below.
 
-The current three-RealSense `calib00` confirmation run passes the full-capture
-gate at 10/10 and calibration-validation gate at 3/3. Its complete retained
-evidence is summarized in
-[EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260722.md).
-This closes the three-camera calibration dependency, but not the combined
-camera-service lifecycle acceptance in P1, the five-sensor capture in P2, the
-controller commissioning evidence below, or the real BOP acceptance in P4.
+The three-RealSense `calib00` guided campaign retained three independent runs.
+At campaign completion each passed the full-capture gate at 10/10 and
+calibration-validation gate at 3/3; historical evidence is summarized in
+[EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
+Their obsolete reusable profiles are now retired, so a fresh Auto time-aligned
+promotion remains required alongside the camera-service lifecycle acceptance
+in P1, the five-sensor capture in P2, controller commissioning, and real BOP
+acceptance in P4.
 
 ## P0 — Safety and Capture-Contract Hardening
 
@@ -195,19 +196,15 @@ Depends on P0 and on an operator-ready robot/camera cell.
 
 ### Calibration evidence and promotion
 
-The initial 2026-07-21 live preflight for
-`working_data/eye_in_hand_calib00_20260721_163559` stopped before `START` after
-RealSense `033422071805` lost its SuperSpeed/UVC interfaces. The subsequent
-two-camera promotion remains an independent baseline, but it was superseded by
-two preserved three-camera runs on 2026-07-22. The confirmation run
-`working_data/eye_in_hand_calib00_3cam_repeat_20260722_1202` promoted immutable
-attempt `12e6a40eff444b889870597b787bf016` with a complete common
-`IPPE + Shah` bundle. It produced 605/606, 608/608, and 610/610 inliers,
-held-out means of 3.052 mm / 0.628 degrees, 3.241 mm / 0.473 degrees, and
-3.226 mm / 0.425 degrees, and 7.104 mm / 0.421 degrees maximum
-stationary-companion closure. Exact transforms and promotion provenance are
-exposed in Cell. `rewrite_full_capture.v1` is 10/10 ready and
-`rewrite_calibration_validation.v1` is 3/3 ready for all three cameras.
+Three retained guided runs live at
+`working_data/calib00_guided_real_20260723_run01`,
+`working_data/calib00_guided_real_20260723_run02`, and
+`working_data/calib00_guided_real_20260723_run03`. Their raw captures and
+immutable attempts remain historical evidence. Their reusable top-level
+profiles were retired because the 0 ms attempts predate required per-camera
+Auto time-alignment provenance. The 8.642 mm maximum cross-run difference is
+also method-confounded and requires a controlled repeat; see
+[EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
 
 Status and capture-plan preflight continue to reject an enabled
 SDK-enumerated RealSense whose known `usb_type_descriptor` has a major version
@@ -215,64 +212,22 @@ below 3, preventing a future USB2 fallback from satisfying readiness. Disabled
 cameras remain visible configuration/diagnostic evidence but are excluded from
 capture/preflight, calibration, Cell, and rewrite-gate expectations.
 
-- [x] For the current eye-in-hand campaign, use the actual printed and measured
-  `calib00` bundle (`15b49f67-7cf5-4c00-9e7f-914aa6ed5da0`):
-  `DICT_5X5_100`, 7 × 5, 35 markers, geometry SHA-256
-  `3da681424ff77e55dc51c8c1c9bb58e0a425f7fa039b63d29c798aa2ad02b256`.
-  Keep placement `unknown` so eye-in-hand solving estimates the stationary
-  target companion transform. Require target/hash/placement agreement through
-  detections, observations, candidates, ranking, and promotion.
-- [x] Retain `intrinsic_comparison.json` for every enabled camera, including
-  both factory and manual evidence and the selection reason. Treat RealSense
-  `inverse_brown_conrady` as forward-OpenCV-compatible only when every
-  coefficient is finite and exactly zero; retain that factory pinhole
-  projection and keep the manual result comparison-only. Never pass nonzero
-  inverse coefficients as forward distortion. When factory projection is
-  unusable, activate manual intrinsics only after at least 15 training views,
-  6/9 image-centroid cells, five held-out views, parameter-plausibility,
-  3 px/view, and 1.5 px RMS gates pass.
-- [x] Require each target pose to have at least 12 common corner inliers, at
-  least 50% whole-board support, and no more than 3 px whole-board mean
-  reprojection error, with four three-corner-supported markers spanning two
-  rows/columns per view and 50% marker plus 60% row/column campaign coverage.
-- [x] For every required camera, require at least 15 accepted extrinsic views,
-  6/9 image-centroid cells, four distinct motion poses, at least 20 mm
-  translation span, at least 5° rotation span, six hand-eye inliers, no more
-  than 10 mm / 5° mean held-out residual, no more than 25% motion-balanced
-  outliers, no more than 25% outliers within any repeated motion, and
-  rotation-axis singular ratio 0.15 from at least 2° samples before/after
-  pruning. Treat raw outlier density as evidence rather than a promotion gate.
-  Balance fitting to five frames per motion and validate every accepted frame.
-  For RealSense require SDK `global_time` color sensor timestamps paired with
-  robot host-wall timestamps, zero manual offset, no fallback, and at most
-  20 ms nearest-pose delta.
-- [x] Confirm the historical high reprojection error on RealSense
-  `825412070181` did not recur: factory/manual held-out RMS is 1.230/0.964 px
-  and promoted-candidate mean reprojection is 1.040 px. Trajectory variation
-  was not treated as a correction.
-- [x] Review every PnP/extrinsic result. For the enabled cameras require a
-  complete common bundle using the same PnP and extrinsic method, with every
-  individual candidate passing and maximum pairwise stationary-companion
-  closure no greater than 10 mm / 5°. Establish the best normalized mean
-  individual score, treat bundles within 0.01 as quality-equivalent, and rank
-  that band by normalized companion closure rounded to six decimals, followed
-  by canonical method tie-breaks. Keep clearly worse individual solutions
-  outside the band even if their closure is smaller. If no common bundle
-  passes, fail closed and forbid partial or mixed-method promotion. Explicitly
-  promote the selected complete bundle, preserve unrelated profiles, expose
-  its exact transforms in Cell, and pass
-  `rewrite_calibration_validation.v1` with promotion evidence.
+- [ ] Run and explicitly publish a fresh supervised three-camera `calib00`
+  calibration through the current workflow. Require passing per-camera Auto
+  time alignment, one complete common solver bundle, current intrinsic and
+  target evidence, and passing rewrite gates before using it for a dataset.
+  The detailed completed software contracts live in
+  [REWRITE_PROGRESS.md](REWRITE_PROGRESS.md).
 - [ ] Revalidate metric depth on RealSense `923322072633` after the cable and
   firmware maintenance opportunity. Saved aligned-depth checks showed a
-  range-dependent scale anomaly; the promoted RGB eye-in-hand transform is
-  valid, but factory depth scale/alignment remains explicitly not recalibrated.
+  range-dependent scale anomaly; factory depth scale/alignment remains
+  explicitly not recalibrated.
 
 ## P4 — Real Pose-Template, BlenderProc, and BOP v3 Acceptance
 
-The promoted-calibration dependency is satisfied by the repeated three-camera
-`calib00` attempt. Real BlenderProc 2.8.0 and BOP acceptance remain outstanding
-for an appropriate dataset run.
-
+No reusable calibration is currently published; the fresh calibration above
+is the first dependency for a real dataset run. Real BlenderProc 2.8.0 and BOP
+acceptance also remain outstanding.
 - [ ] Import/inspect and classify the real CAD and texture assets through
   **Workpiece Catalogue**, exercise name/tag/group filters, verify the compact
   and interactive identification previews and millimetre dimensions, choose

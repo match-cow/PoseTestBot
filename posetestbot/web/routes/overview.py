@@ -34,6 +34,9 @@ from posetestbot.pipeline.run_config import (
     load_run_config_for_run_root,
     sequence_plan_from_run_config,
 )
+from posetestbot.sync.calibration_policy import (
+    resolve_calibration_profile_sync_policy,
+)
 
 
 overview_bp = Blueprint("overview", __name__)
@@ -104,6 +107,68 @@ WORKFLOW_SECTIONS = [
     },
     {"id": "jobs", "label": "Jobs", "artifacts": []},
 ]
+
+
+def _calibration_sync_overview(
+    root: Path,
+    config: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    pointer = (
+        config.get("calibration_profile_selection")
+        if isinstance(config, Mapping)
+        else None
+    )
+    if pointer is None:
+        return {
+            "status": "not_configured",
+            "sensors": [],
+        }
+    bundle_sha256 = (
+        pointer.get("bundle_sha256") if isinstance(pointer, Mapping) else None
+    )
+    try:
+        policy = resolve_calibration_profile_sync_policy(root)
+        if policy is None:
+            raise ValueError(
+                "Run config does not bind a selected calibration timing policy"
+            )
+        display_names: dict[str, str] = {}
+        capture = config.get("capture")
+        if isinstance(capture, Mapping):
+            sensors = capture.get("sensors")
+            if isinstance(sensors, list):
+                for sensor in sensors:
+                    if not isinstance(sensor, Mapping):
+                        continue
+                    sensor_type = sensor.get("sensor_type")
+                    device_id = sensor.get("device_id")
+                    display_name = sensor.get("display_name")
+                    if all(
+                        isinstance(value, str) and value
+                        for value in (sensor_type, device_id, display_name)
+                    ):
+                        display_names[f"{sensor_type}:{device_id}"] = display_name
+        return {
+            "status": "ready",
+            "bundle_sha256": policy["bundle_sha256"],
+            "sensors": [
+                {
+                    **dict(sensor),
+                    "sensor_name": display_names.get(
+                        str(sensor["sensor_key"]),
+                        str(sensor["sensor_name"]),
+                    ),
+                }
+                for sensor in policy["sensors"]
+            ],
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "bundle_sha256": bundle_sha256,
+            "sensors": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def _json_if_present(path: Path) -> Mapping[str, Any] | None:
@@ -311,6 +376,7 @@ def ui_overview():
             "run_root": root.as_posix(),
             "config": config,
             "config_error": config_error,
+            "calibration_sync": _calibration_sync_overview(root, config),
             "sidebar": _section_summaries(root),
             "steps": _sequence_steps(config, root),
             "recommendations": recommendations,

@@ -80,10 +80,15 @@ def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
             }
         )
     )
-    output_folder = attempt_root / "processed" / "synchronized" / "realsense_1"
+    output_folder = (
+        attempt_root / "processed" / "preparation_synchronized" / "realsense_1"
+    )
     report_path = output_folder / "sync_report.json"
 
     def fake_synchronize_run(*_args, **kwargs):
+        assert kwargs["output_root"] == (
+            attempt_root / "processed" / "preparation_synchronized"
+        )
         assert kwargs["sync_delta"] == 0.0
         assert kwargs["timestamp_source"] == "sensor"
         assert kwargs["robot_timestamp_source"] == "host_wall"
@@ -169,6 +174,205 @@ def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
 
     assert synchronized == {"realsense_d435:1": output_folder.resolve()}
     assert intrinsics == {}
+
+
+def test_authoritative_sync_uses_selected_offset_without_replacing_preparation_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    attempt_id = "a" * 32
+    attempt_root = run_root / "processed" / "calibration" / attempt_id
+    sensor_folder = run_root / "realsense_1"
+    preparation_folder = (
+        attempt_root / "processed" / "preparation_synchronized" / "realsense_1"
+    )
+    preparation_folder.mkdir(parents=True)
+    sensor_folder.mkdir(parents=True)
+    preparation_detection = preparation_folder / "aruco_detections.json"
+    preparation_detection.write_text('{"retained": true}')
+
+    request_value = {
+        "attempt_id": attempt_id,
+        "sensor_keys": ["realsense_d435:1"],
+        "sensors": [
+            {
+                "sensor_key": "realsense_d435:1",
+                "sensor_name": "realsense_1",
+                "sensor_type": "realsense_d435",
+                "device_id": "1",
+                "folder": "realsense_1",
+            }
+        ],
+    }
+    time_offset_search = {
+        "policy": "auto_offset",
+        "sign_convention": attempt_module.time_offset_sign_convention(),
+        "search": {"max_nearest_pose_delta_ms": 20.0},
+        "sensors": [
+            {
+                "sensor_key": "realsense_d435:1",
+                "status": "applied",
+                "selected_robot_pose_time_offset_ms": 75.0,
+                "selected_sync_delta_ms": -75.0,
+            }
+        ],
+    }
+    observations = {
+        "realsense_d435:1": {
+            "IPPE": [
+                {
+                    "observation_id": "old",
+                    "frame_id": "000004.png",
+                    "source_frame_id": "source-004.png",
+                    "image_timestamp_ns": 1_000_000_000,
+                    "motion": "old_motion",
+                    "robot_ee_pose": {"X": 0.0},
+                }
+            ]
+        }
+    }
+    timestamp_policy = {
+        "schema_version": "calibration_timestamp_policy.v1",
+        "per_sensor": {
+            "realsense_d435:1": {
+                "frame_timestamp_source": "sensor",
+                "robot_timestamp_source": "host_wall",
+            }
+        },
+    }
+    monkeypatch.setattr(
+        attempt_module,
+        "_calibration_timestamp_preflight",
+        lambda *_args: timestamp_policy,
+    )
+
+    final_folder = attempt_root / "processed" / "synchronized" / "realsense_1"
+    report_path = final_folder / "sync_report.json"
+
+    def fake_synchronize_run(*_args, **kwargs):
+        assert kwargs["output_root"] == attempt_root / "processed" / "synchronized"
+        assert kwargs["sync_delta"] == -75.0
+        assert kwargs["copy_files"] is False
+        assert kwargs["timestamp_source"] == "sensor"
+        assert kwargs["robot_timestamp_source"] == "host_wall"
+        assert kwargs["max_nearest_pose_delta_ms"] == 20.0
+        final_folder.mkdir(parents=True)
+        (final_folder / "match_robot_ee_poses.json").write_text(
+            json.dumps(
+                {
+                    "000000.png": {
+                        "source_frame_id": "source-004.png",
+                        "image_timestamp_ns": 1_000_000_000,
+                        "delayed_timestamp_ns": 1_075_000_000,
+                        "motion": "motion_4",
+                        "robot_ee_pose": {
+                            "X": 1.0,
+                            "Y": 2.0,
+                            "Z": 3.0,
+                            "A": 0.1,
+                            "B": 0.2,
+                            "C": 0.3,
+                        },
+                        "matched_robot_pose_index": 44,
+                        "robot_timestamp_ns": 1_074_000_000,
+                        "nearest_robot_delta_ns": -1_000_000,
+                    }
+                }
+            )
+        )
+        return [
+            SimpleNamespace(
+                sensor_folder=sensor_folder,
+                output_folder=final_folder,
+                report_path=report_path,
+            )
+        ]
+
+    monkeypatch.setattr(attempt_module, "synchronize_run", fake_synchronize_run)
+    monkeypatch.setattr(
+        attempt_module,
+        "build_sync_quality_report",
+        lambda *_args, **_kwargs: {
+            "overall_status": "ok",
+            "sensors": [{"sensor_name": "realsense_1", "sync_delta_ms": -75.0}],
+            "checks": [
+                {
+                    "name": "sync_nearest_pose_delta:realsense_1",
+                    "status": "ok",
+                }
+            ],
+        },
+    )
+
+    synchronized, remapped = attempt_module._materialize_authoritative_synchronization(
+        run_root,
+        attempt_root,
+        request_value,
+        time_offset_search,
+        observations,
+    )
+
+    assert synchronized == {"realsense_d435:1": final_folder.resolve()}
+    assert json.loads(preparation_detection.read_text()) == {"retained": True}
+    item = remapped["realsense_d435:1"]["IPPE"][0]
+    assert item["frame_id"] == "000000.png"
+    assert item["source_frame_id"] == "source-004.png"
+    assert item["robot_pose_time_offset_ms"] == 75.0
+    assert item["sync_delta_ms"] == -75.0
+    assert item["timestamp_alignment"]["source"] == (
+        f"processed/calibration/{attempt_id}/time_offset_search.json"
+    )
+    quality = json.loads((attempt_root / "sync_quality_report.json").read_text())
+    policy = quality["calibration_attempt_policy"]
+    assert policy["per_sensor"] == timestamp_policy["per_sensor"]
+    assert policy["per_sensor_offsets"]["realsense_d435:1"] == {
+        "robot_pose_time_offset_ms": 75.0,
+        "sync_delta_ms": -75.0,
+        "status": "applied",
+    }
+
+
+def test_auto_sync_failure_writes_diagnostic_artifact_before_stopping(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    attempt_root = run_root / "processed" / "calibration" / ("a" * 32)
+    attempt_root.mkdir(parents=True)
+    sensor_key = "realsense_d435:1"
+    request_value = {
+        "attempt_id": "a" * 32,
+        "mode": "eye_in_hand",
+        "sensor_keys": [sensor_key],
+        "sensors": [
+            {
+                "sensor_key": sensor_key,
+                "sensor_name": "realsense_1",
+                "sensor_type": "realsense_d435",
+                "device_id": "1",
+                "folder": "realsense_1",
+            }
+        ],
+        "synchronization_policy": "auto_offset",
+        "synchronization_search": attempt_module.time_offset_search_configuration(),
+        "synchronization_implementation_revision": (
+            attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+        ),
+    }
+
+    with pytest.raises(ValueError, match="failed closed"):
+        attempt_module._estimate_and_apply_time_offsets(
+            run_root,
+            attempt_root,
+            request_value,
+            {sensor_key: {"ITERATIVE": []}},
+        )
+
+    report = json.loads((attempt_root / "time_offset_search.json").read_text())
+    assert report["status"] == "failed"
+    assert report["failed_sensor_keys"] == [sensor_key]
+    assert report["sensors"][0]["status"] == "failed"
+    assert report["sensors"][0]["checks"][0]["name"] == ("time_offset_search_execution")
 
 
 def test_realsense_calibration_timestamp_preflight_requires_global_time(
@@ -1454,7 +1658,7 @@ def test_candidate_ranking_has_stable_method_tie_breaks() -> None:
     assert ranked[0]["recommended"] is True
 
 
-def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
+def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1491,6 +1695,7 @@ def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
         "pnp_methods": ["ITERATIVE"],
         "extrinsic_methods": ["park"],
         "intrinsics_policy": "reuse_compatible_or_factory",
+        "synchronization_policy": "fixed_zero",
     }
     (attempt_root / "request.json").write_text(json.dumps(request_value))
     (attempt_root / "progress.json").write_text(
@@ -1520,6 +1725,39 @@ def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
             {sensor_key: {"ITERATIVE": observations}},
         ),
     )
+    time_offset_search = {
+        "schema_version": "calibration_time_offset_search.v1",
+        "policy": "fixed_zero",
+        "status": "complete",
+        "sign_convention": attempt_module.time_offset_sign_convention(),
+        "sensors": [
+            attempt_module.fixed_zero_sensor_result(
+                sensor_key=sensor_key,
+                observation_count=len(observations),
+            )
+        ],
+    }
+
+    def fake_time_offsets(*_args):
+        attempt_module.atomic_write_json(
+            attempt_root / "time_offset_search.json",
+            time_offset_search,
+        )
+        return time_offset_search, {sensor_key: {"ITERATIVE": observations}}
+
+    monkeypatch.setattr(
+        attempt_module,
+        "_estimate_and_apply_time_offsets",
+        fake_time_offsets,
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "_materialize_authoritative_synchronization",
+        lambda *_args: (
+            {sensor_key: attempt_root / "sensor"},
+            {sensor_key: {"ITERATIVE": observations}},
+        ),
+    )
 
     ranking = attempt_module.run_calibration_attempt(run_root, attempt_id)
 
@@ -1533,6 +1771,7 @@ def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
         "complete",
         "complete",
         "complete",
+        "complete",
     ]
     for filename in (
         "calibration_observations.json",
@@ -1540,6 +1779,7 @@ def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
         "ranking.json",
         "checks.json",
         "candidate_profiles.json",
+        "time_offset_search.json",
     ):
         assert (attempt_root / filename).is_file()
     candidate_profiles = json.loads(
@@ -1553,7 +1793,14 @@ def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
     assert candidate_profile["intrinsics"]["rectified"] is not None
     assert candidate_profile["intrinsics"]["rectified"]["distortion"] == [0.0] * 5
     assert candidate_profile["metadata"]["synchronization"] == {
+        "policy": "fixed_zero",
+        "status": "fixed_zero",
+        "robot_pose_time_offset_ms": 0.0,
         "sync_delta_ms": 0.0,
+        "source": (
+            "processed/calibration/"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/time_offset_search.json"
+        ),
         "timestamp_source": "sensor",
         "frame_timestamp_source": "sensor",
         "robot_timestamp_source": "host_wall",
@@ -1561,6 +1808,7 @@ def test_parent_attempt_runs_four_phases_writes_evidence_and_cannot_be_replayed(
         "timestamp_fallback_allowed": False,
         "max_nearest_pose_delta_ms": 20.0,
         "historical_per_sensor_offsets_allowed": False,
+        "auto_estimated_per_sensor_offset": False,
         "sensor_key": sensor_key,
         "quality_report": (
             f"processed/calibration/{attempt_id}/sync_quality_report.json"

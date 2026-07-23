@@ -18,6 +18,7 @@ from posetestbot.calibration.profiles import (
     load_profile_collection,
     select_valid_profile_for_sensor,
 )
+from posetestbot.calibration.targets import DEFAULT_TARGET_SPEC
 from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
@@ -39,6 +40,7 @@ MAX_PREVIEW_POSES = 200
 CALIBRATION_ATTEMPT_DIRECTORY = Path("processed") / "calibration"
 POSE_TEMPLATE_BUNDLE = "pose_template_bundle.json"
 POSE_TEMPLATE_PREVIEW = "pose_template_preview.json"
+TARGET_FRONT_PRESENTATION = np.diag([1.0, -1.0, -1.0, 1.0])
 
 
 def _matrix(quaternion: Any, translation: Any) -> np.ndarray:
@@ -67,6 +69,68 @@ def _identity(parent: str | None = None) -> dict[str, Any]:
         "parent_frame": parent,
         "translation_mm": [0.0, 0.0, 0.0],
         "rotation_quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+    }
+
+
+def _canonical_grid_frame(target: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the supported grid frame, including the legacy v1 default."""
+
+    if target.get("target_type") != "aruco_grid":
+        return None
+    raw = target.get("frame", DEFAULT_TARGET_SPEC["frame"])
+    if not isinstance(raw, Mapping):
+        return None
+    axes = raw.get("axes")
+    if not isinstance(axes, Mapping):
+        return None
+    frame = {
+        "name": raw.get("name"),
+        "origin": raw.get("origin"),
+        "axes": {
+            "x": axes.get("x"),
+            "y": axes.get("y"),
+            "z": axes.get("z"),
+        },
+    }
+    expected = DEFAULT_TARGET_SPEC["frame"]
+    return frame if frame == expected else None
+
+
+def _reference_presentation(reference_frame: str) -> dict[str, Any]:
+    matrix = np.eye(4)
+    return {
+        "mode": "reference_z_up",
+        "presentation_only": True,
+        "source_frame": reference_frame,
+        "anchor_frame": reference_frame,
+        "display_up_axis": "+Z",
+        "matrix": matrix.tolist(),
+        "transform": _transform_dict(matrix, "display"),
+        "target_frame": None,
+    }
+
+
+def _target_front_presentation(
+    target_to_reference: np.ndarray,
+    *,
+    reference_frame: str,
+    target_frame: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Map a right/down/into grid frame to a conventional right-handed Z-up view."""
+
+    reference_to_display = TARGET_FRONT_PRESENTATION @ pt.invert_transform(
+        target_to_reference
+    )
+    return {
+        "mode": "calibration_target_front",
+        "presentation_only": True,
+        "source_frame": reference_frame,
+        "anchor_frame": "calibration_target",
+        "display_up_axis": "+Z",
+        "source_front_axis": "-Z",
+        "matrix": reference_to_display.tolist(),
+        "transform": _transform_dict(reference_to_display, "display"),
+        "target_frame": dict(target_frame),
     }
 
 
@@ -699,12 +763,14 @@ def _target_geometry(target: Mapping[str, Any], *, pdf_url: str | None) -> dict[
     marker_length = target.get("marker_length") or board.get("marker_size_mm")
     marker_separation = target.get("marker_separation") or board.get("separation_mm")
     markers = target.get("markers")
+    frame = _canonical_grid_frame(target)
     return {
         "kind": "calibration_target",
         "target_type": target.get("target_type"),
         "target_id": target.get("target_id"),
         "display_name": target.get("display_name"),
         "geometry_sha256": target.get("geometry_sha256"),
+        "frame": frame,
         "target_bounds": target.get("target_bounds"),
         "grid_size": target.get("grid_size"),
         "marker_length_mm": marker_length,
@@ -757,6 +823,7 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
     config = load_run_config_for_run_root(root)
     warnings: list[dict[str, str]] = []
     manager = TransformManager()
+    presentation = _reference_presentation("template_base")
     fixed_sources: dict[str, Mapping[str, Any]] = {}
     for edge in config.get("frames", {}).get("fixed_transforms", []):
         try:
@@ -1031,6 +1098,28 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
             parent = str(placement.get("to", "template_base"))
             manager.add_transform("calibration_target", parent, matrix)
             matrix = manager.get_transform("calibration_target", parent)
+            target_frame = _canonical_grid_frame(target)
+            if target_frame is not None:
+                try:
+                    target_to_reference = manager.get_transform(
+                        "calibration_target", "template_base"
+                    )
+                except KeyError:
+                    warnings.append(
+                        {
+                            "code": "unresolved_target_presentation",
+                            "message": (
+                                "Calibration target cannot be resolved to template_base; "
+                                "the Cell view retained its reference Z-up presentation."
+                            ),
+                        }
+                    )
+                else:
+                    presentation = _target_front_presentation(
+                        target_to_reference,
+                        reference_frame="template_base",
+                        target_frame=target_frame,
+                    )
             pdf_path = target_context.get("pdf_path")
             geometry = _target_geometry(
                 target,
@@ -1105,9 +1194,14 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
         "coordinate_system": {
             "units": "millimetres",
             "handedness": "right",
-            "up_axis": "+Z",
+            "up_axis": (
+                presentation["source_front_axis"]
+                if presentation["mode"] == "calibration_target_front"
+                else "+Z"
+            ),
             "reference_frame": "template_base",
             "transform_semantics": "entity_to_parent",
+            "presentation": presentation,
         },
         "run_root": root.as_posix(),
         "entities": entities,
