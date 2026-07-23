@@ -1,6 +1,7 @@
-import { useMemo } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Box, LoaderCircle, TriangleAlert } from "lucide-react"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { api } from "@/lib/api"
 import type {
   CatalogObject,
@@ -19,6 +20,78 @@ function faceColor(shade: number) {
   const base = [150, 169, 135]
   const channel = (value: number) => Math.max(0, Math.min(255, Math.round(18 + (value - 18) * shade)))
   return `rgb(${channel(base[0])} ${channel(base[1])} ${channel(base[2])})`
+}
+
+const SVG_FACE_LIMIT = 512
+
+function CanvasMeshPreview({
+  projection,
+  span,
+  centerX,
+  centerY,
+  padding,
+  label,
+  className,
+  testId,
+}: {
+  projection: ReturnType<typeof projectIsometricMesh>
+  span: number
+  centerX: number
+  centerY: number
+  padding: number
+  label: string
+  className?: string
+  testId?: string
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const draw = () => {
+      const cssWidth = Math.max(1, canvas.clientWidth)
+      const cssHeight = Math.max(1, canvas.clientHeight)
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+      canvas.width = Math.round(cssWidth * pixelRatio)
+      canvas.height = Math.round(cssHeight * pixelRatio)
+      const context = canvas.getContext("2d")
+      if (!context) return
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+      context.fillStyle = "#10171d"
+      context.fillRect(0, 0, cssWidth, cssHeight)
+      const viewSpan = span + padding * 2
+      const scale = Math.min(cssWidth, cssHeight) / viewSpan
+      const offsetX = cssWidth / 2 - centerX * scale
+      const offsetY = cssHeight / 2 - centerY * scale
+      context.lineJoin = "round"
+      context.strokeStyle = "rgba(225,235,218,.24)"
+      context.lineWidth = Math.max(.35, span * scale / 420)
+      projection.polygons.forEach((polygon) => {
+        context.beginPath()
+        polygon.points.forEach((point, index) => {
+          const x = point.x * scale + offsetX
+          const y = point.y * scale + offsetY
+          if (index) context.lineTo(x, y)
+          else context.moveTo(x, y)
+        })
+        context.closePath()
+        context.fillStyle = faceColor(polygon.shade)
+        context.fill()
+        context.stroke()
+      })
+    }
+    draw()
+    if (typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(draw)
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [centerX, centerY, padding, projection, span])
+  return <canvas
+    ref={canvasRef}
+    data-testid={testId}
+    role="img"
+    aria-label={`${label} isometric 3D preview`}
+    className={cn("size-full bg-[#10171d]", className)}
+  />
 }
 
 export function contourPoints(contour: PoseTemplateContour) {
@@ -62,6 +135,18 @@ export function IsometricMeshPreview({
   const centerX = (bounds.minX + bounds.maxX) / 2
   const centerY = (bounds.minY + bounds.maxY) / 2
   const padding = span * 0.09
+  if (polygons.length > SVG_FACE_LIMIT) {
+    return <CanvasMeshPreview
+      projection={result.projection}
+      span={span}
+      centerX={centerX}
+      centerY={centerY}
+      padding={padding}
+      label={label}
+      className={className}
+      testId={testId}
+    />
+  }
   return <svg
     data-testid={testId}
     role="img"
@@ -102,12 +187,47 @@ export function useWorkpieceOrientationThumbnail(object: CatalogObject, enabled 
 }
 
 export function WorkpieceIsometricThumbnail({ object, className }: { object: CatalogObject; className?: string }) {
-  const thumbnail = useWorkpieceOrientationThumbnail(object)
-  const orientation = thumbnail.data?.orientation
-  return <div className={cn("grid h-24 w-full place-items-center overflow-hidden rounded-md border bg-muted/30", className)} data-testid={`workpiece-thumbnail-${object.catalog_uuid}`}>
-    {thumbnail.isPending ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
-      : thumbnail.data && orientation ? <IsometricMeshPreview mesh={thumbnail.data.preview_mesh} transform={orientation.source_to_placed} label={object.name} testId={`workpiece-isometric-${object.catalog_uuid}`} />
-        : <div className="grid place-items-center gap-1 px-2 text-center text-[9px] text-muted-foreground"><Box className="size-5" /><span>Preview available after orientation analysis</span></div>}
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [shouldLoad, setShouldLoad] = useState(false)
+  useEffect(() => {
+    const element = containerRef.current
+    if (!element || shouldLoad) return
+    if (typeof IntersectionObserver === "undefined") {
+      const frame = window.requestAnimationFrame(() => setShouldLoad(true))
+      return () => window.cancelAnimationFrame(frame)
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return
+      setShouldLoad(true)
+      observer.disconnect()
+    }, { rootMargin: "240px" })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [shouldLoad])
+  const thumbnail = useWorkpieceOrientationThumbnail(object, shouldLoad)
+  const displayedFaces = thumbnail.data?.preview_mesh.faces.length ?? 0
+  const approximation = thumbnail.data?.recognition_mesh_approximation
+  const sourceFaces = approximation?.source_faces ?? object.extraction.faces
+  const reduced = displayedFaces > 0 && sourceFaces > displayedFaces
+  const warning = approximation?.strategy === "convex_proxy" || approximation?.topology_preserved === false
+  const badge = approximation?.strategy === "convex_proxy" ? "Proxy" : warning ? "Approx" : "LOD"
+  const strategy = {
+    welded_source: "welded source surface",
+    quadric_decimation: "quadric-decimated surface",
+    spatial_clustering: "spatially clustered surface",
+    convex_proxy: "convex safety proxy",
+  }[approximation?.strategy ?? "quadric_decimation"]
+  const detail = `${displayedFaces.toLocaleString()} of ${sourceFaces.toLocaleString()} source faces shown as a ${strategy}${warning ? "; source topology could not be retained within the card budget" : ""}`
+  return <div ref={containerRef} className={cn("relative grid h-24 w-full place-items-center overflow-hidden rounded-md border bg-muted/30", className)} data-testid={`workpiece-thumbnail-${object.catalog_uuid}`}>
+    {!shouldLoad ? <Box className="size-5 text-muted-foreground/45" />
+      : thumbnail.isPending ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+      : thumbnail.data ? <IsometricMeshPreview mesh={thumbnail.data.preview_mesh} label={object.name} testId={`workpiece-isometric-${object.catalog_uuid}`} />
+        : <div className="grid place-items-center gap-1 px-2 text-center text-[9px] text-muted-foreground"><Box className="size-5" /><span>Card preview is stale or unavailable. Select this workpiece and refresh it.</span></div>}
+    {reduced ? <Tooltip><TooltipTrigger asChild><span
+      className={cn("pointer-events-auto absolute bottom-1 right-1 rounded px-1 py-0.5 text-[8px] font-semibold uppercase tracking-wide text-white", warning ? "bg-amber-800/90" : "bg-black/65")}
+      tabIndex={0}
+      aria-label={`Bounded preview level of detail: ${detail}`}
+    >{badge}</span></TooltipTrigger><TooltipContent className="max-w-72">{detail}</TooltipContent></Tooltip> : null}
   </div>
 }
 

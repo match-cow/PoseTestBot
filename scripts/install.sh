@@ -327,6 +327,7 @@ modules = [
     "av",
     "cv2",
     "pyrealsense2",
+    "fast_simplification",
     "flask",
     "depthai",
     "matplotlib",

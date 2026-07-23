@@ -294,6 +294,24 @@ export interface PoseTemplatePreviewMesh {
   faces: Array<[number, number, number]>
 }
 
+export interface RecognitionMeshApproximation {
+  strategy: "welded_source" | "quadric_decimation" | "spatial_clustering" | "convex_proxy"
+  implementation_revision: string
+  source_vertices: number
+  source_faces: number
+  welded_vertices: number
+  welded_faces: number
+  result_vertices: number
+  result_faces: number
+  source_components: number | null
+  source_euler_number: number | null
+  result_components: number | null
+  result_euler_number: number | null
+  topology_preserved: boolean
+  spatial_resolution: number | null
+  fallback_reason: string | null
+}
+
 export type PoseTemplateContour =
   | Array<{ x_mm: number; y_mm: number }>
   | { points: Array<{ x_mm: number; y_mm: number }> }
@@ -315,6 +333,8 @@ export interface PoseTemplateOrientationAnalysis {
   source_sha256?: string
   orientations: PoseTemplateOrientation[]
   preview_mesh: PoseTemplatePreviewMesh
+  recognition_mesh?: PoseTemplatePreviewMesh
+  recognition_mesh_approximation?: RecognitionMeshApproximation
 }
 
 export interface PoseTemplateOrientationThumbnail {
@@ -323,6 +343,7 @@ export interface PoseTemplateOrientationThumbnail {
   catalog?: { catalog_uuid?: string; name?: string; obj_id?: number }
   source?: { canonical_ply_sha256?: string; geometry_revision?: number }
   preview_mesh: PoseTemplatePreviewMesh
+  recognition_mesh_approximation?: RecognitionMeshApproximation
   orientation: Pick<PoseTemplateOrientation, "orientation_id" | "label" | "probability" | "slice_z_mm" | "source_to_placed"> & { rank: number }
 }
 

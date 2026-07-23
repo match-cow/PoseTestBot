@@ -881,7 +881,7 @@ def correct_catalog_object_units(
                     ORIENTATION_CACHE_FILENAME,
                     ORIENTATION_THUMBNAIL_FILENAME,
                     build_orientation_analysis,
-                    build_orientation_thumbnail,
+                    write_orientation_thumbnail,
                 )
 
                 analysis = build_orientation_analysis(
@@ -892,9 +892,8 @@ def correct_catalog_object_units(
                     backend=backend,
                 )
                 atomic_write_json(stage / ORIENTATION_CACHE_FILENAME, analysis)
-                atomic_write_json(
-                    stage / ORIENTATION_THUMBNAIL_FILENAME,
-                    build_orientation_thumbnail(analysis),
+                write_orientation_thumbnail(
+                    stage / ORIENTATION_THUMBNAIL_FILENAME, analysis
                 )
             except Exception as exc:
                 # Stable-orientation analysis is a reproducible cache, not part

@@ -9,7 +9,10 @@ import trimesh
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.pose_templates.catalog import import_catalog_object
 from posetestbot.pose_templates.library import generate_template_bundle
-from posetestbot.pose_templates.orientations import analyze_catalog_orientations
+from posetestbot.pose_templates.orientations import (
+    ORIENTATION_THUMBNAIL_MAX_BYTES,
+    analyze_catalog_orientations,
+)
 from posetestbot.web.app import create_app
 from posetestbot.web.routes import pose_templates as routes
 
@@ -152,7 +155,7 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
         == "pose_template_orientation_thumbnail.v1"
     )
     assert b'"contours"' not in thumbnail.data
-    assert len(thumbnail.data) < 64 * 1024
+    assert len(thumbnail.data) <= ORIENTATION_THUMBNAIL_MAX_BYTES
 
     upload = client.post(
         "/pose-templates/catalog/upload",

@@ -132,13 +132,32 @@ after either success or failure; submission also prunes abandoned request
 directories older than 24 hours while preserving inputs for active jobs. Unit
 correction uses the same cleanup policy.
 
-The selected-object view and compact cards both read the separate,
-at-most-256-KiB orientation thumbnail. The selected detail uses its bounded mesh
-in one orbitable WebGL view; cards use deterministic isometric SVG projection,
-avoiding both full-contour analysis reads and one WebGL context per card. The
-full canonical PLY remains available as an explicit download but is never
-parsed just to browse the catalogue. These are not stored screenshots and do
-not require BlenderProc or a server-side rendering service.
+The selected-object view loads the exact current canonical PLY in one orbitable
+WebGL view. Its URL is revisioned by the canonical SHA-256, so a geometry
+correction cannot reuse stale browser or Three.js loader state. It starts in
+the authored catalogue orientation rather than silently choosing a stable
+face; the view only centres and uniformly scales it for display.
+Stable-placement comparison remains part of Pose Templates. Vertex colours and
+normals are retained when present, missing normals are computed client-side,
+and open CAD is rendered double-sided. Loader entries are evicted when the
+selected object changes. This makes ports, holes, recesses, handles, and
+separated components available for identification without a BlenderProc or
+server-side rendering service.
+
+Compact cards still read the separate, at-most-256-KiB orientation thumbnail
+and never download every full mesh merely to browse a list. Before publishing
+that cache, PoseTestBot welds a preview copy and keeps the indexed source
+surface when it fits the 4,096-vertex/8,192-face envelope. Larger surfaces use
+deterministic quadric decimation and a bounded spatial candidate. Component and
+Euler signatures select the candidate that retains more source topology;
+PoseTemplateCreator's broad convex proxy is used only if every bounded
+recognition strategy fails. The cache records strategy, source/result counts,
+topology signatures, and any fallback reason. Cards expose that evidence with
+a keyboard-accessible `LOD`, `Approx`, or `Proxy` explanation instead of
+silently claiming exactness. They show the authored orientation for
+recognition, load only as they approach the viewport, keep small previews on an
+inspectable isometric SVG path, and rasterize dense projections into one
+Canvas2D element rather than creating thousands of DOM polygons.
 
 Stable-orientation extraction is CPU/disk work. It is queued through the local
 job runner when a template first needs it and cached beside the exact canonical

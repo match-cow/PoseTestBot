@@ -322,31 +322,29 @@ function Tokens({ values, variant = "secondary" }: { values: string[]; variant?:
 function WorkpieceCard({ item, selected, onSelect }: { item: Workpiece; selected: boolean; onSelect: () => void }) {
   const tags = item.tags ?? []
   const groups = item.groups ?? []
-  return <button
-    type="button"
-    onClick={onSelect}
-    aria-pressed={selected}
-    aria-label={`Select ${item.name}`}
-    data-testid={`workpiece-card-${item.catalog_uuid}`}
-    className="block w-full rounded-[10px] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/55"
-  >
-    <Card className={`${selected ? "border-primary/60 bg-accent/45 shadow-sm" : "transition-colors hover:border-foreground/20 hover:bg-secondary/30"} ${item.state === "archived" ? "opacity-70" : ""}`}>
-      <CardContent className="flex gap-3 p-3.5">
-        <WorkpieceIsometricThumbnail object={item} className="h-[76px] w-[92px] shrink-0" />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0"><div className="truncate text-sm font-semibold">{item.name}</div>{item.alias && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{item.alias}</div>}</div>
-            <StatusBadge status={item.state} />
-          </div>
-          <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-            <span className="font-mono">obj_{String(item.obj_id).padStart(6, "0")}</span>
-            <span>{item.source_format.toUpperCase()}</span>
-          </div>
-          {(tags.length > 0 || groups.length > 0) && <div className="mt-2 flex flex-wrap gap-1">{groups.slice(0, 2).map((value) => <Badge variant="outline" key={`group-${value}`} className="normal-case tracking-normal">{value}</Badge>)}{tags.slice(0, 2).map((value) => <Badge variant="secondary" key={`tag-${value}`} className="normal-case tracking-normal">{value}</Badge>)}</div>}
+  return <Card data-testid={`workpiece-card-${item.catalog_uuid}`} className={`relative ${selected ? "border-primary/60 bg-accent/45 shadow-sm" : "transition-colors hover:border-foreground/20 hover:bg-secondary/30"} ${item.state === "archived" ? "opacity-70" : ""}`}>
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      aria-label={`Select ${item.name}`}
+      className="absolute inset-0 z-0 rounded-[10px] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/55"
+    />
+    <CardContent className="pointer-events-none relative z-10 flex gap-3 p-3.5">
+      <WorkpieceIsometricThumbnail object={item} className="h-[76px] w-[92px] shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0"><div className="truncate text-sm font-semibold">{item.name}</div>{item.alias && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{item.alias}</div>}</div>
+          <StatusBadge status={item.state} />
         </div>
-      </CardContent>
-    </Card>
-  </button>
+        <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+          <span className="font-mono">obj_{String(item.obj_id).padStart(6, "0")}</span>
+          <span>{item.source_format.toUpperCase()}</span>
+        </div>
+        {(tags.length > 0 || groups.length > 0) && <div className="mt-2 flex flex-wrap gap-1">{groups.slice(0, 2).map((value) => <Badge variant="outline" key={`group-${value}`} className="normal-case tracking-normal">{value}</Badge>)}{tags.slice(0, 2).map((value) => <Badge variant="secondary" key={`tag-${value}`} className="normal-case tracking-normal">{value}</Badge>)}</div>}
+      </div>
+    </CardContent>
+  </Card>
 }
 
 export function WorkpiecesPage() {
@@ -371,6 +369,7 @@ export function WorkpiecesPage() {
   const [confirmation, setConfirmation] = useState<{ action: CatalogueAction; item: Workpiece } | null>(null)
   const [pendingUpload, setPendingUpload] = useState<{ id: string; filename: string; startedAt: number } | null>(null)
   const [pendingCorrection, setPendingCorrection] = useState<{ id: string; name: string; startedAt: number } | null>(null)
+  const [pendingPreview, setPendingPreview] = useState<{ id: string; catalogUuid: string; name: string; startedAt: number } | null>(null)
   const uploadAttributeValidation = useMemo(() => validateAttributeRows(uploadDraft.attributes), [uploadDraft.attributes])
   const editAttributeValidation = useMemo(() => validateAttributeRows(editDraft.attributes), [editDraft.attributes])
 
@@ -544,6 +543,39 @@ export function WorkpiecesPage() {
     queueMicrotask(() => setPendingCorrection(null))
   }, [client, correctionJob.data?.job, pendingCorrection])
 
+  const regeneratePreview = useMutation({
+    mutationFn: (item: Workpiece) => api<{ job_id: string }>(
+      `/pose-templates/workpieces/${item.catalog_uuid}/orientations`,
+      { method: "POST", body: "{}" },
+    ),
+    onSuccess: (result, item) => {
+      setPendingPreview({ id: result.job_id, catalogUuid: item.catalog_uuid, name: item.name, startedAt: Date.now() })
+      toast.success("Recognition preview refresh queued", { description: `${item.name} · job ${result.job_id}` })
+    },
+    onError: (error) => toast.error("Recognition preview was not queued", { description: errorMessage(error) }),
+  })
+
+  const previewJob = useQuery({
+    queryKey: ["workpiece-preview-job", pendingPreview?.id],
+    queryFn: () => api<{ job: Job }>(`/jobs/${pendingPreview!.id}`),
+    enabled: Boolean(pendingPreview),
+    refetchInterval: (queryState) => terminalJobStates.has(queryState.state.data?.job.status ?? "") ? false : 600,
+  })
+
+  useEffect(() => {
+    const job = previewJob.data?.job
+    if (!pendingPreview || !job || !terminalJobStates.has(job.status)) return
+    if (job.status === "succeeded") {
+      const seconds = Math.max(1, Math.round((Date.now() - pendingPreview.startedAt) / 1_000))
+      toast.success("Recognition preview refreshed", { description: `${pendingPreview.name} · ${seconds} s` })
+      void client.invalidateQueries({ queryKey: ["pose-template-orientations"] })
+      void client.invalidateQueries({ queryKey: ["pose-template-orientation-thumbnail"] })
+    } else {
+      toast.error("Recognition preview did not complete", { description: jobFailureDetail(job) })
+    }
+    queueMicrotask(() => setPendingPreview(null))
+  }, [client, pendingPreview, previewJob.data?.job])
+
   const refresh = () => {
     void status.refetch()
     void catalogue.refetch()
@@ -671,7 +703,7 @@ export function WorkpiecesPage() {
                 {selected.state === "active" && <div className="rounded-lg border border-dashed bg-muted/25 px-4 py-3 text-xs text-muted-foreground"><strong className="text-foreground">Wrong model scale?</strong> Archive this workpiece first, then use <span className="font-medium text-foreground">Correct model units</span>. Existing immutable templates keep their original geometry snapshot.</div>}
               </CardHeader>
               <CardContent className="space-y-6 pt-5">
-                <section aria-labelledby="workpiece-preview-heading"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 id="workpiece-preview-heading" className="text-sm font-semibold">3D preview</h3><p className="mt-0.5 text-[11px] text-muted-foreground">Drag to rotate and scroll to zoom the bounded orientation-analysis mesh. Download the canonical PLY below when full geometry is needed.</p></div><Badge variant="outline">{selected.source_format.toUpperCase()}</Badge></div><WorkpiecePreviews key={`${selected.catalog_uuid}:${selected.canonical_ply_sha256 ?? selected.geometry_revision ?? 1}`} object={selected} /></section>
+                <section aria-labelledby="workpiece-preview-heading"><div className="mb-3 flex items-end justify-between gap-3"><div><h3 id="workpiece-preview-heading" className="text-sm font-semibold">3D preview</h3><p className="mt-0.5 text-[11px] text-muted-foreground">The selected detail loads the full canonical PLY so holes, recesses, ports, and other identifying features remain visible. Drag to rotate and scroll to zoom.</p></div><div className="flex shrink-0 items-center gap-2"><Badge variant="outline">{selected.source_format.toUpperCase()}</Badge><Button size="sm" variant="outline" disabled={!serviceAvailable || regeneratePreview.isPending || Boolean(pendingPreview)} onClick={() => regeneratePreview.mutate(selected)} title="Queue stable-orientation analysis and rebuild the bounded catalogue-card mesh"><RefreshCw className={pendingPreview?.catalogUuid === selected.catalog_uuid ? "animate-spin" : undefined} />Refresh card preview</Button></div></div><WorkpiecePreviews key={`${selected.catalog_uuid}:${selected.canonical_ply_sha256 ?? selected.geometry_revision ?? 1}`} object={selected} /></section>
 
                 {selected.description && <div className="rounded-lg border bg-muted/25 p-4 text-sm leading-relaxed">{selected.description}</div>}
 

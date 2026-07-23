@@ -99,6 +99,43 @@ full-capture gate accepts the immutable pre-START preflight embedded in an
 execution plan when the standalone report is absent, and rejects mismatched
 embedded status.
 
+## 2026-07-23 Workpiece Recognition Preview Fidelity
+
+- The selected Workpiece Catalogue detail now loads the hash-versioned exact
+  canonical PLY in its authored orientation. Vertex colours and source normals
+  are retained when present, missing normals are generated, and open CAD is
+  rendered double-sided. Selected-object recognition no longer depends on
+  stable-pose analysis or its compact convex proxy.
+- Catalogue cards now use a separate recognition-focused LOD: indexed geometry
+  is welded and, when it does not fit, deterministic quadric and spatial
+  candidates are compared by component/Euler topology before the legacy convex
+  safety proxy. The chosen strategy, counts, topology signatures, and fallback
+  reason are retained with the cache. The card remains bounded to 4,096
+  vertices, 8,192 faces, and 256 KiB, while immutable pose-template previews
+  keep their smaller interaction-oriented tier.
+- Dense card meshes render through one Canvas2D surface instead of thousands of
+  SVG nodes and are loaded only near the viewport. A keyboard-accessible
+  `LOD`/`Approx`/`Proxy` badge reports source and displayed face counts and any
+  topology loss, and the catalogue exposes an explicit queued **Refresh card
+  preview** action for stale caches.
+- The current DGS-108 example improved from a 118-vertex / 232-face convex card
+  proxy to a 2,194-vertex / 4,636-face recognition LOD (125,838-byte thumbnail)
+  that retains the welded source's Euler value of -124; its selected detail
+  uses the full 245,508-vertex / 81,836-face canonical model.
+- Added hollow/perforated-part, relative-quantization, cache-bound, and
+  deterministic-spatial regressions so topology loss is detected and labelled,
+  plus desktop browser coverage for exact selected-model loading, hash
+  cache-busting, analysis-free rendering, dense Canvas2D cards, accessible LOD
+  evidence, and queued card refresh.
+
+Validation completed on 2026-07-23:
+
+- 720 non-browser pytest tests and all 40 explicitly marked Playwright tests
+  passed;
+- Ruff, frontend type checking and lint, the production frontend build, shell
+  syntax, installer check-only, and `git diff --check` passed; and
+- no camera, robot, lab service, or physical capture was accessed.
+
 ## 2026-07-22 Guided Operator Workflows
 
 Implementation of the outcome-oriented operator workflow architecture is

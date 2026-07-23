@@ -145,7 +145,10 @@ def test_orientation_card_uses_separate_bounded_cache_without_full_analysis(
     thumbnail_path = canonical.with_name(
         orientations_module.ORIENTATION_THUMBNAIL_FILENAME
     )
-    assert thumbnail_path.stat().st_size < orientations_module.ORIENTATION_THUMBNAIL_MAX_BYTES
+    assert (
+        thumbnail_path.stat().st_size
+        <= orientations_module.ORIENTATION_THUMBNAIL_MAX_BYTES
+    )
 
     def unexpected_full_analysis(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("orientation card loaded the full contour analysis")
@@ -156,14 +159,28 @@ def test_orientation_card_uses_separate_bounded_cache_without_full_analysis(
         unexpected_full_analysis,
     )
     update_catalog_object_metadata(
-        record["catalog_uuid"], {"name": "Renamed box"}, catalog_root=catalog
+        record["catalog_uuid"],
+        {
+            "name": "😀" * 120,
+            "alias": "alias" * 24,
+            "tags": [f"tag-{index:02d}-" + "x" * 73 for index in range(64)],
+            "groups": [f"group-{index:02d}-" + "y" * 71 for index in range(64)],
+        },
+        catalog_root=catalog,
     )
     thumbnail = orientations_module.load_catalog_orientation_thumbnail(
         record["catalog_uuid"], catalog_root=catalog
     )
 
-    assert thumbnail["catalog"]["name"] == "Renamed box"
+    assert thumbnail["catalog"] == {
+        "obj_id": record["obj_id"],
+        "name": "😀" * 120,
+    }
     assert thumbnail["orientation"]["orientation_id"] == analysis["orientations"][0][
         "orientation_id"
     ]
     assert "contours" not in json.dumps(thumbnail)
+    assert (
+        len(orientations_module._canonical_json(thumbnail) + b"\n")
+        <= orientations_module.ORIENTATION_THUMBNAIL_MAX_BYTES
+    )

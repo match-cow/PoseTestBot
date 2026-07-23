@@ -230,9 +230,11 @@ is the first dependency for a real dataset run. Real BlenderProc 2.8.0 and BOP
 acceptance also remain outstanding.
 - [ ] Import/inspect and classify the real CAD and texture assets through
   **Workpiece Catalogue**, exercise name/tag/group filters, verify the compact
-  and interactive identification previews and millimetre dimensions, choose
-  reviewed stable orientations, generate an immutable printable template from
-  active workpieces, print/measure it, and confirm the full
+  and exact interactive identification previews and millimetre dimensions,
+  confirm that representative real holes, ports, handles, and recesses remain
+  recognizable against the CAD/physical workpiece, choose reviewed stable
+  orientations, generate an immutable printable template from active
+  workpieces, print/measure it, and confirm the full
   `template_base_from_pose_template` placement for a new pose-template run.
 - [ ] Include at least one duplicate physical instance if duplicate-category
   behavior is part of the intended dataset. Verify exact slicing, immutable

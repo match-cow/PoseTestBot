@@ -1161,57 +1161,253 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     assert page_errors == []
 
 
-def test_workpiece_bounded_orientation_mesh_renders_interactive_preview(
+def test_workpiece_selected_detail_renders_exact_canonical_mesh(
     console_server, page, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    page.set_viewport_size({"width": 1920, "height": 1080})
     working = tmp_path / "working"
     monkeypatch.setenv("POSETESTBOT_WORKING_DATA_ROOT", working.as_posix())
-    cad = tmp_path / "preview-box.stl"
+    cad = tmp_path / "preview-ring.stl"
     cad.write_bytes(
-        trimesh.creation.box(extents=(30, 18, 9)).export(file_type="stl")
+        trimesh.creation.annulus(
+            r_min=4,
+            r_max=10,
+            height=8,
+            sections=64,
+        ).export(file_type="stl")
     )
     record = import_catalog_object(
-        name="Preview box",
+        name="Preview ring",
         cad_path=cad,
         catalog_root=working / "object_catalog",
     )
     install_common_mocks(page)
     page_errors: list[str] = []
-    full_mesh_requests: list[str] = []
+    canonical_mesh_requests: list[str] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     page.on(
         "request",
-        lambda request: full_mesh_requests.append(request.url)
+        lambda request: canonical_mesh_requests.append(request.url)
         if urlparse(request.url).path.endswith("/assets/canonical_ply")
         else None,
     )
     page.route(
         "**/pose-templates/workpieces/*/orientation-thumbnail",
         lambda route: fulfill_json(
-            route, pose_template_orientation_thumbnail(record["catalog_uuid"])
+            route,
+            {
+                "output": "Stable orientations have not been analyzed.",
+                "analysis_required": True,
+            },
+            status=404,
+        ),
+    )
+    page.route(
+        "**/pose-templates/workpieces/*/orientations",
+        lambda route: fulfill_json(
+            route,
+            {"job_id": "recognition-preview-job", "request_id": "f" * 32},
+            status=202,
+        ),
+    )
+    page.route(
+        "**/jobs/recognition-preview-job",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "recognition-preview-job",
+                    "status": "succeeded",
+                    "message": None,
+                    "tail": [],
+                }
+            },
         ),
     )
 
     with page.expect_response(
         lambda response: urlparse(response.url).path.endswith(
-            f"/pose-templates/workpieces/{record['catalog_uuid']}/orientation-thumbnail"
+            f"/workpieces/catalog/{record['catalog_uuid']}/assets/canonical_ply"
         ),
         timeout=15_000,
-    ) as thumbnail_response:
+    ) as canonical_response:
         page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
 
-    response = thumbnail_response.value
+    response = canonical_response.value
     response.finished()
     assert response.status == 200
     expect(page.get_by_test_id("workpiece-previews")).to_be_visible()
+    expect(page.get_by_text("Full canonical model", exact=True)).to_be_visible()
     canvas = page.get_by_test_id("workpiece-previews").locator("canvas")
     expect(canvas).to_have_count(1)
-    expect(canvas).to_have_css("height", "256px")
-    expect(page.get_by_text("Loading bounded mesh…")).to_have_count(0, timeout=15_000)
+    expect(canvas).to_have_css("height", "320px")
+    expect(page.get_by_text("Loading full model…")).to_have_count(0, timeout=15_000)
     expect(page.get_by_test_id("workpiece-preview-error")).to_have_count(0)
     expect(page.get_by_test_id("workpiece-preview-fallback")).to_have_count(0)
-    assert full_mesh_requests == []
+    screenshot = cv2.imdecode(
+        np.frombuffer(canvas.screenshot(), dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert screenshot is not None
+    background = screenshot[2, 2].astype(np.int16)
+    foreground = (
+        np.linalg.norm(screenshot.astype(np.int16) - background, axis=2) > 24
+    )
+    component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        foreground.astype(np.uint8),
+        connectivity=8,
+    )
+    height, width = foreground.shape
+    object_components = [
+        index
+        for index in range(1, component_count)
+        if stats[index, cv2.CC_STAT_AREA] > 1_000
+        and stats[index, cv2.CC_STAT_LEFT] > 2
+        and stats[index, cv2.CC_STAT_TOP] > 2
+        and stats[index, cv2.CC_STAT_LEFT] + stats[index, cv2.CC_STAT_WIDTH]
+        < width - 2
+        and stats[index, cv2.CC_STAT_TOP] + stats[index, cv2.CC_STAT_HEIGHT]
+        < height - 2
+    ]
+    assert object_components
+    component = max(
+        object_components,
+        key=lambda index: stats[index, cv2.CC_STAT_AREA],
+    )
+    left, top, component_width, component_height, _area = stats[component]
+    rows, columns = np.indices(foreground.shape)
+    central_opening = (
+        (labels == component)
+        & (columns > left + 0.43 * component_width)
+        & (columns < left + 0.57 * component_width)
+        & (rows > top + 0.12 * component_height)
+        & (rows < top + 0.36 * component_height)
+    )
+    surrounding_top = (
+        (labels == component)
+        & (
+            (
+                (columns > left + 0.15 * component_width)
+                & (columns < left + 0.35 * component_width)
+            )
+            | (
+                (columns > left + 0.65 * component_width)
+                & (columns < left + 0.85 * component_width)
+            )
+        )
+        & (rows > top + 0.12 * component_height)
+        & (rows < top + 0.36 * component_height)
+    )
+    grayscale = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+    assert central_opening.sum() > 100
+    assert surrounding_top.sum() > 100
+    assert (
+        float(np.median(grayscale[surrounding_top]))
+        - float(np.median(grayscale[central_opening]))
+        > 20
+    ), "the exact annulus inner wall was not visibly distinct from its top surface"
+    assert len(canonical_mesh_requests) == 1
+    assert urlparse(canonical_mesh_requests[0]).query == (
+        f"revision={record['canonical_ply_sha256']}"
+    )
+    page.get_by_role("button", name="Refresh card preview").click()
+    expect(page.get_by_text("Recognition preview refreshed")).to_be_visible()
     assert page_errors == []
+
+
+def test_workpiece_dense_card_uses_lazy_canvas_and_accessible_lod_evidence(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.add_init_script("""
+      const originalGetContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function(kind, ...args) {
+        if (kind === "webgl" || kind === "webgl2") return null;
+        return originalGetContext.call(this, kind, ...args);
+      };
+    """)
+    catalogue = pose_template_catalog()
+    workpiece = catalogue["objects"][0]
+    workpiece["extraction"] = {
+        **workpiece["extraction"],
+        "vertices": 1_024,
+        "faces": 2_048,
+    }
+    sections = 513
+    vertices = [[0, 0, 1.5], *[
+        [
+            10 * np.cos(2 * np.pi * index / sections),
+            7 * np.sin(2 * np.pi * index / sections),
+            0.8 * np.sin(6 * np.pi * index / sections),
+        ]
+        for index in range(sections)
+    ]]
+    faces = [
+        [0, index + 1, (index + 1) % sections + 1]
+        for index in range(sections)
+    ]
+    thumbnail = pose_template_orientation_thumbnail(workpiece["catalog_uuid"])
+    thumbnail["preview_mesh"] = {"vertices": vertices, "faces": faces}
+    thumbnail["recognition_mesh_approximation"] = {
+        "strategy": "spatial_clustering",
+        "implementation_revision": "posetestbot_posetemplatecreator_adapter.v4",
+        "source_vertices": 1_024,
+        "source_faces": 2_048,
+        "welded_vertices": 1_024,
+        "welded_faces": 2_048,
+        "result_vertices": len(vertices),
+        "result_faces": len(faces),
+        "source_components": 1,
+        "source_euler_number": 1,
+        "result_components": 1,
+        "result_euler_number": 1,
+        "topology_preserved": True,
+        "spatial_resolution": 32,
+        "fallback_reason": None,
+    }
+
+    page.route(
+        "**/workpieces/status",
+        lambda route: fulfill_json(route, {
+            "schema_version": "workpiece_catalog_status.v1",
+            "available": True,
+            "status": "available",
+            "reason": None,
+            "counts": {"active": 1, "archived": 0, "total": 1},
+        }),
+    )
+    page.route(
+        "**/workpieces/catalog",
+        lambda route: fulfill_json(route, catalogue),
+    )
+    page.route(
+        "**/pose-templates/workpieces/*/orientation-thumbnail",
+        lambda route: fulfill_json(route, thumbnail),
+    )
+
+    page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
+
+    rendered = page.get_by_test_id(
+        f"workpiece-isometric-{workpiece['catalog_uuid']}"
+    )
+    expect(rendered).to_have_count(1)
+    expect(rendered).to_have_js_property("tagName", "CANVAS")
+    expect(rendered.locator("polygon")).to_have_count(0)
+    detail = (
+        "Bounded preview level of detail: 513 of 2,048 source faces shown "
+        "as a spatially clustered surface"
+    )
+    badge = page.get_by_label(detail)
+    expect(badge).to_have_text("LOD")
+    badge.focus()
+    expect(page.get_by_role("tooltip")).to_contain_text(
+        "513 of 2,048 source faces shown"
+    )
+    expect(
+        page.get_by_role("button", name="Select Clamp").locator(
+            "[aria-label^='Bounded preview level of detail']"
+        )
+    ).to_have_count(0)
 
 
 def test_pose_templates_add_instance_with_real_catalog_and_preview(

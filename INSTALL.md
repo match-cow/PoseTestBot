@@ -349,10 +349,13 @@ PID/start time and terminates the complete workload descendant group.
 
 The frontend lives in `frontend/` and follows the shadcn Vite layout with
 React, TypeScript, Tailwind, Radix primitives, HashRouter, TanStack Query,
-React Hook Form, Zod, Three.js, React Three Fiber, and Drei. Its production output is
-`posetestbot/web/static/ui/`. The Workpiece Catalogue's front, side, top, and
-isometric mesh previews use those bundled client-side Three.js dependencies;
-they add no server runtime or database dependency.
+React Hook Form, Zod, Three.js, React Three Fiber, and Drei. Its production
+output is `posetestbot/web/static/ui/`. The selected Workpiece Catalogue detail
+loads the exact canonical PLY with those bundled client-side Three.js
+dependencies. Compact catalogue cards use bounded, topology-scored recognition
+meshes generated with the pinned `fast-simplification==0.1.13` runtime
+dependency; the pose-template editor retains its smaller interaction-oriented
+preview tier. No server rendering service or database is required.
 
 ```bash
 cd frontend

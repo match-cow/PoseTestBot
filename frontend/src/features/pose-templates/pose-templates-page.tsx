@@ -195,7 +195,8 @@ export function PoseTemplatesPage() {
       catalog_uuid: object.catalog_uuid,
       catalog: { catalog_uuid: object.catalog_uuid, name: object.name, obj_id: object.obj_id },
       source: { canonical_ply_sha256: object.canonical_ply_sha256, geometry_revision: object.geometry_revision },
-      preview_mesh: analysis.preview_mesh,
+      preview_mesh: analysis.recognition_mesh ?? analysis.preview_mesh,
+      recognition_mesh_approximation: analysis.recognition_mesh_approximation,
       orientation: { orientation_id: orientation.orientation_id, label: orientation.label, rank: orientation.rank ?? 1, probability: orientation.probability, slice_z_mm: orientation.slice_z_mm, source_to_placed: orientation.source_to_placed },
     })
   }

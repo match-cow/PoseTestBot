@@ -38,6 +38,8 @@ from posetestbot.pose_templates.library import (
     validate_template_bundle,
 )
 from posetestbot.pose_templates.orientations import (
+    ORIENTATION_THUMBNAIL_FILENAME,
+    ORIENTATION_THUMBNAIL_MAX_BYTES,
     OrientationAnalysisStaleError,
     analyze_catalog_orientations,
     load_catalog_orientation_analysis,
@@ -336,6 +338,228 @@ def test_bundle_validation_rejects_symlinked_asset_ancestor(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="must not contain symlinks"):
         validate_template_bundle(bundle_root, library_root=library)
+
+
+def test_catalog_preview_preserves_hollow_geometry_above_legacy_limits(
+    tmp_path: Path,
+) -> None:
+    """Recognition previews must not turn a hollow part into a convex solid."""
+
+    source = trimesh.creation.annulus(
+        r_min=4,
+        r_max=10,
+        height=8,
+        sections=48,
+    )
+    cad = tmp_path / "hollow-ring.stl"
+    cad.write_bytes(source.export(file_type="stl"))
+    catalog = tmp_path / "catalog"
+    record = import_catalog_object(
+        name="Hollow ring",
+        cad_path=cad,
+        catalog_root=catalog,
+    )
+
+    first = analyze_catalog_orientations(
+        record["catalog_uuid"], catalog_root=catalog
+    )
+    preview = first["recognition_mesh"]
+    rendered = trimesh.Trimesh(
+        vertices=preview["vertices"],
+        faces=preview["faces"],
+        process=False,
+    )
+
+    assert len(preview["vertices"]) > 160
+    assert len(preview["faces"]) > 256
+    assert len(preview["vertices"]) <= adapter.CATALOG_PREVIEW_MAX_VERTICES
+    assert len(preview["faces"]) <= adapter.CATALOG_PREVIEW_MAX_FACES
+    assert rendered.euler_number == 0
+    radii = np.linalg.norm(np.asarray(preview["vertices"])[:, :2], axis=1)
+    assert float(radii.min()) == pytest.approx(4, abs=1e-5)
+    approximation = first["recognition_mesh_approximation"]
+    assert approximation["strategy"] == "welded_source"
+    assert approximation["topology_preserved"] is True
+    canonical = catalog / record["assets"]["canonical_ply"]["path"]
+    thumbnail_bytes = canonical.with_name(ORIENTATION_THUMBNAIL_FILENAME).read_bytes()
+    thumbnail = json.loads(thumbnail_bytes)
+    assert len(thumbnail_bytes) <= ORIENTATION_THUMBNAIL_MAX_BYTES
+    assert thumbnail["preview_mesh"] == preview
+    assert thumbnail["recognition_mesh_approximation"] == approximation
+    assert "contours" not in thumbnail
+
+    backend = adapter.load_posetemplatecreator_backend()
+    second = backend.orientation_artifacts("canonical.ply", canonical.read_bytes())
+    assert second["recognition_mesh"] == preview
+    assert (
+        second["provenance"]["dependencies"]["fast-simplification"] != "unavailable"
+    )
+
+
+def test_catalog_preview_decimation_is_deterministic_and_bounded() -> None:
+    source = trimesh.creation.icosphere(subdivisions=5, radius=10)
+
+    first = adapter._preview_mesh_payload(source)
+    second = adapter._preview_mesh_payload(source.copy())
+
+    assert first is not None
+    assert first == second
+    assert len(first["vertices"]) <= adapter.CATALOG_PREVIEW_MAX_VERTICES
+    assert len(first["faces"]) <= adapter.CATALOG_PREVIEW_MAX_FACES
+    assert len(first["faces"]) < len(source.faces)
+    preview_bounds = np.asarray(first["vertices"])
+    assert preview_bounds.min(axis=0) == pytest.approx(source.bounds[0], abs=0.01)
+    assert preview_bounds.max(axis=0) == pytest.approx(source.bounds[1], abs=0.01)
+
+
+def test_catalog_preview_spatial_fallback_keeps_dense_hole() -> None:
+    source = trimesh.creation.annulus(
+        r_min=4,
+        r_max=10,
+        height=8,
+        sections=1_100,
+    )
+
+    preview, approximation = adapter._preview_mesh_artifact(source)
+    repeated, repeated_approximation = adapter._preview_mesh_artifact(source.copy())
+
+    assert preview is not None
+    assert preview == repeated
+    assert approximation == repeated_approximation
+    assert approximation is not None
+    assert approximation["strategy"] == "spatial_clustering"
+    assert approximation["topology_preserved"] is True
+    assert len(preview["vertices"]) <= adapter.CATALOG_PREVIEW_MAX_VERTICES
+    assert len(preview["faces"]) <= adapter.CATALOG_PREVIEW_MAX_FACES
+    rendered = trimesh.Trimesh(
+        vertices=preview["vertices"],
+        faces=preview["faces"],
+        process=False,
+    )
+    assert rendered.euler_number == 0
+    radii = np.linalg.norm(np.asarray(preview["vertices"])[:, :2], axis=1)
+    assert float(radii.min()) == pytest.approx(4, abs=0.02)
+
+
+def test_catalog_preview_prefers_better_topology_over_first_bounded_qem() -> None:
+    size = 80
+    vertices = np.asarray(
+        [
+            (x, y, 0.05 * np.sin(x * 0.2) * np.sin(y * 0.2))
+            for y in range(size + 1)
+            for x in range(size + 1)
+        ],
+        dtype=float,
+    )
+    faces: list[tuple[int, int, int]] = []
+    for y in range(size):
+        for x in range(size):
+            if x % 5 in (1, 2) and y % 5 in (1, 2):
+                continue
+            first = y * (size + 1) + x
+            faces.extend(
+                (
+                    (first, first + 1, first + size + 2),
+                    (first, first + size + 2, first + size + 1),
+                )
+            )
+    source = trimesh.Trimesh(vertices=vertices, faces=np.asarray(faces), process=False)
+    source.remove_unreferenced_vertices()
+
+    preview, approximation = adapter._preview_mesh_artifact(source)
+    first_qem = source.simplify_quadric_decimation(face_count=4_096, aggression=7)
+
+    assert preview is not None
+    assert approximation is not None
+    assert approximation["strategy"] == "spatial_clustering"
+    assert abs(
+        approximation["result_euler_number"]
+        - approximation["source_euler_number"]
+    ) < abs(first_qem.euler_number - source.euler_number)
+
+
+def test_catalog_preview_relative_quantization_keeps_tiny_valid_mesh() -> None:
+    extent = 4e-7
+    points = np.asarray(
+        [
+            (0, 0, 0),
+            (extent, 0, 0),
+            (0, extent, 0),
+            (0, 0, extent),
+        ],
+        dtype=float,
+    )
+    faces = np.asarray(((0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3)))
+
+    preview = adapter._bounded_preview_payload(points, faces)
+
+    assert preview is not None
+    assert len({tuple(vertex) for vertex in preview["vertices"]}) == 4
+    assert len(preview["faces"]) == 4
+
+
+def test_catalog_preview_failure_uses_explicit_bounded_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = adapter.load_posetemplatecreator_backend()
+    payload = trimesh.creation.box(extents=(20, 10, 8)).export(file_type="stl")
+
+    def fail_recognition(_mesh) -> tuple[None, None]:
+        raise RuntimeError("injected recognition failure")
+
+    monkeypatch.setattr(adapter, "_preview_mesh_artifact", fail_recognition)
+    artifacts = backend.orientation_artifacts("box.stl", payload)
+
+    assert artifacts["recognition_mesh"] == artifacts["preview_mesh"]
+    approximation = artifacts["recognition_mesh_approximation"]
+    assert approximation["strategy"] == "convex_proxy"
+    assert approximation["fallback_reason"] == "RuntimeError"
+    assert approximation["result_vertices"] <= adapter.TEMPLATE_PREVIEW_MAX_VERTICES
+    assert approximation["result_faces"] <= adapter.TEMPLATE_PREVIEW_MAX_FACES
+
+
+def test_orientation_cache_rejects_oversized_template_proxy_and_old_adapter(
+    tmp_path: Path,
+) -> None:
+    catalog, record = managed_box(tmp_path)
+    analyze_catalog_orientations(record["catalog_uuid"], catalog_root=catalog)
+    canonical = catalog / record["assets"]["canonical_ply"]["path"]
+    cache = canonical.with_name("pose_template_orientation_analysis.json")
+    tampered = json.loads(cache.read_text())
+    tampered["preview_mesh"]["vertices"].extend([[0.0, 0.0, 0.0]] * 153)
+    cache.write_text(json.dumps(tampered))
+
+    with pytest.raises(ValueError, match="preview_mesh vertices are invalid"):
+        load_catalog_orientation_analysis(record["catalog_uuid"], catalog_root=catalog)
+
+    analyze_catalog_orientations(record["catalog_uuid"], catalog_root=catalog)
+    old_adapter = json.loads(cache.read_text())
+    old_adapter["provenance"]["adapter_version"] = (
+        "posetestbot_posetemplatecreator_adapter.v3"
+    )
+    cache.write_text(json.dumps(old_adapter))
+    with pytest.raises(
+        OrientationAnalysisStaleError,
+        match="unsupported implementation revision",
+    ):
+        load_catalog_orientation_analysis(record["catalog_uuid"], catalog_root=catalog)
+
+    analyze_catalog_orientations(record["catalog_uuid"], catalog_root=catalog)
+    oversized = json.loads(cache.read_text())
+    oversized["recognition_mesh"] = {
+        "vertices": [
+            [0.12345678901234568, 0.12345678901234568, 0.12345678901234568]
+            for _index in range(adapter.CATALOG_PREVIEW_MAX_VERTICES)
+        ],
+        "faces": [[0, 1, 2]],
+    }
+    oversized["recognition_mesh_approximation"]["result_vertices"] = (
+        adapter.CATALOG_PREVIEW_MAX_VERTICES
+    )
+    oversized["recognition_mesh_approximation"]["result_faces"] = 1
+    cache.write_text(json.dumps(oversized))
+    with pytest.raises(ValueError, match="exceeds its bounded JSON size"):
+        load_catalog_orientation_analysis(record["catalog_uuid"], catalog_root=catalog)
 
 
 def test_stable_orientation_cache_and_planar_pose_compose_ground_truth(

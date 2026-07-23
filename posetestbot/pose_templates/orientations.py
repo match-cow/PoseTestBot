@@ -9,10 +9,15 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
-from posetestbot.io.atomic import atomic_write_json
+from posetestbot.io.atomic import atomic_write_bytes, atomic_write_json
 from posetestbot.pose_templates.adapter import (
     ADAPTER_VERSION,
+    CATALOG_PREVIEW_MAX_FACES,
+    CATALOG_PREVIEW_MESH_MAX_JSON_BYTES,
+    CATALOG_PREVIEW_MAX_VERTICES,
     POSETEMPLATECREATOR_REVISION,
+    TEMPLATE_PREVIEW_MAX_FACES,
+    TEMPLATE_PREVIEW_MAX_VERTICES,
     PoseTemplateCreatorBackend,
     load_posetemplatecreator_backend,
 )
@@ -77,6 +82,18 @@ def _catalog_summary(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _thumbnail_catalog_summary(value: Any) -> dict[str, Any]:
+    """Keep mutable card identity useful without consuming the mesh budget."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        key: value[key]
+        for key in ("obj_id", "name")
+        if key in value
+    }
+
+
 def _orientation_id(source_sha256: str, orientation: Mapping[str, Any]) -> str:
     identity = {
         "source_sha256": source_sha256,
@@ -110,7 +127,9 @@ def orientation_cache_path(
         try:
             resolved.relative_to(root.resolve() / "objects" / opaque_id)
         except ValueError as exc:
-            raise ValueError("Canonical PLY is outside the managed workpiece directory") from exc
+            raise ValueError(
+                "Canonical PLY is outside the managed workpiece directory"
+            ) from exc
     return resolved.with_name(ORIENTATION_CACHE_FILENAME)
 
 
@@ -138,7 +157,9 @@ def build_orientation_analysis(
     if not source.is_file() or source.is_symlink():
         raise FileNotFoundError(f"Canonical PLY does not exist: {source}")
     expected = str(canonical_sha256).lower()
-    if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+    if len(expected) != 64 or any(
+        character not in "0123456789abcdef" for character in expected
+    ):
         raise ValueError("canonical_sha256 must be a lowercase SHA-256 digest")
     payload = source.read_bytes()
     actual = hashlib.sha256(payload).hexdigest()
@@ -147,7 +168,9 @@ def build_orientation_analysis(
     implementation = backend or load_posetemplatecreator_backend()
     extracted = implementation.orientation_artifacts("canonical.ply", payload)
     if extracted["source_sha256"] != expected:
-        raise ValueError("Orientation analysis source hash does not match canonical PLY")
+        raise ValueError(
+            "Orientation analysis source hash does not match canonical PLY"
+        )
 
     orientations: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -161,7 +184,9 @@ def build_orientation_analysis(
         }
         orientation_id = _orientation_id(expected, item)
         if orientation_id in seen_ids:
-            raise ValueError("PoseTemplateCreator returned duplicate stable orientations")
+            raise ValueError(
+                "PoseTemplateCreator returned duplicate stable orientations"
+            )
         seen_ids.add(orientation_id)
         orientations.append(
             {
@@ -185,8 +210,116 @@ def build_orientation_analysis(
         "generated_at": utc_now_iso(),
         "provenance": extracted["provenance"],
         "preview_mesh": extracted["preview_mesh"],
+        "recognition_mesh": extracted.get(
+            "recognition_mesh", extracted["preview_mesh"]
+        ),
+        "recognition_mesh_approximation": extracted[
+            "recognition_mesh_approximation"
+        ],
         "orientations": orientations,
     }
+
+
+def _validate_preview_mesh(
+    value: Any,
+    *,
+    label: str,
+    max_vertices: int = CATALOG_PREVIEW_MAX_VERTICES,
+    max_faces: int = CATALOG_PREVIEW_MAX_FACES,
+    max_json_bytes: int | None = None,
+) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    vertices = value.get("vertices")
+    faces = value.get("faces")
+    if not isinstance(vertices, list) or not 3 <= len(vertices) <= max_vertices:
+        raise ValueError(f"{label} vertices are invalid")
+    if not isinstance(faces, list) or not 1 <= len(faces) <= max_faces:
+        raise ValueError(f"{label} faces are invalid")
+    for vertex in vertices:
+        if (
+            not isinstance(vertex, list)
+            or len(vertex) != 3
+            or not all(math.isfinite(float(number)) for number in vertex)
+        ):
+            raise ValueError(f"{label} vertex is invalid")
+    for face in faces:
+        if (
+            not isinstance(face, list)
+            or len(face) != 3
+            or len(set(face)) != 3
+            or not all(
+                isinstance(index, int) and 0 <= index < len(vertices) for index in face
+            )
+        ):
+            raise ValueError(f"{label} face is invalid")
+    if max_json_bytes is not None and len(
+        _canonical_json({"vertices": vertices, "faces": faces})
+    ) > max_json_bytes:
+        raise ValueError(f"{label} exceeds its bounded JSON size")
+
+
+def _validate_recognition_approximation(
+    value: Any,
+    *,
+    mesh: Any,
+    label: str,
+) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    if value.get("strategy") not in {
+        "welded_source",
+        "quadric_decimation",
+        "spatial_clustering",
+        "convex_proxy",
+    }:
+        raise ValueError(f"{label} strategy is invalid")
+    if value.get("implementation_revision") != ADAPTER_VERSION:
+        raise ValueError(f"{label} implementation revision is invalid")
+    if not isinstance(mesh, Mapping):
+        raise ValueError(f"{label} mesh is invalid")
+    counts = {
+        "source_vertices": (1, None),
+        "source_faces": (1, None),
+        "welded_vertices": (3, None),
+        "welded_faces": (1, None),
+        "result_vertices": (3, CATALOG_PREVIEW_MAX_VERTICES),
+        "result_faces": (1, CATALOG_PREVIEW_MAX_FACES),
+    }
+    for key, (minimum, maximum) in counts.items():
+        count = value.get(key)
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < minimum
+            or (maximum is not None and count > maximum)
+        ):
+            raise ValueError(f"{label} {key} is invalid")
+    if value["result_vertices"] != len(mesh.get("vertices", [])) or value[
+        "result_faces"
+    ] != len(mesh.get("faces", [])):
+        raise ValueError(f"{label} result counts do not match its mesh")
+    for key in (
+        "source_components",
+        "source_euler_number",
+        "result_components",
+        "result_euler_number",
+    ):
+        metric = value.get(key)
+        if metric is not None and (
+            not isinstance(metric, int) or isinstance(metric, bool)
+        ):
+            raise ValueError(f"{label} {key} is invalid")
+    if not isinstance(value.get("topology_preserved"), bool):
+        raise ValueError(f"{label} topology_preserved is invalid")
+    resolution = value.get("spatial_resolution")
+    if resolution is not None and (
+        not isinstance(resolution, int) or isinstance(resolution, bool) or resolution < 2
+    ):
+        raise ValueError(f"{label} spatial_resolution is invalid")
+    reason = value.get("fallback_reason")
+    if reason is not None and (not isinstance(reason, str) or len(reason) > 120):
+        raise ValueError(f"{label} fallback_reason is invalid")
 
 
 def _validate_analysis(
@@ -201,9 +334,14 @@ def _validate_analysis(
         )
     opaque_id = _uuid(value.get("catalog_uuid"), label="catalog_uuid")
     if opaque_id != _uuid(catalog_uuid, label="catalog_uuid"):
-        raise OrientationAnalysisStaleError("Orientation cache belongs to another workpiece")
+        raise OrientationAnalysisStaleError(
+            "Orientation cache belongs to another workpiece"
+        )
     source = value.get("source")
-    if not isinstance(source, Mapping) or source.get("canonical_ply_sha256") != canonical_sha256:
+    if (
+        not isinstance(source, Mapping)
+        or source.get("canonical_ply_sha256") != canonical_sha256
+    ):
         raise OrientationAnalysisStaleError(
             "Orientation cache is stale because the canonical geometry changed"
         )
@@ -215,30 +353,23 @@ def _validate_analysis(
         raise OrientationAnalysisStaleError(
             "Orientation cache was produced by an unsupported implementation revision"
         )
-    preview_mesh = value.get("preview_mesh")
-    if not isinstance(preview_mesh, Mapping):
-        raise ValueError("Orientation cache preview_mesh must be an object")
-    vertices = preview_mesh.get("vertices")
-    faces = preview_mesh.get("faces")
-    if not isinstance(vertices, list) or len(vertices) < 3 or len(vertices) > 160:
-        raise ValueError("Orientation cache preview vertices are invalid")
-    if not isinstance(faces, list) or not faces or len(faces) > 256:
-        raise ValueError("Orientation cache preview faces are invalid")
-    for vertex in vertices:
-        if (
-            not isinstance(vertex, list)
-            or len(vertex) != 3
-            or not all(math.isfinite(float(number)) for number in vertex)
-        ):
-            raise ValueError("Orientation cache preview vertex is invalid")
-    for face in faces:
-        if (
-            not isinstance(face, list)
-            or len(face) != 3
-            or len(set(face)) != 3
-            or not all(isinstance(index, int) and 0 <= index < len(vertices) for index in face)
-        ):
-            raise ValueError("Orientation cache preview face is invalid")
+    _validate_preview_mesh(
+        value.get("preview_mesh"),
+        label="Orientation cache preview_mesh",
+        max_vertices=TEMPLATE_PREVIEW_MAX_VERTICES,
+        max_faces=TEMPLATE_PREVIEW_MAX_FACES,
+    )
+    recognition_mesh = value.get("recognition_mesh")
+    _validate_preview_mesh(
+        recognition_mesh,
+        label="Orientation cache recognition_mesh",
+        max_json_bytes=CATALOG_PREVIEW_MESH_MAX_JSON_BYTES,
+    )
+    _validate_recognition_approximation(
+        value.get("recognition_mesh_approximation"),
+        mesh=recognition_mesh,
+        label="Orientation cache recognition_mesh_approximation",
+    )
 
     orientations = value.get("orientations")
     if not isinstance(orientations, list) or not orientations:
@@ -273,13 +404,16 @@ def build_orientation_thumbnail(analysis: Mapping[str, Any]) -> dict[str, Any]:
     first = orientations[0]
     if not isinstance(first, Mapping):
         raise ValueError("Orientation analysis entry is invalid")
-    return {
+    thumbnail = {
         "schema_version": ORIENTATION_THUMBNAIL_SCHEMA_VERSION,
         "catalog_uuid": analysis.get("catalog_uuid"),
-        "catalog": analysis.get("catalog"),
+        "catalog": _thumbnail_catalog_summary(analysis.get("catalog")),
         "source": analysis.get("source"),
         "provenance": analysis.get("provenance"),
-        "preview_mesh": analysis.get("preview_mesh"),
+        "preview_mesh": analysis.get("recognition_mesh", analysis.get("preview_mesh")),
+        "recognition_mesh_approximation": analysis.get(
+            "recognition_mesh_approximation"
+        ),
         "orientation": {
             key: first[key]
             for key in (
@@ -292,6 +426,22 @@ def build_orientation_thumbnail(analysis: Mapping[str, Any]) -> dict[str, Any]:
             )
         },
     }
+    if len(_canonical_json(thumbnail) + b"\n") > ORIENTATION_THUMBNAIL_MAX_BYTES:
+        raise ValueError("Orientation thumbnail exceeds its bounded size limit")
+    return thumbnail
+
+
+def write_orientation_thumbnail(
+    path: str | Path, analysis: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Write the bounded thumbnail with compact deterministic JSON encoding."""
+
+    thumbnail = build_orientation_thumbnail(analysis)
+    payload = _canonical_json(thumbnail) + b"\n"
+    if len(payload) > ORIENTATION_THUMBNAIL_MAX_BYTES:
+        raise ValueError("Orientation thumbnail exceeds its bounded size limit")
+    atomic_write_bytes(path, payload)
+    return thumbnail
 
 
 def _validate_orientation_thumbnail(
@@ -311,9 +461,10 @@ def _validate_orientation_thumbnail(
             "Orientation thumbnail belongs to another workpiece"
         )
     source = value.get("source")
-    if not isinstance(source, Mapping) or source.get(
-        "canonical_ply_sha256"
-    ) != canonical_sha256:
+    if (
+        not isinstance(source, Mapping)
+        or source.get("canonical_ply_sha256") != canonical_sha256
+    ):
         raise OrientationAnalysisStaleError(
             "Orientation thumbnail is stale because canonical geometry changed"
         )
@@ -326,29 +477,16 @@ def _validate_orientation_thumbnail(
             "Orientation thumbnail was produced by an unsupported implementation revision"
         )
     preview_mesh = value.get("preview_mesh")
-    if not isinstance(preview_mesh, Mapping):
-        raise ValueError("Orientation thumbnail preview_mesh must be an object")
-    vertices = preview_mesh.get("vertices")
-    faces = preview_mesh.get("faces")
-    if not isinstance(vertices, list) or not 3 <= len(vertices) <= 160:
-        raise ValueError("Orientation thumbnail preview vertices are invalid")
-    if not isinstance(faces, list) or not 1 <= len(faces) <= 256:
-        raise ValueError("Orientation thumbnail preview faces are invalid")
-    for vertex in vertices:
-        if (
-            not isinstance(vertex, list)
-            or len(vertex) != 3
-            or not all(math.isfinite(float(number)) for number in vertex)
-        ):
-            raise ValueError("Orientation thumbnail preview vertex is invalid")
-    for face in faces:
-        if (
-            not isinstance(face, list)
-            or len(face) != 3
-            or len(set(face)) != 3
-            or not all(isinstance(index, int) and 0 <= index < len(vertices) for index in face)
-        ):
-            raise ValueError("Orientation thumbnail preview face is invalid")
+    _validate_preview_mesh(
+        preview_mesh,
+        label="Orientation thumbnail preview_mesh",
+        max_json_bytes=CATALOG_PREVIEW_MESH_MAX_JSON_BYTES,
+    )
+    _validate_recognition_approximation(
+        value.get("recognition_mesh_approximation"),
+        mesh=preview_mesh,
+        label="Orientation thumbnail recognition_mesh_approximation",
+    )
     orientation = value.get("orientation")
     if not isinstance(orientation, Mapping):
         raise ValueError("Orientation thumbnail selection is invalid")
@@ -359,9 +497,7 @@ def _validate_orientation_thumbnail(
         or len(orientation_id) != len("orientation-") + 24
     ):
         raise ValueError("Orientation thumbnail orientation_id is invalid")
-    validate_rigid_matrix(
-        orientation.get("source_to_placed"), label="source_to_placed"
-    )
+    validate_rigid_matrix(orientation.get("source_to_placed"), label="source_to_placed")
     probability = float(orientation.get("probability"))
     slice_z = float(orientation.get("slice_z_mm"))
     if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
@@ -426,6 +562,9 @@ def analyze_catalog_orientations(
         catalog_metadata=record,
         backend=backend,
     )
+    # Fail before replacing either cache if the new paired card artifact cannot
+    # satisfy its count, provenance, or byte contract.
+    build_orientation_thumbnail(analysis)
     # Publication shares the catalogue's process/thread lock with unit correction
     # and permanent deletion. The relatively expensive analysis stays outside the
     # lock; once it is ready, revalidate the exact current geometry and publish in
@@ -447,9 +586,8 @@ def analyze_catalog_orientations(
             record["catalog_uuid"], catalog_root=root, canonical_path=current_path
         )
         atomic_write_json(cache, analysis)
-        atomic_write_json(
-            cache.with_name(ORIENTATION_THUMBNAIL_FILENAME),
-            build_orientation_thumbnail(analysis),
+        write_orientation_thumbnail(
+            cache.with_name(ORIENTATION_THUMBNAIL_FILENAME), analysis
         )
     return load_catalog_orientation_analysis(record["catalog_uuid"], catalog_root=root)
 
@@ -460,7 +598,9 @@ def ensure_catalog_orientation_analysis(
     """Load a current cache, computing it on demand inside an existing job."""
 
     try:
-        return load_catalog_orientation_analysis(catalog_uuid, catalog_root=catalog_root)
+        return load_catalog_orientation_analysis(
+            catalog_uuid, catalog_root=catalog_root
+        )
     except (FileNotFoundError, OrientationAnalysisStaleError):
         return analyze_catalog_orientations(catalog_uuid, catalog_root=catalog_root)
 
@@ -496,7 +636,9 @@ def load_catalog_orientation_thumbnail(
         canonical_sha256=expected,
     )
     # Mutable catalogue labels must never be served from a stale geometry cache.
-    validated["catalog"] = _catalog_summary(record)
+    validated["catalog"] = _thumbnail_catalog_summary(record)
+    if len(_canonical_json(validated) + b"\n") > ORIENTATION_THUMBNAIL_MAX_BYTES:
+        raise ValueError("Orientation thumbnail exceeds its bounded size limit")
     return validated
 
 

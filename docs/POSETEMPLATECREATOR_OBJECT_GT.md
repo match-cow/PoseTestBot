@@ -113,8 +113,14 @@ transforms, the PDF page boundary, or GT.
   `pose_template_orientation_analysis.json` cache and its separately bounded
   `pose_template_orientation_thumbnail.json` card cache sit beside the
   canonical PLY. Both are reproducible, hash/revision-bound derivatives rather
-  than immutable catalogue assets. Editable metadata lives beside stable
-  catalogue UUID and BOP `obj_id` identity.
+  than immutable catalogue assets. The selected Workpiece Catalogue detail
+  reads the exact canonical PLY, while cards use the thumbnail's welded,
+  topology-scored bounded surface (quadric-decimated or spatially clustered
+  only when necessary) in the authored orientation. Approximation metadata
+  identifies the chosen strategy and warns when topology could not fit the card
+  budget. Stable-orientation transforms remain explicit choices in the
+  template editor. Editable metadata lives beside stable catalogue UUID and
+  BOP `obj_id` identity.
 - Global library: `working_data/pose_templates/<template_uuid>/`, containing
   `pose_template_bundle.json`, exact preview data, a hash-verified bounded
   `pose_template_thumbnail.json`, asset snapshots, and PDF. The thumbnail keeps

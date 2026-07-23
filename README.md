@@ -416,10 +416,16 @@ a canonical PLY, hashes, and texture below
 `working_data/object_catalog/objects/<catalog_uuid>/`. Operators can edit the
 workpiece name, alias, description, tags, groups, and custom scalar key/value
 attributes, search or filter the catalogue, and use bounded isometric card
-thumbnails plus one orbitable bounded 3D detail view for identification. Cards
-and the detail view read a separately bounded, geometry-hash-bound orientation
-thumbnail; ranked orientations and exact contours remain in the full derived
-analysis used by the template editor.
+thumbnails plus one orbitable exact 3D detail view for identification. The
+selected detail loads the hash-revisioned canonical PLY, preserves its authored
+orientation, and only centres/uniformly scales it for display. Cards use a
+separately bounded, geometry-hash-bound
+recognition mesh that keeps the welded source when it fits and otherwise
+compares quadric and spatial candidates by component/Euler topology before
+using a convex safety proxy. The cache records which strategy won and whether
+topology was retained, so an unavoidable approximation is labelled rather than
+silently presented as exact. Ranked orientations and exact contours remain in
+the full derived analysis used by the template editor.
 
 The catalogue manifest remains portable JSON at
 `working_data/object_catalog/object_catalog.json`. Mutations are serialized
