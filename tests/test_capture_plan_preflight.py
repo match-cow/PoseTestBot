@@ -14,6 +14,7 @@ from posetestbot.pipeline.capture_plan_preflight import (
     write_capture_plan_preflight_with_manifest,
 )
 from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
     create_run_config,
     sensor_config_from_token,
     write_run_config,
@@ -424,3 +425,60 @@ def test_capture_plan_preflight_writes_report_and_manifest(tmp_path: Path) -> No
     assert stage["artifacts"][CAPTURE_PLAN] == CAPTURE_PLAN
     assert manifest["robot_profile"]["mode"] == "real"
     assert manifest["capture_config"]["fps"] == 6
+
+
+def test_capture_plan_preflight_rejects_persisted_hardware_plan_after_mode_change(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "stale-hardware-plan"
+    sensors = (
+        SensorRunConfig(
+            "realsense_d435",
+            "static",
+            "Static D435",
+            mounting_mode="static",
+        ),
+        SensorRunConfig(
+            "realsense_d435",
+            "wrist",
+            "Wrist D435",
+            mounting_mode="eye_in_hand",
+        ),
+    )
+    hardware_config = create_run_config(
+        run_root=run_root,
+        sensors=sensors,
+        synchronization={
+            "schema_version": "capture_synchronization.v1",
+            "mode": "hardware_trigger",
+            "implementation": "realsense_inter_cam_sync",
+            "scope": "depth_exposure",
+            "group_id": "stale-mode-rig",
+            "master_sensor_key": "realsense_d435:static",
+            "max_depth_timestamp_skew_ms": 2.0,
+        },
+    )
+    write_run_config(run_root, hardware_config)
+    write_capture_plan_with_manifest(run_root, hardware_config.to_dict())
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=sensors,
+        ),
+    )
+
+    report = build_capture_plan_preflight(
+        run_root,
+        include_sensor_status=False,
+        allow_real_robot=True,
+    )
+
+    check = next(
+        item
+        for item in report["checks"]
+        if item["name"] == "capture_plan_current_config"
+    )
+    assert report["overall_status"] == "error"
+    assert check["status"] == "error"
+    assert "stale" in check["message"]

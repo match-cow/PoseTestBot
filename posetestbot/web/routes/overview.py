@@ -251,7 +251,8 @@ def _validated_artifact_status(
     if relative_path == f"{BOP_DIR}/{BOP_EXPORT_MANIFEST}":
         exports = value.get("exports")
         if (
-            value.get("schema_version") != "bop_export_manifest.v3"
+            value.get("schema_version")
+            not in {"bop_export_manifest.v3", "bop_export_manifest.v4"}
             or not isinstance(exports, list)
             or not exports
             or not all(isinstance(item, Mapping) for item in exports)

@@ -512,9 +512,22 @@ def select_pose_template(
                 (staging_selection, current_path),
             ]
             if config_path.is_file():
-                with open(config_path, "r", encoding="utf-8") as handle:
-                    config = json.load(handle)
-                config["schema_version"] = "run_config.v2"
+                from posetestbot.pipeline.run_config import (
+                    SCHEMA_VERSION as RUN_CONFIG_SCHEMA_VERSION,
+                    capture_synchronization_from_mapping,
+                    load_run_config,
+                )
+
+                config = load_run_config(config_path)
+                capture_config = config.get("capture")
+                if not isinstance(capture_config, dict):
+                    raise ValueError("Run config capture must be an object")
+                capture_config["synchronization"] = (
+                    capture_synchronization_from_mapping(
+                        capture_config.get("synchronization")
+                    ).to_dict()
+                )
+                config["schema_version"] = RUN_CONFIG_SCHEMA_VERSION
                 config["dataset_mode"] = "pose_template"
                 config.pop("object_folder", None)
                 config.pop("selected_objects", None)

@@ -553,6 +553,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 default=60.0,
             ),
             PipelineParameter(
+                name="camera_metadata_idle_timeout_s",
+                flag="--camera-metadata-idle-timeout-s",
+                kind="float",
+                default=None,
+            ),
+            PipelineParameter(
                 name="no_write_plan_if_missing",
                 flag="--no-write-plan-if-missing",
                 kind="bool",

@@ -29,6 +29,24 @@ def test_sensor_adapter_registry_lists_supported_capture_scripts() -> None:
     assert adapters["realsense_d435"]["live_rgb_preview_supported"] is True
     assert adapters["oak_d_pro"]["live_rgb_preview_supported"] is True
     assert adapters["zed_2i"]["live_rgb_preview_supported"] is False
+    assert adapters["realsense_d435"]["hardware_sync"] == {
+        "supported": True,
+        "transport": "realsense_inter_cam_sync",
+        "supported_scopes": ["depth_exposure"],
+        "supported_roles": ["master", "subordinate"],
+    }
+    assert adapters["oak_d_pro"]["hardware_sync"] == {
+        "supported": False,
+        "transport": None,
+        "supported_scopes": [],
+        "supported_roles": [],
+    }
+    assert adapters["zed_2i"]["hardware_sync"] == {
+        "supported": False,
+        "transport": None,
+        "supported_scopes": [],
+        "supported_roles": [],
+    }
 
 
 def test_sensor_registry_builds_folder_names_and_uv_capture_commands() -> None:
@@ -109,6 +127,88 @@ def test_sensor_registry_adds_warmup_frames_to_capture_commands() -> None:
         "--device",
         "123",
     ]
+
+
+def test_sensor_registry_adds_supported_realsense_hardware_sync_flags() -> None:
+    command = build_sensor_capture_command(
+        sensor_type=SensorType.REALSENSE_D435,
+        device_id="123",
+        output_folder="/tmp/run/realsense_123",
+        fps=30,
+        resolution="720p",
+        hardware_sync_role="subordinate",
+        hardware_sync_group_id="mixed-rig-01",
+        hardware_sync_scope="depth_exposure",
+    )
+
+    assert command == [
+        "uv",
+        "run",
+        "python",
+        "scripts/capture_realsense_720p.py",
+        "/tmp/run/realsense_123",
+        "--fps",
+        "30",
+        "--device",
+        "123",
+        "--hardware-sync-role",
+        "subordinate",
+        "--hardware-sync-group-id",
+        "mixed-rig-01",
+        "--hardware-sync-scope",
+        "depth_exposure",
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {
+            "hardware_sync_role": "master",
+            "hardware_sync_group_id": "group-1",
+            "hardware_sync_scope": None,
+        },
+        {
+            "hardware_sync_role": "leader",
+            "hardware_sync_group_id": "group-1",
+            "hardware_sync_scope": "depth_exposure",
+        },
+        {
+            "hardware_sync_role": "master",
+            "hardware_sync_group_id": "group-1",
+            "hardware_sync_scope": "rgb_exposure",
+        },
+    ],
+)
+def test_sensor_registry_rejects_invalid_realsense_hardware_sync(
+    arguments: dict[str, str | None],
+) -> None:
+    with pytest.raises(ValueError, match="hardware synchronization|hardware_sync"):
+        build_sensor_capture_command(
+            sensor_type=SensorType.REALSENSE_D435,
+            device_id="123",
+            output_folder="/tmp/run/realsense_123",
+            fps=30,
+            resolution="720p",
+            **arguments,
+        )
+
+
+@pytest.mark.parametrize("sensor_type", [SensorType.OAK_D_PRO, SensorType.ZED_2I])
+def test_sensor_registry_rejects_hardware_sync_for_unsupported_adapters(
+    sensor_type: SensorType,
+) -> None:
+    with pytest.raises(ValueError, match="does not support hardware synchronization"):
+        build_sensor_capture_command(
+            sensor_type=sensor_type,
+            device_id="device-1",
+            output_folder="/tmp/run/sensor",
+            fps=6,
+            resolution="720p",
+            hardware_sync_role="master",
+            hardware_sync_group_id="group-1",
+            hardware_sync_scope="depth_exposure",
+        )
 
 
 def test_sensor_registry_rejects_negative_warmup_frames() -> None:

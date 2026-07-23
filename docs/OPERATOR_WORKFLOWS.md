@@ -91,6 +91,24 @@ calibration has been promoted.
    rebinding that evidence to another calibration. The selected profiles must
    also contain a verified per-camera robot-pose time offset, timestamp pair,
    clock-domain/fallback rule, and maximum pose gap.
+   Choose the capture synchronization policy in the same setup. The general
+   choice is `timestamp_aligned`. The research combined-view choice is the
+   exact `capture_synchronization.v1` contract
+   `hardware_trigger` / `realsense_inter_cam_sync` / `depth_exposure`: it
+   requires at least two enabled exact-ID D435 cameras, both `static` and
+   `eye_in_hand` mounting modes, exactly one selected master, and subordinate
+   roles for the rest. USB OAK-D Pro and USB ZED 2i cannot join that group.
+   Saving an invalid combination fails; it never becomes timestamp alignment
+   through a silent fallback. D435 RGB remains timestamp-associated and is not
+   certified as a simultaneous cross-camera exposure.
+   Before acquisition, physically qualify the exact harness, camera
+   membership, mounts, roles, resolution, and FPS without robot motion, then
+   record the operator-confirmed external exposure-timing evidence in
+   `hardware_sync_qualification.json`. The recorder only copies evidence; it
+   does not open cameras or contact the robot. Once capture status, logs, raw
+   camera data, or raw robot-pose evidence exists, the qualification cannot be
+   published or replaced. Start a new run when either the contract or
+   qualification must change.
 2. **Choose the object template and placement — required.** Select the immutable
    printed pose-template version that is physically present, enter its measured
    pose in `template_base`, and confirm the placement. Creating or editing
@@ -104,7 +122,15 @@ calibration has been promoted.
 4. **Record the object dataset — required.** Place the physical objects exactly
    as confirmed, clear the cell, and explicitly authorize supervised capture.
    The selected calibration and template are provenance; they do not authorize
-   hardware by themselves.
+   hardware by themselves. For a hardware-trigger run, capture also requires
+   exact master/subordinate SDK configuration and read-back plus global depth
+   timestamps before the robot may start. Every camera must then continue
+   appending monotonic metadata. Its default liveness deadline is 12 planned
+   frame periods clamped to 2–5 seconds, independent of the robot UDP
+   first/inter-packet timeouts; a stalled or rewritten stream aborts capture
+   while preserving raw evidence. Immediately before receiver startup, the
+   supervisor revalidates the contract and qualification and records their
+   exact hashes in the successful capture report.
 5. **Synchronize and verify frames — required.** PoseTestBot applies each
    selected profile's saved timing automatically; manual values and generic
    defaults cannot override it. It writes derived frame-to-pose matches below
@@ -112,15 +138,36 @@ calibration has been promoted.
    incompatible timestamps, or calibration-provenance differences.
    Per-camera `sync_report.json` files and the run-level
    `sync_quality_report.json` retain the exact applied policy. Raw capture data
-   remains untouched.
+   remains untouched. Hardware-trigger runs additionally associate global
+   depth timestamps whose full earliest-to-latest group span is within the
+   configured threshold, and write only complete
+   mixed-mount sets to
+   `processed/synchronized/multiview_frame_groups.json`. Early master frames,
+   incomplete groups, and unmatched frames remain preserved as raw evidence
+   but are not authoritative combined observations. Group validation requires
+   a succeeded full-capture report with both execution gates and the same
+   capture-time configuration/qualification binding.
 6. **Export the BOP dataset — required.** Revalidate the selected calibration
    and template identities, then write the BOP scenes, camera data, object
    poses, models, targets, frame map, and PoseTestBot provenance sidecars.
+   Hardware-trigger export maps every authoritative complete group onto its
+   per-camera BOP scene/image views in `bop/posetestbot_frame_sets.json` and
+   carries forward that capture-report binding. The BOP rewrite gate compares
+   it across the current qualification, capture report, authoritative groups,
+   frame sets, frame map, and exported files.
 
 BlenderProc preparation and rendering of GT, masks, or derived COCO annotations
 is explicitly optional. A synchronized calibrated recording remains valid
 without those rendered products. Pose-estimator execution and metric evaluation
 remain outside this repository.
+
+The real static and robot-mounted depth observations in an authoritative
+complete group share the synchronized depth-exposure instant, including
+depth-visible robot occlusion. Associated D435 RGB images are not
+hardware-synchronized and must not be claimed to share a moving-robot or
+changing-illumination instant. BlenderProc does not currently render the
+articulated iiwa, so optional synthetic GT and masks do not model the robot
+occluder and must not be presented as that visibility truth.
 
 ## One readiness step, two fresh capture gates
 

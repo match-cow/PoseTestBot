@@ -14,7 +14,12 @@ os.environ.setdefault("POSETESTBOT_WEB_RUN_ROOTS", "/tmp")
 os.environ.setdefault("POSETESTBOT_WEB_INPUT_ROOTS", "/tmp")
 
 from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
-from posetestbot.pipeline.run_config import create_run_config, write_run_config
+from posetestbot.pipeline.run_config import (
+    FixedFrameTransform,
+    SensorRunConfig,
+    create_run_config,
+    write_run_config,
+)
 from posetestbot.web import legacy as web_legacy
 from posetestbot.web.app import _PreviewPollLogFilter
 from posetestbot.web.routes import sensors as web_sensors
@@ -400,6 +405,221 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
     assert loaded["config"]["capture"]["sensors"][1]["enabled"] is False
 
 
+def test_run_config_partial_post_preserves_existing_operator_contract(
+    tmp_path: Path,
+) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "partial-config"
+    calibration_target = {
+        "target_id": "target-1",
+        "bundle_path": "calibration_targets/target-1",
+        "source_sha256": "a" * 64,
+        "spec_sha256": "b" * 64,
+        "pdf_sha256": "c" * 64,
+        "configuration_sha256": "d" * 64,
+        "geometry_sha256": "e" * 64,
+        "placement": {"mode": "unknown"},
+    }
+    pose_template = {
+        "selection_artifact": "pose_template_selection.json",
+        "template_uuid": "template-1",
+    }
+    initial = create_run_config(
+        run_root=run_root,
+        run_name="Research combined-view run",
+        resolution="720p",
+        fps=6,
+        velocity_m_s=0.123,
+        sensors=(
+            SensorRunConfig(
+                "realsense_d435",
+                "static-1",
+                "Static D435",
+                mounting_mode="static",
+            ),
+        ),
+        dataset_mode="pose_template",
+        pose_template=pose_template,
+        calibration_profiles="calibration/full.json",
+        intrinsic_calibration_profiles="calibration/intrinsics.json",
+        calibration_target=calibration_target,
+        sequence_id="sync_aruco",
+        sequence_options={
+            "sync_quality": {
+                "min_match_ratio": 0.75,
+            }
+        },
+        plan_only=False,
+        fixed_transforms=(
+            FixedFrameTransform(
+                from_frame="robot_flange",
+                to_frame="tcp",
+                rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+                translation_mm=(0.0, 0.0, 125.0),
+                source="tool_measurement",
+            ),
+        ),
+    )
+    write_run_config(run_root, initial)
+
+    response = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "fps": 12,
+        },
+    )
+
+    assert response.status_code == 201, response.get_json()
+    config = response.get_json()["config"]
+    assert config["run_name"] == "Research combined-view run"
+    assert config["capture"]["fps"] == 12
+    assert config["capture"]["velocity_m_s"] == 0.123
+    assert config["robot_profile"]["cartesian_velocity_m_s"] == 0.123
+    assert config["pipeline"] == {
+        "sequence_id": "sync_aruco",
+        "plan_only": False,
+        "options": {
+            "sync_quality": {
+                "min_match_ratio": 0.75,
+            }
+        },
+    }
+    assert config["frames"] == initial.to_dict()["frames"]
+    assert config["calibration_profiles"] == "calibration/full.json"
+    assert config["intrinsic_calibration_profiles"] == "calibration/intrinsics.json"
+    assert config["calibration_target"] == calibration_target
+    assert config["dataset_mode"] == "pose_template"
+    assert config["pose_template"] == pose_template
+
+
+def test_run_config_endpoint_preserves_hardware_trigger_and_freezes_it_after_raw_evidence(
+    tmp_path: Path,
+) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "run-hardware-trigger"
+    sensors = [
+        {
+            "sensor_type": "realsense_d435",
+            "device_id": "wrist-1",
+            "mounting_mode": "eye_in_hand",
+            "display_name": "Wrist D435",
+        },
+        {
+            "sensor_type": "realsense_d435",
+            "device_id": "static-1",
+            "mounting_mode": "static",
+            "display_name": "Static D435",
+        },
+    ]
+    synchronization = {
+        "schema_version": "capture_synchronization.v1",
+        "mode": "hardware_trigger",
+        "implementation": "realsense_inter_cam_sync",
+        "scope": "depth_exposure",
+        "group_id": "mixed-depth-rig",
+        "master_sensor_key": "realsense_d435:wrist-1",
+        "max_depth_timestamp_skew_ms": 2.0,
+    }
+
+    created = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "sensors": sensors,
+            "synchronization": synchronization,
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.get_json()["config"]["schema_version"] == "run_config.v3"
+    assert (
+        created.get_json()["config"]["capture"]["synchronization"]
+        == synchronization
+    )
+
+    preserved = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "sensors": sensors,
+            "fps": 8,
+        },
+    )
+
+    assert preserved.status_code == 201
+    assert (
+        preserved.get_json()["config"]["capture"]["synchronization"]
+        == synchronization
+    )
+    assert preserved.get_json()["config"]["capture"]["fps"] == 8
+
+    preserved_without_sensor_payload = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "fps": 9,
+        },
+    )
+
+    assert preserved_without_sensor_payload.status_code == 201
+    preserved_capture = preserved_without_sensor_payload.get_json()["config"][
+        "capture"
+    ]
+    assert preserved_capture["synchronization"] == synchronization
+    assert [
+        {
+            key: sensor[key]
+            for key in (
+                "sensor_type",
+                "device_id",
+                "mounting_mode",
+                "display_name",
+            )
+        }
+        for sensor in preserved_capture["sensors"]
+    ] == sensors
+    assert preserved_capture["fps"] == 9
+
+    (run_root / "raw_robot_ee_poses.json").write_text("{}")
+    rejected = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "sensors": sensors,
+            "synchronization": {
+                "schema_version": "capture_synchronization.v1",
+                "mode": "timestamp_aligned",
+            },
+        },
+    )
+
+    assert rejected.status_code == 400
+    assert "Cannot change the hardware_trigger policy" in rejected.get_json()["output"]
+
+    changed_membership = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "sensors": [
+                sensors[0],
+                {
+                    **sensors[1],
+                    "device_id": "static-2",
+                },
+            ],
+        },
+    )
+    assert changed_membership.status_code == 400
+    assert "camera membership" in changed_membership.get_json()["output"]
+
+    loaded = client.get(
+        "/run-config",
+        query_string={"run_root": run_root.as_posix()},
+    ).get_json()
+    assert loaded["config"]["capture"]["synchronization"] == synchronization
+
+
 def test_run_config_endpoint_rejects_truthy_string_enabled(tmp_path: Path) -> None:
     response = app.test_client().post(
         "/run-config",
@@ -419,6 +639,61 @@ def test_run_config_endpoint_rejects_truthy_string_enabled(tmp_path: Path) -> No
 
     assert response.status_code == 400
     assert "literal JSON boolean" in response.get_json()["output"]
+
+
+def test_run_config_explicit_redetection_replaces_preserved_sensors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "redetected-run"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "old",
+                    "Old D435",
+                    mounting_mode="static",
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "posetestbot.web.legacy.collect_sensor_status",
+        lambda: {
+            "families": [
+                {
+                    "sensor_type": "realsense_d435",
+                        "devices": [
+                            {
+                                "sensor_type": "realsense_d435",
+                                "device_id": "new",
+                            "display_name": "Detected D435",
+                            "connected": True,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    response = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "from_detected_sensors": True,
+            "mounting_mode": "eye_in_hand",
+        },
+    )
+
+    assert response.status_code == 201
+    sensors = response.get_json()["config"]["capture"]["sensors"]
+    assert [(sensor["device_id"], sensor["mounting_mode"]) for sensor in sensors] == [
+        ("new", "eye_in_hand")
+    ]
 
 
 def test_run_config_endpoint_rejects_retired_robot_mode(tmp_path: Path) -> None:

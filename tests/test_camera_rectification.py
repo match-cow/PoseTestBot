@@ -9,7 +9,12 @@ import numpy as np
 import pytest
 
 from posetestbot.calibration.intrinsics import factory_intrinsic_profile
-from posetestbot.calibration.rectification import rectify_run
+from posetestbot.calibration.rectification import (
+    PROVENANCE_SCHEMA_VERSION,
+    RECTIFICATION_PROVENANCE,
+    rectify_run,
+    validate_rectification_provenance,
+)
 from posetestbot.io.artifacts import CAMERA_RECTIFICATION_REPORT, MATCH_ROBOT_EE_POSES
 
 
@@ -86,6 +91,41 @@ def test_rectification_is_transactional_non_destructive_and_depth_nearest(
     camera_data = json.loads((output / "camera_data.json").read_text())
     assert camera_data["projection"] == "rectified_alpha0"
     assert camera_data["distortion"] == [0.0] * 5
+    provenance = validate_rectification_provenance(sensor, output)
+    assert provenance["schema_version"] == PROVENANCE_SCHEMA_VERSION
+    assert provenance["source_fingerprint"] == report["sensors"][0][
+        "source_fingerprint"
+    ]
+    assert provenance["output_fingerprint"] == report["sensors"][0][
+        "output_fingerprint"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutated_tree", "message"),
+    [
+        ("synchronized", "source fingerprint"),
+        ("rectified", "output fingerprint"),
+    ],
+)
+def test_rectification_provenance_detects_stale_source_or_mutated_output(
+    tmp_path: Path,
+    mutated_tree: str,
+    message: str,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    rectify_run(run_root, [profile])
+    output = run_root / "processed" / "rectified" / sensor.name
+    target = (
+        sensor if mutated_tree == "synchronized" else output
+    ) / "rgb" / "000000.png"
+    target.write_bytes(target.read_bytes() + b"mutated")
+
+    with pytest.raises(ValueError, match=message):
+        validate_rectification_provenance(sensor, output)
+
+    assert (output / RECTIFICATION_PROVENANCE).is_file()
 
 
 def test_rectification_refuses_profile_orientation_mismatch(tmp_path: Path) -> None:

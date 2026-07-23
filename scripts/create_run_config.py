@@ -8,6 +8,11 @@ import json
 from pathlib import Path
 
 from posetestbot.pipeline.run_config import (
+    CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
+    DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS,
+    HARDWARE_TRIGGER_IMPLEMENTATION,
+    HARDWARE_TRIGGER_SCOPE,
+    capture_synchronization_from_mapping,
     create_run_config,
     default_lab_sensors,
     fixed_transform_from_mapping,
@@ -40,6 +45,53 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resolution", default="720p")
     parser.add_argument("--fps", type=int, default=6)
     parser.add_argument("--velocity", type=float, default=0.2)
+    synchronization_source = parser.add_mutually_exclusive_group()
+    synchronization_source.add_argument(
+        "--synchronization-json",
+        default=None,
+        help=(
+            "Capture synchronization JSON object. Use "
+            '{"schema_version":"capture_synchronization.v1",'
+            '"mode":"timestamp_aligned"} or the validated hardware_trigger form.'
+        ),
+    )
+    synchronization_source.add_argument(
+        "--synchronization-file",
+        default=None,
+        help="Path to a JSON file containing one capture synchronization object.",
+    )
+    parser.add_argument(
+        "--hardware-trigger",
+        action="store_true",
+        help=(
+            "Configure RealSense inter-camera depth-exposure triggering. Requires "
+            "--hardware-sync-group-id and --hardware-sync-master-sensor."
+        ),
+    )
+    parser.add_argument(
+        "--hardware-sync-group-id",
+        default=None,
+        help="Safe identifier for the hardware-triggered RealSense camera group.",
+    )
+    parser.add_argument(
+        "--hardware-sync-master-sensor",
+        default=None,
+        metavar="SENSOR_KEY",
+        help=(
+            "Exact enabled RealSense master key, for example "
+            "realsense_d435:825412070181."
+        ),
+    )
+    parser.add_argument(
+        "--max-depth-timestamp-skew-ms",
+        type=float,
+        default=None,
+        help=(
+            "Maximum accepted earliest-to-latest depth timestamp span across "
+            "every camera in one hardware-triggered group "
+            f"(default {DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS} ms)."
+        ),
+    )
     parser.add_argument(
         "--sensor",
         action="append",
@@ -116,6 +168,63 @@ def load_sequence_options(
     return options
 
 
+def load_capture_synchronization(args: argparse.Namespace):
+    """Resolve CLI synchronization input through the production validator."""
+
+    hardware_flag_values = (
+        args.hardware_trigger,
+        args.hardware_sync_group_id is not None,
+        args.hardware_sync_master_sensor is not None,
+        args.max_depth_timestamp_skew_ms is not None,
+    )
+    if (
+        args.synchronization_json is not None
+        or args.synchronization_file is not None
+    ) and any(hardware_flag_values):
+        raise ValueError(
+            "--synchronization-json/--synchronization-file cannot be combined "
+            "with --hardware-trigger flags"
+        )
+    if args.synchronization_json is not None:
+        value = json.loads(args.synchronization_json)
+        if not isinstance(value, dict):
+            raise ValueError("--synchronization-json must decode to a JSON object")
+        return capture_synchronization_from_mapping(value)
+    if args.synchronization_file is not None:
+        with open(args.synchronization_file, "r") as f:
+            value = json.load(f)
+        if not isinstance(value, dict):
+            raise ValueError("--synchronization-file must contain a JSON object")
+        return capture_synchronization_from_mapping(value)
+    if not any(hardware_flag_values):
+        return capture_synchronization_from_mapping(None)
+    if not args.hardware_trigger:
+        raise ValueError(
+            "--hardware-sync-group-id, --hardware-sync-master-sensor, and "
+            "--max-depth-timestamp-skew-ms require --hardware-trigger"
+        )
+    if not args.hardware_sync_group_id or not args.hardware_sync_master_sensor:
+        raise ValueError(
+            "--hardware-trigger requires --hardware-sync-group-id and "
+            "--hardware-sync-master-sensor"
+        )
+    return capture_synchronization_from_mapping(
+        {
+            "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
+            "mode": "hardware_trigger",
+            "implementation": HARDWARE_TRIGGER_IMPLEMENTATION,
+            "scope": HARDWARE_TRIGGER_SCOPE,
+            "group_id": args.hardware_sync_group_id,
+            "master_sensor_key": args.hardware_sync_master_sensor,
+            "max_depth_timestamp_skew_ms": (
+                args.max_depth_timestamp_skew_ms
+                if args.max_depth_timestamp_skew_ms is not None
+                else DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS
+            ),
+        }
+    )
+
+
 def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
@@ -134,6 +243,7 @@ def main() -> None:
         if args.sensor
         else default_lab_sensors(mounting_mode=args.mounting_mode)
     )
+    synchronization = load_capture_synchronization(args)
     config = create_run_config(
         run_root=run_root,
         run_name=args.run_name,
@@ -150,6 +260,7 @@ def main() -> None:
             fixed_transform_from_mapping(json.loads(value))
             for value in args.fixed_transform_json
         ),
+        synchronization=synchronization,
     )
     path = write_run_config_with_manifest(run_root, config)
 

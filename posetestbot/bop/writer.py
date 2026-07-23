@@ -9,7 +9,7 @@ import re
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 import cv2
 import numpy as np
@@ -27,6 +27,7 @@ from posetestbot.io.artifacts import (
     BOP_DATASET_INFO,
     BOP_EXPORT_MANIFEST,
     BOP_FRAME_MAP_JSON,
+    BOP_FRAME_SETS,
     BOP_INSTANCE_MAP,
     BOP_MULTIVIEW_TARGETS,
     BOP_POSE_TEMPLATE,
@@ -39,9 +40,17 @@ from posetestbot.io.artifacts import (
     RGB_DIR,
 )
 
-SCHEMA_VERSION = "bop_export_manifest.v3"
+SCHEMA_VERSION = "bop_export_manifest.v4"
 FRAME_MAP_SCHEMA_VERSION = "posetestbot_bop_frame_map.v2"
+FRAME_SETS_SCHEMA_VERSION = "posetestbot_frame_sets.v1"
 DATASET_INFO_SCHEMA_VERSION = "posetestbot_bop_dataset_info.v1"
+_HARDWARE_SYNC_EXECUTION_BINDING_FIELDS = frozenset(
+    {
+        "configuration_sha256",
+        "qualification_artifact_sha256",
+        "revalidated_immediately_before_receiver_spawn",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -55,8 +64,13 @@ class BopSceneExport:
     artifacts: dict[str, str]
     calibration_profile_id: str | None = None
     targets: list[dict] | None = None
-    frame_map: dict[str, dict[str, str | int]] = field(default_factory=dict)
+    frame_map: dict[str, dict[str, Any]] = field(default_factory=dict)
     instance_map: list[dict] = field(default_factory=list)
+    projection: str = "native"
+    input_sensor_folder: str | None = None
+    authoritative_source_sensor_folder: str | None = None
+    input_fingerprint_sha256: str | None = None
+    authoritative_source_fingerprint_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -587,6 +601,11 @@ def export_sensor_scene_to_bop(
     calibration_profile: CalibrationProfile | None = None,
     object_name_to_id: Mapping[str, int] | None = None,
     template_instances: list[Mapping[str, object]] | None = None,
+    source_projection: str | None = None,
+    input_sensor_folder: str | None = None,
+    authoritative_source_sensor_folder: str | None = None,
+    input_fingerprint_sha256: str | None = None,
+    authoritative_source_fingerprint_sha256: str | None = None,
 ) -> BopSceneExport:
     sensor_folder = Path(sensor_folder)
     output_root = Path(output_root)
@@ -614,10 +633,22 @@ def export_sensor_scene_to_bop(
     rgb_dest.mkdir(parents=True)
     depth_dest.mkdir(parents=True)
 
-    projection = (
+    detected_projection = (
         "rectified"
         if (sensor_folder / "rectification_provenance.json").is_file()
         else "native"
+    )
+    projection = source_projection or detected_projection
+    if projection not in {"native", "rectified"}:
+        raise ValueError(f"Unsupported BOP input projection: {projection!r}")
+    if source_projection is not None and projection != detected_projection:
+        raise ValueError(
+            "Declared BOP input projection does not match sensor-folder "
+            f"provenance: declared={projection!r}, detected={detected_projection!r}"
+        )
+    input_sensor_folder_value = input_sensor_folder or sensor_folder.as_posix()
+    authoritative_source_folder_value = (
+        authoritative_source_sensor_folder or input_sensor_folder_value
     )
     cam_k = camera_matrix_from_profile(
         calibration_profile, projection=projection
@@ -654,11 +685,20 @@ def export_sensor_scene_to_bop(
         }
         if calibration_metadata:
             scene_camera[image_id_key]["posetestbot_calibration"] = calibration_metadata
+        source_rgb_relative = rgb_source.relative_to(sensor_folder).as_posix()
+        source_depth_relative = depth_source.relative_to(sensor_folder).as_posix()
         frame_map[image_id_key] = {
             "sensor_name": sensor_name,
             "scene_id": scene_id,
-            "source_rgb": rgb_source.relative_to(sensor_folder).as_posix(),
-            "source_depth": depth_source.relative_to(sensor_folder).as_posix(),
+            "projection": projection,
+            "input_sensor_folder": input_sensor_folder_value,
+            "source_rgb": source_rgb_relative,
+            "source_depth": source_depth_relative,
+            "authoritative_source_sensor_folder": (
+                authoritative_source_folder_value
+            ),
+            "authoritative_source_rgb": source_rgb_relative,
+            "authoritative_source_depth": source_depth_relative,
             "bop_rgb": f"{RGB_DIR}/{image_name}",
             "bop_depth": f"{DEPTH_DIR}/{image_name}",
         }
@@ -774,6 +814,15 @@ def export_sensor_scene_to_bop(
         targets=targets,
         frame_map=frame_map,
         instance_map=instance_map,
+        projection=projection,
+        input_sensor_folder=input_sensor_folder_value,
+        authoritative_source_sensor_folder=(
+            authoritative_source_folder_value
+        ),
+        input_fingerprint_sha256=input_fingerprint_sha256,
+        authoritative_source_fingerprint_sha256=(
+            authoritative_source_fingerprint_sha256
+        ),
     )
 
 
@@ -895,6 +944,15 @@ def write_bop_frame_map(
             "sensor_name": export.sensor_name,
             "split": export.split,
             "scene_folder": export.scene_folder,
+            "projection": export.projection,
+            "input_sensor_folder": export.input_sensor_folder,
+            "authoritative_source_sensor_folder": (
+                export.authoritative_source_sensor_folder
+            ),
+            "input_fingerprint_sha256": export.input_fingerprint_sha256,
+            "authoritative_source_fingerprint_sha256": (
+                export.authoritative_source_fingerprint_sha256
+            ),
             "frames": export.frame_map,
         }
         for export in sorted(exports, key=lambda item: item.scene_id)
@@ -902,6 +960,328 @@ def write_bop_frame_map(
     return _write_json(
         output_root / BOP_FRAME_MAP_JSON,
         {"schema_version": FRAME_MAP_SCHEMA_VERSION, "scenes": scenes},
+    )
+
+
+def _validated_hardware_sync_execution_binding(
+    value: Any,
+) -> dict[str, Any]:
+    """Return the exact capture-time binding carried into portable BOP data."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "Hardware-sync frame groups require a "
+            "hardware_sync_execution_binding object"
+        )
+    if set(value) != _HARDWARE_SYNC_EXECUTION_BINDING_FIELDS:
+        raise ValueError(
+            "hardware_sync_execution_binding contains missing or unknown fields"
+        )
+    if value.get("revalidated_immediately_before_receiver_spawn") is not True:
+        raise ValueError(
+            "hardware_sync_execution_binding must prove immediate pre-receiver "
+            "revalidation"
+        )
+    binding: dict[str, Any] = {
+        "revalidated_immediately_before_receiver_spawn": True,
+    }
+    for digest_field in (
+        "configuration_sha256",
+        "qualification_artifact_sha256",
+    ):
+        digest = value.get(digest_field)
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(
+                "hardware_sync_execution_binding."
+                f"{digest_field} must be a lowercase "
+                "SHA-256 digest"
+            )
+        binding[digest_field] = digest
+    return {
+        "configuration_sha256": binding["configuration_sha256"],
+        "qualification_artifact_sha256": binding[
+            "qualification_artifact_sha256"
+        ],
+        "revalidated_immediately_before_receiver_spawn": True,
+    }
+
+
+def bop_frame_sets_from_hardware_groups(
+    exports: list[BopSceneExport],
+    hardware_groups: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Map authoritative complete capture groups onto exported BOP scene IDs."""
+
+    if hardware_groups.get("schema_version") != "hardware_sync_frame_groups.v1":
+        raise ValueError("Unsupported hardware-sync frame-group schema")
+    from posetestbot.sync.hardware import validate_hardware_sync_frame_groups
+
+    validate_hardware_sync_frame_groups(hardware_groups)
+    execution_binding = _validated_hardware_sync_execution_binding(
+        hardware_groups.get("hardware_sync_execution_binding")
+    )
+    sensor_order = hardware_groups.get("sensor_order")
+    groups = hardware_groups.get("groups")
+    if (
+        not isinstance(sensor_order, list)
+        or not sensor_order
+        or not all(isinstance(item, str) and item for item in sensor_order)
+        or len(sensor_order) != len(set(sensor_order))
+    ):
+        raise ValueError("Hardware-sync frame groups require unique sensor_order")
+    if not isinstance(groups, list) or not groups:
+        raise ValueError(
+            "Hardware-sync BOP export requires at least one complete frame group"
+        )
+
+    export_by_sensor = {export.sensor_name: export for export in exports}
+    if len(export_by_sensor) != len(exports):
+        raise ValueError("BOP exports contain duplicate sensor names")
+    group_sensors = hardware_groups.get("sensors")
+    if not isinstance(group_sensors, list):
+        raise ValueError("Hardware-sync frame groups require sensor inventory")
+    sensor_folder_by_key: dict[str, str] = {}
+    sensor_name_by_key: dict[str, str] = {}
+    for sensor in group_sensors:
+        if not isinstance(sensor, Mapping):
+            raise ValueError("Hardware-sync sensor inventory entry must be an object")
+        sensor_key = str(sensor.get("sensor_key") or "")
+        sensor_folder = str(sensor.get("sensor_folder") or "")
+        if not sensor_key or not sensor_folder:
+            raise ValueError(
+                "Hardware-sync sensor inventory requires sensor_key and sensor_folder"
+            )
+        sensor_folder_by_key[sensor_key] = sensor_folder
+        sensor_name_by_key[sensor_key] = Path(sensor_folder).name
+    if set(sensor_folder_by_key) != set(sensor_order):
+        raise ValueError(
+            "Hardware-sync sensor inventory does not match sensor_order"
+        )
+    if len(set(sensor_name_by_key.values())) != len(sensor_name_by_key):
+        raise ValueError(
+            "Hardware-sync sensor inventory contains duplicate folder names"
+        )
+    if set(export_by_sensor) != set(sensor_name_by_key.values()):
+        raise ValueError(
+            "BOP sensor exports do not exactly cover the authoritative "
+            "hardware-sync sensor set"
+        )
+
+    source_maps: dict[str, dict[str, tuple[int, Mapping[str, Any]]]] = {}
+    for export in exports:
+        frames: dict[str, tuple[int, Mapping[str, Any]]] = {}
+        for raw_im_id, frame in export.frame_map.items():
+            if not isinstance(frame, Mapping):
+                raise ValueError(
+                    f"BOP frame map entry is invalid for {export.sensor_name}"
+                )
+            source_rgb = str(
+                frame.get("authoritative_source_rgb")
+                or frame.get("source_rgb")
+                or ""
+            )
+            if not source_rgb or source_rgb in frames:
+                raise ValueError(
+                    f"BOP frame map has missing or duplicate source RGB for "
+                    f"{export.sensor_name}: {source_rgb!r}"
+                )
+            frames[source_rgb] = (int(raw_im_id), frame)
+        source_maps[export.sensor_name] = frames
+
+    frame_sets: list[dict[str, Any]] = []
+    seen_group_ids: set[str] = set()
+    for expected_index, group in enumerate(groups):
+        if not isinstance(group, Mapping):
+            raise ValueError("Hardware-sync complete group must be an object")
+        frame_group_id = str(group.get("frame_group_id") or "")
+        if not frame_group_id or frame_group_id in seen_group_ids:
+            raise ValueError(
+                f"Hardware-sync frame_group_id is missing or duplicated: "
+                f"{frame_group_id!r}"
+            )
+        seen_group_ids.add(frame_group_id)
+        if group.get("frame_group_index") != expected_index:
+            raise ValueError(
+                "Hardware-sync complete groups must have contiguous frame_group_index"
+            )
+        frames = group.get("frames")
+        if not isinstance(frames, Mapping) or set(frames) != set(sensor_order):
+            raise ValueError(
+                f"Hardware-sync group {frame_group_id} is not a complete sensor set"
+            )
+
+        views: list[dict[str, Any]] = []
+        for sensor_key in sensor_order:
+            frame_ref = frames[sensor_key]
+            if not isinstance(frame_ref, Mapping):
+                raise ValueError(
+                    f"Hardware-sync group {frame_group_id} frame is invalid for "
+                    f"{sensor_key}"
+                )
+            sensor_folder = str(frame_ref.get("sensor_folder") or "")
+            expected_folder = sensor_folder_by_key[sensor_key]
+            if sensor_folder != expected_folder:
+                raise ValueError(
+                    f"Hardware-sync group {frame_group_id} sensor folder mismatch "
+                    f"for {sensor_key}"
+                )
+            synchronized_rgb = str(
+                frame_ref.get("synchronized_rgb_path") or ""
+            )
+            sensor_name = sensor_name_by_key[sensor_key]
+            export = export_by_sensor[sensor_name]
+            mapped = source_maps[sensor_name].get(synchronized_rgb)
+            if mapped is None:
+                raise ValueError(
+                    f"Hardware-sync group {frame_group_id} references "
+                    f"{sensor_folder}/{synchronized_rgb}, which is absent from "
+                    "the BOP export"
+                )
+            im_id, bop_frame = mapped
+            authoritative_source_folder = (
+                export.authoritative_source_sensor_folder or sensor_folder
+            )
+            authoritative_rgb = str(
+                bop_frame.get("authoritative_source_rgb")
+                or bop_frame.get("source_rgb")
+                or ""
+            )
+            authoritative_depth = str(
+                bop_frame.get("authoritative_source_depth")
+                or bop_frame.get("source_depth")
+                or ""
+            )
+            if (
+                authoritative_source_folder != sensor_folder
+                or authoritative_rgb != synchronized_rgb
+                or authoritative_depth
+                != str(frame_ref.get("synchronized_depth_path") or "")
+            ):
+                raise ValueError(
+                    f"BOP source provenance for {sensor_key} does not exactly "
+                    "match the authoritative synchronized frame"
+                )
+            views.append(
+                {
+                    "sensor_key": sensor_key,
+                    "sensor_name": sensor_name,
+                    "mounting_mode": frame_ref.get("mounting_mode"),
+                    "hardware_sync_role": frame_ref.get("hardware_sync_role"),
+                    "projection": export.projection,
+                    "bop_input_sensor_folder": export.input_sensor_folder,
+                    "bop_input_rgb_path": bop_frame.get("source_rgb"),
+                    "bop_input_depth_path": bop_frame.get("source_depth"),
+                    "authoritative_source_sensor_folder": (
+                        authoritative_source_folder
+                    ),
+                    "authoritative_source_rgb_path": authoritative_rgb,
+                    "authoritative_source_depth_path": authoritative_depth,
+                    "bop_input_fingerprint_sha256": (
+                        export.input_fingerprint_sha256
+                    ),
+                    "authoritative_source_fingerprint_sha256": (
+                        export.authoritative_source_fingerprint_sha256
+                    ),
+                    "scene_id": export.scene_id,
+                    "im_id": im_id,
+                    "source_frame_index": frame_ref.get("source_frame_index"),
+                    "source_frame_id": frame_ref.get("source_frame_id"),
+                    "source_sensor_folder": frame_ref.get(
+                        "source_sensor_folder"
+                    ),
+                    "source_rgb_path": frame_ref.get("source_rgb_path"),
+                    "source_depth_path": frame_ref.get("source_depth_path"),
+                    "sensor_folder": sensor_folder,
+                    "synchronized_frame_index": frame_ref.get(
+                        "synchronized_frame_index"
+                    ),
+                    "synchronized_frame_id": frame_ref.get(
+                        "synchronized_frame_id"
+                    ),
+                    "synchronized_rgb_path": synchronized_rgb,
+                    "synchronized_depth_path": frame_ref.get(
+                        "synchronized_depth_path"
+                    ),
+                    "depth_sensor_timestamp_ns": frame_ref.get(
+                        "depth_sensor_timestamp_ns"
+                    ),
+                    "depth_frame_number": frame_ref.get("depth_frame_number"),
+                    "depth_timestamp_domain": frame_ref.get(
+                        "depth_timestamp_domain"
+                    ),
+                    "depth_timestamp_skew_ns": frame_ref.get(
+                        "depth_timestamp_skew_ns"
+                    ),
+                    "abs_depth_timestamp_skew_ns": frame_ref.get(
+                        "abs_depth_timestamp_skew_ns"
+                    ),
+                    "matched_robot_pose": frame_ref.get("matched_robot_pose"),
+                    "bop_rgb": (
+                        Path(export.scene_folder) / str(bop_frame["bop_rgb"])
+                    ).as_posix(),
+                    "bop_depth": (
+                        Path(export.scene_folder) / str(bop_frame["bop_depth"])
+                    ).as_posix(),
+                }
+            )
+        frame_sets.append(
+            {
+                "frame_set_id": frame_group_id,
+                "frame_set_index": expected_index,
+                "capture_group_id": group.get("capture_group_id"),
+                "master_sensor_key": group.get("master_sensor_key"),
+                "depth_sensor_timestamp_ns": group.get(
+                    "depth_sensor_timestamp_ns"
+                ),
+                "max_abs_depth_timestamp_skew_ns": group.get(
+                    "max_abs_depth_timestamp_skew_ns"
+                ),
+                "depth_timestamp_span_ns": group.get(
+                    "depth_timestamp_span_ns"
+                ),
+                "matched_robot_pose": group.get("matched_robot_pose"),
+                "views": views,
+            }
+        )
+
+    return {
+        "schema_version": FRAME_SETS_SCHEMA_VERSION,
+        "source_schema_version": hardware_groups["schema_version"],
+        "group_id": hardware_groups.get("group_id"),
+        "implementation": hardware_groups.get("implementation"),
+        "scope": hardware_groups.get("scope"),
+        "master_sensor_key": hardware_groups.get("master_sensor_key"),
+        "max_depth_timestamp_skew_ns": hardware_groups.get(
+            "max_depth_timestamp_skew_ns"
+        ),
+        "hardware_sync_qualification": hardware_groups.get(
+            "hardware_sync_qualification"
+        ),
+        "hardware_sync_execution_binding": execution_binding,
+        "sensor_order": list(sensor_order),
+        "frame_set_count": len(frame_sets),
+        "synchronization_claims": {
+            "depth_exposure_hardware_synchronized": True,
+            "rgb_exposure_hardware_synchronized": False,
+            "rgb_association": "same_device_frameset_timestamp_association",
+            "synthetic_robot_occlusion_modeled": False,
+        },
+        "frame_sets": frame_sets,
+    }
+
+
+def write_bop_frame_sets(
+    output_root: str | Path,
+    exports: list[BopSceneExport],
+    hardware_groups: Mapping[str, Any],
+) -> Path:
+    return _write_json(
+        Path(output_root) / BOP_FRAME_SETS,
+        bop_frame_sets_from_hardware_groups(exports, hardware_groups),
     )
 
 
@@ -1282,6 +1662,7 @@ def write_bop_export_manifest(
     multiview_targets_path: str | Path | None = None,
     coco_annotations_path: str | Path | None = None,
     frame_map_path: str | Path | None = None,
+    frame_sets_path: str | Path | None = None,
     dataset_info_path: str | Path | None = None,
     validation: Mapping[str, object] | None = None,
     stable_id_mapping: Mapping[str, int] | None = None,
@@ -1333,6 +1714,7 @@ def write_bop_export_manifest(
             "multiview_targets_path": artifact_path(multiview_targets_path),
             "coco_annotations_path": artifact_path(coco_annotations_path),
             "frame_map_path": artifact_path(frame_map_path),
+            "frame_sets_path": artifact_path(frame_sets_path),
             "instance_map_path": artifact_path(instance_map_path),
             "pose_template_path": artifact_path(pose_template_path),
             "dataset_info_path": artifact_path(dataset_info_path),

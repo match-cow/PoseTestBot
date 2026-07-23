@@ -99,6 +99,23 @@ def test_capture_execution_uses_calibration_receiver_timeouts(
     )
 
 
+def test_capture_execution_accepts_distinct_camera_metadata_timeout(
+    tmp_path: Path,
+) -> None:
+    job = build_pipeline_job(
+        stage_id="capture_execution",
+        run_root=tmp_path / "capture",
+        options={"camera_metadata_idle_timeout_s": 3.0},
+    )
+
+    assert job.parameters["options"][
+        "camera_metadata_idle_timeout_s"
+    ] == 3.0
+    assert job.command[
+        job.command.index("--camera-metadata-idle-timeout-s") + 1
+    ] == "3.0"
+
+
 def test_rewrite_gate_choices_are_acquisition_only(tmp_path: Path) -> None:
     job = build_pipeline_job(stage_id="rewrite_gate", run_root=tmp_path / "run")
 

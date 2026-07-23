@@ -12,6 +12,7 @@ from posetestbot.pipeline.capture_execution import (
     DEFAULT_CAMERA_STARTUP_ATTEMPTS,
     DEFAULT_CAMERA_STARTUP_RETRY_DELAY_S,
     DEFAULT_CAPTURE_EXECUTION_TIMEOUT_S,
+    MAX_EXPLICIT_CAMERA_METADATA_IDLE_TIMEOUT_S,
     run_capture_execution,
 )
 from posetestbot.robot.pose_receiver import (
@@ -92,6 +93,17 @@ def parse_args() -> argparse.Namespace:
         help="Seconds the pose receiver waits between robot packets.",
     )
     parser.add_argument(
+        "--camera-metadata-idle-timeout-s",
+        type=float,
+        default=None,
+        help=(
+            "Maximum seconds a live camera may stop appending valid frame "
+            "metadata. By default this is derived from capture FPS and bounded "
+            "to a few seconds; explicit values must not exceed "
+            f"{MAX_EXPLICIT_CAMERA_METADATA_IDLE_TIMEOUT_S:g} seconds."
+        ),
+    )
+    parser.add_argument(
         "--no-write-plan-if-missing",
         action="store_true",
         help="Do not create capture_plan.json when it is missing.",
@@ -119,6 +131,9 @@ def main() -> None:
         terminate_timeout_s=args.terminate_timeout_s,
         receive_start_timeout_s=args.receive_start_timeout_s,
         receive_idle_timeout_s=args.receive_idle_timeout_s,
+        camera_metadata_idle_timeout_s=(
+            args.camera_metadata_idle_timeout_s
+        ),
         write_plan_if_missing=not args.no_write_plan_if_missing,
     )
 

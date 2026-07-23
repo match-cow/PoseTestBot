@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 
 from posetestbot.io.artifacts import (
     CAM_K,
@@ -27,6 +30,7 @@ from posetestbot.sensors.discovery import (
 )
 from posetestbot.sensors.realsense import (
     _intrinsics_for_orientation,
+    RealSenseCaptureError,
     camera_intrinsics_from_realsense,
     capture_realsense_rgbd,
 )
@@ -150,9 +154,11 @@ class FakePipeline:
     def __init__(self, device: FakeDevice):
         self.device = device
         self.index = 0
+        self.started = False
         self.stopped = False
 
     def start(self, _config):
+        self.started = True
         return FakeProfile(self.device)
 
     def wait_for_frames(self):
@@ -198,6 +204,107 @@ class FakeRS:
 
     def align(self, stream):
         return FakeAlign(stream)
+
+
+class FakeOptionSensor:
+    def __init__(
+        self,
+        name: str,
+        *,
+        supported_options: set[str],
+        readback_overrides: dict[str, float] | None = None,
+        depth_scale: float | None = None,
+    ) -> None:
+        self.name = name
+        self.supported_options = set(supported_options)
+        self.readback_overrides = dict(readback_overrides or {})
+        self.depth_scale = depth_scale
+        self.values: dict[str, float] = {}
+        self.set_calls: list[tuple[str, float]] = []
+
+    def get_info(self, key):
+        if key == "name":
+            return self.name
+        return ""
+
+    def supports(self, option) -> bool:
+        return option in self.supported_options
+
+    def set_option(self, option, value: float) -> None:
+        if option not in self.supported_options:
+            raise RuntimeError(f"unsupported option: {option}")
+        self.set_calls.append((option, float(value)))
+        self.values[option] = float(value)
+
+    def get_option(self, option) -> float:
+        if option not in self.supported_options:
+            raise RuntimeError(f"unsupported option: {option}")
+        return self.readback_overrides.get(option, self.values.get(option, 0.0))
+
+    def get_depth_scale(self) -> float:
+        if self.depth_scale is None:
+            raise RuntimeError("not a depth sensor")
+        return self.depth_scale
+
+
+class FakeOptionDevice(FakeDevice):
+    def __init__(
+        self,
+        *,
+        serial: str,
+        depth_options: set[str],
+        color_options: set[str],
+        depth_readback_overrides: dict[str, float] | None = None,
+        color_readback_overrides: dict[str, float] | None = None,
+    ) -> None:
+        self.serial = serial
+        self.depth_sensor = FakeOptionSensor(
+            "Stereo Module",
+            supported_options=depth_options,
+            readback_overrides=depth_readback_overrides,
+            depth_scale=0.001,
+        )
+        self.color_sensor = FakeOptionSensor(
+            "RGB Camera",
+            supported_options=color_options,
+            readback_overrides=color_readback_overrides,
+        )
+        self.sensors = [self.depth_sensor, self.color_sensor]
+
+    def first_depth_sensor(self):
+        return self.depth_sensor
+
+
+class FakeHardwareSyncRS(FakeRS):
+    option = SimpleNamespace(
+        inter_cam_sync_mode="inter_cam_sync_mode",
+        global_time_enabled="global_time_enabled",
+    )
+
+    def __init__(
+        self,
+        serial: str = "123",
+        *,
+        depth_options: set[str] | None = None,
+        color_options: set[str] | None = None,
+        depth_readback_overrides: dict[str, float] | None = None,
+        color_readback_overrides: dict[str, float] | None = None,
+    ) -> None:
+        self.device = FakeOptionDevice(
+            serial=serial,
+            depth_options=(
+                {"inter_cam_sync_mode", "global_time_enabled"}
+                if depth_options is None
+                else depth_options
+            ),
+            color_options=(
+                {"global_time_enabled"} if color_options is None else color_options
+            ),
+            depth_readback_overrides=depth_readback_overrides,
+            color_readback_overrides=color_readback_overrides,
+        )
+        self.pipeline_instance = None
+        self.config_instance = None
 
 
 class PreviewSpy:
@@ -257,6 +364,321 @@ def test_capture_realsense_rgbd_writes_frames_without_preview(tmp_path) -> None:
     assert records[0]["sensor_id"] == "825412070181"
     assert records[0]["inverted"] is False
     assert records[0]["image_rotation_degrees"] == 0
+
+
+@pytest.mark.parametrize(
+    ("role", "expected_mode"),
+    [("master", 1), ("subordinate", 2)],
+)
+def test_capture_realsense_configures_verified_depth_hardware_sync_and_provenance(
+    tmp_path: Path,
+    role: str,
+    expected_mode: int,
+) -> None:
+    fake_rs = FakeHardwareSyncRS("825412070181")
+
+    summary = capture_realsense_rgbd(
+        tmp_path,
+        device_id="825412070181",
+        fps=30,
+        max_frames=1,
+        hardware_sync_role=role,
+        hardware_sync_group_id="mixed-rig-01",
+        hardware_sync_scope="depth_exposure",
+        rs_module=fake_rs,
+    )
+
+    depth_sensor = fake_rs.device.depth_sensor
+    color_sensor = fake_rs.device.color_sensor
+    assert depth_sensor.set_calls == [
+        ("global_time_enabled", 1.0),
+        ("inter_cam_sync_mode", float(expected_mode)),
+    ]
+    assert color_sensor.set_calls == [("global_time_enabled", 1.0)]
+    assert fake_rs.pipeline_instance.started is True
+
+    record = json.loads((tmp_path / FRAME_METADATA_JSONL).read_text())
+    assert record["capture_group_id"] == "mixed-rig-01"
+    assert record["hardware_sync_role"] == role
+    assert record["hardware_sync_scope"] == "depth_exposure"
+    assert record["hardware_sync_transport"] == "realsense_inter_cam_sync"
+    assert record["inter_cam_sync_mode_configured"] == expected_mode
+    assert record["inter_cam_sync_mode_readback"] == expected_mode
+    assert record["depth_sensor_timestamp_ns"] == 10_000_000
+    assert record["depth_frame_number"] == 1
+    assert "depth_timestamp_domain" in record
+    assert record["global_time_enabled_evidence"] == [
+        {
+            "sensor_index": 0,
+            "sensor_name": "Stereo Module",
+            "configured": 1,
+            "readback": 1,
+            "is_depth_sensor": True,
+        },
+        {
+            "sensor_index": 1,
+            "sensor_name": "RGB Camera",
+            "configured": 1,
+            "readback": 1,
+            "is_depth_sensor": False,
+        },
+    ]
+
+    assert summary["hardware_sync_enabled"] is True
+    assert summary["hardware_sync_transport"] == "realsense_inter_cam_sync"
+    assert summary["capture_group_id"] == "mixed-rig-01"
+    assert summary["hardware_sync_role"] == role
+    assert summary["hardware_sync_scope"] == "depth_exposure"
+    assert summary["hardware_sync_rgb_exposure_claimed"] is False
+    assert summary["inter_cam_sync_mode_configured"] == expected_mode
+    assert summary["inter_cam_sync_mode_readback"] == expected_mode
+    assert (
+        summary["global_time_enabled_evidence"]
+        == record["global_time_enabled_evidence"]
+    )
+
+
+def test_capture_realsense_rejects_unsupported_hardware_sync_before_stream_start(
+    tmp_path: Path,
+) -> None:
+    fake_rs = FakeHardwareSyncRS(
+        depth_options={"global_time_enabled"},
+    )
+
+    with pytest.raises(RealSenseCaptureError, match="does not support"):
+        capture_realsense_rgbd(
+            tmp_path,
+            max_frames=1,
+            hardware_sync_role="master",
+            hardware_sync_group_id="group-1",
+            hardware_sync_scope="depth_exposure",
+            rs_module=fake_rs,
+        )
+
+    assert fake_rs.pipeline_instance.started is False
+    assert not (tmp_path / RGB_DIR).exists()
+
+
+def test_capture_realsense_rejects_non_d435_identity_for_hardware_sync(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fake_rs = FakeHardwareSyncRS("825412070181")
+    original_get_info = fake_rs.device.get_info
+
+    def device_info(key):
+        if key == "product_id":
+            return "0B5C"
+        if key == "name":
+            return "Intel RealSense D455"
+        return original_get_info(key)
+
+    monkeypatch.setattr(
+        fake_rs.camera_info,
+        "product_id",
+        "product_id",
+        raising=False,
+    )
+    monkeypatch.setattr(fake_rs.device, "get_info", device_info)
+
+    with pytest.raises(RealSenseCaptureError, match="verified RealSense D435/D435i"):
+        capture_realsense_rgbd(
+            tmp_path,
+            max_frames=1,
+            hardware_sync_role="master",
+            hardware_sync_group_id="group-1",
+            hardware_sync_scope="depth_exposure",
+            rs_module=fake_rs,
+        )
+
+    assert fake_rs.pipeline_instance.started is False
+    assert not (tmp_path / RGB_DIR).exists()
+
+
+def test_capture_realsense_rejects_inter_cam_sync_readback_mismatch(
+    tmp_path: Path,
+) -> None:
+    fake_rs = FakeHardwareSyncRS(
+        depth_readback_overrides={"inter_cam_sync_mode": 0.0},
+    )
+
+    with pytest.raises(RealSenseCaptureError, match="readback mismatch"):
+        capture_realsense_rgbd(
+            tmp_path,
+            max_frames=1,
+            hardware_sync_role="subordinate",
+            hardware_sync_group_id="group-1",
+            hardware_sync_scope="depth_exposure",
+            rs_module=fake_rs,
+        )
+
+    assert fake_rs.pipeline_instance.started is False
+    assert not (tmp_path / RGB_DIR).exists()
+
+
+def test_capture_realsense_resets_persisted_sync_mode_without_hardware_sync(
+    tmp_path: Path,
+) -> None:
+    fake_rs = FakeHardwareSyncRS()
+
+    summary = capture_realsense_rgbd(
+        tmp_path,
+        max_frames=1,
+        rs_module=fake_rs,
+    )
+
+    record = json.loads((tmp_path / FRAME_METADATA_JSONL).read_text())
+    assert summary["hardware_sync_enabled"] is False
+    assert summary["inter_cam_sync_mode_configured"] is None
+    assert summary["inter_cam_sync_mode_readback"] is None
+    assert summary["inter_cam_sync_reset_evidence"] == {
+        "sensor_name": "Stereo Module",
+        "configured": 0,
+        "readback": 0,
+    }
+    assert summary["global_time_enabled_evidence"] == []
+    assert (
+        record["global_time_enabled_evidence"]
+        == summary["global_time_enabled_evidence"]
+    )
+    assert fake_rs.device.depth_sensor.set_calls == [
+        ("inter_cam_sync_mode", 0.0)
+    ]
+    assert fake_rs.device.color_sensor.set_calls == []
+    assert "capture_group_id" not in record
+    assert "inter_cam_sync_mode_configured" not in record
+    assert record["inter_cam_sync_reset_evidence"] == (
+        summary["inter_cam_sync_reset_evidence"]
+    )
+
+
+def test_capture_realsense_rejects_failed_sync_reset_before_default_stream(
+    tmp_path: Path,
+) -> None:
+    fake_rs = FakeHardwareSyncRS(
+        depth_readback_overrides={"inter_cam_sync_mode": 2.0},
+    )
+
+    with pytest.raises(
+        RealSenseCaptureError,
+        match="inter_cam_sync_mode readback mismatch",
+    ):
+        capture_realsense_rgbd(
+            tmp_path,
+            max_frames=1,
+            rs_module=fake_rs,
+        )
+
+    assert fake_rs.pipeline_instance.started is False
+    assert not (tmp_path / RGB_DIR).exists()
+
+
+def test_capture_realsense_rejects_global_time_readback_mismatch_before_stream(
+    tmp_path: Path,
+) -> None:
+    fake_rs = FakeHardwareSyncRS(
+        color_readback_overrides={"global_time_enabled": 0.0},
+    )
+
+    with pytest.raises(
+        RealSenseCaptureError, match="global_time_enabled readback mismatch"
+    ):
+        capture_realsense_rgbd(
+            tmp_path,
+            max_frames=1,
+            hardware_sync_role="master",
+            hardware_sync_group_id="group-1",
+            hardware_sync_scope="depth_exposure",
+            rs_module=fake_rs,
+        )
+
+    assert fake_rs.pipeline_instance.started is False
+    assert not (tmp_path / RGB_DIR).exists()
+
+
+def test_capture_realsense_rejects_hardware_sync_without_global_time_evidence(
+    tmp_path: Path,
+) -> None:
+    fake_rs = FakeHardwareSyncRS(
+        depth_options={"inter_cam_sync_mode"},
+        color_options=set(),
+    )
+
+    with pytest.raises(RealSenseCaptureError, match="global_time_enabled"):
+        capture_realsense_rgbd(
+            tmp_path,
+            max_frames=1,
+            hardware_sync_role="master",
+            hardware_sync_group_id="group-1",
+            hardware_sync_scope="depth_exposure",
+            rs_module=fake_rs,
+        )
+
+    assert fake_rs.pipeline_instance.started is False
+    assert fake_rs.device.depth_sensor.set_calls == []
+    assert not (tmp_path / RGB_DIR).exists()
+
+
+def test_capture_realsense_rejects_color_only_global_time_evidence_before_stream(
+    tmp_path: Path,
+) -> None:
+    fake_rs = FakeHardwareSyncRS(
+        depth_options={"inter_cam_sync_mode"},
+        color_options={"global_time_enabled"},
+    )
+
+    with pytest.raises(
+        RealSenseCaptureError,
+        match="depth sensor does not expose global_time_enabled",
+    ):
+        capture_realsense_rgbd(
+            tmp_path,
+            max_frames=1,
+            hardware_sync_role="master",
+            hardware_sync_group_id="group-1",
+            hardware_sync_scope="depth_exposure",
+            rs_module=fake_rs,
+        )
+
+    assert fake_rs.pipeline_instance.started is False
+    assert fake_rs.device.depth_sensor.set_calls == []
+    assert fake_rs.device.color_sensor.set_calls == []
+    assert not (tmp_path / RGB_DIR).exists()
+
+
+def test_realsense_capture_cli_parses_hardware_sync_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "capture_realsense_720p.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "capture_realsense_720p_cli_test",
+        script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            script_path.as_posix(),
+            "/tmp/run/realsense_123",
+            "--hardware-sync-role",
+            "subordinate",
+            "--hardware-sync-group-id",
+            "mixed-rig-01",
+            "--hardware-sync-scope",
+            "depth_exposure",
+        ],
+    )
+
+    args = module.parse_args()
+
+    assert args.hardware_sync_role == "subordinate"
+    assert args.hardware_sync_group_id == "mixed-rig-01"
+    assert args.hardware_sync_scope == "depth_exposure"
 
 
 def test_host_received_timestamp_is_sampled_before_alignment(
@@ -500,6 +922,52 @@ def test_discover_realsense_d435_reads_mocked_sdk_devices(monkeypatch) -> None:
     assert devices[0].sensor_type == SensorType.REALSENSE_D435
     assert devices[0].device_id == "rs-1"
     assert devices[0].metadata["product_line"] == "D400"
+
+
+def test_discover_realsense_d435_filters_other_realsense_models(monkeypatch) -> None:
+    class FakeCameraInfo:
+        serial_number = "serial_number"
+        name = "name"
+        product_line = "product_line"
+        product_id = "product_id"
+
+    class FakeDiscoveryDevice:
+        def __init__(self, serial: str, name: str, product_id: str):
+            self.values = {
+                "serial_number": serial,
+                "name": name,
+                "product_line": "D400",
+                "product_id": product_id,
+            }
+
+        def supports(self, _key):
+            return True
+
+        def get_info(self, key):
+            return self.values[key]
+
+    fake_rs = SimpleNamespace(
+        camera_info=FakeCameraInfo,
+        context=lambda: SimpleNamespace(
+            query_devices=lambda: [
+                FakeDiscoveryDevice("d435", "Intel RealSense D435", "0B07"),
+                FakeDiscoveryDevice("d455", "Intel RealSense D455", "0B5C"),
+            ]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "pyrealsense2", fake_rs)
+    monkeypatch.setattr(
+        "posetestbot.sensors.discovery._video_node_metadata_by_serial",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "posetestbot.sensors.discovery._discover_realsense_from_lsusb",
+        lambda: [],
+    )
+
+    devices = discover_realsense_d435()
+
+    assert [device.device_id for device in devices] == ["d435"]
 
 
 def test_parse_realsense_lsusb_fallback_reads_d435_and_d435i() -> None:

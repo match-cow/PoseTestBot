@@ -19,6 +19,7 @@ from posetestbot.io.artifacts import (
     DEPTH_SCALE,
     FRAME_METADATA_JSONL,
     MATCH_ROBOT_EE_POSES,
+    MULTIVIEW_FRAME_GROUPS,
     RAW_ROBOT_EE_POSES,
     RGB_DIR,
     SYNC_REPORT,
@@ -580,7 +581,24 @@ def test_run_sync_cli_applies_selected_profile_policy_per_exact_camera(
 
     run_root = tmp_path / "selected-run"
     run_root.mkdir()
-    (run_root / "run_config.json").write_text("{}\n")
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "camera-A",
+                    "Camera A",
+                ),
+                SensorRunConfig(
+                    "realsense_d435",
+                    "camera-B",
+                    "Camera B",
+                ),
+            ),
+        ),
+    )
     sensors = [
         {
             "sensor_key": f"realsense_d435:{device_id}",
@@ -688,6 +706,207 @@ def test_run_sync_cli_applies_selected_profile_policy_per_exact_camera(
     with pytest.raises(ValueError, match="remove manual synchronization options"):
         sync_script.main()
     assert calls == []
+
+
+def test_run_sync_cli_publishes_complete_groups_for_hardware_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "sync_run_non_destructive.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "test_sync_run_hardware_script",
+        script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    sync_script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sync_script)
+
+    run_root = tmp_path / "hardware-run"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(
+            SensorRunConfig(
+                "realsense_d435",
+                "static",
+                "Static",
+                mounting_mode="static",
+            ),
+            SensorRunConfig(
+                "realsense_d435",
+                "hand",
+                "Robot",
+                mounting_mode="eye_in_hand",
+            ),
+        ),
+        synchronization={
+            "schema_version": "capture_synchronization.v1",
+            "mode": "hardware_trigger",
+            "implementation": "realsense_inter_cam_sync",
+            "scope": "depth_exposure",
+            "group_id": "mixed-rig",
+            "master_sensor_key": "realsense_d435:static",
+            "max_depth_timestamp_skew_ms": 2.0,
+        },
+    )
+    write_run_config(run_root, config)
+    calls: list[dict] = []
+
+    def fake_synchronize_run(root, **kwargs):
+        calls.append({"root": Path(root), **kwargs})
+        return [
+            SyncResult(
+                sensor_folder=(run_root / f"realsense_{device}").as_posix(),
+                output_folder=(
+                    run_root
+                    / "processed"
+                    / "synchronized"
+                    / f"realsense_{device}"
+                ).as_posix(),
+                matched_poses_path=(
+                    run_root / f"{device}-matched.json"
+                ).as_posix(),
+                report_path=(run_root / f"{device}-sync.json").as_posix(),
+                total_frames=3,
+                matched_frames=3,
+                dropped_frames=0,
+            )
+            for device in ("static", "hand")
+        ]
+
+    grouping_calls: list[dict] = []
+
+    def fake_build(root, *, run_config):
+        grouping_calls.append({"root": Path(root), "run_config": run_config})
+        return {
+            "schema_version": "hardware_sync_frame_groups.v1",
+            "summary": {"complete_group_count": 3},
+        }
+
+    def fake_write(root, value):
+        path = (
+            Path(root)
+            / "processed"
+            / "synchronized"
+            / MULTIVIEW_FRAME_GROUPS
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+        return path
+
+    monkeypatch.setattr(
+        sync_script,
+        "parse_args",
+        lambda: SimpleNamespace(
+            run_root=run_root.as_posix(),
+            output_root=None,
+            sensor_folder=None,
+            sync_delta=None,
+            timestamp_source=None,
+            robot_timestamp_source=None,
+            no_copy=False,
+        ),
+    )
+    monkeypatch.setattr(
+        sync_script,
+        "resolve_calibration_profile_sync_policy",
+        lambda _run_root: None,
+    )
+    qualification_provenance = {
+        "schema_version": "hardware_sync_qualification.v1",
+        "artifact_path": "hardware_sync_qualification.json",
+        "artifact_sha256": "a" * 64,
+        "status": "passed",
+        "configuration_sha256": "b" * 64,
+    }
+    monkeypatch.setattr(
+        sync_script,
+        "validate_hardware_sync_qualification",
+        lambda _root, *, run_config: qualification_provenance,
+    )
+    execution_binding = {
+        "configuration_sha256": "b" * 64,
+        "qualification_artifact_sha256": "a" * 64,
+        "revalidated_immediately_before_receiver_spawn": True,
+    }
+    monkeypatch.setattr(
+        sync_script,
+        "capture_execution_hardware_sync_binding",
+        lambda _root, *, qualification: execution_binding,
+    )
+    monkeypatch.setattr(sync_script, "synchronize_run", fake_synchronize_run)
+    monkeypatch.setattr(
+        sync_script,
+        "build_hardware_sync_frame_groups",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        sync_script,
+        "write_hardware_sync_frame_groups",
+        fake_write,
+    )
+
+    sync_script.main()
+
+    assert len(calls) == 1
+    assert grouping_calls[0]["run_config"]["capture"]["synchronization"][
+        "mode"
+    ] == "hardware_trigger"
+    groups = json.loads(
+        (
+            run_root
+            / "processed"
+            / "synchronized"
+            / MULTIVIEW_FRAME_GROUPS
+        ).read_text()
+    )
+    assert groups["hardware_sync_qualification"] == qualification_provenance
+    assert groups["hardware_sync_execution_binding"] == execution_binding
+    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
+    sync_stage = next(
+        stage for stage in manifest["stages"] if stage["name"] == "sync_run"
+    )
+    assert sync_stage["artifacts"][MULTIVIEW_FRAME_GROUPS] == (
+        f"processed/synchronized/{MULTIVIEW_FRAME_GROUPS}"
+    )
+    assert "3 authoritative complete" in sync_stage["message"]
+
+    def fail_grouping(*_args, **_kwargs):
+        raise ValueError("new grouping evidence is invalid")
+
+    monkeypatch.setattr(
+        sync_script,
+        "build_hardware_sync_frame_groups",
+        fail_grouping,
+    )
+    with pytest.raises(ValueError, match="new grouping evidence is invalid"):
+        sync_script.main()
+
+    canonical = (
+        run_root
+        / "processed"
+        / "synchronized"
+        / MULTIVIEW_FRAME_GROUPS
+    )
+    assert not canonical.exists()
+    assert len(
+        list(
+            canonical.parent.glob(
+                f".{MULTIVIEW_FRAME_GROUPS}.*.invalidated"
+            )
+        )
+    ) == 1
+    failed_manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
+    failed_stage = next(
+        stage
+        for stage in failed_manifest["stages"]
+        if stage["name"] == "sync_run"
+    )
+    assert failed_stage["status"] == "failed"
+    assert MULTIVIEW_FRAME_GROUPS not in failed_stage.get("artifacts", {})
 
 
 def test_invalid_filename_timestamp_is_reported_as_missing() -> None:

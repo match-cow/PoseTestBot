@@ -1749,9 +1749,27 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
                 "mounting_mode": "eye_in_hand",
                 "enabled": True,
                 "inverted": False,
-            }
+            },
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "static-1",
+                "display_name": "Static RGB-D",
+                "mounting_mode": "static",
+                "enabled": True,
+                "inverted": True,
+            },
         ]
     )
+    configured["schema_version"] = "run_config.v3"
+    configured["capture"]["synchronization"] = {
+        "schema_version": "capture_synchronization.v1",
+        "mode": "hardware_trigger",
+        "implementation": "realsense_inter_cam_sync",
+        "scope": "depth_exposure",
+        "group_id": "existing-mixed-rig",
+        "master_sensor_key": "realsense_d435:wrist-1",
+        "max_depth_timestamp_skew_ms": 2,
+    }
     source_run_root = "/tmp/posetestbot-console/calibration-july-21"
     source_bundle_sha256 = "a" * 64
     selected_calibration_path = (
@@ -1776,7 +1794,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         "issues": [],
         "calibration_profiles": {
             "sha256": "b" * 64,
-            "valid_profile_count": 1,
+            "valid_profile_count": 2,
             "profiles": [
                 {
                     "profile_id": "profile-wrist-1",
@@ -1789,12 +1807,24 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
                         "num_inliers": 17,
                         "mean_reprojection_error_px": 0.31,
                     },
-                }
+                },
+                {
+                    "profile_id": "profile-static-1",
+                    "sensor_type": "realsense_d435",
+                    "sensor_id": "static-1",
+                    "mounting_mode": "static",
+                    "method": "IPPE + park",
+                    "quality": {
+                        "num_observations": 18,
+                        "num_inliers": 17,
+                        "mean_reprojection_error_px": 0.29,
+                    },
+                },
             ],
         },
         "intrinsic_calibration_profiles": {
             "sha256": "c" * 64,
-            "profile_count": 1,
+            "profile_count": 2,
         },
     }
     install_common_mocks(page, requests=requests, config_payload=configured)
@@ -1818,8 +1848,16 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
                     {
                         "sensor_key": "realsense_d435:wrist-1",
                         "profile_id": "profile-wrist-1",
-                    }
+                    },
+                    {
+                        "sensor_key": "realsense_d435:static-1",
+                        "profile_id": "profile-static-1",
+                    },
                 ],
+                "sensor_profiles": {
+                    "realsense_d435:wrist-1": "profile-wrist-1",
+                    "realsense_d435:static-1": "profile-static-1",
+                },
                 "selection": selection_artifact,
             },
         )
@@ -1862,6 +1900,31 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     expect(source_choice).to_contain_text("Camera settings match")
     source_choice.click()
     expect(source_choice).to_have_attribute("aria-checked", "true")
+    synchronization_mode = page.get_by_role(
+        "combobox", name="Synchronization mode"
+    )
+    expect(synchronization_mode).to_contain_text(
+        "Hardware-triggered RealSense depth exposure"
+    )
+    synchronization_mode.click()
+    page.get_by_role("option", name="Timestamp-aligned RGB-D streams").click()
+    expect(page.get_by_text("Timestamp association", exact=True)).to_be_visible()
+    synchronization_mode.click()
+    page.get_by_role(
+        "option", name="Hardware-triggered RealSense depth exposure"
+    ).click()
+    expect(page.get_by_text("Depth-only hardware synchronization boundary")).to_be_visible()
+    expect(page.get_by_text("not certified as hardware-synchronous across cameras")).to_be_visible()
+    expect(page.get_by_test_id("hardware-sync-contract-status")).to_contain_text(
+        "Hardware trigger configuration is complete"
+    )
+    expect(page.get_by_test_id("hardware-sync-qualification-requirement")).to_contain_text(
+        "Current physical qualification required before recording"
+    )
+    expect(page.get_by_test_id("hardware-sync-qualification-requirement")).to_contain_text(
+        "hardware_sync_qualification.json"
+    )
+    page.get_by_label("Trigger group ID").fill("research-mixed-rig")
     validate_and_save = page.get_by_role(
         "button", name="Validate and save setup", exact=True
     )
@@ -1883,7 +1946,13 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
                     "device_id": "wrist-1",
                     "mounting_mode": "eye_in_hand",
                     "inverted": False,
-                }
+                },
+                {
+                    "sensor_type": "realsense_d435",
+                    "device_id": "static-1",
+                    "mounting_mode": "static",
+                    "inverted": True,
+                },
             ],
         }
     ]
@@ -1897,6 +1966,16 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         "camera_rectification": {"intrinsic_profiles": selected_intrinsics_path}
     }
     assert written["sensors"][0]["calibration_profile_id"] == "profile-wrist-1"
+    assert written["sensors"][1]["calibration_profile_id"] == "profile-static-1"
+    assert written["synchronization"] == {
+        "schema_version": "capture_synchronization.v1",
+        "mode": "hardware_trigger",
+        "implementation": "realsense_inter_cam_sync",
+        "scope": "depth_exposure",
+        "group_id": "research-mixed-rig",
+        "master_sensor_key": "realsense_d435:wrist-1",
+        "max_depth_timestamp_skew_ms": 2,
+    }
 
     readiness_steps = page.locator('[data-workflow-step="readiness"]')
     expect(readiness_steps).to_have_count(1)

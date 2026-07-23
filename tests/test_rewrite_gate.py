@@ -4,18 +4,32 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 
+from posetestbot.calibration.intrinsics import factory_intrinsic_profile
+from posetestbot.calibration.rectification import rectify_run
 from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
+    BOP_FRAME_MAP_JSON,
+    BOP_FRAME_SETS,
     BOP_TARGETS_BOP19,
+    CAM_K,
+    CAMERA_DATA_JSON,
     CALIBRATION_PROFILES,
     CALIBRATION_VALIDATION_REPORT,
+    CAPTURE_EXECUTION_REPORT,
     DEPTH_DIR,
+    DEPTH_SCALE,
+    FRAME_METADATA_JSONL,
     HARDWARE_STATUS_REPORT,
+    MATCH_ROBOT_EE_POSES,
+    MULTIVIEW_FRAME_GROUPS,
     RGB_DIR,
     RUN_PREFLIGHT_REPORT,
 )
@@ -33,6 +47,14 @@ from posetestbot.pipeline.run_config import (
     SensorRunConfig,
     create_run_config,
     write_run_config,
+)
+from posetestbot.sensors.hardware_sync_qualification import (
+    record_hardware_sync_qualification,
+    validate_hardware_sync_qualification,
+)
+from posetestbot.sync.hardware import (
+    build_hardware_sync_frame_groups,
+    write_hardware_sync_frame_groups,
 )
 
 
@@ -126,6 +148,219 @@ def populate_bop_export(
         )
 
 
+def populate_hardware_sync_bop_export(
+    tmp_path: Path,
+    *,
+    rectified: bool = False,
+) -> Path:
+    """Build the durable hardware groups and export them through production code."""
+
+    run_root = tmp_path / "hardware-gate-run"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(
+            SensorRunConfig(
+                "realsense_d435",
+                "master",
+                "Static master",
+                mounting_mode="static",
+            ),
+            SensorRunConfig(
+                "realsense_d435",
+                "hand",
+                "Robot-mounted subordinate",
+                mounting_mode="eye_in_hand",
+            ),
+        ),
+        synchronization={
+            "schema_version": "capture_synchronization.v1",
+            "mode": "hardware_trigger",
+            "implementation": "realsense_inter_cam_sync",
+            "scope": "depth_exposure",
+            "group_id": "mixed-rig",
+            "master_sensor_key": "realsense_d435:master",
+            "max_depth_timestamp_skew_ms": 2.0,
+        },
+    )
+    write_run_config(run_root, config)
+    qualification_evidence = tmp_path / "hardware-gate-pulse.csv"
+    qualification_evidence.write_text("time_ns,master,hand\n0,1,1\n")
+    record_hardware_sync_qualification(
+        run_root,
+        operator="gate-test@example.test",
+        method="pulsed_light",
+        observed_max_depth_timestamp_skew_ms=0.1,
+        evidence_paths=[qualification_evidence],
+        confirm_passed=True,
+    )
+    qualification = validate_hardware_sync_qualification(
+        run_root,
+        run_config=config.to_dict(),
+    )
+    execution_binding = {
+        "configuration_sha256": qualification["configuration_sha256"],
+        "qualification_artifact_sha256": qualification["artifact_sha256"],
+        "revalidated_immediately_before_receiver_spawn": True,
+    }
+    write_json(
+        run_root / CAPTURE_EXECUTION_REPORT,
+        {
+            "schema_version": "capture_execution_report.v1",
+            "run_root": run_root.as_posix(),
+            "status": "succeeded",
+            "mode": "full",
+            "allow_cameras": True,
+            "allow_real_robot": True,
+            "hardware_sync_execution_binding": execution_binding,
+        },
+    )
+
+    for device_id, role, mounting_mode, timestamp_ns, pixel_value in (
+        ("master", "master", "static", 1_000_000_000, 10),
+        ("hand", "subordinate", "eye_in_hand", 1_000_100_000, 20),
+    ):
+        raw_sensor = run_root / f"realsense_{device_id}"
+        synchronized_sensor = (
+            run_root
+            / "processed"
+            / "synchronized"
+            / f"realsense_{device_id}"
+        )
+        for sensor_folder in (raw_sensor, synchronized_sensor):
+            (sensor_folder / RGB_DIR).mkdir(parents=True)
+            (sensor_folder / DEPTH_DIR).mkdir()
+        rgb = np.full((5, 6, 3), pixel_value, dtype=np.uint8)
+        depth = np.full((5, 6), pixel_value * 10, dtype=np.uint16)
+        assert cv2.imwrite(
+            (raw_sensor / RGB_DIR / "1000.png").as_posix(),
+            rgb,
+        )
+        assert cv2.imwrite(
+            (raw_sensor / DEPTH_DIR / "1000.png").as_posix(),
+            depth,
+        )
+        assert cv2.imwrite(
+            (synchronized_sensor / RGB_DIR / "000000.png").as_posix(),
+            rgb,
+        )
+        assert cv2.imwrite(
+            (synchronized_sensor / DEPTH_DIR / "000000.png").as_posix(),
+            depth,
+        )
+        (synchronized_sensor / CAM_K).write_text(
+            "10 0 3\n0 10 2.5\n0 0 1\n0 0 0 0 0\n"
+        )
+        (synchronized_sensor / DEPTH_SCALE).write_text("1.0\n")
+        write_json(
+            synchronized_sensor / CAMERA_DATA_JSON,
+            {
+                "K": [[10, 0, 3], [0, 10, 2.5], [0, 0, 1]],
+                "resolution": [5, 6],
+                "orientation": "normal",
+                "distortion": [0.0] * 5,
+                "distortion_model": "brown_conrady",
+            },
+        )
+        inter_cam_sync_mode = 1 if role == "master" else 2
+        write_json(
+            synchronized_sensor / MATCH_ROBOT_EE_POSES,
+            {
+                "000000.png": {
+                    "source_frame_id": "1000.png",
+                    "matched_robot_pose_index": 20,
+                    "robot_timestamp_ns": timestamp_ns + 50,
+                    "nearest_robot_delta_ns": 50,
+                    "motion": "capture",
+                    "robot_ee_pose": {
+                        "x": 1,
+                        "y": 2,
+                        "z": 3,
+                        "a": 0,
+                        "b": 0,
+                        "c": 0,
+                    },
+                }
+            },
+        )
+        metadata = {
+            "schema_version": "frame_metadata.v1",
+            "sensor_type": "realsense_d435",
+            "sensor_id": device_id,
+            "orientation": "normal",
+            "frame_index": 0,
+            "frame_id": "000000.png",
+            "rgb_path": "rgb/000000.png",
+            "depth_path": "depth/000000.png",
+            "source_frame_index": 10,
+            "source_frame_id": "1000.png",
+            "source_rgb_path": "rgb/1000.png",
+            "source_depth_path": "depth/1000.png",
+            "depth_sensor_timestamp_ns": timestamp_ns,
+            "depth_frame_number": 100,
+            "depth_timestamp_domain": "global_time",
+            "capture_group_id": "mixed-rig",
+            "hardware_sync_role": role,
+            "hardware_sync_scope": "depth_exposure",
+            "hardware_sync_transport": "realsense_inter_cam_sync",
+            "inter_cam_sync_mode_configured": inter_cam_sync_mode,
+            "inter_cam_sync_mode_readback": inter_cam_sync_mode,
+            "matched_robot_pose_index": 20,
+            "nearest_robot_delta_ns": 50,
+            "motion": "capture",
+            "mounting_mode": mounting_mode,
+        }
+        (synchronized_sensor / FRAME_METADATA_JSONL).write_text(
+            json.dumps(metadata) + "\n"
+        )
+
+    groups = build_hardware_sync_frame_groups(run_root)
+    groups["hardware_sync_qualification"] = qualification
+    groups["hardware_sync_execution_binding"] = execution_binding
+    write_hardware_sync_frame_groups(run_root, groups)
+    if rectified:
+        synchronized = run_root / "processed" / "synchronized"
+        rectify_run(
+            run_root,
+            [
+                factory_intrinsic_profile(synchronized / sensor_name)
+                for sensor_name in ("realsense_master", "realsense_hand")
+            ],
+        )
+    repo_root = Path(__file__).resolve().parents[1]
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "run_bop_export_stage.py"),
+            str(run_root),
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    # The calibration-provenance check is orthogonal to this fixture. Keep its
+    # manifest structurally ready so the complete report can exercise the
+    # hardware-sync check as a positive gate rather than as an isolated helper.
+    manifest_path = run_root / BOP_DIR / BOP_EXPORT_MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    manifest["calibration_profiles"] = [
+        {"profile_id": "hardware-gate-profile", "status": "valid"}
+    ]
+    for export in manifest["exports"]:
+        export["calibration_profile_id"] = "hardware-gate-profile"
+    write_json(manifest_path, manifest)
+    return run_root
+
+
+def hardware_gate_check(run_root: Path) -> dict[str, object]:
+    report = build_bop_export_readiness_gate_report(run_root)
+    return next(
+        check
+        for check in report["checks"]
+        if check["name"] == "bop_hardware_sync_frame_sets"
+    )
+
+
 def test_bop_export_readiness_gate_blocks_missing_targets(tmp_path: Path) -> None:
     run_root = tmp_path / "bop-run"
     populate_bop_export(run_root, with_targets=False)
@@ -156,6 +391,223 @@ def test_bop_export_readiness_accepts_consistent_objectless_dataset(
     report = build_bop_export_readiness_gate_report(run_root)
 
     assert report["overall_status"] == "ready"
+
+
+def test_bop_export_readiness_requires_frame_sets_for_hardware_run(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "hardware-bop"
+    populate_bop_export(run_root)
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "123",
+                    "Static",
+                    mounting_mode="static",
+                ),
+                SensorRunConfig(
+                    "realsense_d435",
+                    "456",
+                    "Robot",
+                    mounting_mode="eye_in_hand",
+                ),
+            ),
+            synchronization={
+                "schema_version": "capture_synchronization.v1",
+                "mode": "hardware_trigger",
+                "implementation": "realsense_inter_cam_sync",
+                "scope": "depth_exposure",
+                "group_id": "mixed-rig",
+                "master_sensor_key": "realsense_d435:123",
+                "max_depth_timestamp_skew_ms": 2.0,
+            },
+        ),
+    )
+
+    report = build_bop_export_readiness_gate_report(run_root)
+
+    assert report["overall_status"] == "blocked"
+    blocker = next(
+        item
+        for item in report["next_blockers"]
+        if item["name"] == "bop_hardware_sync_frame_sets"
+    )
+    assert "multiview_frame_groups.json" in blocker["message"]
+    assert "posetestbot_frame_sets.json" in blocker["message"]
+
+
+def test_bop_export_readiness_accepts_generated_hardware_sync_provenance(
+    tmp_path: Path,
+) -> None:
+    run_root = populate_hardware_sync_bop_export(tmp_path)
+
+    report = build_bop_export_readiness_gate_report(run_root)
+
+    assert report["overall_status"] == "ready"
+    check = hardware_gate_check(run_root)
+    assert check["status"] == "ready"
+    assert check["details"]["source_validation_error"] is None
+    assert check["details"]["qualification_matches"] is True
+    assert check["details"]["execution_binding_matches"] is True
+    assert check["details"]["execution_binding_errors"] == {}
+    assert check["details"]["projection_truth_errors"] == []
+
+
+def test_bop_hardware_sync_gate_accepts_current_rectified_source_truth(
+    tmp_path: Path,
+) -> None:
+    run_root = populate_hardware_sync_bop_export(tmp_path, rectified=True)
+
+    report = build_bop_export_readiness_gate_report(run_root)
+
+    assert report["overall_status"] == "ready"
+    check = hardware_gate_check(run_root)
+    assert check["status"] == "ready"
+    assert check["details"]["projection_truth_errors"] == []
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "scene_im_remap",
+        "source_rgb_depth",
+        "bop_paths",
+        "sensor_order",
+        "frame_set_count",
+        "max_skew",
+        "source_schema",
+        "group_inventory_mount",
+        "group_inventory_role",
+        "current_run_inventory",
+        "qualification",
+        "execution_binding",
+        "execution_binding_shape",
+        "capture_execution_binding",
+        "stale_source_content",
+        "malformed_scene_id",
+        "malformed_source_groups",
+        "malformed_frame_sets",
+        "malformed_frame_map",
+    ),
+)
+def test_bop_hardware_sync_gate_rejects_tampered_provenance(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    run_root = populate_hardware_sync_bop_export(tmp_path)
+    bop_root = run_root / BOP_DIR
+    frame_sets_path = bop_root / BOP_FRAME_SETS
+    frame_map_path = bop_root / BOP_FRAME_MAP_JSON
+    groups_path = (
+        run_root
+        / "processed"
+        / "synchronized"
+        / MULTIVIEW_FRAME_GROUPS
+    )
+    frame_sets = json.loads(frame_sets_path.read_text())
+    frame_map = json.loads(frame_map_path.read_text())
+    groups = json.loads(groups_path.read_text())
+    views = frame_sets["frame_sets"][0]["views"]
+
+    if tamper == "scene_im_remap":
+        views[0]["scene_id"] = views[1]["scene_id"]
+        views[0]["im_id"] = views[1]["im_id"]
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "source_rgb_depth":
+        first_scene = frame_map["scenes"][str(views[0]["scene_id"])]
+        first_frame = first_scene["frames"][str(views[0]["im_id"])]
+        first_frame["source_rgb"] = "rgb/000042.png"
+        first_frame["source_depth"] = "depth/000042.png"
+        write_json(frame_map_path, frame_map)
+    elif tamper == "bop_paths":
+        first_scene = frame_map["scenes"][str(views[0]["scene_id"])]
+        first_frame = first_scene["frames"][str(views[0]["im_id"])]
+        first_frame["bop_rgb"] = "rgb/000042.png"
+        views[0]["bop_depth"] = "test/000001/depth/000042.png"
+        write_json(frame_map_path, frame_map)
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "sensor_order":
+        frame_sets["sensor_order"] = list(
+            reversed(frame_sets["sensor_order"])
+        )
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "frame_set_count":
+        frame_sets["frame_set_count"] += 1
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "max_skew":
+        frame_sets["max_depth_timestamp_skew_ns"] += 1
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "source_schema":
+        frame_sets["source_schema_version"] = "wrong.v1"
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "group_inventory_mount":
+        groups["sensors"][1]["mounting_mode"] = "static"
+        write_json(groups_path, groups)
+    elif tamper == "group_inventory_role":
+        groups["sensors"][1]["hardware_sync_role"] = "master"
+        write_json(groups_path, groups)
+    elif tamper == "current_run_inventory":
+        config_path = run_root / "run_config.json"
+        run_config = json.loads(config_path.read_text())
+        run_config["capture"]["sensors"][1]["mounting_mode"] = "static"
+        write_json(config_path, run_config)
+    elif tamper == "qualification":
+        frame_sets["hardware_sync_qualification"][
+            "artifact_sha256"
+        ] = "0" * 64
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "execution_binding":
+        frame_sets["hardware_sync_execution_binding"][
+            "qualification_artifact_sha256"
+        ] = "0" * 64
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "execution_binding_shape":
+        frame_sets["hardware_sync_execution_binding"]["unexpected"] = True
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "capture_execution_binding":
+        capture_report_path = run_root / CAPTURE_EXECUTION_REPORT
+        capture_report = json.loads(capture_report_path.read_text())
+        capture_report["hardware_sync_execution_binding"][
+            "qualification_artifact_sha256"
+        ] = "0" * 64
+        write_json(capture_report_path, capture_report)
+    elif tamper == "stale_source_content":
+        stale_rgb = (
+            run_root
+            / "processed"
+            / "synchronized"
+            / "realsense_master"
+            / RGB_DIR
+            / "000000.png"
+        )
+        assert cv2.imwrite(
+            stale_rgb.as_posix(),
+            np.full((5, 6, 3), 99, dtype=np.uint8),
+        )
+    elif tamper == "malformed_scene_id":
+        views[0]["scene_id"] = ["not", "an", "integer"]
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "malformed_source_groups":
+        groups["groups"] = {"not": "a list"}
+        write_json(groups_path, groups)
+    elif tamper == "malformed_frame_sets":
+        frame_sets["frame_sets"] = 42
+        write_json(frame_sets_path, frame_sets)
+    elif tamper == "malformed_frame_map":
+        frame_map["scenes"] = ["not", "an", "object"]
+        write_json(frame_map_path, frame_map)
+    else:  # pragma: no cover - parameter list owns the supported cases.
+        raise AssertionError(tamper)
+
+    report = build_bop_export_readiness_gate_report(run_root)
+
+    assert report["overall_status"] == "blocked"
+    check = hardware_gate_check(run_root)
+    assert check["status"] == "blocked"
 
 
 def test_bop_export_readiness_requires_matching_pose_template_instance_evidence(

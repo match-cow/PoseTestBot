@@ -17,6 +17,8 @@ The code rewrite is implemented across:
   run-scoped enable/disable selection that preserves disabled camera metadata;
 - transactional synchronization and sync-quality reporting, including strict
   hash-bound reuse of each selected calibration profile's saved timing policy;
+- explicit `run_config.v3` mixed-mount D435 depth-exposure triggering, complete
+  cross-camera frame grouping, and BOP frame-set provenance;
 - PoseGridGen targets, including immutable-library card previews rendered from
   stored marker geometry, and attempt-scoped factory-vs-OpenCV intrinsic
   evidence, whole-board PnP support gates, global-sensor-time RealSense
@@ -31,7 +33,7 @@ The code rewrite is implemented across:
   templates sourced from active workpieces, preview-rich run selection,
   per-instance GT, and Cell provenance;
 - BlenderProc 2.8.0 preparation/render identity checks and transactional BOP
-  v3 export; and
+  v4 export; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
 
@@ -56,7 +58,7 @@ stored pose or promoted calibration transform.
 
 Historical run `working_data/hot_full_capture_fixed_20260710_1351` passes the
 full-capture gate at 10/10 for three RealSense cameras. The current five-sensor
-profile, combined camera-service lifecycle acceptance, and real BOP v3 export
+profile, combined camera-service lifecycle acceptance, and real BOP v4 export
 still require operator-run acceptance. That historical run used an older 10 ×
 7 / 70-marker board and insufficient hand-eye motion diversity; it is a
 preserved negative baseline, not `calib00` calibration evidence.
@@ -98,6 +100,82 @@ snapshot and preflight artifacts. The calculation card documents the observed
 full-capture gate accepts the immutable pre-START preflight embedded in an
 execution plan when the standalone report is absent, and rejects mismatched
 embedded status.
+
+## 2026-07-23 Combined Mixed-Mount Hardware Synchronization
+
+- Added the explicit `run_config.v3` `capture.synchronization` contract.
+  `timestamp_aligned` remains the general default. `hardware_trigger` accepts
+  only `realsense_inter_cam_sync` with `scope=depth_exposure`, a safe group ID,
+  a selected exact master key, and a bounded earliest-to-latest depth-timestamp
+  span across the complete camera group.
+  Legacy v1/v2 configs remain loadable as timestamp-aligned evidence and cannot
+  claim hardware synchronization.
+- Hardware-trigger validation fails closed unless every enabled device is an
+  exact-ID D435 and the run includes at least one `static` and one
+  `eye_in_hand` camera. Exactly one is the master and all others are
+  subordinates. The current USB OAK-D Pro and USB ZED 2i are rejected from this
+  mode; an invalid group never silently falls back.
+- Capture planning starts the internal D435 master before its subordinates.
+  RealSense acquisition configures and reads back each SDK
+  `inter_cam_sync_mode`, requires global depth timestamps, and records the
+  group, role, scope, depth frame number, and depth exposure timestamp with each
+  raw frame. D435 RGB is retained as the associated device frameset but is
+  explicitly not certified as a simultaneous cross-camera exposure.
+- The capture supervisor now requires append-only frame-metadata progress from
+  every camera throughout sequential startup, all-camera overlap, and robot
+  receiver execution. An alive process whose metadata stalls, is truncated, is
+  rewritten, or becomes non-monotonic aborts local capture while preserving raw
+  evidence. Its independent FPS-derived freshness limit spans 12 planned frames
+  and is clamped to 2–5 seconds; an explicit execution override cannot exceed
+  five seconds, and receiver completion performs the same final check. The
+  exact hardware contract and qualification are also rebound
+  immediately before receiver startup, so a changed config or replacement
+  qualification refuses robot `START`. A successful full-capture report
+  persists the exact configuration SHA-256, qualification-artifact SHA-256,
+  and immediate-revalidation result.
+- Added a fail-closed `hardware_sync_qualification.v1` artifact and evidence
+  recorder. It copies operator-supplied pulsed-light or equivalent
+  exposure-timing evidence without accessing hardware, verifies file hashes,
+  and binds the pass to the exact run, resolution, FPS, trigger policy, camera
+  identities, mounts, and roles. Capture preflight, synchronization, and BOP
+  consumption reject missing, tampered, or stale qualifications. Publication
+  and replacement are blocked once capture status/report/logs, raw
+  RGB-D/metadata, or raw robot-pose evidence exists; changing the qualification
+  after acquisition requires a new run.
+- Non-destructive synchronization preserves every early, incomplete, and
+  unmatched raw frame. It publishes only complete cross-camera sets within the
+  configured full earliest-to-latest depth-timestamp span to
+  `processed/synchronized/multiview_frame_groups.json`, with mounting, source,
+  timestamp, skew, and robot-pose references. The artifact also hashes the
+  current hardware contract, metadata, matched poses, and every referenced raw
+  and synchronized RGB-D file so later mutation invalidates it. Durable writes,
+  loads, and downstream consumption rebuild the canonical grouping from those
+  inputs, require exact payload equality, and require the exact current physical
+  qualification, so self-consistent edits to the derived group JSON are also
+  rejected. Authoritative grouping additionally requires a succeeded
+  full-capture report with both execution gates and carries its exact
+  configuration/qualification binding.
+- Transactional BOP v4 export maps those authoritative complete groups across
+  the per-camera scenes in `bop/posetestbot_frame_sets.json` and propagates the
+  capture-report binding. Its claims state that depth exposures are
+  hardware-synchronized, RGB exposures are not certified, and synthetic robot
+  occlusion is not modeled. `rewrite_bop_export_readiness.v1` compares the
+  binding across the capture report, authoritative groups, and BOP frame sets,
+  and also requires the current qualification and exported mapping/bytes to
+  agree.
+- The dataset setup UI exposes the timing choice, exact master selection, and
+  capability/claim blockers while preserving an existing policy when unrelated
+  fields are saved.
+
+This work implemented and tested the software contract only. No camera, robot,
+lab service, sync harness, or physical capture was accessed. Operator-run
+electrical and pulsed-LED/exposure qualification remains required before the
+feature becomes real research evidence; the implemented recorder and gates
+make that operator step durable and mandatory. Complete real depth observations
+share the synchronized exposure instant and depth-visible occlusion; their
+associated RGB images are not certified to share a moving-robot or illumination
+instant.
+Current BlenderProc GT/masks do not render the articulated iiwa.
 
 ## 2026-07-23 Workpiece Recognition Preview Fidelity
 

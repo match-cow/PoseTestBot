@@ -35,11 +35,18 @@ from posetestbot.pipeline.capture_plan import (
     load_capture_plan,
 )
 from posetestbot.pipeline.capture_plan_preflight import build_capture_plan_preflight
-from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pipeline.run_config import (
+    load_run_config_for_run_root,
+    run_config_lock,
+)
 from posetestbot.robot.pose_receiver import (
     CLAIM_SCHEMA_VERSION,
     DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
     DEFAULT_RECEIVE_START_TIMEOUT_S,
+)
+from posetestbot.sensors.hardware_sync_qualification import (
+    hardware_sync_qualification_contract_sha256,
+    validate_hardware_sync_qualification,
 )
 from posetestbot.sensors.status import collect_sensor_status
 
@@ -52,6 +59,11 @@ DEFAULT_CAMERA_READINESS_TIMEOUT_S = 15.0
 DEFAULT_CAMERA_STARTUP_ATTEMPTS = 3
 DEFAULT_CAMERA_STARTUP_RETRY_DELAY_S = 1.0
 MIN_CAMERA_READINESS_RECORDS = 3
+MIN_HARDWARE_SYNC_START_GROUPS = 3
+CAMERA_METADATA_IDLE_FRAME_PERIODS = 12.0
+MIN_DERIVED_CAMERA_METADATA_IDLE_TIMEOUT_S = 2.0
+MAX_DERIVED_CAMERA_METADATA_IDLE_TIMEOUT_S = 5.0
+MAX_EXPLICIT_CAMERA_METADATA_IDLE_TIMEOUT_S = 5.0
 RECEIVER_MONITOR_INTERVAL_S = 0.1
 EXECUTION_ONLY_RECEIVER_FLAGS = frozenset(
     {
@@ -184,6 +196,11 @@ class CaptureProcessRecord:
     startup_attempt_limit: int | None = None
     readiness_record_count: int | None = None
     output_mutated: bool | None = None
+    metadata_record_count: int | None = None
+    metadata_last_frame_index: int | None = None
+    metadata_last_progress_at: str | None = None
+    metadata_idle_elapsed_s: float | None = None
+    metadata_idle_timeout_s: float | None = None
     output_tail: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -199,6 +216,9 @@ class CaptureExecutionBoundary:
     expected_receiver_command: tuple[str, ...]
     expected_command_fingerprints: tuple[str, ...]
     sensor_output_paths: tuple[Path, ...]
+    capture_fps: int
+    hardware_sync_contract_sha256: str | None = None
+    hardware_sync_qualification: Mapping[str, Any] | None = None
 
 
 def _now() -> str:
@@ -216,6 +236,47 @@ def _overall_status(gates: list[CaptureExecutionGate]) -> str:
     if "warning" in statuses:
         return "warning"
     return "ok"
+
+
+def _resolve_camera_metadata_idle_timeout(
+    *,
+    capture_fps: int,
+    requested_timeout_s: float | None,
+) -> tuple[float, str]:
+    """Resolve a camera-specific watchdog bound independent of robot UDP."""
+
+    if (
+        isinstance(capture_fps, bool)
+        or not isinstance(capture_fps, int)
+        or capture_fps <= 0
+    ):
+        raise ValueError(
+            "Capture FPS must be a positive integer for camera metadata "
+            "freshness supervision."
+        )
+    if requested_timeout_s is not None:
+        if (
+            isinstance(requested_timeout_s, bool)
+            or not isinstance(requested_timeout_s, (int, float))
+            or not math.isfinite(float(requested_timeout_s))
+            or float(requested_timeout_s) <= 0
+            or float(requested_timeout_s)
+            > MAX_EXPLICIT_CAMERA_METADATA_IDLE_TIMEOUT_S
+        ):
+            raise ValueError(
+                "camera_metadata_idle_timeout_s must be a finite value within "
+                f"(0, {MAX_EXPLICIT_CAMERA_METADATA_IDLE_TIMEOUT_S:g}] seconds"
+            )
+        return float(requested_timeout_s), "explicit_execution_option"
+
+    derived = CAMERA_METADATA_IDLE_FRAME_PERIODS / capture_fps
+    return (
+        min(
+            MAX_DERIVED_CAMERA_METADATA_IDLE_TIMEOUT_S,
+            max(MIN_DERIVED_CAMERA_METADATA_IDLE_TIMEOUT_S, derived),
+        ),
+        "capture_fps_derived",
+    )
 
 
 def _command_with_metadata(command: Mapping[str, Any], *, index: int) -> dict[str, Any]:
@@ -323,13 +384,23 @@ def _missing_sensor_readiness(
 def _valid_frame_metadata_record_count(path: Path) -> int:
     """Count complete JSONL records that satisfy the shared frame contract."""
 
+    return len(_valid_frame_metadata_records(path))
+
+
+def _valid_frame_metadata_records(
+    path: Path,
+    *,
+    limit: int | None = MIN_CAMERA_READINESS_RECORDS,
+) -> list[Mapping[str, Any]]:
+    """Read the first committed records satisfying the shared frame contract."""
+
     try:
         with open(path, "r", encoding="utf-8") as handle:
             lines = list(handle)
     except (FileNotFoundError, OSError, UnicodeError):
-        return 0
+        return []
 
-    count = 0
+    records: list[Mapping[str, Any]] = []
     for line in lines:
         # A writer may be appending while the supervisor reads.  Only a
         # newline-terminated record has completed the JSONL append contract.
@@ -361,10 +432,461 @@ def _valid_frame_metadata_record_count(path: Path) -> int:
             or not value["depth_path"]
         ):
             continue
-        count += 1
-        if count >= MIN_CAMERA_READINESS_RECORDS:
+        records.append(value)
+        if limit is not None and len(records) >= limit:
             break
-    return count
+    return records
+
+
+def _metadata_progress_key(record: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return the append-only identity fields used by the live watchdog."""
+
+    return (
+        record["frame_index"],
+        record["frame_id"],
+        record["host_received_timestamp_ns"],
+        record["sensor_id"],
+        record["rgb_path"],
+        record["depth_path"],
+    )
+
+
+def _validate_metadata_progress_sequence(
+    records: list[Mapping[str, Any]],
+    *,
+    command_name: str,
+) -> list[tuple[Any, ...]]:
+    keys = [_metadata_progress_key(record) for record in records]
+    for previous, current in zip(records, records[1:]):
+        if (
+            int(current["frame_index"]) <= int(previous["frame_index"])
+            or int(current["host_received_timestamp_ns"])
+            <= int(previous["host_received_timestamp_ns"])
+        ):
+            raise RuntimeError(
+                f"Camera {command_name} frame metadata is not strictly "
+                "increasing by frame_index and host_received_timestamp_ns."
+            )
+    return keys
+
+
+def _initialize_camera_metadata_progress(
+    info: dict[str, Any],
+    metadata_path: Path,
+    *,
+    idle_timeout_s: float,
+) -> None:
+    """Bind a ready camera to its current append-only metadata prefix."""
+
+    records = _valid_frame_metadata_records(metadata_path, limit=None)
+    command_name = str(info["command"].get("name") or "camera")
+    keys = _validate_metadata_progress_sequence(
+        records,
+        command_name=command_name,
+    )
+    if len(keys) < MIN_CAMERA_READINESS_RECORDS:
+        raise RuntimeError(
+            f"Camera {command_name} lost frame metadata before live progress "
+            "tracking could start."
+        )
+    now_monotonic = time.monotonic()
+    info["metadata_path"] = metadata_path
+    info["_metadata_progress_keys"] = keys
+    info["metadata_record_count"] = len(keys)
+    info["metadata_last_frame_index"] = int(records[-1]["frame_index"])
+    info["metadata_last_progress_at"] = _now()
+    info["metadata_last_progress_monotonic"] = now_monotonic
+    info["metadata_idle_elapsed_s"] = 0.0
+    info["metadata_idle_timeout_s"] = idle_timeout_s
+
+
+def _camera_metadata_progress_error(
+    background_processes: list[dict[str, Any]],
+    *,
+    idle_timeout_s: float,
+    phase: str,
+) -> RuntimeError | None:
+    """Detect an alive camera whose committed metadata stopped advancing."""
+
+    now_monotonic = time.monotonic()
+    for info in background_processes:
+        command_name = str(info["command"].get("name") or "camera")
+        metadata_path = info.get("metadata_path")
+        previous_keys = info.get("_metadata_progress_keys")
+        if not isinstance(metadata_path, Path) or not isinstance(
+            previous_keys, list
+        ):
+            info["status"] = "failed"
+            info["termination_reason"] = "camera_metadata_watchdog_uninitialized"
+            return RuntimeError(
+                f"Camera {command_name} has no initialized frame-metadata "
+                f"progress watchdog during {phase}."
+            )
+
+        records = _valid_frame_metadata_records(metadata_path, limit=None)
+        try:
+            current_keys = _validate_metadata_progress_sequence(
+                records,
+                command_name=command_name,
+            )
+        except RuntimeError as exc:
+            info["status"] = "failed"
+            info["termination_reason"] = "camera_metadata_progress_invalid"
+            return exc
+        previous_count = len(previous_keys)
+        if (
+            len(current_keys) < previous_count
+            or current_keys[:previous_count] != previous_keys
+        ):
+            info["status"] = "failed"
+            info["termination_reason"] = "camera_metadata_prefix_changed"
+            return RuntimeError(
+                f"Camera {command_name} committed frame metadata was truncated "
+                f"or rewritten during {phase}; preserving raw evidence and "
+                "aborting capture."
+            )
+
+        if len(current_keys) > previous_count:
+            info["_metadata_progress_keys"] = current_keys
+            info["metadata_record_count"] = len(current_keys)
+            info["metadata_last_frame_index"] = int(
+                records[-1]["frame_index"]
+            )
+            info["metadata_last_progress_at"] = _now()
+            info["metadata_last_progress_monotonic"] = now_monotonic
+            info["metadata_idle_elapsed_s"] = 0.0
+            continue
+
+        last_progress = info.get("metadata_last_progress_monotonic")
+        if not isinstance(last_progress, (int, float)):
+            info["status"] = "failed"
+            info["termination_reason"] = "camera_metadata_watchdog_uninitialized"
+            return RuntimeError(
+                f"Camera {command_name} has no valid frame-metadata freshness "
+                f"timestamp during {phase}."
+            )
+        idle_elapsed_s = max(0.0, now_monotonic - float(last_progress))
+        info["metadata_idle_elapsed_s"] = idle_elapsed_s
+        info["metadata_record_count"] = len(current_keys)
+        if idle_elapsed_s >= idle_timeout_s:
+            info["status"] = "failed"
+            info["termination_reason"] = "camera_metadata_stalled"
+            return RuntimeError(
+                f"Camera {command_name} process is alive but committed "
+                f"{FRAME_METADATA_JSONL} stopped advancing for "
+                f"{idle_elapsed_s:.3f} seconds during {phase} (limit "
+                f"{idle_timeout_s:g} seconds); preserving raw evidence and "
+                "aborting capture."
+            )
+    return None
+
+
+def _hardware_sync_readiness_errors(
+    command: Mapping[str, Any],
+    metadata_path: Path,
+) -> list[str]:
+    """Validate adapter readback evidence before hardware-sync capture starts."""
+
+    assignment = command.get("hardware_sync")
+    if assignment is None:
+        return []
+    if not isinstance(assignment, Mapping):
+        return ["capture command hardware_sync assignment is not an object"]
+
+    expected_role = str(assignment.get("role") or "")
+    expected_group = str(assignment.get("group_id") or "")
+    expected_scope = str(assignment.get("scope") or "")
+    expected_mode = assignment.get("inter_cam_sync_mode_expected")
+    if (
+        expected_role not in {"master", "subordinate"}
+        or not expected_group
+        or expected_scope != "depth_exposure"
+        or expected_mode not in {1, 2}
+    ):
+        return ["capture command hardware_sync assignment is incomplete"]
+
+    records = _valid_frame_metadata_records(metadata_path)
+    if len(records) < MIN_CAMERA_READINESS_RECORDS:
+        return []
+
+    errors: list[str] = []
+    for record_index, record in enumerate(records):
+        expected_values = {
+            "capture_group_id": expected_group,
+            "hardware_sync_role": expected_role,
+            "hardware_sync_scope": expected_scope,
+            "hardware_sync_transport": assignment.get("implementation"),
+            "inter_cam_sync_mode_configured": expected_mode,
+            "inter_cam_sync_mode_readback": expected_mode,
+            "depth_timestamp_domain": "global_time",
+        }
+        for field_name, expected_value in expected_values.items():
+            if record.get(field_name) != expected_value:
+                errors.append(
+                    f"record {record_index} {field_name}="
+                    f"{record.get(field_name)!r}, expected {expected_value!r}"
+                )
+        depth_timestamp = record.get("depth_sensor_timestamp_ns")
+        if (
+            isinstance(depth_timestamp, bool)
+            or not isinstance(depth_timestamp, int)
+            or depth_timestamp <= 0
+        ):
+            errors.append(
+                f"record {record_index} depth_sensor_timestamp_ns is not a "
+                "positive integer"
+            )
+        depth_frame_number = record.get("depth_frame_number")
+        if (
+            isinstance(depth_frame_number, bool)
+            or not isinstance(depth_frame_number, int)
+            or depth_frame_number < 0
+        ):
+            errors.append(
+                f"record {record_index} depth_frame_number is not a "
+                "non-negative integer"
+            )
+    return errors
+
+
+def _hardware_sync_overlap_evidence(
+    sensor_commands: list[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Find one complete all-camera depth-timestamp group before robot START."""
+
+    assignments = [command.get("hardware_sync") for command in sensor_commands]
+    if all(assignment is None for assignment in assignments):
+        return None
+    if any(not isinstance(assignment, Mapping) for assignment in assignments):
+        raise RuntimeError(
+            "Hardware-sync capture plan must assign every selected camera"
+        )
+    typed_assignments = [
+        assignment for assignment in assignments if isinstance(assignment, Mapping)
+    ]
+    group_ids = {str(assignment.get("group_id") or "") for assignment in typed_assignments}
+    scopes = {str(assignment.get("scope") or "") for assignment in typed_assignments}
+    implementations = {
+        str(assignment.get("implementation") or "")
+        for assignment in typed_assignments
+    }
+    skew_values = {
+        assignment.get("max_depth_timestamp_skew_ms")
+        for assignment in typed_assignments
+    }
+    if (
+        len(group_ids) != 1
+        or "" in group_ids
+        or scopes != {"depth_exposure"}
+        or implementations != {"realsense_inter_cam_sync"}
+        or len(skew_values) != 1
+    ):
+        raise RuntimeError(
+            "Hardware-sync capture assignments disagree on group, scope, "
+            "implementation, or skew"
+        )
+    raw_skew_ms = next(iter(skew_values))
+    if (
+        isinstance(raw_skew_ms, bool)
+        or not isinstance(raw_skew_ms, (int, float))
+        or not math.isfinite(float(raw_skew_ms))
+        or float(raw_skew_ms) <= 0
+        or float(raw_skew_ms) > 5.0
+    ):
+        raise RuntimeError(
+            "Hardware-sync max depth timestamp skew must be within (0, 5] ms"
+        )
+    max_skew_ns = int(round(float(raw_skew_ms) * 1_000_000))
+    masters = [
+        index
+        for index, assignment in enumerate(typed_assignments)
+        if assignment.get("role") == "master"
+    ]
+    if len(masters) != 1 or any(
+        assignment.get("role") not in {"master", "subordinate"}
+        for assignment in typed_assignments
+    ):
+        raise RuntimeError(
+            "Hardware-sync capture requires exactly one master and only "
+            "subordinate followers"
+        )
+
+    records_by_index: dict[int, list[Mapping[str, Any]]] = {}
+    for index, (command, assignment) in enumerate(
+        zip(sensor_commands, typed_assignments, strict=True)
+    ):
+        metadata_path = _sensor_output_path(command) / FRAME_METADATA_JSONL
+        records = _valid_frame_metadata_records(metadata_path, limit=None)
+        expected_mode = 1 if assignment["role"] == "master" else 2
+        expected_values = {
+            "sensor_id": command.get("device_id"),
+            "capture_group_id": assignment["group_id"],
+            "hardware_sync_role": assignment["role"],
+            "hardware_sync_scope": assignment["scope"],
+            "hardware_sync_transport": assignment["implementation"],
+            "inter_cam_sync_mode_configured": expected_mode,
+            "inter_cam_sync_mode_readback": expected_mode,
+            "depth_timestamp_domain": "global_time",
+        }
+        for record_index, record in enumerate(records):
+            for field_name, expected_value in expected_values.items():
+                if record.get(field_name) != expected_value:
+                    raise RuntimeError(
+                        f"{command.get('name')} hardware-sync record "
+                        f"{record_index} {field_name}={record.get(field_name)!r}, "
+                        f"expected {expected_value!r}"
+                    )
+            for field_name, minimum in (
+                ("depth_sensor_timestamp_ns", 1),
+                ("depth_frame_number", 0),
+            ):
+                value = record.get(field_name)
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < minimum
+                ):
+                    raise RuntimeError(
+                        f"{command.get('name')} hardware-sync record "
+                        f"{record_index} has invalid {field_name}"
+                    )
+        records_by_index[index] = records
+    if any(not records for records in records_by_index.values()):
+        return None
+
+    master_index = masters[0]
+    master_records = sorted(
+        records_by_index[master_index],
+        key=lambda record: int(record["depth_sensor_timestamp_ns"]),
+    )
+    used_records: dict[int, set[tuple[int, str]]] = {
+        index: set() for index in records_by_index
+    }
+    complete_groups: list[dict[int, Mapping[str, Any]]] = []
+    for master_record in master_records:
+        master_timestamp = int(master_record["depth_sensor_timestamp_ns"])
+        selected: dict[int, Mapping[str, Any]] = {master_index: master_record}
+        for index, records in records_by_index.items():
+            if index == master_index:
+                continue
+            unused = [
+                record
+                for record in records
+                if (
+                    int(record["frame_index"]),
+                    str(record["frame_id"]),
+                )
+                not in used_records[index]
+            ]
+            if not unused:
+                break
+            nearest = min(
+                unused,
+                key=lambda record: (
+                    abs(
+                        int(record["depth_sensor_timestamp_ns"])
+                        - master_timestamp
+                    ),
+                    int(record["depth_sensor_timestamp_ns"]),
+                ),
+            )
+            if (
+                abs(int(nearest["depth_sensor_timestamp_ns"]) - master_timestamp)
+                > max_skew_ns
+            ):
+                break
+            selected[index] = nearest
+        if len(selected) != len(sensor_commands):
+            continue
+        selected_timestamps = [
+            int(record["depth_sensor_timestamp_ns"])
+            for record in selected.values()
+        ]
+        if max(selected_timestamps) - min(selected_timestamps) > max_skew_ns:
+            continue
+        for index, record in selected.items():
+            used_records[index].add(
+                (int(record["frame_index"]), str(record["frame_id"]))
+            )
+        complete_groups.append(selected)
+
+    for start in range(
+        0,
+        len(complete_groups) - MIN_HARDWARE_SYNC_START_GROUPS + 1,
+    ):
+        candidate_groups = complete_groups[
+            start : start + MIN_HARDWARE_SYNC_START_GROUPS
+        ]
+        continuous = True
+        for previous, current in zip(
+            candidate_groups,
+            candidate_groups[1:],
+        ):
+            for index in records_by_index:
+                if (
+                    int(current[index]["depth_frame_number"])
+                    != int(previous[index]["depth_frame_number"]) + 1
+                    or int(current[index]["depth_sensor_timestamp_ns"])
+                    <= int(previous[index]["depth_sensor_timestamp_ns"])
+                    or int(current[index]["frame_index"])
+                    <= int(previous[index]["frame_index"])
+                ):
+                    continuous = False
+                    break
+            if not continuous:
+                break
+        if not continuous:
+            continue
+
+        evidence_groups: list[dict[str, Any]] = []
+        observed_skews: list[int] = []
+        observed_spans: list[int] = []
+        for group_index, selected in enumerate(candidate_groups):
+            master_timestamp = int(
+                selected[master_index]["depth_sensor_timestamp_ns"]
+            )
+            timestamps = [
+                int(record["depth_sensor_timestamp_ns"])
+                for record in selected.values()
+            ]
+            depth_timestamp_span_ns = max(timestamps) - min(timestamps)
+            observed_spans.append(depth_timestamp_span_ns)
+            frames: dict[str, Any] = {}
+            for index, record in selected.items():
+                assignment = typed_assignments[index]
+                timestamp = int(record["depth_sensor_timestamp_ns"])
+                skew = timestamp - master_timestamp
+                observed_skews.append(abs(skew))
+                frames[str(assignment["sensor_key"])] = {
+                    "frame_id": record["frame_id"],
+                    "frame_index": record["frame_index"],
+                    "depth_sensor_timestamp_ns": timestamp,
+                    "depth_frame_number": record["depth_frame_number"],
+                    "depth_timestamp_skew_ns": skew,
+                }
+            evidence_groups.append(
+                {
+                    "group_index": group_index,
+                    "master_depth_sensor_timestamp_ns": master_timestamp,
+                    "depth_timestamp_span_ns": depth_timestamp_span_ns,
+                    "frames": frames,
+                }
+            )
+        return {
+            "schema_version": "capture_hardware_sync_start_evidence.v2",
+            "capture_group_id": next(iter(group_ids)),
+            "scope": "depth_exposure",
+            "master_sensor_key": typed_assignments[master_index]["sensor_key"],
+            "required_consecutive_group_count": (
+                MIN_HARDWARE_SYNC_START_GROUPS
+            ),
+            "observed_consecutive_group_count": len(evidence_groups),
+            "max_depth_timestamp_skew_ns": max_skew_ns,
+            "observed_max_abs_depth_timestamp_skew_ns": max(observed_skews),
+            "observed_max_depth_timestamp_span_ns": max(observed_spans),
+            "groups": evidence_groups,
+        }
+    return None
 
 
 def _sensor_output_has_mutation(output_path: Path) -> bool:
@@ -482,12 +1004,102 @@ def _assert_capture_outputs_absent(
         )
 
 
+def _hardware_sync_execution_binding(
+    run_root: Path,
+    *,
+    run_config: Mapping[str, Any],
+    capture_plan: Mapping[str, Any],
+) -> tuple[str | None, Mapping[str, Any] | None]:
+    """Validate and bind the exact hardware contract before camera startup."""
+
+    commands = capture_plan.get("commands")
+    if not isinstance(commands, list):
+        raise ValueError("Capture plan commands must be a list")
+    hardware_sync_planned = any(
+        isinstance(command, Mapping)
+        and command.get("role") == "sensor_capture"
+        and command.get("hardware_sync") is not None
+        for command in commands
+    )
+    if not hardware_sync_planned:
+        return None, None
+    contract_sha256 = hardware_sync_qualification_contract_sha256(run_config)
+    qualification = validate_hardware_sync_qualification(
+        run_root,
+        run_config=run_config,
+    )
+    if qualification.get("configuration_sha256") != contract_sha256:
+        raise RuntimeError(
+            "Physical hardware-sync qualification does not bind the exact "
+            "current run-config hardware contract."
+        )
+    return contract_sha256, qualification
+
+
+def _revalidate_hardware_sync_execution_binding(
+    run_root: Path,
+    *,
+    boundary: CaptureExecutionBoundary,
+    capture_plan: Mapping[str, Any],
+) -> None:
+    """Close the config/qualification gap immediately before robot START."""
+
+    if boundary.hardware_sync_contract_sha256 is None:
+        return
+    try:
+        current_config = load_run_config_for_run_root(run_root)
+        current_digest = hardware_sync_qualification_contract_sha256(
+            current_config
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Hardware-sync run-config contract could not be revalidated "
+            "immediately before robot receiver startup."
+        ) from exc
+    if current_digest != boundary.hardware_sync_contract_sha256:
+        raise RuntimeError(
+            "Hardware-sync run-config contract digest changed after camera "
+            "startup; preserving raw evidence and refusing robot START."
+        )
+    try:
+        _, current_qualification = _hardware_sync_execution_binding(
+            run_root,
+            run_config=current_config,
+            capture_plan=capture_plan,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Physical hardware-sync qualification became invalid after camera "
+            "startup; preserving raw evidence and refusing robot START."
+        ) from exc
+    if (
+        current_qualification is None
+        or boundary.hardware_sync_qualification is None
+        or dict(current_qualification)
+        != dict(boundary.hardware_sync_qualification)
+    ):
+        raise RuntimeError(
+            "Physical hardware-sync qualification changed after camera "
+            "startup; preserving raw evidence and refusing robot START."
+        )
+
+
 def _validate_capture_execution_boundary(
     run_root: Path,
 ) -> CaptureExecutionBoundary:
     """Perform only read-only checks before supervisor artifact creation."""
 
     config = load_run_config_for_run_root(run_root)
+    capture = config.get("capture")
+    if not isinstance(capture, Mapping):
+        raise ValueError("Run configuration capture must be an object")
+    capture_fps = capture.get("fps")
+    if (
+        isinstance(capture_fps, bool)
+        or not isinstance(capture_fps, int)
+        or capture_fps <= 0
+    ):
+        raise ValueError("Run configuration capture.fps must be positive")
     plan_path = run_root / CAPTURE_PLAN
     persisted_plan: dict[str, Any] | None = None
     max_frames: int | None = None
@@ -546,11 +1158,21 @@ def _validate_capture_execution_boundary(
         expected_plan,
         run_root=run_root,
     )
+    hardware_sync_contract_sha256, hardware_sync_qualification = (
+        _hardware_sync_execution_binding(
+            run_root,
+            run_config=config,
+            capture_plan=expected_plan,
+        )
+    )
     _assert_capture_outputs_absent(run_root, sensor_output_paths)
     return CaptureExecutionBoundary(
         expected_receiver_command=expected_receiver,
         expected_command_fingerprints=expected_fingerprints,
         sensor_output_paths=sensor_output_paths,
+        capture_fps=capture_fps,
+        hardware_sync_contract_sha256=hardware_sync_contract_sha256,
+        hardware_sync_qualification=hardware_sync_qualification,
     )
 
 
@@ -691,6 +1313,16 @@ def build_capture_execution_plan(
     ]
 
     selected, skipped, selection_gate = _select_full_capture(commands)
+    capture_options = capture_plan.get("capture")
+    if not isinstance(capture_options, Mapping):
+        raise ValueError("Capture plan capture options must be an object")
+    (
+        planned_camera_metadata_idle_timeout_s,
+        planned_camera_metadata_idle_timeout_source,
+    ) = _resolve_camera_metadata_idle_timeout(
+        capture_fps=capture_options.get("fps"),
+        requested_timeout_s=None,
+    )
     gates = [
         _robot_gate(allow_real_robot=allow_real_robot),
         _camera_gate(allow_cameras=allow_cameras),
@@ -737,6 +1369,12 @@ def build_capture_execution_plan(
             ),
             "camera_startup_attempts": camera_startup_attempts,
             "camera_startup_retry_delay_s": camera_startup_retry_delay_s,
+            "camera_metadata_idle_timeout_s": (
+                planned_camera_metadata_idle_timeout_s
+            ),
+            "camera_metadata_idle_timeout_source": (
+                planned_camera_metadata_idle_timeout_source
+            ),
             "camera_retry_policy": (
                 "Retry only when the current attempt leaves no sensor output "
                 "evidence; preserve and fail closed on any partial raw output."
@@ -745,7 +1383,9 @@ def build_capture_execution_plan(
                 "Each planned sensor output must publish at least "
                 f"{MIN_CAMERA_READINESS_RECORDS} valid committed "
                 f"{FRAME_METADATA_JSONL} records before the next sensor starts. "
-                "The robot pose receiver starts only after every sensor is ready."
+                "The robot pose receiver starts only after every sensor is ready, "
+                "and each camera must keep appending metadata through receiver "
+                "completion."
             ),
             "stop_policy": (
                 "After robot_pose_receiver exits, terminate remaining selected "
@@ -895,6 +1535,11 @@ def _process_record(
     startup_attempt_limit: int | None = None,
     readiness_record_count: int | None = None,
     output_mutated: bool | None = None,
+    metadata_record_count: int | None = None,
+    metadata_last_frame_index: int | None = None,
+    metadata_last_progress_at: str | None = None,
+    metadata_idle_elapsed_s: float | None = None,
+    metadata_idle_timeout_s: float | None = None,
 ) -> CaptureProcessRecord:
     command_array = _command_array(command)
     return CaptureProcessRecord(
@@ -915,6 +1560,11 @@ def _process_record(
         startup_attempt_limit=startup_attempt_limit,
         readiness_record_count=readiness_record_count,
         output_mutated=output_mutated,
+        metadata_record_count=metadata_record_count,
+        metadata_last_frame_index=metadata_last_frame_index,
+        metadata_last_progress_at=metadata_last_progress_at,
+        metadata_idle_elapsed_s=metadata_idle_elapsed_s,
+        metadata_idle_timeout_s=metadata_idle_timeout_s,
         output_tail=_tail(log_path),
     )
 
@@ -968,6 +1618,11 @@ def _status_process_record(info: Mapping[str, Any]) -> dict[str, Any]:
         "startup_attempt_limit": info.get("startup_attempt_limit"),
         "readiness_record_count": info.get("readiness_record_count"),
         "output_mutated": info.get("output_mutated"),
+        "metadata_record_count": info.get("metadata_record_count"),
+        "metadata_last_frame_index": info.get("metadata_last_frame_index"),
+        "metadata_last_progress_at": info.get("metadata_last_progress_at"),
+        "metadata_idle_elapsed_s": info.get("metadata_idle_elapsed_s"),
+        "metadata_idle_timeout_s": info.get("metadata_idle_timeout_s"),
         "active": active,
         "output_tail": list(output_tail),
     }
@@ -982,6 +1637,8 @@ def _build_capture_execution_status(
     allow_real_robot: bool,
     receive_start_timeout_s: float,
     receive_idle_timeout_s: float,
+    camera_metadata_idle_timeout_s: float,
+    camera_metadata_idle_timeout_source: str,
     started_monotonic: float,
     plan: Mapping[str, Any] | None,
     process_infos: list[dict[str, Any]],
@@ -1000,6 +1657,10 @@ def _build_capture_execution_status(
         "allow_real_robot": allow_real_robot,
         "receive_start_timeout_s": receive_start_timeout_s,
         "receive_idle_timeout_s": receive_idle_timeout_s,
+        "camera_metadata_idle_timeout_s": camera_metadata_idle_timeout_s,
+        "camera_metadata_idle_timeout_source": (
+            camera_metadata_idle_timeout_source
+        ),
         "elapsed_s": time.monotonic() - started_monotonic,
         "active_process_count": active_count,
         "process_count": len(process_records),
@@ -1104,6 +1765,7 @@ def run_capture_execution(
     terminate_timeout_s: float = 2.0,
     receive_start_timeout_s: float = DEFAULT_RECEIVE_START_TIMEOUT_S,
     receive_idle_timeout_s: float = DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
+    camera_metadata_idle_timeout_s: float | None = None,
     collect_sensors: Callable[[], dict] = collect_sensor_status,
     write_plan_if_missing: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
@@ -1148,34 +1810,53 @@ def run_capture_execution(
         )
 
     run_root_path = Path(run_root)
-    boundary = _validate_capture_execution_boundary(run_root_path)
-    plan = build_capture_execution_plan(
-        run_root_path,
-        allow_cameras=allow_cameras,
-        allow_real_robot=allow_real_robot,
-        include_sensor_status=include_sensor_status,
-        collect_sensors=collect_sensors,
-        write_plan_if_missing=write_plan_if_missing,
-        camera_startup_attempts=camera_startup_attempts,
-        camera_startup_retry_delay_s=camera_startup_retry_delay_s,
-    )
-    commands, receiver_command = _validated_execution_commands(
-        plan,
-        boundary=boundary,
-    )
-    # Sensor discovery can take time. Recheck before accepting and persisting
-    # the execution plan so a concurrently created raw output still blocks it.
-    _assert_capture_outputs_absent(
-        run_root_path,
-        boundary.sensor_output_paths,
-    )
+    with run_config_lock(run_root_path):
+        boundary = _validate_capture_execution_boundary(run_root_path)
+        (
+            resolved_camera_metadata_idle_timeout_s,
+            camera_metadata_idle_timeout_source,
+        ) = _resolve_camera_metadata_idle_timeout(
+            capture_fps=boundary.capture_fps,
+            requested_timeout_s=camera_metadata_idle_timeout_s,
+        )
+        plan = build_capture_execution_plan(
+            run_root_path,
+            allow_cameras=allow_cameras,
+            allow_real_robot=allow_real_robot,
+            include_sensor_status=include_sensor_status,
+            collect_sensors=collect_sensors,
+            write_plan_if_missing=write_plan_if_missing,
+            camera_startup_attempts=camera_startup_attempts,
+            camera_startup_retry_delay_s=camera_startup_retry_delay_s,
+        )
+        execution_strategy = plan.get("execution_strategy")
+        if not isinstance(execution_strategy, dict):
+            raise ValueError(
+                "Capture execution plan execution_strategy must be an object"
+            )
+        execution_strategy["camera_metadata_idle_timeout_s"] = (
+            resolved_camera_metadata_idle_timeout_s
+        )
+        execution_strategy["camera_metadata_idle_timeout_source"] = (
+            camera_metadata_idle_timeout_source
+        )
+        commands, receiver_command = _validated_execution_commands(
+            plan,
+            boundary=boundary,
+        )
+        # Sensor discovery can take time. Recheck under the shared run-config
+        # transaction before publishing the first durable execution evidence.
+        _assert_capture_outputs_absent(
+            run_root_path,
+            boundary.sensor_output_paths,
+        )
 
-    plan_path = write_capture_execution_plan(run_root_path, plan)
-    logs_dir = run_root_path / CAPTURE_EXECUTION_LOGS_DIR
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    manifest = load_or_create_run_manifest(run_root_path)
-    upsert_stage(manifest, name="capture_execution", status="running")
-    write_run_manifest(manifest, run_root_path)
+        logs_dir = run_root_path / CAPTURE_EXECUTION_LOGS_DIR
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        plan_path = write_capture_execution_plan(run_root_path, plan)
+        manifest = load_or_create_run_manifest(run_root_path)
+        upsert_stage(manifest, name="capture_execution", status="running")
+        write_run_manifest(manifest, run_root_path)
 
     started_monotonic = time.monotonic()
     process_infos: list[dict[str, Any]] = []
@@ -1183,6 +1864,8 @@ def run_capture_execution(
     status = "succeeded"
     message = "Capture execution completed successfully."
     report_path: Path | None = None
+    hardware_sync_start_evidence: dict[str, Any] | None = None
+    hardware_sync_binding_revalidated = False
 
     def record_status(status_value: str, message_value: str) -> Path:
         return write_capture_execution_status(
@@ -1195,6 +1878,12 @@ def run_capture_execution(
                 allow_real_robot=allow_real_robot,
                 receive_start_timeout_s=receive_start_timeout_s,
                 receive_idle_timeout_s=receive_idle_timeout_s,
+                camera_metadata_idle_timeout_s=(
+                    resolved_camera_metadata_idle_timeout_s
+                ),
+                camera_metadata_idle_timeout_source=(
+                    camera_metadata_idle_timeout_source
+                ),
                 started_monotonic=started_monotonic,
                 plan=plan,
                 process_infos=process_infos,
@@ -1203,6 +1892,15 @@ def run_capture_execution(
         )
 
     status_path = record_status("starting", "Capture execution supervisor starting.")
+
+    def require_camera_metadata_progress(phase: str) -> None:
+        progress_error = _camera_metadata_progress_error(
+            background_processes,
+            idle_timeout_s=resolved_camera_metadata_idle_timeout_s,
+            phase=phase,
+        )
+        if progress_error is not None:
+            raise progress_error
 
     def cleanup_processes(reason: str) -> None:
         for info in process_infos:
@@ -1217,10 +1915,16 @@ def run_capture_execution(
                     )
                     info["termination_reason"] = f"not_spawned_during_{reason}"
             elif process.poll() is None:
+                preserve_failure = (
+                    info.get("status") == "failed"
+                    and isinstance(info.get("termination_reason"), str)
+                    and bool(info["termination_reason"])
+                )
                 _terminate_process_group(process, timeout_s=terminate_timeout_s)
                 _mark_process_ended(info)
-                info["status"] = "terminated"
-                info["termination_reason"] = reason
+                if not preserve_failure:
+                    info["status"] = "terminated"
+                    info["termination_reason"] = reason
             elif info.get("status") in {"starting", "running"}:
                 _mark_process_ended(info)
                 info["status"] = (
@@ -1272,6 +1976,9 @@ def run_capture_execution(
                 prior_error = _camera_startup_exit(background_processes)
                 if prior_error is not None:
                     raise prior_error
+                require_camera_metadata_progress(
+                    "sequential camera startup"
+                )
 
                 command_array = _command_array(command)
                 log_stem = _safe_log_stem(command, index=index)
@@ -1366,6 +2073,9 @@ def run_capture_execution(
                     prior_error = _camera_startup_exit(background_processes)
                     if prior_error is not None:
                         raise prior_error
+                    require_camera_metadata_progress(
+                        "sequential camera startup"
+                    )
 
                     returncode = process.poll()
                     record_count = _valid_frame_metadata_record_count(metadata_path)
@@ -1412,8 +2122,38 @@ def run_capture_execution(
                         )
 
                     if record_count >= MIN_CAMERA_READINESS_RECORDS:
+                        sync_errors = _hardware_sync_readiness_errors(
+                            command,
+                            metadata_path,
+                        )
+                        if sync_errors:
+                            info["output_mutated"] = True
+                            info["status"] = "failed"
+                            info["termination_reason"] = (
+                                "hardware_sync_readback_mismatch"
+                            )
+                            raise RuntimeError(
+                                f"Camera {command_name} published frames without "
+                                "the required hardware-sync readback evidence; "
+                                "preserving raw output and refusing robot START: "
+                                + "; ".join(sync_errors)
+                            )
                         info["output_mutated"] = True
                         info["termination_reason"] = "camera_ready"
+                        try:
+                            _initialize_camera_metadata_progress(
+                                info,
+                                metadata_path,
+                                idle_timeout_s=(
+                                    resolved_camera_metadata_idle_timeout_s
+                                ),
+                            )
+                        except RuntimeError:
+                            info["status"] = "failed"
+                            info["termination_reason"] = (
+                                "camera_metadata_progress_invalid"
+                            )
+                            raise
                         background_processes.append(info)
                         sensor_ready = True
                         record_status(
@@ -1496,6 +2236,7 @@ def run_capture_execution(
         startup_error = _camera_startup_exit(background_processes)
         if startup_error is not None:
             raise startup_error
+        require_camera_metadata_progress("pre-receiver readiness")
         missing_readiness = _missing_sensor_readiness(boundary.sensor_output_paths)
         if missing_readiness:
             raise RuntimeError(
@@ -1504,11 +2245,61 @@ def run_capture_execution(
                 + ", ".join(path.as_posix() for path in missing_readiness)
                 + "."
             )
+        hardware_sync_failures = []
+        for command in (item for _, item in sensor_commands):
+            metadata_path = _sensor_output_path(command) / FRAME_METADATA_JSONL
+            errors = _hardware_sync_readiness_errors(command, metadata_path)
+            if errors:
+                hardware_sync_failures.append(
+                    f"{command.get('name')}: " + "; ".join(errors)
+                )
+        if hardware_sync_failures:
+            raise RuntimeError(
+                "Hardware-sync evidence changed before robot START; "
+                + " | ".join(hardware_sync_failures)
+            )
+        sensor_command_values = [item for _, item in sensor_commands]
+        if any(
+            command.get("hardware_sync") is not None
+            for command in sensor_command_values
+        ):
+            overlap_deadline = time.monotonic() + startup_wait_s
+            record_status(
+                "starting",
+                "Every hardware-sync camera is streaming; waiting for one "
+                "complete all-camera depth-timestamp group before robot START.",
+            )
+            while hardware_sync_start_evidence is None:
+                startup_error = _camera_startup_exit(background_processes)
+                if startup_error is not None:
+                    raise startup_error
+                require_camera_metadata_progress(
+                    "hardware-sync overlap startup"
+                )
+                hardware_sync_start_evidence = (
+                    _hardware_sync_overlap_evidence(sensor_command_values)
+                )
+                if hardware_sync_start_evidence is not None:
+                    break
+                remaining_s = overlap_deadline - time.monotonic()
+                if remaining_s <= 0:
+                    raise RuntimeError(
+                        "Hardware-sync overlap deadline expired before robot "
+                        "START; no complete all-camera depth-timestamp group "
+                        "was observed within the configured skew. Check sync "
+                        "wiring, master/subordinate roles, frame rate, and "
+                        "global-time metadata."
+                    )
+                time.sleep(
+                    min(RECEIVER_MONITOR_INTERVAL_S, remaining_s)
+                )
         record_status(
             "running",
-            "Every camera published sustained frame metadata; receiver may start.",
+            "Every camera published sustained frame metadata and any required "
+            "hardware-sync readback/overlap evidence; receiver may start.",
         )
 
+        require_camera_metadata_progress("immediate pre-receiver startup")
         receiver_array = _command_array(receiver_command)
         receiver_array.extend(
             [
@@ -1541,8 +2332,16 @@ def run_capture_execution(
         log_file = open(receiver_log, "w", buffering=1)
         receiver_info["log_file"] = log_file
         process_infos.append(receiver_info)
+        log_file.write(f"$ {shlex.join(receiver_array)}\n")
+        _revalidate_hardware_sync_execution_binding(
+            run_root_path,
+            boundary=boundary,
+            capture_plan=plan["capture_plan"],
+        )
+        hardware_sync_binding_revalidated = (
+            boundary.hardware_sync_contract_sha256 is not None
+        )
         try:
-            log_file.write(f"$ {shlex.join(receiver_array)}\n")
             with _defer_capture_cancellation():
                 receiver_process = subprocess.Popen(
                     receiver_array,
@@ -1570,6 +2369,7 @@ def run_capture_execution(
             camera_error = _premature_camera_exit(background_processes)
             if camera_error is not None:
                 raise camera_error
+            require_camera_metadata_progress("robot receiver execution")
             remaining_s = receiver_deadline - time.monotonic()
             if remaining_s <= 0:
                 _terminate_process_group(
@@ -1595,6 +2395,7 @@ def run_capture_execution(
         camera_error = _premature_camera_exit(background_processes)
         if camera_error is not None:
             raise camera_error
+        require_camera_metadata_progress("robot receiver completion")
         log_file.close()
         receiver_info["returncode"] = returncode
         _mark_process_ended(receiver_info)
@@ -1692,6 +2493,40 @@ def run_capture_execution(
                     if isinstance(info.get("output_mutated"), bool)
                     else None
                 ),
+                metadata_record_count=(
+                    int(info["metadata_record_count"])
+                    if isinstance(info.get("metadata_record_count"), int)
+                    else None
+                ),
+                metadata_last_frame_index=(
+                    int(info["metadata_last_frame_index"])
+                    if isinstance(info.get("metadata_last_frame_index"), int)
+                    else None
+                ),
+                metadata_last_progress_at=(
+                    str(info["metadata_last_progress_at"])
+                    if isinstance(
+                        info.get("metadata_last_progress_at"),
+                        str,
+                    )
+                    else None
+                ),
+                metadata_idle_elapsed_s=(
+                    float(info["metadata_idle_elapsed_s"])
+                    if isinstance(
+                        info.get("metadata_idle_elapsed_s"),
+                        (int, float),
+                    )
+                    else None
+                ),
+                metadata_idle_timeout_s=(
+                    float(info["metadata_idle_timeout_s"])
+                    if isinstance(
+                        info.get("metadata_idle_timeout_s"),
+                        (int, float),
+                    )
+                    else None
+                ),
             ).to_dict()
         )
 
@@ -1719,13 +2554,56 @@ def run_capture_execution(
                 "bounded_retry_only_without_sensor_output_evidence"
             ),
             "attempt_log_policy": "one_distinct_log_per_camera_startup_attempt",
+            "live_metadata_progress_required": True,
+            "live_metadata_idle_timeout_s": (
+                resolved_camera_metadata_idle_timeout_s
+            ),
+            "live_metadata_idle_timeout_source": (
+                camera_metadata_idle_timeout_source
+            ),
+            "capture_fps": boundary.capture_fps,
             "validated_sensor_outputs": [
                 path.as_posix() for path in boundary.sensor_output_paths
             ],
+            "hardware_sync_readback_required_when_planned": True,
+            "hardware_sync_complete_overlap_required_when_planned": True,
+            "hardware_sync_required_fields": [
+                "capture_group_id",
+                "hardware_sync_role",
+                "hardware_sync_scope",
+                "hardware_sync_transport",
+                "inter_cam_sync_mode_configured",
+                "inter_cam_sync_mode_readback",
+                "depth_sensor_timestamp_ns",
+                "depth_frame_number",
+                "depth_timestamp_domain",
+            ],
         },
+        "hardware_sync_execution_binding": (
+            {
+                "configuration_sha256": (
+                    boundary.hardware_sync_contract_sha256
+                ),
+                "qualification_artifact_sha256": (
+                    boundary.hardware_sync_qualification or {}
+                ).get("artifact_sha256"),
+                "revalidated_immediately_before_receiver_spawn": (
+                    hardware_sync_binding_revalidated
+                ),
+            }
+            if boundary.hardware_sync_contract_sha256 is not None
+            else None
+        ),
+        "hardware_sync_start_evidence": hardware_sync_start_evidence,
         "terminate_timeout_s": terminate_timeout_s,
         "receive_start_timeout_s": receive_start_timeout_s,
         "receive_idle_timeout_s": receive_idle_timeout_s,
+        "camera_metadata_idle_timeout_s": (
+            resolved_camera_metadata_idle_timeout_s
+        ),
+        "camera_metadata_idle_timeout_source": (
+            camera_metadata_idle_timeout_source
+        ),
         "elapsed_s": elapsed_s,
         "raw_pose_artifact": RAW_ROBOT_EE_POSES,
         "raw_pose_count": _raw_pose_count(run_root_path),

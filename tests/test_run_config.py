@@ -8,8 +8,13 @@ import pytest
 
 from posetestbot.io.artifacts import DATASET_MANIFEST, RUN_CONFIG
 from posetestbot.pipeline.run_config import (
+    CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
+    HARDWARE_TRIGGER_IMPLEMENTATION,
+    HARDWARE_TRIGGER_SCOPE,
     FixedFrameTransform,
+    PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
+    SensorRunConfig,
     build_sequence_job_from_run_config,
     create_run_config,
     load_run_config_for_run_root,
@@ -47,6 +52,10 @@ def test_default_run_config_uses_real_robot_and_lab_sensors(tmp_path: Path) -> N
     assert [sensor["sensor_type"] for sensor in sensors].count("zed_2i") == 1
     assert all(sensor["enabled"] is True for sensor in sensors)
     assert all(sensor["inverted"] is False for sensor in sensors)
+    assert data["capture"]["synchronization"] == {
+        "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
+        "mode": "timestamp_aligned",
+    }
 
     plan = sequence_plan_from_run_config(data)
 
@@ -246,6 +255,203 @@ def test_legacy_run_config_defaults_missing_sensor_enabled_to_true(
     assert all(sensor["enabled"] is True for sensor in loaded["capture"]["sensors"])
 
 
+def test_run_config_v2_infers_timestamp_alignment_without_hardware_claim(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "legacy-v2-timing"
+    value = create_run_config(run_root=run_root).to_dict()
+    value["schema_version"] = PREVIOUS_SCHEMA_VERSION
+    value["capture"].pop("synchronization")
+    run_root.mkdir()
+    (run_root / RUN_CONFIG).write_text(json.dumps(value))
+
+    loaded = load_run_config_for_run_root(run_root)
+
+    assert loaded["schema_version"] == PREVIOUS_SCHEMA_VERSION
+    assert loaded["capture"]["synchronization"] == {
+        "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
+        "mode": "timestamp_aligned",
+    }
+    assert any(
+        warning["code"] == "legacy_capture_synchronization_inferred"
+        for warning in loaded["warnings"]
+    )
+
+
+def test_hardware_trigger_run_config_accepts_exact_mixed_mount_realsense_group(
+    tmp_path: Path,
+) -> None:
+    sensors = (
+        SensorRunConfig(
+            sensor_type="realsense_d435",
+            device_id="wrist-1",
+            display_name="Wrist D435",
+            mounting_mode="eye_in_hand",
+        ),
+        SensorRunConfig(
+            sensor_type="realsense_d435",
+            device_id="static-1",
+            display_name="Static D435",
+            mounting_mode="static",
+        ),
+    )
+
+    config = create_run_config(
+        run_root=tmp_path / "hardware-trigger",
+        sensors=sensors,
+        synchronization={
+            "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
+            "mode": "hardware_trigger",
+            "implementation": HARDWARE_TRIGGER_IMPLEMENTATION,
+            "scope": HARDWARE_TRIGGER_SCOPE,
+            "group_id": "mixed-depth-rig",
+            "master_sensor_key": "realsense_d435:wrist-1",
+        },
+    ).to_dict()
+
+    assert config["schema_version"] == "run_config.v3"
+    assert config["capture"]["synchronization"] == {
+        "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
+        "mode": "hardware_trigger",
+        "implementation": HARDWARE_TRIGGER_IMPLEMENTATION,
+        "scope": HARDWARE_TRIGGER_SCOPE,
+        "group_id": "mixed-depth-rig",
+        "master_sensor_key": "realsense_d435:wrist-1",
+        "max_depth_timestamp_skew_ms": 2.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("sensors", "policy_patch", "message"),
+    [
+        (
+            (
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="wrist-1",
+                    display_name="Wrist",
+                    mounting_mode="eye_in_hand",
+                ),
+            ),
+            {},
+            "at least two",
+        ),
+        (
+            (
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="wrist-1",
+                    display_name="Wrist",
+                    mounting_mode="eye_in_hand",
+                ),
+                SensorRunConfig(
+                    sensor_type="oak_d_pro",
+                    device_id="oak-1",
+                    display_name="OAK",
+                    mounting_mode="static",
+                ),
+            ),
+            {},
+            "RealSense D435 cameras only",
+        ),
+        (
+            (
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="wrist-1",
+                    display_name="Wrist",
+                    mounting_mode="eye_in_hand",
+                ),
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="auto",
+                    display_name="Static",
+                    mounting_mode="static",
+                ),
+            ),
+            {},
+            "exact RealSense device IDs",
+        ),
+        (
+            (
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="../wrist",
+                    display_name="Wrist",
+                    mounting_mode="eye_in_hand",
+                ),
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="static-1",
+                    display_name="Static",
+                    mounting_mode="static",
+                ),
+            ),
+            {"master_sensor_key": "realsense_d435:../wrist"},
+            "must contain 1-128",
+        ),
+        (
+            (
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="wrist-1",
+                    display_name="Wrist",
+                    mounting_mode="eye_in_hand",
+                ),
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="wrist-2",
+                    display_name="Wrist 2",
+                    mounting_mode="eye_in_hand",
+                ),
+            ),
+            {},
+            "both static and eye_in_hand",
+        ),
+        (
+            (
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="wrist-1",
+                    display_name="Wrist",
+                    mounting_mode="eye_in_hand",
+                ),
+                SensorRunConfig(
+                    sensor_type="realsense_d435",
+                    device_id="static-1",
+                    display_name="Static",
+                    mounting_mode="static",
+                ),
+            ),
+            {"master_sensor_key": "realsense_d435:missing"},
+            "exactly match one enabled",
+        ),
+    ],
+)
+def test_hardware_trigger_run_config_rejects_unsupported_camera_contract(
+    tmp_path: Path,
+    sensors: tuple[SensorRunConfig, ...],
+    policy_patch: dict[str, object],
+    message: str,
+) -> None:
+    policy = {
+        "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
+        "mode": "hardware_trigger",
+        "implementation": HARDWARE_TRIGGER_IMPLEMENTATION,
+        "scope": HARDWARE_TRIGGER_SCOPE,
+        "group_id": "mixed-depth-rig",
+        "master_sensor_key": "realsense_d435:wrist-1",
+        **policy_patch,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        create_run_config(
+            run_root=tmp_path / "invalid-hardware-trigger",
+            sensors=sensors,
+            synchronization=policy,
+        )
+
+
 def test_run_config_calibration_profiles_flow_to_calibrated_sequence(
     tmp_path: Path,
 ) -> None:
@@ -353,6 +559,47 @@ def test_create_run_config_cli_writes_real_full_capture_validation_plan(
     assert "--allow-real-robot" not in result.stdout
     assert "scripts/run_rewrite_gate.py" in result.stdout
     assert "rewrite_full_capture.v1" in result.stdout
+
+
+def test_create_run_config_cli_writes_hardware_trigger_policy(tmp_path: Path) -> None:
+    run_root = tmp_path / "hardware-trigger-cli"
+    repo_root = Path(__file__).resolve().parents[1]
+
+    subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/create_run_config.py",
+            run_root.as_posix(),
+            "--sensor",
+            "realsense:wrist-1:eye_in_hand:Wrist D435",
+            "--sensor",
+            "realsense:static-1:static:Static D435",
+            "--hardware-trigger",
+            "--hardware-sync-group-id",
+            "mixed-depth-rig",
+            "--hardware-sync-master-sensor",
+            "realsense_d435:wrist-1",
+            "--max-depth-timestamp-skew-ms",
+            "1.5",
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    config = json.loads((run_root / RUN_CONFIG).read_text())
+    assert config["capture"]["synchronization"] == {
+        "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
+        "mode": "hardware_trigger",
+        "implementation": HARDWARE_TRIGGER_IMPLEMENTATION,
+        "scope": HARDWARE_TRIGGER_SCOPE,
+        "group_id": "mixed-depth-rig",
+        "master_sensor_key": "realsense_d435:wrist-1",
+        "max_depth_timestamp_skew_ms": 1.5,
+    }
 
 
 def test_create_run_config_cli_lists_sequence_choices() -> None:

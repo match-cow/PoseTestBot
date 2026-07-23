@@ -29,7 +29,9 @@ The rewrite already provides:
   RealSense/OAK live previews, the managed UGREEN WebRTC monitor, and
   run-scoped camera enable/disable selection that retains disabled camera
   identity and metadata;
-- transactional non-destructive synchronization and sync-quality reports;
+- transactional non-destructive synchronization and sync-quality reports,
+  including the implemented `run_config.v3` mixed-mount D435 depth-exposure
+  trigger contract, authoritative complete frame groups, and BOP frame sets;
 - PoseGridGen target bundles, attempt-scoped two-mode calibration, exact
   RealSense timebase/intrinsic compatibility gates, evidence-gated per-camera
   constant-offset search, deterministic common-bundle multi-camera ranking,
@@ -45,7 +47,7 @@ The rewrite already provides:
   and template thumbnails, target-specific artifact verification, interactive
   selected-template 3D previews, strict bundle/selection validation, durable
   selection recovery, run-owned placement and instance snapshots, BlenderProc
-  2.8.0 identity validation, and BOP v3 provenance sidecars;
+  2.8.0 identity validation, and BOP v4 provenance sidecars;
 - a packaged React operator console and scoped Flask APIs; and
 - the three acquisition-only gates: `rewrite_full_capture.v1`,
   `rewrite_calibration_validation.v1`, and
@@ -175,6 +177,63 @@ Depends on P0 and on an operator-ready robot/camera cell.
 - [ ] Preserve the plan, preflight, execution status/report/logs, hardware
   snapshot, raw folders, sync reports, and gate report as acceptance evidence.
 
+### Combined mixed-mount D435 hardware-sync acceptance
+
+This is a separate D435-only research acceptance, not an extension of the
+five-sensor run above. The software contract is complete, but no sync harness,
+camera, robot, or physical capture was accessed during its implementation.
+
+- [ ] Assign exact D435 identities and physically fixed mounts with at least one
+  `static` and one `eye_in_hand` view. Select exactly one internal master and
+  treat every other group member as a subordinate.
+- [ ] Create a fresh `run_config.v3` dataset run with
+  `capture.synchronization` set to `hardware_trigger`,
+  `realsense_inter_cam_sync`, and `depth_exposure`. Never reuse a run root that
+  contains capture status/report/logs, raw camera data, or raw robot poses.
+- [ ] Build and inspect the sync harness against Intel's D400 multi-camera
+  guidance. Retain continuity/electrical-limit evidence and verify the cable
+  routing remains safe through the complete iiwa motion envelope.
+- [ ] Without robot motion, verify master/subordinate
+  `inter_cam_sync_mode` configuration and read-back, global depth timestamps,
+  expected frame-number cadence, and a shared-view pulsed LED visible in the
+  depth/IR stream, or an equivalent exposure-timing test, at the intended frame
+  rate.
+- [ ] Record the passed external evidence with
+  `scripts/record_hardware_sync_qualification.py --confirm-passed`; retain its
+  run/config-bound `hardware_sync_qualification.json` and copied evidence.
+  Confirm the recorder refuses publication/replacement after any acquisition
+  evidence exists and directs the operator to a new run. Plan and preflight the
+  qualified run, then perform a short supervised robot trial only with explicit
+  authorization and both execution gates.
+- [ ] Verify that raw early/incomplete frames remain preserved while
+  `processed/synchronized/multiview_frame_groups.json` contains only complete
+  mixed-mount sets whose full earliest-to-latest timestamp span is within the
+  configured threshold, with valid robot-pose and source references. Exercise
+  the live camera-progress watchdog during the supervised trial. Verify its
+  default 12-frame-period deadline is clamped to 2–5 seconds and remains
+  independent of the robot UDP timeout; retain evidence that an intentionally
+  stopped test stream aborts local capture without deleting partial raw data.
+- [ ] Verify the succeeded full-capture report records the exact configuration
+  SHA-256, qualification-artifact SHA-256, immediate pre-receiver
+  revalidation, full mode, and both execution gates. Require authoritative
+  grouping to fail when that report or binding is changed.
+- [ ] Confirm representative complete depth sets consistently observe real
+  robot occlusion at the synchronized depth exposure. Retain the explicit
+  limitation that associated D435 RGB images are not hardware-certified and
+  cannot establish a shared moving-robot or changing-illumination instant.
+- [ ] Export BOP v4 and verify `bop/posetestbot_frame_sets.json` maps every
+  complete set to all expected scene/image views and carries the exact
+  capture-report configuration/qualification binding. Require
+  `rewrite_bop_export_readiness.v1` to fail if the current qualification,
+  capture report, authoritative groups, BOP frame sets, frame map, or exported
+  bytes disagree. Do not treat optional BlenderProc masks as robot-occluder
+  truth; the articulated iiwa is not rendered.
+- [ ] If the research later requires OAK or ZED views in the same hardware
+  exposure group, qualify trigger-capable replacement interfaces, a
+  level-compatible isolated distribution design, and new adapter contracts.
+  The current USB OAK-D Pro and USB ZED 2i must remain rejected rather than
+  silently timestamp-aligned inside a claimed hardware group.
+
 ## P3 — Nine-Frame Commissioning and Real Calibration
 
 ### Sunrise.Workbench and physical commissioning
@@ -223,7 +282,7 @@ capture/preflight, calibration, Cell, and rewrite-gate expectations.
   range-dependent scale anomaly; factory depth scale/alignment remains
   explicitly not recalibrated.
 
-## P4 — Real Pose-Template, BlenderProc, and BOP v3 Acceptance
+## P4 — Real Pose-Template, BlenderProc, and BOP v4 Acceptance
 
 No reusable calibration is currently published; the fresh calibration above
 is the first dependency for a real dataset run. Real BlenderProc 2.8.0 and BOP
@@ -241,10 +300,14 @@ acceptance also remain outstanding.
   hashes, stable `obj_id` reuse, and unique instance UUIDs.
 - [ ] Prepare and render real GT/masks with BlenderProc 2.8.0. Require camera,
   calibration, selection, geometry, renderer-version, GT-index, and instance
-  identity evidence to agree for every sensor/frame.
-- [ ] Export `bop_export_manifest.v3`, standard BOP scenes/models/targets, the
+  identity evidence to agree for every sensor/frame. Mark robot-intersected
+  real views as unsupported for synthetic robot-occlusion truth until approved
+  articulated iiwa geometry, joint state, and transforms are recorded.
+- [ ] Export `bop_export_manifest.v4`, standard BOP scenes/models/targets, the
   frame map, `posetestbot_pose_template.json`, and
-  `posetestbot_instance_map.json` transactionally.
+  `posetestbot_instance_map.json` transactionally. For a hardware-trigger run,
+  also require `posetestbot_frame_sets.json` to cover every authoritative
+  complete mixed-mount group.
 - [ ] Inspect representative RGB/depth/GT/masks and repeated-object rows, then
   pass `rewrite_bop_export_readiness.v1` on the real dataset.
 
@@ -259,10 +322,11 @@ These tasks are useful but do not replace the real-data gates.
 - [ ] Decide and document a compatibility sunset for `web_interface.py` and
   the direct single-sensor `scripts/sync_non_destructive.py` CLI. Do not remove
   either while external use is unknown.
-- [ ] Decide when legacy `run_config.v1`, calibration v1, and historical
-  BOP/sync readers can be retired. Until a data migration policy exists, they
-  remain supported readers rather than dead code. The object-registry path was
-  retired on 2026-07-21; object-bearing runs now require pose-template bundles.
+- [ ] Decide when legacy `run_config.v1`/`run_config.v2`, calibration v1, and
+  historical BOP/sync readers can be retired. Until a data migration policy
+  exists, they remain supported readers rather than dead code. The
+  object-registry path was retired on 2026-07-21; object-bearing runs now
+  require pose-template bundles.
 - [ ] Reduce the shared lazy Three.js/OrbitControls production chunk (about
   909 kB minified in the 2026-07-22 build) if operator load time or deployment
   limits justify it. Preserve the WebGL-free fallback and add a bundle-size

@@ -17,20 +17,28 @@ from posetestbot.io.artifacts import (
     CAPTURE_PLAN,
     DATASET_MANIFEST,
     FRAME_METADATA_JSONL,
+    HARDWARE_SYNC_QUALIFICATION,
     RAW_ROBOT_EE_POSES,
+    RUN_CONFIG,
 )
 from posetestbot.io.manifest import write_run_manifest
 from posetestbot.pipeline.capture_plan import build_capture_plan, write_capture_plan
 from posetestbot.pipeline.capture_execution import (
     CaptureExecutionPermissionError,
+    _hardware_sync_overlap_evidence,
+    _hardware_sync_readiness_errors,
     build_capture_execution_plan,
     run_capture_execution,
     write_capture_execution_plan_with_manifest,
 )
 from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
     create_run_config,
     sensor_config_from_token,
     write_run_config,
+)
+from posetestbot.sensors.hardware_sync_qualification import (
+    record_hardware_sync_qualification,
 )
 
 
@@ -167,6 +175,232 @@ def mark_sensor_ready(
     )
 
 
+def test_hardware_sync_readiness_requires_exact_adapter_readback(
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / FRAME_METADATA_JSONL
+    command = {
+        "hardware_sync": {
+            "implementation": "realsense_inter_cam_sync",
+            "role": "subordinate",
+            "group_id": "mixed-rig",
+            "scope": "depth_exposure",
+            "inter_cam_sync_mode_expected": 2,
+        }
+    }
+    records = [
+        {
+            "schema_version": "frame_metadata.v1",
+            "sensor_id": "hand",
+            "frame_index": index,
+            "frame_id": f"{index}.png",
+            "rgb_path": f"rgb/{index}.png",
+            "depth_path": f"depth/{index}.png",
+            "host_received_timestamp_ns": index + 1,
+            "capture_group_id": "mixed-rig",
+            "hardware_sync_role": "subordinate",
+            "hardware_sync_scope": "depth_exposure",
+            "hardware_sync_transport": "realsense_inter_cam_sync",
+            "inter_cam_sync_mode_configured": 2,
+            "inter_cam_sync_mode_readback": 2,
+            "depth_sensor_timestamp_ns": 1000 + index,
+            "depth_frame_number": 20 + index,
+            "depth_timestamp_domain": "global_time",
+        }
+        for index in range(3)
+    ]
+    metadata_path.write_text(
+        "".join(f"{json.dumps(record)}\n" for record in records)
+    )
+
+    assert _hardware_sync_readiness_errors(command, metadata_path) == []
+
+    records[2]["inter_cam_sync_mode_readback"] = 0
+    metadata_path.write_text(
+        "".join(f"{json.dumps(record)}\n" for record in records)
+    )
+    errors = _hardware_sync_readiness_errors(command, metadata_path)
+    assert any("inter_cam_sync_mode_readback=0, expected 2" in item for item in errors)
+
+
+def _write_hardware_sync_overlap_sensor(
+    root: Path,
+    *,
+    device_id: str,
+    role: str,
+    timestamp_ns: int,
+    transport: str = "realsense_inter_cam_sync",
+    max_skew_ms: float = 2.0,
+    record_count: int = 3,
+) -> dict:
+    output = root / f"realsense_{device_id}"
+    output.mkdir(parents=True)
+    mode = 1 if role == "master" else 2
+    records = [
+        {
+            "schema_version": "frame_metadata.v1",
+            "sensor_id": device_id,
+            "frame_index": index,
+            "frame_id": f"{index}.png",
+            "rgb_path": f"rgb/{index}.png",
+            "depth_path": f"depth/{index}.png",
+            "host_received_timestamp_ns": (
+                timestamp_ns + index * 33_000_000
+            ),
+            "capture_group_id": "mixed-rig",
+            "hardware_sync_role": role,
+            "hardware_sync_scope": "depth_exposure",
+            "hardware_sync_transport": transport,
+            "inter_cam_sync_mode_configured": mode,
+            "inter_cam_sync_mode_readback": mode,
+            "depth_sensor_timestamp_ns": (
+                timestamp_ns + index * 33_000_000
+            ),
+            "depth_frame_number": index + 1,
+            "depth_timestamp_domain": "global_time",
+        }
+        for index in range(record_count)
+    ]
+    (output / FRAME_METADATA_JSONL).write_text(
+        "".join(json.dumps(record) + "\n" for record in records)
+    )
+    return {
+        "name": f"capture-{device_id}",
+        "device_id": device_id,
+        "output_folder": output.as_posix(),
+        "hardware_sync": {
+            "implementation": "realsense_inter_cam_sync",
+            "role": role,
+            "group_id": "mixed-rig",
+            "scope": "depth_exposure",
+            "sensor_key": f"realsense_d435:{device_id}",
+            "inter_cam_sync_mode_expected": mode,
+            "max_depth_timestamp_skew_ms": max_skew_ms,
+        },
+    }
+
+
+def test_hardware_sync_overlap_requires_a_complete_group_within_skew(
+    tmp_path: Path,
+) -> None:
+    commands = [
+        _write_hardware_sync_overlap_sensor(
+            tmp_path,
+            device_id="master",
+            role="master",
+            timestamp_ns=10_000_000,
+        ),
+        _write_hardware_sync_overlap_sensor(
+            tmp_path,
+            device_id="wrist",
+            role="subordinate",
+            timestamp_ns=11_000_000,
+        ),
+    ]
+
+    evidence = _hardware_sync_overlap_evidence(commands)
+
+    assert evidence is not None
+    assert evidence["master_sensor_key"] == "realsense_d435:master"
+    assert evidence["observed_max_abs_depth_timestamp_skew_ns"] == 1_000_000
+    assert evidence["observed_max_depth_timestamp_span_ns"] == 1_000_000
+    assert evidence["observed_consecutive_group_count"] == 3
+    assert all(
+        group["depth_timestamp_span_ns"] == 1_000_000
+        for group in evidence["groups"]
+    )
+    assert all(
+        set(group["frames"])
+        == {
+            "realsense_d435:master",
+            "realsense_d435:wrist",
+        }
+        for group in evidence["groups"]
+    )
+
+    wrist_metadata = (
+        tmp_path / "realsense_wrist" / FRAME_METADATA_JSONL
+    )
+    wrist_records = [
+        json.loads(line) for line in wrist_metadata.read_text().splitlines()
+    ]
+    for wrist_record in wrist_records:
+        wrist_record["depth_sensor_timestamp_ns"] += 3_000_001
+    wrist_metadata.write_text(
+        "".join(json.dumps(record) + "\n" for record in wrist_records)
+    )
+    assert _hardware_sync_overlap_evidence(commands) is None
+
+    for index, wrist_record in enumerate(wrist_records):
+        wrist_record["depth_sensor_timestamp_ns"] = (
+            11_000_000 + index * 33_000_000
+        )
+    wrist_records[1]["depth_frame_number"] = 7
+    wrist_metadata.write_text(
+        "".join(json.dumps(record) + "\n" for record in wrist_records)
+    )
+    assert _hardware_sync_overlap_evidence(commands) is None
+
+
+def test_hardware_sync_overlap_enforces_full_three_camera_timestamp_span(
+    tmp_path: Path,
+) -> None:
+    commands = [
+        _write_hardware_sync_overlap_sensor(
+            tmp_path,
+            device_id="master",
+            role="master",
+            timestamp_ns=10_000_000,
+            max_skew_ms=2.0,
+        ),
+        _write_hardware_sync_overlap_sensor(
+            tmp_path,
+            device_id="early",
+            role="subordinate",
+            timestamp_ns=8_500_000,
+            max_skew_ms=2.0,
+        ),
+        _write_hardware_sync_overlap_sensor(
+            tmp_path,
+            device_id="late",
+            role="subordinate",
+            timestamp_ns=11_500_000,
+            max_skew_ms=2.0,
+        ),
+    ]
+
+    # Both subordinates are individually within 2 ms of the master, but the
+    # complete group spans 3 ms and therefore must not authorize robot START.
+    assert _hardware_sync_overlap_evidence(commands) is None
+
+
+def test_hardware_sync_overlap_rejects_wrong_transport_and_unsafe_skew(
+    tmp_path: Path,
+) -> None:
+    commands = [
+        _write_hardware_sync_overlap_sensor(
+            tmp_path,
+            device_id="master",
+            role="master",
+            timestamp_ns=10_000_000,
+        ),
+        _write_hardware_sync_overlap_sensor(
+            tmp_path,
+            device_id="wrist",
+            role="subordinate",
+            timestamp_ns=11_000_000,
+            transport="host_clock",
+        ),
+    ]
+
+    with pytest.raises(RuntimeError, match="hardware_sync_transport"):
+        _hardware_sync_overlap_evidence(commands)
+
+    commands[1]["hardware_sync"]["max_depth_timestamp_skew_ms"] = 6.0
+    with pytest.raises(RuntimeError, match="assignments disagree|within"):
+        _hardware_sync_overlap_evidence(commands)
+
+
 def fake_realsense_status(*device_ids: str) -> dict:
     status = fake_sensor_status()
     status["families"][0]["devices"] = [
@@ -211,6 +445,12 @@ def test_capture_execution_plan_selects_full_capture_roles(tmp_path: Path) -> No
     gates = {gate["name"]: gate for gate in plan["gates"]}
     assert gates["camera_permission"]["status"] == "ok"
     assert gates["capture_plan_preflight"]["status"] == "ok"
+    assert plan["execution_strategy"][
+        "camera_metadata_idle_timeout_s"
+    ] == 2.0
+    assert plan["execution_strategy"][
+        "camera_metadata_idle_timeout_source"
+    ] == "capture_fps_derived"
 
 
 def test_capture_execution_plan_blocks_until_both_permissions_are_allowed(
@@ -453,6 +693,37 @@ def test_capture_execution_validates_live_sensor_preflight_before_supervisor_art
     assert not (run_root / DATASET_MANIFEST).exists()
 
 
+@pytest.mark.parametrize("timeout_s", [0, 5.001, float("inf"), True])
+def test_capture_execution_rejects_unsafe_camera_metadata_timeout(
+    tmp_path: Path,
+    timeout_s,
+) -> None:
+    run_root, _config = configured_run(
+        tmp_path,
+        "invalid-camera-metadata-timeout",
+    )
+    before = filesystem_snapshot(run_root)
+
+    def forbidden_discovery():
+        raise AssertionError(
+            "camera metadata timeout validation must precede discovery"
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="camera_metadata_idle_timeout_s",
+    ):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            camera_metadata_idle_timeout_s=timeout_s,
+            collect_sensors=forbidden_discovery,
+        )
+
+    assert filesystem_snapshot(run_root) == before
+
+
 @pytest.mark.parametrize("tampered_role", ["sensor_capture", "robot_pose_receiver"])
 def test_capture_execution_rejects_any_noncanonical_persisted_command_before_mutation(
     tmp_path: Path,
@@ -632,6 +903,18 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
     ] == "7"
     assert report["receive_start_timeout_s"] == 11
     assert report["receive_idle_timeout_s"] == 7
+    assert report["camera_metadata_idle_timeout_s"] == 2.0
+    assert report["camera_metadata_idle_timeout_source"] == (
+        "capture_fps_derived"
+    )
+    persisted_status = json.loads(
+        (run_root / CAPTURE_EXECUTION_STATUS).read_text()
+    )
+    assert persisted_status["receive_idle_timeout_s"] == 7
+    assert persisted_status["camera_metadata_idle_timeout_s"] == 2.0
+    assert persisted_status["camera_metadata_idle_timeout_source"] == (
+        "capture_fps_derived"
+    )
     planned_receiver = next(
         command
         for command in report["capture_execution_plan"]["selected_commands"]
@@ -989,6 +1272,373 @@ def test_capture_execution_never_starts_receiver_with_only_one_metadata_record(
     ] == 3
 
 
+def configured_hardware_sync_run(tmp_path: Path, name: str) -> Path:
+    run_root = tmp_path / name
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            fps=6,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "master",
+                    "Static D435",
+                    mounting_mode="static",
+                ),
+                SensorRunConfig(
+                    "realsense_d435",
+                    "wrist",
+                    "Wrist D435",
+                    mounting_mode="eye_in_hand",
+                ),
+            ),
+            synchronization={
+                "schema_version": "capture_synchronization.v1",
+                "mode": "hardware_trigger",
+                "implementation": "realsense_inter_cam_sync",
+                "scope": "depth_exposure",
+                "group_id": "mixed-rig",
+                "master_sensor_key": "realsense_d435:master",
+                "max_depth_timestamp_skew_ms": 2.0,
+            },
+        ),
+    )
+    qualification_evidence = tmp_path / f"{name}-pulse-trace.csv"
+    qualification_evidence.write_text("t,master,wrist\n0,1,1\n")
+    record_hardware_sync_qualification(
+        run_root,
+        operator="pytest",
+        method="pulsed_light",
+        observed_max_depth_timestamp_skew_ms=1.0,
+        evidence_paths=[qualification_evidence],
+        confirm_passed=True,
+    )
+    return run_root
+
+
+def test_hardware_sync_capture_never_starts_robot_without_sustained_overlap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = tmp_path / "hardware-no-overlap"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            fps=6,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "master",
+                    "Static D435",
+                    mounting_mode="static",
+                ),
+                SensorRunConfig(
+                    "realsense_d435",
+                    "wrist",
+                    "Wrist D435",
+                    mounting_mode="eye_in_hand",
+                ),
+            ),
+            synchronization={
+                "schema_version": "capture_synchronization.v1",
+                "mode": "hardware_trigger",
+                "implementation": "realsense_inter_cam_sync",
+                "scope": "depth_exposure",
+                "group_id": "mixed-rig",
+                "master_sensor_key": "realsense_d435:master",
+                "max_depth_timestamp_skew_ms": 2.0,
+            },
+        ),
+    )
+    qualification_evidence = tmp_path / "pulse-trace.csv"
+    qualification_evidence.write_text("t,master,wrist\n0,1,1\n")
+    record_hardware_sync_qualification(
+        run_root,
+        operator="pytest",
+        method="pulsed_light",
+        observed_max_depth_timestamp_skew_ms=1.0,
+        evidence_paths=[qualification_evidence],
+        confirm_passed=True,
+    )
+    receiver_commands: list[list[str]] = []
+    camera_processes: list[FakePersistentProcess] = []
+
+    def fake_popen(command, **kwargs):
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_commands.append(list(command))
+            raise AssertionError("robot receiver must not start without overlap")
+        device_id = command[command.index("--device") + 1]
+        role = command[command.index("--hardware-sync-role") + 1]
+        _write_hardware_sync_overlap_sensor(
+            run_root,
+            device_id=device_id,
+            role=role,
+            timestamp_ns=(
+                10_000_000 if role == "master" else 20_000_000
+            ),
+        )
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        camera_processes.append(process)
+        return process
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -15
+
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.subprocess.Popen",
+        fake_popen,
+    )
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.time.sleep",
+        lambda _delay: None,
+    )
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="overlap deadline expired"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=lambda: fake_realsense_status("master", "wrist"),
+            startup_wait_s=0,
+            camera_startup_attempts=1,
+        )
+
+    assert receiver_commands == []
+    assert len(camera_processes) == 2
+    assert all(process.returncode == -15 for process in camera_processes)
+    assert not (run_root / RAW_ROBOT_EE_POSES).exists()
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    assert report["status"] == "failed"
+    assert report["hardware_sync_start_evidence"] is None
+
+
+def test_hardware_sync_capture_revalidates_run_config_digest_before_receiver(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = configured_hardware_sync_run(
+        tmp_path,
+        "hardware-config-changed-after-cameras",
+    )
+    receiver_commands: list[list[str]] = []
+    camera_processes: list[FakePersistentProcess] = []
+
+    def fake_popen(command, **kwargs):
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_commands.append(list(command))
+            raise AssertionError(
+                "receiver must not start after hardware contract mutation"
+            )
+        device_id = command[command.index("--device") + 1]
+        role = command[command.index("--hardware-sync-role") + 1]
+        _write_hardware_sync_overlap_sensor(
+            run_root,
+            device_id=device_id,
+            role=role,
+            timestamp_ns=(
+                10_000_000 if role == "master" else 11_000_000
+            ),
+        )
+        if device_id == "wrist":
+            config = json.loads((run_root / RUN_CONFIG).read_text())
+            config["capture"]["synchronization"][
+                "max_depth_timestamp_skew_ms"
+            ] = 1.5
+            (run_root / RUN_CONFIG).write_text(json.dumps(config))
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        camera_processes.append(process)
+        return process
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -15
+
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.subprocess.Popen",
+        fake_popen,
+    )
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="contract digest changed"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=lambda: fake_realsense_status("master", "wrist"),
+            camera_startup_attempts=1,
+        )
+
+    assert receiver_commands == []
+    assert len(camera_processes) == 2
+    assert all(process.returncode == -15 for process in camera_processes)
+    assert not (run_root / RAW_ROBOT_EE_POSES).exists()
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    assert report["status"] == "failed"
+    assert report["hardware_sync_start_evidence"] is not None
+    assert report["hardware_sync_execution_binding"][
+        "revalidated_immediately_before_receiver_spawn"
+    ] is False
+
+
+def test_hardware_sync_capture_revalidates_unchanged_binding_and_starts_receiver(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = configured_hardware_sync_run(
+        tmp_path,
+        "hardware-binding-unchanged",
+    )
+    receiver_commands: list[list[str]] = []
+    camera_processes: list[FakePersistentProcess] = []
+
+    def fake_popen(command, **kwargs):
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_commands.append(list(command))
+            (run_root / RAW_ROBOT_EE_POSES).write_text(
+                json.dumps({"0": {"motion": "circ_far", "pose": {"X": 1}}})
+            )
+            return FakeBackgroundProcess(list(command), kwargs["stdout"])
+        device_id = command[command.index("--device") + 1]
+        role = command[command.index("--hardware-sync-role") + 1]
+        _write_hardware_sync_overlap_sensor(
+            run_root,
+            device_id=device_id,
+            role=role,
+            timestamp_ns=(
+                10_000_000 if role == "master" else 11_000_000
+            ),
+        )
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        camera_processes.append(process)
+        return process
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -15
+
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.subprocess.Popen",
+        fake_popen,
+    )
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    _report_path, report = run_capture_execution(
+        run_root,
+        allow_cameras=True,
+        allow_real_robot=True,
+        collect_sensors=lambda: fake_realsense_status("master", "wrist"),
+        camera_startup_attempts=1,
+    )
+
+    assert len(receiver_commands) == 1
+    assert len(camera_processes) == 2
+    assert all(process.returncode == -15 for process in camera_processes)
+    assert report["status"] == "succeeded"
+    assert report["hardware_sync_execution_binding"][
+        "revalidated_immediately_before_receiver_spawn"
+    ] is True
+    assert report["hardware_sync_start_evidence"][
+        "observed_max_depth_timestamp_span_ns"
+    ] == 1_000_000
+
+
+def test_hardware_sync_capture_revalidates_qualification_before_receiver(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = configured_hardware_sync_run(
+        tmp_path,
+        "hardware-qualification-changed-after-cameras",
+    )
+    original_qualification = json.loads(
+        (run_root / HARDWARE_SYNC_QUALIFICATION).read_text()
+    )
+    receiver_commands: list[list[str]] = []
+    camera_processes: list[FakePersistentProcess] = []
+
+    def fake_popen(command, **kwargs):
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            receiver_commands.append(list(command))
+            raise AssertionError(
+                "receiver must not start after qualification replacement"
+            )
+        device_id = command[command.index("--device") + 1]
+        role = command[command.index("--hardware-sync-role") + 1]
+        _write_hardware_sync_overlap_sensor(
+            run_root,
+            device_id=device_id,
+            role=role,
+            timestamp_ns=(
+                10_000_000 if role == "master" else 11_000_000
+            ),
+        )
+        if device_id == "wrist":
+            # The supported recorder now shares the run-config transaction
+            # and refuses publication once capture evidence exists. Simulate
+            # an out-of-band file edit to prove the final pre-Popen validation
+            # still detects a changed, otherwise structurally valid artifact.
+            replacement = json.loads(
+                (run_root / HARDWARE_SYNC_QUALIFICATION).read_text()
+            )
+            replacement["operator"] = "out-of-band-replacement"
+            (run_root / HARDWARE_SYNC_QUALIFICATION).write_text(
+                json.dumps(replacement)
+            )
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        camera_processes.append(process)
+        return process
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -15
+
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.subprocess.Popen",
+        fake_popen,
+    )
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="qualification changed"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=lambda: fake_realsense_status("master", "wrist"),
+            camera_startup_attempts=1,
+        )
+
+    assert receiver_commands == []
+    assert len(camera_processes) == 2
+    assert all(process.returncode == -15 for process in camera_processes)
+    assert not (run_root / RAW_ROBOT_EE_POSES).exists()
+    current_qualification = json.loads(
+        (run_root / HARDWARE_SYNC_QUALIFICATION).read_text()
+    )
+    assert current_qualification != original_qualification
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    assert report["status"] == "failed"
+    assert report["hardware_sync_start_evidence"] is not None
+    assert report["hardware_sync_execution_binding"][
+        "revalidated_immediately_before_receiver_spawn"
+    ] is False
+
+
 def test_capture_execution_monitors_camera_exit_during_readiness_window(
     tmp_path: Path,
     monkeypatch,
@@ -1023,6 +1673,144 @@ def test_capture_execution_monitors_camera_exit_during_readiness_window(
     assert camera["status"] == "failed"
     assert camera["returncode"] == 0
     assert camera["termination_reason"] == "exited_before_receiver_start"
+
+
+def test_capture_execution_aborts_alive_camera_with_stalled_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root, _config = configured_run(tmp_path, "camera-metadata-stalls")
+    spawned: list[FakePersistentProcess] = []
+
+    def fake_popen(command, **kwargs):
+        if not any(
+            item.endswith("pose_receiver_udp_json.py") for item in command
+        ):
+            mark_sensor_ready(run_root)
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        spawned.append(process)
+        return process
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -15
+
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.subprocess.Popen",
+        fake_popen,
+    )
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="stopped advancing"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=fake_sensor_status,
+            timeout_s=2,
+            camera_metadata_idle_timeout_s=0.01,
+        )
+
+    assert len(spawned) == 2
+    assert all(process.returncode == -15 for process in spawned)
+    assert (
+        run_root / "realsense_123" / FRAME_METADATA_JSONL
+    ).is_file()
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    camera = next(
+        process
+        for process in report["processes"]
+        if process["role"] == "sensor_capture"
+    )
+    assert report["status"] == "failed"
+    assert camera["status"] == "failed"
+    assert camera["termination_reason"] == "camera_metadata_stalled"
+    assert camera["metadata_record_count"] == 3
+    assert camera["metadata_last_frame_index"] == 2
+    assert camera["metadata_idle_elapsed_s"] >= 0.01
+    assert camera["metadata_idle_timeout_s"] == 0.01
+    assert not (run_root / RAW_ROBOT_EE_POSES).exists()
+
+
+def test_capture_execution_rejects_camera_stall_before_short_receiver_finishes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root, _config = configured_run(
+        tmp_path,
+        "camera-stalls-before-receiver-finishes",
+    )
+    clock = {"monotonic": 0.0}
+    camera_processes: list[FakePersistentProcess] = []
+
+    class FakeReceiverFinishesAfterCameraDeadline(FakeBackgroundProcess):
+        def wait(self, timeout=None):
+            del timeout
+            # The robot-side command finishes well within its independent
+            # default 60-second packet-idle limit, but after the FPS-derived
+            # camera metadata freshness deadline.
+            clock["monotonic"] += 3.0
+            self.returncode = 0
+            return 0
+
+    def fake_popen(command, **kwargs):
+        if any(item.endswith("pose_receiver_udp_json.py") for item in command):
+            return FakeReceiverFinishesAfterCameraDeadline(
+                list(command),
+                kwargs["stdout"],
+            )
+        mark_sensor_ready(run_root)
+        process = FakePersistentProcess(list(command), kwargs["stdout"])
+        camera_processes.append(process)
+        return process
+
+    def fake_terminate(process, *, timeout_s):
+        del timeout_s
+        process.returncode = -15
+
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.time.monotonic",
+        lambda: clock["monotonic"],
+    )
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.subprocess.Popen",
+        fake_popen,
+    )
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        fake_terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="stopped advancing"):
+        run_capture_execution(
+            run_root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            collect_sensors=fake_sensor_status,
+        )
+
+    assert len(camera_processes) == 1
+    assert camera_processes[0].returncode == -15
+    report = json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())
+    assert report["status"] == "failed"
+    assert report["receive_idle_timeout_s"] == 60.0
+    assert report["camera_metadata_idle_timeout_s"] == 2.0
+    assert report["camera_metadata_idle_timeout_source"] == (
+        "capture_fps_derived"
+    )
+    camera = next(
+        process
+        for process in report["processes"]
+        if process["role"] == "sensor_capture"
+    )
+    assert camera["termination_reason"] == "camera_metadata_stalled"
+    assert camera["metadata_idle_elapsed_s"] == 3.0
+    assert (
+        run_root / "realsense_123" / FRAME_METADATA_JSONL
+    ).is_file()
 
 
 def test_capture_execution_reloads_child_manifest_updates_before_final_write(

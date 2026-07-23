@@ -154,12 +154,17 @@ Do not reintroduce downstream estimator/evaluator behavior here:
 - Run configuration artifact: `run_config.json`.
 - Run preflight artifact: `run_preflight_report.json`.
 - Hardware snapshot artifact: `hardware_status_report.json`.
+- Run/config-bound physical depth-sync qualification:
+  `hardware_sync_qualification.json`, with copied evidence below
+  `hardware_sync_qualification_evidence/`.
 - Capture artifacts: `capture_plan.json`,
   `capture_plan_preflight_report.json`, `capture_execution_plan.json`,
   `capture_execution_status.json`, `capture_execution_report.json`,
   and `capture_execution_logs/`.
 - Derived sync report: `sync_report.json`.
 - Run-level sync quality report: `sync_quality_report.json`.
+- Authoritative complete mixed-mount hardware-sync groups:
+  `processed/synchronized/multiview_frame_groups.json`.
 - Calibration artifacts: `calibration_preflight_report.json`,
   `calibration_target.json`, `intrinsic_calibration_profiles.json`,
   attempt-level `intrinsic_comparison.json`,
@@ -196,7 +201,8 @@ Do not reintroduce downstream estimator/evaluator behavior here:
   `.pose_template_selection.transaction.json` journal while replacement is in
   progress, and `object_instances.json`.
 - BOP export artifacts: `bop/bop_export_manifest.json`,
-  `bop/posetestbot_bop_frame_map.json`, `bop/test_targets_bop19.json`,
+  `bop/posetestbot_bop_frame_map.json`, `bop/posetestbot_frame_sets.json`,
+  `bop/test_targets_bop19.json`,
   `bop/models/models_info.json`, pose-template
   `bop/posetestbot_pose_template.json` and `bop/posetestbot_instance_map.json`, optional
   `bop/posetestbot_multiview_targets.json`, and optional
@@ -255,6 +261,33 @@ not open hardware. Update it first when adding or renaming a sensor adapter.
 
 RealSense, OAK-D Pro, and ZED 2i capture scripts should write frames through
 `write_legacy_rgbd_frame` or `write_aligned_rgbd_frame`.
+
+`run_config.v3` owns the explicit `capture.synchronization` contract.
+`timestamp_aligned` remains the general default. The only supported
+`hardware_trigger` implementation on the current lab inventory is
+`realsense_inter_cam_sync` with `scope=depth_exposure`, across exact-ID D435
+cameras that include at least one `static` and one `eye_in_hand` view. Exactly
+one is the master and the others are subordinates. This does not certify D435
+RGB exposure synchronization. The USB OAK-D Pro and USB ZED 2i cannot join that
+trigger group; reject such configurations instead of silently falling back.
+Hardware-trigger capture and synchronization require a current
+`hardware_sync_qualification.json` produced from operator-confirmed external
+exposure-timing evidence. The recorder must never open cameras or contact the
+robot. Changing the resolution, FPS, trigger policy, camera membership, mount,
+orientation, or role invalidates qualification. Publish or replace
+qualification only before acquisition starts; once capture status/report/logs,
+raw camera data, or raw robot-pose evidence exists, it is immutable and a
+different qualification requires a new run.
+During supervised capture, require append-only camera metadata progress using
+the independent default of 12 planned frame periods clamped to 2–5 seconds,
+regardless of the robot UDP timeout. Preserve partial raw evidence on failure.
+A successful hardware-sync capture report must bind the exact configuration
+and qualification hashes after immediate pre-receiver revalidation. Carry that
+binding through authoritative groups and BOP frame sets, and require the BOP
+rewrite gate to compare it with the capture report and current qualification.
+Preserve early and incomplete raw frames, and treat only the complete groups in
+`processed/synchronized/multiview_frame_groups.json` as authoritative combined
+views.
 
 ## Pipeline Sequences
 

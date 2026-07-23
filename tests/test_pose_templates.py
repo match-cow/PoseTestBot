@@ -14,6 +14,7 @@ import trimesh
 
 from posetestbot.bop.writer import copy_bop_instance_models, export_sensor_scene_to_bop
 from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
     create_run_config,
     load_run_config_for_run_root,
     write_run_config,
@@ -768,7 +769,7 @@ def test_selection_resolution_blockers_and_object_instances(tmp_path: Path) -> N
         [50, 60, 30]
     )
     loaded_config = load_run_config_for_run_root(run)
-    assert loaded_config["schema_version"] == "run_config.v2"
+    assert loaded_config["schema_version"] == "run_config.v3"
     assert loaded_config["pose_template"]["template_uuid"] == bundle["template_uuid"]
     objects = prepare_object_instances(run)
     assert len(objects["instances"]) == 2
@@ -786,6 +787,104 @@ def test_selection_resolution_blockers_and_object_instances(tmp_path: Path) -> N
         )
     assert "blenderproc_render_plan.json" in conflict.value.blockers
     assert load_pose_template_selection(run)["bundle_sha256"] == bundle["bundle_sha256"]
+
+
+def test_pose_template_selection_preserves_hardware_sync_policy(
+    tmp_path: Path,
+) -> None:
+    catalog, record = managed_box(tmp_path)
+    library = tmp_path / "library"
+    bundle = generate_template_bundle(
+        template_configuration(record["catalog_uuid"]),
+        catalog_root=catalog,
+        library_root=library,
+    )
+    run = tmp_path / "hardware-run"
+    run.mkdir()
+    synchronization = {
+        "schema_version": "capture_synchronization.v1",
+        "mode": "hardware_trigger",
+        "implementation": "realsense_inter_cam_sync",
+        "scope": "depth_exposure",
+        "group_id": "template-mixed-rig",
+        "master_sensor_key": "realsense_d435:static",
+        "max_depth_timestamp_skew_ms": 2.0,
+    }
+    write_run_config(
+        run,
+        create_run_config(
+            run_root=run,
+            dataset_mode="pose_template",
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "static",
+                    "Static",
+                    mounting_mode="static",
+                ),
+                SensorRunConfig(
+                    "realsense_d435",
+                    "hand",
+                    "Robot",
+                    mounting_mode="eye_in_hand",
+                ),
+            ),
+            synchronization=synchronization,
+        ),
+    )
+
+    select_pose_template(
+        run,
+        bundle["template_uuid"],
+        placement={"matrix": np.eye(4).tolist()},
+        confirmed=True,
+        operator="pytest",
+        library_root=library,
+    )
+
+    loaded_config = load_run_config_for_run_root(run)
+    assert loaded_config["schema_version"] == "run_config.v3"
+    assert loaded_config["capture"]["synchronization"] == synchronization
+
+
+def test_pose_template_selection_preserves_legacy_sync_inference_warning(
+    tmp_path: Path,
+) -> None:
+    catalog, record = managed_box(tmp_path)
+    library = tmp_path / "library"
+    bundle = generate_template_bundle(
+        template_configuration(record["catalog_uuid"]),
+        catalog_root=catalog,
+        library_root=library,
+    )
+    run = tmp_path / "legacy-run"
+    run.mkdir()
+    legacy_config = create_run_config(
+        run_root=run,
+        dataset_mode="pose_template",
+    ).to_dict()
+    legacy_config["schema_version"] = "run_config.v2"
+    legacy_config["capture"].pop("synchronization")
+    (run / "run_config.json").write_text(json.dumps(legacy_config))
+
+    select_pose_template(
+        run,
+        bundle["template_uuid"],
+        placement={"matrix": np.eye(4).tolist()},
+        confirmed=True,
+        operator="pytest",
+        library_root=library,
+    )
+
+    loaded_config = load_run_config_for_run_root(run)
+    assert loaded_config["schema_version"] == "run_config.v3"
+    assert loaded_config["capture"]["synchronization"]["mode"] == (
+        "timestamp_aligned"
+    )
+    assert any(
+        warning.get("code") == "legacy_capture_synchronization_inferred"
+        for warning in loaded_config.get("warnings", [])
+    )
 
 
 def test_bop_model_export_deduplicates_duplicate_instances(tmp_path: Path) -> None:

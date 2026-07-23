@@ -165,6 +165,84 @@ def test_capture_plan_treats_string_false_inverted_as_normal(tmp_path: Path) -> 
     assert plan["sensors"][0]["metadata"]["inverted"] is False
 
 
+def test_capture_plan_assigns_master_first_for_mixed_mount_hardware_sync(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-hardware-sync"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(
+            sensor_config_from_token(
+                "realsense:static-1:static:Static RealSense"
+            ),
+            sensor_config_from_token(
+                "realsense:hand-1:eye_in_hand:Robot RealSense"
+            ),
+        ),
+        synchronization={
+            "schema_version": "capture_synchronization.v1",
+            "mode": "hardware_trigger",
+            "implementation": "realsense_inter_cam_sync",
+            "scope": "depth_exposure",
+            "group_id": "mixed-rig-1",
+            "master_sensor_key": "realsense_d435:hand-1",
+            "max_depth_timestamp_skew_ms": 2.0,
+        },
+    ).to_dict()
+
+    plan = build_capture_plan(config, warmup_frames=30).to_dict()
+
+    assert plan["capture"]["synchronization"]["mode"] == "hardware_trigger"
+    cameras = plan["commands"][:-1]
+    assert [command["device_id"] for command in cameras] == [
+        "hand-1",
+        "static-1",
+    ]
+    assert [command["startup_order"] for command in cameras] == [20, 21]
+    assert [command["hardware_sync"]["role"] for command in cameras] == [
+        "master",
+        "subordinate",
+    ]
+    assert cameras[0]["hardware_sync"]["inter_cam_sync_mode_expected"] == 1
+    assert cameras[1]["hardware_sync"]["inter_cam_sync_mode_expected"] == 2
+    assert all(
+        command["hardware_sync"]["depth_exposure_synchronized"] is True
+        and command["hardware_sync"]["rgb_exposure_synchronized"] is False
+        for command in cameras
+    )
+    assert cameras[0]["command"][-6:] == [
+        "--hardware-sync-role",
+        "master",
+        "--hardware-sync-group-id",
+        "mixed-rig-1",
+        "--hardware-sync-scope",
+        "depth_exposure",
+    ]
+
+
+def test_capture_plan_rejects_finite_hardware_sync_capture(tmp_path: Path) -> None:
+    run_root = tmp_path / "run-finite-hardware-sync"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(
+            sensor_config_from_token("realsense:master:static:Master"),
+            sensor_config_from_token("realsense:slave:eye_in_hand:Slave"),
+        ),
+        synchronization={
+            "schema_version": "capture_synchronization.v1",
+            "mode": "hardware_trigger",
+            "implementation": "realsense_inter_cam_sync",
+            "scope": "depth_exposure",
+            "group_id": "finite-test",
+            "master_sensor_key": "realsense_d435:master",
+            "max_depth_timestamp_skew_ms": 2.0,
+        },
+    ).to_dict()
+
+    with pytest.raises(ValueError, match="must be long-running"):
+        build_capture_plan(config, max_frames=100)
+
+
 def test_capture_plan_stage_writes_manifest_artifact(tmp_path: Path) -> None:
     run_root = tmp_path / "run-cli"
     repo_root = Path(__file__).resolve().parents[1]

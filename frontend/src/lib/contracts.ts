@@ -192,6 +192,21 @@ export interface PipelineSequence {
   steps: Array<{ id: string; stage_id: string; [key: string]: JsonValue }>
 }
 
+export type CaptureSynchronization =
+  | {
+      schema_version: "capture_synchronization.v1"
+      mode: "timestamp_aligned"
+    }
+  | {
+      schema_version: "capture_synchronization.v1"
+      mode: "hardware_trigger"
+      implementation: "realsense_inter_cam_sync"
+      scope: "depth_exposure"
+      group_id: string
+      master_sensor_key: string
+      max_depth_timestamp_skew_ms: number
+    }
+
 export interface RunConfig {
   schema_version: string
   run_name: string
@@ -201,6 +216,7 @@ export interface RunConfig {
     resolution: string
     fps: number
     velocity_m_s: number
+    synchronization?: CaptureSynchronization
     sensors: Array<{
       sensor_type: string
       device_id: string

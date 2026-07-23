@@ -14,6 +14,25 @@ REALSENSE_D435_USB_PRODUCTS = {
     "0b07": "Intel RealSense D435",
     "0b3a": "Intel RealSense D435i",
 }
+REALSENSE_D435_MODEL_PATTERN = re.compile(
+    r"(?:^|[^A-Za-z0-9])D435i?(?:$|[^A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def is_realsense_d435_identity(
+    *,
+    name: str,
+    product_id: str | None,
+) -> bool:
+    """Return whether SDK identity evidence names a supported D435/D435i."""
+
+    normalized_product_id = str(product_id or "").strip().lower()
+    if normalized_product_id.startswith("0x"):
+        normalized_product_id = normalized_product_id[2:]
+    if normalized_product_id:
+        return normalized_product_id in REALSENSE_D435_USB_PRODUCTS
+    return REALSENSE_D435_MODEL_PATTERN.search(str(name or "")) is not None
 
 
 def _udev_properties_for_node(path: Path) -> dict[str, str]:
@@ -254,6 +273,15 @@ def discover_realsense_d435() -> list[SensorDeviceInfo]:
                     continue
                 if value:
                     metadata[metadata_key] = value
+            if not is_realsense_d435_identity(
+                name=str(name),
+                product_id=(
+                    str(metadata["product_id"])
+                    if metadata.get("product_id") is not None
+                    else None
+                ),
+            ):
+                continue
             usb_serial, video_metadata = _video_metadata_for_physical_port(
                 str(metadata.get("physical_port") or ""),
                 video_metadata_by_usb_serial,

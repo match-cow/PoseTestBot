@@ -3,6 +3,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from typing import Mapping
 
 from flask import Blueprint, Response, jsonify, request
 
@@ -44,6 +45,10 @@ from posetestbot.io.artifacts import (
     CAPTURE_EXECUTION_PLAN,
     CAPTURE_EXECUTION_STATUS,
     CAPTURE_PLAN,
+    DEPTH_DIR,
+    FRAME_METADATA_JSONL,
+    RAW_ROBOT_EE_POSES,
+    RGB_DIR,
     RUN_CONFIG,
     RUN_PREFLIGHT_REPORT,
 )
@@ -67,7 +72,9 @@ from posetestbot.pipeline.capture_execution import (
 )
 from posetestbot.pipeline.run_config import (
     build_sequence_job_from_run_config,
+    capture_synchronization_from_mapping,
     create_run_config,
+    fixed_transform_from_mapping,
     load_run_config_for_run_root,
     run_config_lock,
     sequence_plan_from_run_config,
@@ -282,13 +289,85 @@ def _persisted_capture_gate(value) -> str | None:
     return None
 
 
+def _raw_capture_evidence(run_root: str | Path) -> list[str]:
+    """Return material raw evidence that freezes hardware-sync semantics."""
+
+    root = Path(run_root)
+    evidence: list[str] = []
+    robot_poses = root / RAW_ROBOT_EE_POSES
+    if robot_poses.is_file():
+        evidence.append(RAW_ROBOT_EE_POSES)
+    if not root.is_dir():
+        return evidence
+    for child in sorted(root.iterdir()):
+        if not child.is_dir() or child.name == "processed":
+            continue
+        metadata = child / FRAME_METADATA_JSONL
+        if metadata.is_file():
+            evidence.append(f"{child.name}/{FRAME_METADATA_JSONL}")
+            continue
+        if any((child / RGB_DIR).glob("*.png")):
+            evidence.append(f"{child.name}/{RGB_DIR}")
+            continue
+        if any((child / DEPTH_DIR).glob("*.png")):
+            evidence.append(f"{child.name}/{DEPTH_DIR}")
+    return evidence
+
+
+def _hardware_sync_sensor_contract(sensors) -> list[tuple]:
+    """Return raw-data-relevant camera membership without mutable labels."""
+
+    contract = []
+    for sensor in sensors:
+        value = sensor.to_dict() if hasattr(sensor, "to_dict") else sensor
+        if not isinstance(value, Mapping):
+            continue
+        contract.append(
+            (
+                str(value.get("sensor_type") or ""),
+                str(value.get("device_id") or ""),
+                str(value.get("mounting_mode") or ""),
+                value.get("enabled", True) is True,
+                bool(value.get("inverted", False)),
+            )
+        )
+    return sorted(contract)
+
+
 def _run_config_from_payload(data: dict):
     run_root = data.get("run_root")
     if not run_root:
         raise ValueError("run_root is required")
+    try:
+        existing_config = load_run_config_for_run_root(run_root)
+    except FileNotFoundError:
+        existing_config = None
+    existing_capture = (
+        existing_config.get("capture")
+        if isinstance(existing_config, dict)
+        and isinstance(existing_config.get("capture"), dict)
+        else {}
+    )
+    existing_pipeline = (
+        existing_config.get("pipeline")
+        if isinstance(existing_config, dict)
+        and isinstance(existing_config.get("pipeline"), dict)
+        else {}
+    )
+    existing_frames = (
+        existing_config.get("frames")
+        if isinstance(existing_config, dict)
+        and isinstance(existing_config.get("frames"), dict)
+        else {}
+    )
     if "robot_mode" in data:
         raise ValueError("robot_mode is retired; run configs always use the real robot")
-    sequence_options = data.get("sequence_options", data.get("options", {}))
+    if "sequence_options" in data:
+        sequence_options = data["sequence_options"]
+    elif "options" in data:
+        sequence_options = data["options"]
+    else:
+        sequence_options = existing_pipeline.get("options", {})
     if isinstance(sequence_options, str):
         sequence_options = _json_object_from_text(
             sequence_options,
@@ -313,12 +392,61 @@ def _run_config_from_payload(data: dict):
         )
         if not sensors:
             raise ValueError("No connected sensors were detected")
+    elif "sensors" not in data and existing_capture.get("sensors"):
+        sensors = sensor_configs_from_values(
+            existing_capture["sensors"],
+            default_mounting_mode=mounting_mode,
+        )
     else:
         sensors = sensor_configs_from_values(
             data.get("sensors"),
             default_mounting_mode=mounting_mode,
         )
-    resolution = data.get("resolution", "720p")
+    resolution = data.get(
+        "resolution",
+        existing_capture.get("resolution", "720p"),
+    )
+    requested_fps = int(data.get("fps", existing_capture.get("fps", 6)))
+    existing_synchronization = (
+        existing_capture.get("synchronization")
+    )
+    requested_synchronization = (
+        data["synchronization"]
+        if "synchronization" in data
+        else existing_synchronization
+    )
+    existing_policy = capture_synchronization_from_mapping(
+        existing_synchronization
+    )
+    requested_policy = capture_synchronization_from_mapping(
+        requested_synchronization
+    )
+    hardware_contract_changed = (
+        existing_policy.to_dict() != requested_policy.to_dict()
+        or (
+            existing_policy.mode == "hardware_trigger"
+            and (
+                _hardware_sync_sensor_contract(
+                    existing_capture.get("sensors", [])
+                )
+                != _hardware_sync_sensor_contract(sensors)
+                or str(existing_capture.get("resolution")) != str(resolution)
+                or int(existing_capture.get("fps", 0)) != requested_fps
+            )
+        )
+    )
+    if (
+        hardware_contract_changed
+        and "hardware_trigger" in {existing_policy.mode, requested_policy.mode}
+    ):
+        evidence = _raw_capture_evidence(run_root)
+        if evidence:
+            raise ValueError(
+                "Cannot change the hardware_trigger policy, camera membership, "
+                "mounting, orientation, resolution, or frame rate after raw "
+                "capture or robot-pose evidence exists: "
+                + ", ".join(evidence)
+            )
     expected_calibration_bundle = data.get("expected_calibration_bundle_sha256")
     if expected_calibration_bundle is not None and (
         not isinstance(expected_calibration_bundle, str)
@@ -331,13 +459,19 @@ def _run_config_from_payload(data: dict):
         raise ValueError(
             "expected_calibration_bundle_sha256 must be a lowercase SHA-256 digest or null"
         )
+    if "calibration_profiles" in data:
+        requested_calibration_profiles = data["calibration_profiles"]
+    elif existing_config is not None:
+        requested_calibration_profiles = existing_config.get("calibration_profiles")
+    else:
+        requested_calibration_profiles = None
     selection_defaults = selected_calibration_run_config_defaults(
         run_root,
         sensors=sensors,
         resolution=resolution,
         requested_calibration_profiles=(
-            str(data["calibration_profiles"])
-            if data.get("calibration_profiles")
+            str(requested_calibration_profiles)
+            if requested_calibration_profiles
             else None
         ),
         infer_when_omitted="calibration_profiles" not in data,
@@ -358,44 +492,95 @@ def _run_config_from_payload(data: dict):
             )
             for sensor in sensors
         )
-    try:
-        existing_config = load_run_config_for_run_root(run_root)
+    if existing_config is not None:
         calibration_target = existing_config.get("calibration_target")
         dataset_mode = existing_config.get("dataset_mode", "objectless")
         pose_template = existing_config.get("pose_template")
-    except FileNotFoundError:
+    else:
         calibration_target = None
         dataset_mode = "objectless"
         pose_template = None
     requested_dataset_mode = data.get("dataset_mode", dataset_mode)
+    if selection_defaults is not None:
+        calibration_profiles = selection_defaults["calibration_profiles"]
+        intrinsic_calibration_profiles = selection_defaults[
+            "intrinsic_calibration_profiles"
+        ]
+        calibration_profile_selection = selection_defaults[
+            "calibration_profile_selection"
+        ]
+    else:
+        calibration_profiles = (
+            data["calibration_profiles"]
+            if "calibration_profiles" in data
+            else (
+                existing_config.get("calibration_profiles")
+                if existing_config is not None
+                else None
+            )
+        )
+        intrinsic_calibration_profiles = (
+            data["intrinsic_calibration_profiles"]
+            if "intrinsic_calibration_profiles" in data
+            else (
+                existing_config.get("intrinsic_calibration_profiles")
+                if existing_config is not None
+                else None
+            )
+        )
+        calibration_profile_selection = (
+            existing_config.get("calibration_profile_selection")
+            if existing_config is not None
+            and "calibration_profiles" not in data
+            and "intrinsic_calibration_profiles" not in data
+            else None
+        )
+    fixed_transforms = tuple(
+        fixed_transform_from_mapping(item)
+        for item in existing_frames.get("fixed_transforms", [])
+    )
+    velocity_m_s = (
+        data["velocity"]
+        if "velocity" in data
+        else data.get(
+            "velocity_m_s",
+            existing_capture.get("velocity_m_s", 0.2),
+        )
+    )
     return create_run_config(
         run_root=run_root,
-        run_name=data.get("run_name"),
+        run_name=data.get(
+            "run_name",
+            existing_config.get("run_name") if existing_config is not None else None,
+        ),
         resolution=resolution,
-        fps=int(data.get("fps", 6)),
-        velocity_m_s=float(data.get("velocity", data.get("velocity_m_s", 0.2))),
+        fps=requested_fps,
+        velocity_m_s=float(velocity_m_s),
         sensors=sensors,
         dataset_mode=requested_dataset_mode,
         pose_template=(pose_template if requested_dataset_mode == "pose_template" else None),
-        calibration_profiles=(
-            selection_defaults["calibration_profiles"]
-            if selection_defaults is not None
-            else data.get("calibration_profiles") or None
-        ),
-        intrinsic_calibration_profiles=(
-            selection_defaults["intrinsic_calibration_profiles"]
-            if selection_defaults is not None
-            else data.get("intrinsic_calibration_profiles") or None
-        ),
-        calibration_profile_selection=(
-            selection_defaults["calibration_profile_selection"]
-            if selection_defaults is not None
-            else None
-        ),
+        calibration_profiles=calibration_profiles or None,
+        intrinsic_calibration_profiles=intrinsic_calibration_profiles or None,
+        calibration_profile_selection=calibration_profile_selection,
         calibration_target=calibration_target,
-        sequence_id=data.get("sequence", data.get("sequence_id", "real_full_capture_validation")),
+        sequence_id=(
+            data["sequence"]
+            if "sequence" in data
+            else data.get(
+                "sequence_id",
+                existing_pipeline.get(
+                    "sequence_id",
+                    "real_full_capture_validation",
+                ),
+            )
+        ),
         sequence_options=sequence_options,
-        plan_only=_truthy(data.get("plan_only"), default=True),
+        plan_only=_truthy(
+            data.get("plan_only"),
+            default=bool(existing_pipeline.get("plan_only", True)),
+        ),
+        fixed_transforms=fixed_transforms,
+        synchronization=requested_policy,
     )
 
 

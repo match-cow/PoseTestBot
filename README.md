@@ -23,7 +23,8 @@ project.
 - RealSense, OAK-D Pro, and ZED 2i sensor registry/status/capture contracts.
 - Run-scoped camera enable/disable controls that retain configured camera
   identity and calibration metadata while excluding disabled cameras from work.
-- Non-destructive synchronization under `processed/synchronized/`.
+- Non-destructive timestamp alignment and fail-closed mixed-mount RealSense
+  depth-exposure hardware synchronization under `processed/synchronized/`.
 - Sync quality reporting.
 - Pinned PoseGridGen target preview/generation, immutable target bundles,
   legacy ArUcoGridGen import, split marker detection/pose solving,
@@ -38,8 +39,8 @@ project.
   templates sourced from filtered active catalogue workpieces, preview-rich run
   placement, and per-instance object GT.
 - BlenderProc preparation/render planning for optional GT and masks.
-- BOP dataset export, model metadata, targets, frame maps, and optional
-  multiview/COCO sidecars.
+- BOP dataset export, model metadata, targets, frame maps, authoritative
+  hardware-synchronized frame sets, and optional multiview/COCO sidecars.
 - React/shadcn operator console backed by the Flask API and local job runner.
 
 ## Operator Workflows
@@ -136,6 +137,61 @@ least one camera must remain enabled. Regenerate any already-written capture
 plan and preflight after changing this selection so their evidence matches the
 current run configuration.
 
+`run_config.v3` also makes the acquisition timing claim explicit below
+`capture.synchronization`. The default is
+`capture_synchronization.v1` / `timestamp_aligned`. The current lab's supported
+combined mode is deliberately narrower:
+
+- `mode=hardware_trigger`
+- `implementation=realsense_inter_cam_sync`
+- `scope=depth_exposure`
+- at least two exact-ID D435 cameras, including both a `static` and an
+  `eye_in_hand` view
+- exactly one selected master; every other enabled camera is a subordinate
+
+For example:
+
+```bash
+uv run python scripts/create_run_config.py working_data/combined_run \
+  --sensor realsense_d435:STATIC_SERIAL:static \
+  --sensor realsense_d435:ROBOT_SERIAL:eye_in_hand \
+  --hardware-trigger \
+  --hardware-sync-group-id combined-d435-01 \
+  --hardware-sync-master-sensor realsense_d435:STATIC_SERIAL
+```
+
+The command validates the identities and mounting mix before writing the run.
+USB OAK-D Pro and USB ZED 2i cameras cannot join this hardware-trigger group,
+and PoseTestBot does not silently downgrade an invalid request to timestamp
+alignment. D435 inter-camera signaling synchronizes depth exposures only; the
+associated rolling-shutter RGB images are retained, but are explicitly not
+certified as simultaneous RGB exposures. The configured skew threshold is the
+full earliest-to-latest depth timestamp span across every camera in a complete
+group, not a separate allowance on either side of the master.
+
+After the operator performs the physical harness and exposure-timing test
+without robot motion, record its external evidence against that exact run:
+
+```bash
+uv run python scripts/record_hardware_sync_qualification.py \
+  working_data/combined_run \
+  --operator OPERATOR_ID \
+  --method pulsed_light \
+  --observed-max-depth-timestamp-skew-ms 0.8 \
+  --evidence path/to/pulse-trace.csv \
+  --confirm-passed
+```
+
+This command only copies evidence; it does not open cameras or contact the
+robot. It writes `hardware_sync_qualification.json` plus hash-verified,
+run-owned evidence. Hardware-trigger preflight, synchronization, and BOP export
+fail closed if the evidence is missing, modified, or stale for the configured
+resolution, FPS, policy, camera IDs, mounts, or roles.
+Record or replace this qualification before acquisition begins. Once capture
+status, report, logs, raw camera data, or raw robot-pose evidence exists, the
+qualification is immutable and the recorder refuses to publish another one;
+create a new run for a different qualification or hardware contract.
+
 For example, a measured flange-to-TCP edge can be recorded at creation time:
 
 ```bash
@@ -186,6 +242,11 @@ selected camera has 15 seconds to publish at least three valid, committed
 `frame_metadata.jsonl` records. Override these bounds with `--startup-wait`,
 `--receive-start-timeout-s`, `--receive-idle-timeout-s`, and `--timeout-s` when
 the reviewed motion program requires different bounds.
+Camera-stream freshness is deliberately independent of the robot packet
+timeout: by default the supervisor allows 12 planned frame periods without new
+metadata, clamped to 2–5 seconds. The optional
+`--camera-metadata-idle-timeout-s` override is validated and cannot exceed five
+seconds, so a shorter robot run cannot hide an alive-but-stalled camera.
 Direct `start_iiwa.py` and `scripts/pose_receiver_udp_json.py` invocations also
 require both fresh acknowledgement flags. Prefer the supervised capture stage
 for coordinated camera startup and cleanup. The receiver refuses to bind or
@@ -212,6 +273,41 @@ Synchronization is transactional and emits `sync_report.v3` per sensor plus
 frame paths, retains source-frame provenance, and records any timestamp-source
 fallback. Raw frames and raw robot poses are never overwritten; start a new run
 root when capture preflight reports existing raw data.
+
+For a validated mixed-mount hardware-trigger run, capture starts the designated
+D435 master before its subordinates and verifies the configured/read-back
+inter-camera roles. The supervisor also requires every live camera to keep
+appending monotonic frame metadata while cameras overlap and while the robot
+receiver runs; a stalled or rewritten stream aborts local capture and preserves
+the raw evidence. Immediately before receiver startup it revalidates the exact
+run contract and physical qualification. A successful full-capture report
+records the configuration SHA-256, the exact qualification-artifact SHA-256,
+and that immediate revalidation; authoritative hardware-sync grouping rejects
+any other capture status, missing execution gate, or changed binding.
+
+Synchronization associates frames by global depth-sensor
+timestamps whose full earliest-to-latest group span is within the configured
+threshold and writes only complete cross-camera
+sets to:
+
+```text
+processed/synchronized/multiview_frame_groups.json
+```
+
+Early master frames, incomplete sets, and unmatched frames remain in the raw
+recording for audit and recovery; they are not presented as authoritative
+combined observations. Complete groups certify a common depth-exposure instant
+across static and robot-mounted views, including depth-visible robot occlusion.
+Their associated D435 RGB images are not hardware-synchronized and must not be
+described as sharing the same moving-robot or changing-illumination state.
+Each durable group artifact is rebuilt and exactly compared with the current
+run config, qualification, synchronized metadata, matched robot poses, and
+referenced RGB-D bytes before it is accepted downstream.
+The exact capture-report binding is carried from this artifact into
+`bop/posetestbot_frame_sets.json`. The BOP rewrite gate compares the current
+qualification, capture report, authoritative groups, frame sets, frame map, and
+exported bytes; it fails if the original capture-time configuration or
+qualification provenance no longer agrees.
 
 For a dataset run with a selected hash-bound calibration, these commands
 automatically apply each camera profile's saved sync delta, timestamp pair,
@@ -470,13 +566,14 @@ uv run python scripts/run_bop_export_stage.py working_data/example_run \
   --calibration-profiles working_data/example_run/calibration_profiles.json
 ```
 
-The transactional export emits `bop_export_manifest.v3` and uses standard
+The transactional export emits `bop_export_manifest.v4` and uses standard
 BOP-scenewise paths:
 
 ```text
 bop/
 ├── dataset_info.json
 ├── posetestbot_bop_frame_map.json
+├── posetestbot_frame_sets.json          # hardware-trigger runs
 ├── posetestbot_pose_template.json       # pose-template runs
 ├── posetestbot_instance_map.json        # pose-template runs
 ├── models/
@@ -503,6 +600,7 @@ The export preserves:
 - optional `mask/` and `mask_visib/`,
 - `bop_export_manifest.json`,
 - `posetestbot_bop_frame_map.json`,
+- `posetestbot_frame_sets.json` for validated hardware-trigger runs,
 - `models/obj_XXXXXX.ply`,
 - `models/models_info.json`,
 - `test_targets_bop19.json`.
@@ -511,6 +609,16 @@ Pose-template runs load every physical instance independently in BlenderProc
 2.8.0. Duplicate instances share one stable numeric `obj_id` and one exported
 model, while their masks and `scene_gt` rows retain distinct immutable instance
 UUIDs in PoseTestBot sidecars.
+
+`posetestbot_frame_sets.json` maps each authoritative complete hardware group
+onto its per-camera BOP `scene_id`/`im_id` views and records that depth exposure
+is hardware-synchronized while RGB exposure is not certified. Only the depth
+observations may be treated as sharing the robot/scene instant; the associated
+RGB images may differ during motion or changing light. BlenderProc's optional
+synthetic GT/masks do not currently render the articulated iiwa, so they must
+not be treated as robot-occluder visibility truth. The sidecar also retains the
+successful capture report's exact configuration/qualification binding for
+rewrite-gate verification.
 
 ## Pipeline Sequences
 
