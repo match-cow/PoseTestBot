@@ -42,6 +42,16 @@ project.
   multiview/COCO sidecars.
 - React/shadcn operator console backed by the Flask API and local job runner.
 
+## Operator Workflows
+
+The web console starts with two guided outcomes: **Calibrate cameras** and
+**Record an object dataset**. Each journey shows a numbered required path,
+keeps optional authoring/rendering work off that path, and uses one visible
+readiness step before a separately authorized physical capture. See
+[`docs/OPERATOR_WORKFLOWS.md`](docs/OPERATOR_WORKFLOWS.md) for the complete
+operator contract, including saved-calibration reuse and the exact Factory SDK
+versus OpenCV intrinsic-selection policy.
+
 ## Quick Setup
 
 Install the Python 3.12 dependencies and initialize the pinned target generator:
@@ -113,12 +123,12 @@ immutable bundle. Object-bearing runs resolve its physical instances and retain
 stable catalog UUID and BOP `obj_id` provenance.
 For the managed pose-template workflow, create the run with
 `--dataset-mode pose_template`, then select and confirm an immutable template
-in the console's **Workflow → Ground Truth** phase. See
+in **Workflow → Object dataset**, step 2. See
 [`docs/WORKPIECE_CATALOGUE.md`](docs/WORKPIECE_CATALOGUE.md) and
 [`docs/POSETEMPLATECREATOR_OBJECT_GT.md`](docs/POSETEMPLATECREATOR_OBJECT_GT.md).
 
-The **Workflow → Run Setup** camera list has an **Enabled for capture and
-calibration** checkbox for each configured camera. Disabling a camera retains
+Step 1 of either guided workflow has a **Use for this recording** checkbox for
+each configured camera. Disabling a camera retains
 its identity, alias, mounting/orientation metadata, and calibration-profile
 selection in `run_config.json`; it excludes that camera from capture planning
 and preflight, calibration, rewrite-gate expectations, and the Cell scene. At
@@ -205,9 +215,9 @@ root when capture preflight reports existing raw data.
 
 ## Calibration
 
-The preferred operator path is **Workflow → Calibration**. One form selects
-exactly one geometry, one or more captured cameras, and one of two authoritative
-modes:
+The preferred operator path is **Workflow → Camera calibration**. One form
+selects exactly one geometry, one or more captured cameras, and one of two
+authoritative modes:
 
 - **Robot-mounted camera (eye-in-hand):** the target is stationary relative to
   `template_base`; the primary result is `camera → robot_flange`.

@@ -1,0 +1,1477 @@
+"""Discovery and immutable selection of promoted calibration profile bundles."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import stat
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from posetestbot.calibration.intrinsics import (
+    SCHEMA_VERSION as INTRINSIC_SCHEMA_VERSION,
+    projection_is_opencv_compatible,
+    validate_intrinsic_profile,
+)
+from posetestbot.calibration.profiles import (
+    CalibrationProfile,
+    CalibrationStatus,
+    LEGACY_SCHEMA_VERSION as LEGACY_CALIBRATION_SCHEMA_VERSION,
+    SCHEMA_VERSION as CALIBRATION_SCHEMA_VERSION,
+    profile_from_dict,
+    rectified_projection_from_native,
+    validate_profile_collection,
+)
+from posetestbot.io.atomic import atomic_write_bytes, atomic_write_json
+from posetestbot.io.artifacts import (
+    BLENDERPROC_RENDER_PLAN,
+    BOP_DIR,
+    CALIBRATION_PROFILES,
+    CALIBRATION_PROFILE_SELECTION,
+    CAMERA_RECTIFICATION_REPORT,
+    DEPTH_DIR,
+    INTRINSIC_CALIBRATION_PROFILES,
+    MATCH_ROBOT_EE_POSES,
+    MASKS_DIR,
+    PROCESSED_DIR,
+    RAW_ROBOT_EE_POSES,
+    RGB_DIR,
+    RUN_CONFIG,
+    SYNC_QUALITY_REPORT,
+    SYNC_REPORT,
+    SYNCHRONIZED_DIR,
+)
+from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
+    load_run_config_for_run_root,
+    run_config_lock,
+    sensor_config_from_mapping,
+)
+from posetestbot.sensors.registry import get_sensor_adapter
+
+
+LIBRARY_SCHEMA_VERSION = "calibration_library.v1"
+SELECTION_SCHEMA_VERSION = "calibration_profile_selection.v1"
+SNAPSHOT_PARENT = Path("processed") / "calibration_inputs"
+MAX_PROFILE_ARTIFACT_BYTES = 16 * 1024 * 1024
+RESOLUTION_IMAGE_SIZES = {
+    "720p": (1280, 720),
+    "360p": (672, 376),
+}
+
+
+class CalibrationSelectionConflict(ValueError):
+    """A stale or incompatible selection request with structured UI issues."""
+
+    def __init__(self, message: str, issues: Sequence[Mapping[str, Any]]):
+        super().__init__(message)
+        self.issues = [dict(issue) for issue in issues]
+
+
+@dataclass(frozen=True)
+class _LoadedBundle:
+    calibration_bytes: bytes
+    intrinsic_bytes: bytes
+    calibration_sha256: str
+    intrinsic_sha256: str
+    bundle_sha256: str
+    calibration_schema_version: str
+    intrinsic_schema_version: str
+    profiles: tuple[CalibrationProfile, ...]
+    intrinsic_profiles: tuple[dict[str, Any], ...]
+
+
+def _issue(code: str, message: str, *, sensor_key: str | None = None) -> dict[str, str]:
+    value = {"code": code, "message": message}
+    if sensor_key is not None:
+        value["sensor_key"] = sensor_key
+    return value
+
+
+def _safe_error(prefix: str, error: Exception) -> str:
+    detail = f"{type(error).__name__}: {error}"
+    if len(detail) > 500:
+        detail = detail[:497] + "..."
+    return f"{prefix}: {detail}"
+
+
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _bundle_sha256(calibration_sha256: str, intrinsic_sha256: str) -> str:
+    payload = (
+        f"{CALIBRATION_PROFILES}:{calibration_sha256}\n"
+        f"{INTRINSIC_CALIBRATION_PROFILES}:{intrinsic_sha256}\n"
+    ).encode("ascii")
+    return _sha256(payload)
+
+
+def _read_regular_file(path: Path) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"Artifact is missing, unreadable, or a symbolic link: {path}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"Artifact must be a regular file: {path}")
+        if metadata.st_size > MAX_PROFILE_ARTIFACT_BYTES:
+            raise ValueError(
+                f"Artifact exceeds {MAX_PROFILE_ARTIFACT_BYTES} bytes: {path}"
+            )
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            return handle.read(MAX_PROFILE_ARTIFACT_BYTES + 1)
+    finally:
+        os.close(descriptor)
+
+
+def _json_object(payload: bytes, *, label: str) -> Mapping[str, Any]:
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} must be valid UTF-8 JSON") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a JSON object")
+    return value
+
+
+def _parse_calibration_profiles(
+    payload: bytes,
+) -> tuple[str, tuple[CalibrationProfile, ...]]:
+    value = _json_object(payload, label=CALIBRATION_PROFILES)
+    schema = str(value.get("schema_version"))
+    if schema not in {CALIBRATION_SCHEMA_VERSION, LEGACY_CALIBRATION_SCHEMA_VERSION}:
+        raise ValueError(
+            "Calibration collection schema must be calibration.v2 or calibration.v1"
+        )
+    raw_profiles = value.get("profiles")
+    if not isinstance(raw_profiles, list):
+        raise ValueError("Calibration collection profiles must be a list")
+    if any(not isinstance(item, Mapping) for item in raw_profiles):
+        raise ValueError("Calibration collection profiles must be objects")
+    profiles = tuple(profile_from_dict(item) for item in raw_profiles)
+    validate_profile_collection(profiles)
+    return schema, profiles
+
+
+def _parse_intrinsic_profiles(
+    payload: bytes,
+) -> tuple[str, tuple[dict[str, Any], ...]]:
+    value = _json_object(payload, label=INTRINSIC_CALIBRATION_PROFILES)
+    schema = str(value.get("schema_version"))
+    if schema != INTRINSIC_SCHEMA_VERSION:
+        raise ValueError(
+            f"Intrinsic collection schema must be {INTRINSIC_SCHEMA_VERSION!r}"
+        )
+    raw_profiles = value.get("profiles")
+    if not isinstance(raw_profiles, list):
+        raise ValueError("Intrinsic collection profiles must be a list")
+    profiles: list[dict[str, Any]] = []
+    keys: list[tuple[str, tuple[int, ...], str]] = []
+    for item in raw_profiles:
+        if not isinstance(item, Mapping):
+            raise ValueError("Intrinsic collection profiles must be objects")
+        validate_intrinsic_profile(item)
+        profile = dict(item)
+        profiles.append(profile)
+        keys.append(
+            (
+                str(profile.get("sensor_id")),
+                tuple(int(value) for value in profile.get("resolution", [])),
+                str(profile.get("orientation")),
+            )
+        )
+    if len(keys) != len(set(keys)):
+        raise ValueError(
+            "Intrinsic collection has duplicate serial/resolution/orientation profiles"
+        )
+    return schema, tuple(profiles)
+
+
+def _load_bundle(source_run_root: Path) -> _LoadedBundle:
+    calibration_bytes = _read_regular_file(source_run_root / CALIBRATION_PROFILES)
+    intrinsic_bytes = _read_regular_file(
+        source_run_root / INTRINSIC_CALIBRATION_PROFILES
+    )
+    calibration_schema, profiles = _parse_calibration_profiles(calibration_bytes)
+    intrinsic_schema, intrinsic_profiles = _parse_intrinsic_profiles(intrinsic_bytes)
+    calibration_digest = _sha256(calibration_bytes)
+    intrinsic_digest = _sha256(intrinsic_bytes)
+    return _LoadedBundle(
+        calibration_bytes=calibration_bytes,
+        intrinsic_bytes=intrinsic_bytes,
+        calibration_sha256=calibration_digest,
+        intrinsic_sha256=intrinsic_digest,
+        bundle_sha256=_bundle_sha256(calibration_digest, intrinsic_digest),
+        calibration_schema_version=calibration_schema,
+        intrinsic_schema_version=intrinsic_schema,
+        profiles=profiles,
+        intrinsic_profiles=intrinsic_profiles,
+    )
+
+
+def _source_run_name(source_run_root: Path) -> str:
+    try:
+        value = _json_object(
+            _read_regular_file(source_run_root / RUN_CONFIG), label=RUN_CONFIG
+        )
+        name = value.get("run_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    except (OSError, ValueError):
+        pass
+    return source_run_root.name
+
+
+def _profile_summary(profile: CalibrationProfile) -> dict[str, Any]:
+    return {
+        "profile_id": profile.profile_id,
+        "sensor_id": profile.sensor_id,
+        "sensor_type": profile.sensor_type.value,
+        "mounting_mode": profile.mounting_mode.value,
+        "status": profile.status.value,
+        "resolution": [profile.intrinsics.width, profile.intrinsics.height],
+        "created_at": profile.calibrated_at,
+    }
+
+
+def _intrinsic_summary(profile: Mapping[str, Any]) -> dict[str, Any]:
+    source = profile.get("source")
+    return {
+        "profile_id": str(profile.get("profile_id", "")),
+        "sensor_id": str(profile.get("sensor_id", "")),
+        "resolution": [int(item) for item in profile.get("resolution", [])],
+        "orientation": str(profile.get("orientation", "")),
+        "method": (
+            str(source.get("mode"))
+            if isinstance(source, Mapping) and source.get("mode") is not None
+            else None
+        ),
+    }
+
+
+def _configured_image_size(sensor: Mapping[str, Any], resolution: str) -> tuple[int, int] | None:
+    metadata = sensor.get("metadata")
+    if isinstance(metadata, Mapping):
+        explicit = metadata.get("image_size") or metadata.get("resolution")
+        if (
+            isinstance(explicit, list | tuple)
+            and len(explicit) == 2
+            and all(type(item) is int and item > 0 for item in explicit)
+        ):
+            return int(explicit[0]), int(explicit[1])
+    return RESOLUTION_IMAGE_SIZES.get(resolution)
+
+
+def _float_values(value: Any, *, count: int) -> tuple[float, ...] | None:
+    if not isinstance(value, list | tuple) or len(value) != count:
+        return None
+    try:
+        return tuple(float(item) for item in value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _projection_dimensions(value: Mapping[str, Any]) -> tuple[int, int] | None:
+    try:
+        dimensions = int(value.get("width", 0)), int(value.get("height", 0))
+    except (TypeError, ValueError):
+        return None
+    return dimensions if dimensions[0] > 0 and dimensions[1] > 0 else None
+
+
+def _profile_intrinsic_equivalence_issues(
+    profile: CalibrationProfile,
+    intrinsic: Mapping[str, Any],
+    *,
+    sensor_key: str,
+) -> list[dict[str, str]]:
+    """Require both profile files to describe one byte-for-byte numeric projection."""
+
+    mismatches: list[str] = []
+    native = intrinsic.get("native")
+    if not isinstance(native, Mapping):
+        mismatches.append("native projection")
+    else:
+        if _float_values(native.get("cam_K"), count=9) != tuple(
+            float(item) for item in profile.intrinsics.cam_k
+        ):
+            mismatches.append("native cam_K")
+        if _float_values(native.get("distortion"), count=5) != tuple(
+            float(item) for item in profile.intrinsics.distortion
+        ):
+            mismatches.append("native distortion")
+        if str(native.get("distortion_model", "brown_conrady")) != str(
+            profile.intrinsics.distortion_model
+        ):
+            mismatches.append("native distortion model")
+        if _projection_dimensions(native) != (
+            profile.intrinsics.width,
+            profile.intrinsics.height,
+        ):
+            mismatches.append("native dimensions")
+
+    if tuple(int(item) for item in intrinsic.get("resolution", [])) != (
+        profile.intrinsics.width,
+        profile.intrinsics.height,
+    ):
+        mismatches.append("collection resolution")
+
+    full_rectified = profile.rectified_intrinsics
+    full_roi = profile.rectified_valid_roi
+    if full_rectified is not None and full_roi is None:
+        _derived, full_roi = rectified_projection_from_native(profile.intrinsics)
+    intrinsic_rectified = intrinsic.get("rectified")
+    if full_rectified is None or not isinstance(intrinsic_rectified, Mapping):
+        mismatches.append("rectified projection availability")
+    else:
+        if _float_values(intrinsic_rectified.get("cam_K"), count=9) != tuple(
+            float(item) for item in full_rectified.cam_k
+        ):
+            mismatches.append("rectified cam_K")
+        if _float_values(intrinsic_rectified.get("distortion"), count=5) != tuple(
+            float(item) for item in full_rectified.distortion
+        ):
+            mismatches.append("rectified distortion")
+        if str(
+            intrinsic_rectified.get("distortion_model", "brown_conrady")
+        ) != str(full_rectified.distortion_model):
+            mismatches.append("rectified distortion model")
+        if _projection_dimensions(intrinsic_rectified) != (
+            full_rectified.width,
+            full_rectified.height,
+        ):
+            mismatches.append("rectified dimensions")
+        intrinsic_roi = intrinsic_rectified.get("valid_roi")
+        if _float_values(intrinsic_roi, count=4) != (
+            tuple(float(item) for item in full_roi) if full_roi is not None else None
+        ):
+            mismatches.append("rectified valid ROI")
+
+    depth = intrinsic.get("depth")
+    try:
+        intrinsic_depth_scale = (
+            float(depth.get("scale_to_mm")) if isinstance(depth, Mapping) else None
+        )
+    except (TypeError, ValueError):
+        intrinsic_depth_scale = None
+    if intrinsic_depth_scale != float(profile.intrinsics.depth_scale_to_mm):
+        mismatches.append("depth scale")
+
+    if not mismatches:
+        return []
+    return [
+        _issue(
+            "calibration_intrinsic_projection_mismatch",
+            f"Calibration profile {profile.profile_id} and intrinsic profile "
+            f"{intrinsic.get('profile_id')} disagree on: {', '.join(mismatches)}.",
+            sensor_key=sensor_key,
+        )
+    ]
+
+
+def _select_profile(
+    bundle: _LoadedBundle,
+    sensor: Mapping[str, Any],
+    resolution: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+    sensor_type = str(sensor["sensor_type"])
+    device_id = str(sensor["device_id"])
+    mounting_mode = str(sensor["mounting_mode"])
+    sensor_key = f"{sensor_type}:{device_id}"
+    image_size = _configured_image_size(sensor, resolution)
+    identity_profiles = [
+        profile
+        for profile in bundle.profiles
+        if profile.sensor_type.value == sensor_type and profile.sensor_id == device_id
+    ]
+    if not identity_profiles:
+        return None, [
+            _issue(
+                "sensor_identity_not_calibrated",
+                f"No calibration profile matches {sensor_key}.",
+                sensor_key=sensor_key,
+            )
+        ]
+
+    valid_profiles = [
+        profile
+        for profile in identity_profiles
+        if profile.status == CalibrationStatus.VALID
+    ]
+    if not valid_profiles:
+        return None, [
+            _issue(
+                "profile_not_valid",
+                f"Calibration profiles for {sensor_key} are not marked valid.",
+                sensor_key=sensor_key,
+            )
+        ]
+
+    mounted_profiles = [
+        profile
+        for profile in valid_profiles
+        if profile.mounting_mode.value == mounting_mode
+    ]
+    if not mounted_profiles:
+        return None, [
+            _issue(
+                "mounting_mode_mismatch",
+                f"{sensor_key} is configured as {mounting_mode}, but its valid calibration uses another mounting mode.",
+                sensor_key=sensor_key,
+            )
+        ]
+
+    resolution_profiles = [
+        profile
+        for profile in mounted_profiles
+        if image_size is None
+        or (profile.intrinsics.width, profile.intrinsics.height) == image_size
+    ]
+    if not resolution_profiles:
+        return None, [
+            _issue(
+                "resolution_mismatch",
+                f"No valid {sensor_key} profile matches configured resolution {resolution} ({image_size}).",
+                sensor_key=sensor_key,
+            )
+        ]
+    if len(resolution_profiles) != 1:
+        ids = ", ".join(sorted(profile.profile_id for profile in resolution_profiles))
+        return None, [
+            _issue(
+                "ambiguous_calibration_profile",
+                f"More than one valid profile matches {sensor_key}: {ids}.",
+                sensor_key=sensor_key,
+            )
+        ]
+    profile = resolution_profiles[0]
+    if profile.rectified_intrinsics is None:
+        return None, [
+            _issue(
+                "rectified_projection_unavailable",
+                f"Calibration profile {profile.profile_id} has no usable rectified projection.",
+                sensor_key=sensor_key,
+            )
+        ]
+
+    expected_orientation = "inverted" if sensor.get("inverted") is True else "normal"
+    expected_intrinsic_id = profile.metadata.get("intrinsic_profile_id")
+    intrinsic_matches = [
+        item
+        for item in bundle.intrinsic_profiles
+        if str(item.get("sensor_id")) == profile.sensor_id
+        and tuple(int(value) for value in item.get("resolution", []))
+        == (profile.intrinsics.width, profile.intrinsics.height)
+        and str(item.get("orientation")) == expected_orientation
+        and (
+            not expected_intrinsic_id
+            or str(item.get("profile_id")) == str(expected_intrinsic_id)
+        )
+    ]
+    if not intrinsic_matches:
+        return None, [
+            _issue(
+                "intrinsic_profile_mismatch",
+                f"No intrinsic profile for {sensor_key} matches serial, resolution, and {expected_orientation} orientation.",
+                sensor_key=sensor_key,
+            )
+        ]
+    if len(intrinsic_matches) != 1:
+        return None, [
+            _issue(
+                "ambiguous_intrinsic_profile",
+                f"More than one intrinsic profile matches {sensor_key}.",
+                sensor_key=sensor_key,
+            )
+        ]
+    intrinsic = intrinsic_matches[0]
+    native = intrinsic.get("native")
+    if not isinstance(native, Mapping) or not projection_is_opencv_compatible(native):
+        return None, [
+            _issue(
+                "intrinsic_projection_not_opencv_compatible",
+                f"Intrinsic profile {intrinsic.get('profile_id')} cannot be used for OpenCV rectification.",
+                sensor_key=sensor_key,
+            )
+        ]
+    if not isinstance(intrinsic.get("rectified"), Mapping):
+        return None, [
+            _issue(
+                "intrinsic_rectification_unavailable",
+                f"Intrinsic profile {intrinsic.get('profile_id')} has no rectified projection.",
+                sensor_key=sensor_key,
+            )
+        ]
+
+    equivalence_issues = _profile_intrinsic_equivalence_issues(
+        profile, intrinsic, sensor_key=sensor_key
+    )
+    if equivalence_issues:
+        return None, equivalence_issues
+
+    return {
+        "sensor_key": sensor_key,
+        "sensor_type": sensor_type,
+        "device_id": device_id,
+        "calibrated_sensor_id": profile.sensor_id,
+        "mounting_mode": mounting_mode,
+        "resolution": resolution,
+        "image_size": [profile.intrinsics.width, profile.intrinsics.height],
+        "orientation": expected_orientation,
+        "profile_id": profile.profile_id,
+        "intrinsic_profile_id": str(intrinsic["profile_id"]),
+    }, []
+
+
+def _compatibility(
+    bundle: _LoadedBundle,
+    setup: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    mapping: list[dict[str, Any]] = []
+    issues: list[dict[str, str]] = []
+    for sensor in setup["sensors"]:
+        if sensor.get("enabled", True) is not True:
+            continue
+        selected, sensor_issues = _select_profile(
+            bundle, sensor, str(setup["resolution"])
+        )
+        issues.extend(sensor_issues)
+        if selected is not None:
+            mapping.append(selected)
+    return mapping, issues
+
+
+def _normalize_setup(
+    run_root: Path,
+    *,
+    sensors: Any = None,
+    resolution: Any = None,
+    require_available: bool,
+) -> dict[str, Any] | None:
+    current: Mapping[str, Any] | None = None
+    try:
+        current = load_run_config_for_run_root(run_root)
+    except FileNotFoundError:
+        current = None
+
+    if sensors is None:
+        if current is None:
+            if require_available:
+                raise ValueError(
+                    "sensors are required until the destination run config has been saved"
+                )
+            return None
+        capture = current.get("capture")
+        sensors = capture.get("sensors") if isinstance(capture, Mapping) else None
+    if not isinstance(sensors, list | tuple) or not sensors:
+        raise ValueError("sensors must be a non-empty list")
+
+    normalized_sensors: list[dict[str, Any]] = []
+    for item in sensors:
+        if not isinstance(item, Mapping):
+            raise ValueError("Each sensor must be a JSON object")
+        normalized_sensors.append(sensor_config_from_mapping(item).to_dict())
+    if not any(sensor["enabled"] is True for sensor in normalized_sensors):
+        raise ValueError("At least one sensor must be enabled")
+    keys = [
+        (sensor["sensor_type"], sensor["device_id"])
+        for sensor in normalized_sensors
+    ]
+    if len(keys) != len(set(keys)):
+        raise ValueError("Sensor type/device identity entries must be unique")
+
+    if resolution is None:
+        if current is not None and isinstance(current.get("capture"), Mapping):
+            resolution = current["capture"].get("resolution")
+        else:
+            resolution = "720p"
+    if not isinstance(resolution, str) or not resolution.strip():
+        raise ValueError("resolution must be a non-empty string")
+    resolution = resolution.strip()
+    for sensor in normalized_sensors:
+        if sensor["enabled"] is not True:
+            continue
+        adapter = get_sensor_adapter(sensor["sensor_type"])
+        if resolution not in adapter.supported_resolutions:
+            supported = ", ".join(adapter.supported_resolutions)
+            raise ValueError(
+                f"{adapter.display_name} supports {supported}, not {resolution!r}"
+            )
+    return {"resolution": resolution, "sensors": normalized_sensors}
+
+
+def _empty_artifact_summary(filename: str) -> dict[str, Any]:
+    return {
+        "relative_path": filename,
+        "sha256": None,
+        "size_bytes": None,
+        "schema_version": None,
+    }
+
+
+def _inspect_source(
+    source_run_root: Path,
+    setup: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], _LoadedBundle | None]:
+    calibration_summary = _empty_artifact_summary(CALIBRATION_PROFILES)
+    calibration_summary.update({"valid_profile_count": 0, "profiles": []})
+    intrinsic_summary = _empty_artifact_summary(INTRINSIC_CALIBRATION_PROFILES)
+    intrinsic_summary.update({"profile_count": 0, "profiles": []})
+    record: dict[str, Any] = {
+        "source_run_root": source_run_root.as_posix(),
+        "source_run_name": _source_run_name(source_run_root),
+        "bundle_sha256": None,
+        "valid": False,
+        "compatible": False,
+        "issues": [],
+        "calibration_profiles": calibration_summary,
+        "intrinsic_calibration_profiles": intrinsic_summary,
+        "sensor_profile_mapping": [],
+        "sensor_profiles": {},
+    }
+    try:
+        bundle = _load_bundle(source_run_root)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        record["issues"].append(
+            _issue(
+                "invalid_calibration_bundle",
+                _safe_error("Calibration bundle is not usable", exc),
+            )
+        )
+        return record, None
+
+    valid_profiles = [
+        profile for profile in bundle.profiles if profile.status == CalibrationStatus.VALID
+    ]
+    calibration_summary.update(
+        {
+            "sha256": bundle.calibration_sha256,
+            "size_bytes": len(bundle.calibration_bytes),
+            "schema_version": bundle.calibration_schema_version,
+            "valid_profile_count": len(valid_profiles),
+            "profiles": [_profile_summary(profile) for profile in bundle.profiles],
+        }
+    )
+    intrinsic_summary.update(
+        {
+            "sha256": bundle.intrinsic_sha256,
+            "size_bytes": len(bundle.intrinsic_bytes),
+            "schema_version": bundle.intrinsic_schema_version,
+            "profile_count": len(bundle.intrinsic_profiles),
+            "profiles": [
+                _intrinsic_summary(profile) for profile in bundle.intrinsic_profiles
+            ],
+        }
+    )
+    record["bundle_sha256"] = bundle.bundle_sha256
+    if not valid_profiles:
+        record["issues"].append(
+            _issue(
+                "no_valid_calibration_profiles",
+                "The calibration collection contains no profiles marked valid.",
+            )
+        )
+        return record, bundle
+    record["valid"] = True
+    if setup is None:
+        record["issues"].append(
+            _issue(
+                "destination_setup_required",
+                "Save camera settings or provide sensors and resolution before selecting this calibration.",
+            )
+        )
+        return record, bundle
+
+    mapping, compatibility_issues = _compatibility(bundle, setup)
+    record["sensor_profile_mapping"] = mapping
+    record["sensor_profiles"] = {
+        item["sensor_key"]: item["profile_id"] for item in mapping
+    }
+    record["issues"].extend(compatibility_issues)
+    record["compatible"] = not compatibility_issues
+    return record, bundle
+
+
+def _is_direct_run_path(path: Path) -> bool:
+    from posetestbot.web.security import web_run_roots
+
+    return any(path.parent == root.resolve() for root in web_run_roots())
+
+
+def _resolve_direct_run(value: str | Path, *, must_exist: bool) -> Path:
+    from posetestbot.web.security import resolve_web_run_root
+
+    resolved = resolve_web_run_root(value)
+    if not _is_direct_run_path(resolved):
+        raise ValueError("Run must be a direct child of an allowed run root")
+    if must_exist:
+        directory_entry = resolved.parent / resolved.name
+        if directory_entry.is_symlink() or not directory_entry.is_dir():
+            raise ValueError("Run must be an existing non-symbolic-link directory")
+        if directory_entry.resolve() != resolved:
+            raise ValueError("Run directory resolution changed unexpectedly")
+    return resolved
+
+
+def _selection_path(run_root: Path) -> Path:
+    return run_root / CALIBRATION_PROFILE_SELECTION
+
+
+def _safe_snapshot_path(run_root: Path, relative: Any, *, label: str) -> Path:
+    if not isinstance(relative, str) or not relative.strip():
+        raise ValueError(f"{label} must be a run-relative path")
+    raw = Path(relative)
+    if raw.is_absolute() or ".." in raw.parts:
+        raise ValueError(f"{label} must be a run-relative path")
+    path = run_root
+    for part in raw.parts:
+        path = path / part
+        if path.is_symlink():
+            raise ValueError(f"{label} must not contain symbolic links")
+    try:
+        path.resolve().relative_to(run_root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"{label} escapes the destination run") from exc
+    return path
+
+
+def load_calibration_profile_selection(
+    run_root: str | Path,
+    *,
+    verify_snapshots: bool = True,
+) -> dict[str, Any]:
+    root = Path(run_root).resolve()
+    value = _json_object(
+        _read_regular_file(_selection_path(root)),
+        label=CALIBRATION_PROFILE_SELECTION,
+    )
+    if value.get("schema_version") != SELECTION_SCHEMA_VERSION:
+        raise ValueError(
+            f"Calibration selection schema must be {SELECTION_SCHEMA_VERSION!r}"
+        )
+    source = value.get("source")
+    snapshot = value.get("snapshot")
+    if not isinstance(source, Mapping) or not isinstance(snapshot, Mapping):
+        raise ValueError("Calibration selection source and snapshot are required")
+    bundle_digest = str(source.get("bundle_sha256", ""))
+    if len(bundle_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in bundle_digest
+    ):
+        raise ValueError("Calibration selection bundle_sha256 is invalid")
+    if not verify_snapshots:
+        return dict(value)
+
+    expected_directory = SNAPSHOT_PARENT / bundle_digest
+    if snapshot.get("directory") != expected_directory.as_posix():
+        raise ValueError(
+            "Calibration selection snapshot directory does not match its bundle hash"
+        )
+    observed_hashes: dict[str, str] = {}
+    filenames = {
+        "calibration_profiles": CALIBRATION_PROFILES,
+        "intrinsic_calibration_profiles": INTRINSIC_CALIBRATION_PROFILES,
+    }
+    for key, filename in filenames.items():
+        artifact = snapshot.get(key)
+        source_artifact = source.get(key)
+        if not isinstance(artifact, Mapping):
+            raise ValueError(f"Calibration selection snapshot.{key} is required")
+        if not isinstance(source_artifact, Mapping):
+            raise ValueError(f"Calibration selection source.{key} is required")
+        expected_relative = expected_directory / filename
+        if artifact.get("relative_path") != expected_relative.as_posix():
+            raise ValueError(
+                f"Calibration selection snapshot path identity changed: {key}"
+            )
+        if source_artifact.get("relative_path") != filename:
+            raise ValueError(
+                f"Calibration selection source path identity is invalid: {key}"
+            )
+        path = _safe_snapshot_path(
+            root, artifact.get("relative_path"), label=f"snapshot.{key}.relative_path"
+        )
+        payload = _read_regular_file(path)
+        digest = _sha256(payload)
+        if digest != artifact.get("sha256"):
+            raise ValueError(f"Calibration selection snapshot hash changed: {key}")
+        if source_artifact.get("sha256") != digest:
+            raise ValueError(
+                f"Calibration selection source and snapshot hashes disagree: {key}"
+            )
+        if artifact.get("size_bytes") != len(payload) or source_artifact.get(
+            "size_bytes"
+        ) != len(payload):
+            raise ValueError(
+                f"Calibration selection source and snapshot sizes disagree: {key}"
+            )
+        if artifact.get("schema_version") != source_artifact.get("schema_version"):
+            raise ValueError(
+                f"Calibration selection source and snapshot schemas disagree: {key}"
+            )
+        observed_hashes[key] = digest
+    observed_bundle = _bundle_sha256(
+        observed_hashes["calibration_profiles"],
+        observed_hashes["intrinsic_calibration_profiles"],
+    )
+    if observed_bundle != bundle_digest:
+        raise ValueError("Calibration selection bundle hash does not match its snapshots")
+    return dict(value)
+
+
+def _resolved_input_path(run_root: Path, value: str | Path, *, label: str) -> Path:
+    raw = Path(value)
+    path = raw if raw.is_absolute() else run_root / raw
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(run_root)
+    except ValueError as exc:
+        raise ValueError(f"{label} must remain inside the selected run") from exc
+    return resolved
+
+
+def verify_calibration_profile_selection(
+    run_root: str | Path,
+    *,
+    expected_calibration_profiles: str | Path | None = None,
+    expected_intrinsic_calibration_profiles: str | Path | None = None,
+    expected_bundle_sha256: str | None = None,
+    verify_run_config: bool = True,
+) -> dict[str, Any]:
+    """Revalidate immutable selection identity, bytes, pairing, and run-config binding."""
+
+    root = Path(run_root).resolve()
+    selection = load_calibration_profile_selection(root)
+    source = selection["source"]
+    snapshot = selection["snapshot"]
+    bundle_digest = str(source["bundle_sha256"])
+    if expected_bundle_sha256 is not None and expected_bundle_sha256 != bundle_digest:
+        raise ValueError(
+            "Calibration selection bundle does not match the expected bundle SHA-256"
+        )
+    calibration_relative = str(snapshot["calibration_profiles"]["relative_path"])
+    intrinsic_relative = str(
+        snapshot["intrinsic_calibration_profiles"]["relative_path"]
+    )
+    calibration_path = _safe_snapshot_path(
+        root, calibration_relative, label="snapshot.calibration_profiles.relative_path"
+    )
+    intrinsic_path = _safe_snapshot_path(
+        root,
+        intrinsic_relative,
+        label="snapshot.intrinsic_calibration_profiles.relative_path",
+    )
+    if expected_calibration_profiles is not None and _resolved_input_path(
+        root,
+        expected_calibration_profiles,
+        label="expected_calibration_profiles",
+    ) != calibration_path.resolve():
+        raise ValueError(
+            "Configured calibration_profiles path is not the selected immutable snapshot"
+        )
+    if expected_intrinsic_calibration_profiles is not None and _resolved_input_path(
+        root,
+        expected_intrinsic_calibration_profiles,
+        label="expected_intrinsic_calibration_profiles",
+    ) != intrinsic_path.resolve():
+        raise ValueError(
+            "Configured intrinsic_calibration_profiles path is not the selected immutable snapshot"
+        )
+
+    bundle = _load_bundle(calibration_path.parent)
+    if bundle.bundle_sha256 != bundle_digest:
+        raise ValueError("Selected calibration bundle identity changed")
+    if bundle.calibration_schema_version != snapshot["calibration_profiles"].get(
+        "schema_version"
+    ) or bundle.intrinsic_schema_version != snapshot[
+        "intrinsic_calibration_profiles"
+    ].get("schema_version"):
+        raise ValueError("Selected calibration snapshot schema identity changed")
+
+    setup = selection.get("intended_setup")
+    if not isinstance(setup, Mapping):
+        raise ValueError("Calibration selection intended_setup is missing")
+    mapping, issues = _compatibility(bundle, setup)
+    if issues:
+        raise ValueError(
+            "Selected calibration snapshot is no longer internally compatible: "
+            + "; ".join(issue["message"] for issue in issues)
+        )
+    if selection.get("sensor_profile_mapping") != mapping:
+        raise ValueError("Calibration selection sensor profile mapping changed")
+    expected_sensor_profiles = {
+        item["sensor_key"]: item["profile_id"] for item in mapping
+    }
+    if selection.get("sensor_profiles") != expected_sensor_profiles:
+        raise ValueError("Calibration selection sensor profile lookup changed")
+
+    config: Mapping[str, Any] | None = None
+    if verify_run_config:
+        try:
+            config = load_run_config_for_run_root(root)
+        except FileNotFoundError:
+            config = None
+    if verify_run_config and config is not None:
+        pointer = config.get("calibration_profile_selection")
+        if not isinstance(pointer, Mapping):
+            raise ValueError(
+                "Run config does not bind its calibration inputs to the selection manifest"
+            )
+        if pointer.get("selection_artifact") != CALIBRATION_PROFILE_SELECTION or str(
+            pointer.get("bundle_sha256", "")
+        ) != bundle_digest:
+            raise ValueError("Run config calibration selection pointer is stale")
+        if _resolved_input_path(
+            root,
+            str(config.get("calibration_profiles", "")),
+            label="run_config.calibration_profiles",
+        ) != calibration_path.resolve():
+            raise ValueError("Run config calibration_profiles path is not the selected snapshot")
+        if _resolved_input_path(
+            root,
+            str(config.get("intrinsic_calibration_profiles", "")),
+            label="run_config.intrinsic_calibration_profiles",
+        ) != intrinsic_path.resolve():
+            raise ValueError(
+                "Run config intrinsic_calibration_profiles path is not the selected snapshot"
+            )
+    return selection
+
+
+def _selected_for_library(run_root: Path) -> dict[str, Any] | None:
+    try:
+        selected = load_calibration_profile_selection(run_root)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        return {
+            "valid": False,
+            "issues": [
+                _issue(
+                    "invalid_current_selection",
+                    _safe_error("Current calibration selection is invalid", exc),
+                )
+            ],
+        }
+    return {**selected, "valid": True, "issues": []}
+
+
+def list_calibration_library(run_root: str | Path) -> dict[str, Any]:
+    """List promoted calibration artifacts and compatibility for one destination."""
+
+    from posetestbot.web.security import web_run_roots
+
+    destination = _resolve_direct_run(run_root, must_exist=False)
+    setup = _normalize_setup(destination, require_available=False)
+    records: list[dict[str, Any]] = []
+    for allowed_root in web_run_roots():
+        if not allowed_root.is_dir():
+            continue
+        try:
+            children = sorted(allowed_root.iterdir(), key=lambda item: item.name)
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if child.is_symlink() or not child.is_dir():
+                    continue
+                source = child.resolve()
+                if source == destination or source.parent != allowed_root.resolve():
+                    continue
+                if not any(
+                    os.path.lexists(source / filename)
+                    for filename in (
+                        CALIBRATION_PROFILES,
+                        INTRINSIC_CALIBRATION_PROFILES,
+                    )
+                ):
+                    continue
+                record, _bundle = _inspect_source(source, setup)
+                records.append(record)
+            except OSError:
+                continue
+    records.sort(key=lambda item: (item["source_run_name"], item["source_run_root"]))
+    return {
+        "schema_version": LIBRARY_SCHEMA_VERSION,
+        "run_root": destination.as_posix(),
+        "selected": _selected_for_library(destination),
+        "replacement_blockers": calibration_selection_replacement_blockers(
+            destination
+        ),
+        "calibrations": records,
+    }
+
+
+def _ensure_snapshot_parent(run_root: Path) -> Path:
+    current = run_root
+    for part in SNAPSHOT_PARENT.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"Calibration snapshot directory must not be a symlink: {current}")
+        if current.exists():
+            if not current.is_dir():
+                raise ValueError(f"Calibration snapshot path must be a directory: {current}")
+        else:
+            current.mkdir()
+        try:
+            current.resolve().relative_to(run_root.resolve())
+        except ValueError as exc:
+            raise ValueError("Calibration snapshot directory escapes the run") from exc
+    return current
+
+
+def _write_snapshot(run_root: Path, bundle: _LoadedBundle) -> tuple[Path, Path]:
+    parent = _ensure_snapshot_parent(run_root)
+    destination = parent / bundle.bundle_sha256
+    calibration_path = destination / CALIBRATION_PROFILES
+    intrinsic_path = destination / INTRINSIC_CALIBRATION_PROFILES
+    if destination.is_symlink():
+        raise ValueError("Calibration snapshot bundle directory must not be a symlink")
+    if destination.exists():
+        if not destination.is_dir():
+            raise ValueError("Calibration snapshot bundle path must be a directory")
+        if _read_regular_file(calibration_path) != bundle.calibration_bytes:
+            raise ValueError("Existing calibration snapshot bytes do not match bundle hash")
+        if _read_regular_file(intrinsic_path) != bundle.intrinsic_bytes:
+            raise ValueError("Existing intrinsic snapshot bytes do not match bundle hash")
+        os.chmod(calibration_path, 0o444)
+        os.chmod(intrinsic_path, 0o444)
+        os.chmod(destination, 0o555)
+        return calibration_path, intrinsic_path
+
+    staging = parent / f".{bundle.bundle_sha256}.{uuid.uuid4().hex}.tmp"
+    staging.mkdir()
+    try:
+        atomic_write_bytes(staging / CALIBRATION_PROFILES, bundle.calibration_bytes)
+        atomic_write_bytes(
+            staging / INTRINSIC_CALIBRATION_PROFILES, bundle.intrinsic_bytes
+        )
+        os.replace(staging, destination)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+    os.chmod(calibration_path, 0o444)
+    os.chmod(intrinsic_path, 0o444)
+    os.chmod(destination, 0o555)
+    return calibration_path, intrinsic_path
+
+
+def _relative(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def _directory_has_material_files(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    if not path.is_dir():
+        return False
+    try:
+        return any(item.is_file() for item in path.rglob("*"))
+    except OSError:
+        return True
+
+
+def calibration_selection_replacement_blockers(run_root: str | Path) -> list[str]:
+    """Return material capture/derivation paths that make replacement unsafe."""
+
+    root = Path(run_root).resolve()
+    candidates = (
+        root / RAW_ROBOT_EE_POSES,
+        root / MATCH_ROBOT_EE_POSES,
+        root / SYNC_REPORT,
+        root / SYNC_QUALITY_REPORT,
+        root / CAMERA_RECTIFICATION_REPORT,
+        root / BLENDERPROC_RENDER_PLAN,
+    )
+    blockers = [path.relative_to(root).as_posix() for path in candidates if path.is_file()]
+    material_directories = (
+        root / PROCESSED_DIR / SYNCHRONIZED_DIR,
+        root / PROCESSED_DIR / "rectified",
+        root / BOP_DIR,
+    )
+    blockers.extend(
+        path.relative_to(root).as_posix()
+        for path in material_directories
+        if _directory_has_material_files(path)
+    )
+    try:
+        children = list(root.iterdir()) if root.is_dir() else []
+    except OSError:
+        children = []
+    for child in children:
+        if child.is_symlink():
+            blockers.append(child.relative_to(root).as_posix())
+            continue
+        if not child.is_dir() or child.name == PROCESSED_DIR:
+            continue
+        if any(
+            _directory_has_material_files(child / folder)
+            for folder in (RGB_DIR, DEPTH_DIR, MASKS_DIR)
+        ):
+            blockers.append(child.relative_to(root).as_posix())
+    return sorted(set(blockers))
+
+
+def _selection_response(
+    selection: Mapping[str, Any],
+    *,
+    idempotent: bool,
+) -> dict[str, Any]:
+    snapshot = selection["snapshot"]
+    calibration_relative = str(snapshot["calibration_profiles"]["relative_path"])
+    intrinsic_relative = str(
+        snapshot["intrinsic_calibration_profiles"]["relative_path"]
+    )
+    mapping = [dict(item) for item in selection["sensor_profile_mapping"]]
+    sensor_profiles = dict(selection["sensor_profiles"])
+    return {
+        "schema_version": SELECTION_SCHEMA_VERSION,
+        "selection": dict(selection),
+        "calibration_profiles": calibration_relative,
+        "intrinsic_calibration_profiles": intrinsic_relative,
+        "sensor_profile_mapping": mapping,
+        "sensor_profiles": sensor_profiles,
+        "stage_options": {
+            "calibration_preflight": {"require_valid": True},
+            "camera_rectification": {"intrinsic_profiles": intrinsic_relative},
+            "blenderproc_prepare": {"calibration_profiles": calibration_relative},
+            "bop_export": {"calibration_profiles": calibration_relative},
+        },
+        "idempotent": idempotent,
+    }
+
+
+def select_calibration_profile_snapshot(
+    run_root: str | Path,
+    *,
+    source_run_root: str | Path,
+    expected_bundle_sha256: str,
+    sensors: Any = None,
+    resolution: Any = None,
+    operator: Any = None,
+    expected_current_bundle_sha256: Any = None,
+    confirm_replace: Any = False,
+) -> dict[str, Any]:
+    """Validate a promoted source and snapshot both profile collections."""
+
+    destination = _resolve_direct_run(run_root, must_exist=False)
+    source = _resolve_direct_run(source_run_root, must_exist=True)
+    if source == destination:
+        raise ValueError("source_run_root must be different from run_root")
+    if (
+        not isinstance(expected_bundle_sha256, str)
+        or len(expected_bundle_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_bundle_sha256
+        )
+    ):
+        raise ValueError("expected_bundle_sha256 must be a lowercase SHA-256 digest")
+    if operator is None:
+        operator = "web_operator"
+    if not isinstance(operator, str) or not operator.strip() or len(operator.strip()) > 200:
+        raise ValueError("operator must be a non-empty string of at most 200 characters")
+    if expected_current_bundle_sha256 is not None and (
+        not isinstance(expected_current_bundle_sha256, str)
+        or len(expected_current_bundle_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_current_bundle_sha256
+        )
+    ):
+        raise ValueError(
+            "expected_current_bundle_sha256 must be a lowercase SHA-256 digest or null"
+        )
+    if not isinstance(confirm_replace, bool):
+        raise ValueError("confirm_replace must be a literal JSON boolean")
+    setup = _normalize_setup(
+        destination,
+        sensors=sensors,
+        resolution=resolution,
+        require_available=True,
+    )
+    assert setup is not None
+
+    with run_config_lock(source):
+        record, bundle = _inspect_source(source, setup)
+    if bundle is None or not record["valid"] or not record["compatible"]:
+        raise CalibrationSelectionConflict(
+            "Calibration is invalid or incompatible with the intended camera setup",
+            record["issues"],
+        )
+    if bundle.bundle_sha256 != expected_bundle_sha256:
+        raise CalibrationSelectionConflict(
+            "Calibration changed after it was listed; refresh and select it again",
+            [
+                _issue(
+                    "stale_calibration_bundle",
+                    "The source calibration hashes changed after the library was loaded.",
+                )
+            ],
+        )
+
+    with run_config_lock(destination) as locked_destination:
+        locked_setup = _normalize_setup(
+            locked_destination,
+            sensors=sensors,
+            resolution=resolution,
+            require_available=True,
+        )
+        assert locked_setup is not None
+        locked_mapping, locked_issues = _compatibility(bundle, locked_setup)
+        if locked_issues:
+            raise CalibrationSelectionConflict(
+                "Calibration became incompatible with the destination camera setup",
+                locked_issues,
+            )
+        setup = locked_setup
+        record["sensor_profile_mapping"] = locked_mapping
+        record["sensor_profiles"] = {
+            item["sensor_key"]: item["profile_id"] for item in locked_mapping
+        }
+        try:
+            current = verify_calibration_profile_selection(
+                locked_destination,
+                verify_run_config=False,
+            )
+        except FileNotFoundError:
+            current = None
+        except (OSError, ValueError) as exc:
+            raise CalibrationSelectionConflict(
+                "The current calibration selection is invalid and cannot be replaced safely",
+                [
+                    _issue(
+                        "invalid_current_selection",
+                        _safe_error("Current calibration selection is invalid", exc),
+                    )
+                ],
+            ) from exc
+        current_bundle = (
+            str(current["source"]["bundle_sha256"])
+            if current is not None
+            else None
+        )
+        if current_bundle == bundle.bundle_sha256:
+            return _selection_response(current, idempotent=True)
+        if current is None and expected_current_bundle_sha256 is not None:
+            raise CalibrationSelectionConflict(
+                "The expected current calibration no longer exists",
+                [
+                    _issue(
+                        "current_selection_missing",
+                        "No current calibration selection exists for the supplied compare-and-swap hash.",
+                    )
+                ],
+            )
+        if current is not None:
+            if expected_current_bundle_sha256 != current_bundle:
+                raise CalibrationSelectionConflict(
+                    "The current calibration changed; refresh before replacing it",
+                    [
+                        _issue(
+                            "stale_current_calibration_bundle",
+                            "expected_current_bundle_sha256 does not match the active selection.",
+                        )
+                    ],
+                )
+            if confirm_replace is not True:
+                raise CalibrationSelectionConflict(
+                    "Replacing the active calibration requires explicit confirmation",
+                    [
+                        _issue(
+                            "calibration_replacement_confirmation_required",
+                            "Set confirm_replace to literal true after reviewing the replacement.",
+                        )
+                    ],
+                )
+            blockers = calibration_selection_replacement_blockers(
+                locked_destination
+            )
+            if blockers:
+                raise CalibrationSelectionConflict(
+                    "Calibration cannot be replaced after capture or derived dataset material exists",
+                    [
+                        {
+                            "code": "calibration_replacement_blocked",
+                            "message": (
+                                "Create a new run to use another calibration; this run already "
+                                "contains capture or derived dataset material."
+                            ),
+                            "blockers": blockers,
+                        }
+                    ],
+                )
+        calibration_path, intrinsic_path = _write_snapshot(
+            locked_destination, bundle
+        )
+        calibration_relative = _relative(calibration_path, locked_destination)
+        intrinsic_relative = _relative(intrinsic_path, locked_destination)
+        selected_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+        mapping = list(record["sensor_profile_mapping"])
+        sensor_profiles = dict(record["sensor_profiles"])
+        selection = {
+            "schema_version": SELECTION_SCHEMA_VERSION,
+            "selected_at": selected_at,
+            "operator": operator.strip(),
+            "source": {
+                "run_root": source.as_posix(),
+                "run_name": record["source_run_name"],
+                "bundle_sha256": bundle.bundle_sha256,
+                "calibration_profiles": {
+                    "relative_path": CALIBRATION_PROFILES,
+                    "sha256": bundle.calibration_sha256,
+                    "size_bytes": len(bundle.calibration_bytes),
+                    "schema_version": bundle.calibration_schema_version,
+                },
+                "intrinsic_calibration_profiles": {
+                    "relative_path": INTRINSIC_CALIBRATION_PROFILES,
+                    "sha256": bundle.intrinsic_sha256,
+                    "size_bytes": len(bundle.intrinsic_bytes),
+                    "schema_version": bundle.intrinsic_schema_version,
+                },
+            },
+            "snapshot": {
+                "directory": _relative(calibration_path.parent, locked_destination),
+                "calibration_profiles": {
+                    "relative_path": calibration_relative,
+                    "sha256": bundle.calibration_sha256,
+                    "size_bytes": len(bundle.calibration_bytes),
+                    "schema_version": bundle.calibration_schema_version,
+                },
+                "intrinsic_calibration_profiles": {
+                    "relative_path": intrinsic_relative,
+                    "sha256": bundle.intrinsic_sha256,
+                    "size_bytes": len(bundle.intrinsic_bytes),
+                    "schema_version": bundle.intrinsic_schema_version,
+                },
+            },
+            "intended_setup": setup,
+            "sensor_profile_mapping": mapping,
+            "sensor_profiles": sensor_profiles,
+        }
+        atomic_write_json(_selection_path(locked_destination), selection)
+    return _selection_response(selection, idempotent=False)
+
+
+def selected_calibration_run_config_defaults(
+    run_root: str | Path,
+    *,
+    sensors: Sequence[SensorRunConfig],
+    resolution: str,
+    requested_calibration_profiles: str | None,
+    infer_when_omitted: bool,
+    expected_bundle_sha256: str | None = None,
+) -> dict[str, Any] | None:
+    """Resolve a verified selection when saving the destination run config."""
+
+    root = Path(run_root).resolve()
+    requested_is_managed_snapshot = False
+    if requested_calibration_profiles:
+        requested_path = Path(requested_calibration_profiles)
+        if not requested_path.is_absolute():
+            requested_path = root / requested_path
+        try:
+            requested_relative = requested_path.resolve().relative_to(root)
+            requested_is_managed_snapshot = (
+                requested_relative.parts[: len(SNAPSHOT_PARENT.parts)]
+                == SNAPSHOT_PARENT.parts
+            )
+        except ValueError:
+            requested_is_managed_snapshot = False
+    try:
+        selection = verify_calibration_profile_selection(
+            root,
+            expected_bundle_sha256=expected_bundle_sha256,
+            verify_run_config=False,
+        )
+    except FileNotFoundError:
+        if expected_bundle_sha256 is not None or requested_is_managed_snapshot:
+            raise CalibrationSelectionConflict(
+                "The expected calibration selection no longer exists",
+                [
+                    _issue(
+                        "current_selection_missing",
+                        "Select the calibration again before saving the run config.",
+                    )
+                ],
+            )
+        return None
+    except ValueError as exc:
+        if expected_bundle_sha256 is not None:
+            raise CalibrationSelectionConflict(
+                "The selected calibration changed before the run config was saved",
+                [
+                    _issue(
+                        "stale_calibration_selection",
+                        _safe_error("Calibration selection verification failed", exc),
+                    )
+                ],
+            ) from exc
+        raise
+    snapshot = selection["snapshot"]
+    calibration_relative = str(snapshot["calibration_profiles"]["relative_path"])
+    intrinsic_relative = str(
+        snapshot["intrinsic_calibration_profiles"]["relative_path"]
+    )
+    selected_path = (root / calibration_relative).resolve()
+    if requested_calibration_profiles:
+        requested_path = Path(requested_calibration_profiles)
+        if not requested_path.is_absolute():
+            requested_path = root / requested_path
+        if requested_path.resolve() != selected_path:
+            if expected_bundle_sha256 is not None or requested_is_managed_snapshot:
+                raise CalibrationSelectionConflict(
+                    "The requested calibration path is not the expected selection",
+                    [
+                        _issue(
+                            "calibration_selection_path_mismatch",
+                            "Save the immutable path returned by the calibration selection request.",
+                        )
+                    ],
+                )
+            return None
+    elif not infer_when_omitted:
+        if expected_bundle_sha256 is not None:
+            raise CalibrationSelectionConflict(
+                "The expected calibration snapshot path was omitted",
+                [
+                    _issue(
+                        "calibration_selection_path_missing",
+                        "Send the calibration_profiles path returned by calibration selection.",
+                    )
+                ],
+            )
+        return None
+
+    bundle = _load_bundle(root / Path(calibration_relative).parent)
+    setup = {
+        "resolution": resolution,
+        "sensors": [sensor.to_dict() for sensor in sensors],
+    }
+    mapping, issues = _compatibility(bundle, setup)
+    if issues:
+        raise ValueError(
+            "Selected calibration is incompatible with the saved camera setup: "
+            + "; ".join(issue["message"] for issue in issues)
+        )
+    return {
+        "calibration_profiles": calibration_relative,
+        "intrinsic_calibration_profiles": intrinsic_relative,
+        "calibration_profile_selection": {
+            "selection_artifact": CALIBRATION_PROFILE_SELECTION,
+            "bundle_sha256": selection["source"]["bundle_sha256"],
+            "selected_at": selection["selected_at"],
+        },
+        "sensor_profile_mapping": mapping,
+    }

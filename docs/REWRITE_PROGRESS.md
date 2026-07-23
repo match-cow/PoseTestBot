@@ -75,6 +75,62 @@ ready. Its only blocked gate is the expected BOP-export gate because this
 calibration-only run did not produce a BOP dataset; full capture is 10/10 ready
 and calibration validation is 3/3 ready.
 
+## 2026-07-22 Guided Operator Workflows
+
+Implementation of the outcome-oriented operator workflow architecture is
+complete:
+
+- replaced the generic seven-phase primary navigation with two guided journeys:
+  a five-step required camera-calibration spine and a six-step required
+  object-dataset spine, with persistent artifact-backed status and visual
+  dependencies;
+- kept optional target/template authoring, advanced calibration evidence, and
+  BlenderProc GT/mask work visibly outside the required spine, while retaining
+  individual stage forms only under **Advanced tools** for diagnostics and
+  recovery;
+- collapsed operator preflight into one visible readiness facade per journey,
+  with human-readable missing/stale/failed/invalid states, while preserving the
+  separate two-acknowledgement capture dialog and fresh startup checks at the
+  physical execution boundary;
+- made a prior promoted calibration a required object-dataset input, with
+  per-camera compatibility checks, a hash-bound
+  `calibration_profile_selection.json`, and exact run-owned profile snapshots
+  below `processed/calibration_inputs/<bundle_sha256>/`; snapshot pairs are
+  re-hashed at readiness and immediately before rectification, BlenderProc
+  preparation, or BOP export, while selection replacement is confirmation/CAS
+  gated and blocked after capture or derived dataset material exists;
+- added keyboard-accessible contextual help and explicit explanations for
+  camera mounting modes, template placement, synchronization, BOP output, and
+  Factory SDK versus OpenCV intrinsics. Compatible factory projection remains
+  selected by policy; OpenCV activates only as the fully gated fallback when
+  factory projection is unusable;
+- bound calibration analysis to the step-2 run-owned grid and the step-1 camera
+  mounting identities, split mixed static/robot-mounted selections into
+  separate attempts, and reject contradictory mode or target submissions at
+  the API boundary;
+- made guided progress depend on schema/status-validated evidence rather than
+  file existence, use the run-level sync-quality report as the aggregate over
+  per-camera sync reports, and refresh progress while queued work completes;
+  and
+- added the versioned `operator_workflows.v1` description endpoint while
+  retaining old workflow URLs as redirects into the corresponding guided step.
+
+This was a software-only workflow and documentation change. It did not open a
+camera, contact the robot, authorize motion, or complete any outstanding
+operator-run acceptance item in
+[REWRITE_REMAINING_WORK.md](REWRITE_REMAINING_WORK.md).
+
+Repository-wide software validation of this redesign completed on 2026-07-22:
+
+- 677 non-browser pytest tests and all 33 explicitly marked Playwright tests
+  passed (710 total);
+- Ruff, frontend type checking and lint, the production Vite build, and
+  `git diff --check` passed; and
+- the browser suite covered both numbered journeys, responsive navigation,
+  one visible readiness action, calibration selection/replacement CAS, fresh
+  capture gates, Factory/OpenCV guidance, automatic progress refresh, and the
+  consolidated dataset-processing action.
+
 ## 2026-07-22 Workpiece Catalogue
 
 Implementation of the dedicated **Workpiece Catalogue** feature is complete:

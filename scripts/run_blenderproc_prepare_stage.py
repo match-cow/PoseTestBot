@@ -18,6 +18,7 @@ from posetestbot.calibration.profiles import (
 from posetestbot.io.artifacts import (
     CALIBRATION_DIR,
     CALIBRATION_PROFILES,
+    CALIBRATION_PROFILE_SELECTION,
     DERIVED_CAMERA_EE_TRANSFORM,
     OBJECT_INSTANCES,
     PROCESSED_DIR,
@@ -107,6 +108,20 @@ def derived_camera_transform_path(run_root: Path) -> Path:
     return run_root / PROCESSED_DIR / CALIBRATION_DIR / DERIVED_CAMERA_EE_TRANSFORM
 
 
+def _selected_calibration_configured(
+    run_root: Path, run_config: dict | None
+) -> bool:
+    return (
+        (run_config or {}).get("calibration_profile_selection") is not None
+        or (run_root / CALIBRATION_PROFILE_SELECTION).exists()
+    )
+
+
+def _run_input_path(run_root: Path, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else run_root / path
+
+
 def camera_transformations_from_calibration_profiles(
     *,
     input_folder: Path,
@@ -149,7 +164,9 @@ def main() -> None:
     )
     camera_transformations_path = Path(args.camera_transformations)
     calibration_profiles = (
-        Path(args.calibration_profiles) if args.calibration_profiles else None
+        _run_input_path(run_root, args.calibration_profiles)
+        if args.calibration_profiles
+        else None
     )
 
     manifest = load_or_create_run_manifest(run_root)
@@ -163,6 +180,20 @@ def main() -> None:
             run_config = load_run_config_for_run_root(run_root)
         except FileNotFoundError:
             run_config = None
+        if _selected_calibration_configured(run_root, run_config):
+            if calibration_profiles is None:
+                raise ValueError(
+                    "A run with selected calibration provenance must pass its "
+                    "calibration_profiles snapshot to BlenderProc preparation"
+                )
+            from posetestbot.calibration.profile_library import (
+                verify_calibration_profile_selection,
+            )
+
+            verify_calibration_profile_selection(
+                run_root,
+                expected_calibration_profiles=calibration_profiles,
+            )
         if (
             not args.objectless
             and run_config is not None

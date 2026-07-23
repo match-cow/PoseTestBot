@@ -197,6 +197,12 @@ export interface RunConfig {
     placement_confirmed: boolean
   } | null
   calibration_profiles: string | null
+  intrinsic_calibration_profiles?: string | null
+  calibration_profile_selection?: {
+    selection_artifact: "calibration_profile_selection.json"
+    bundle_sha256: string
+    selected_at: string
+  } | null
   calibration_target: {
     target_id: string
     bundle_path: string

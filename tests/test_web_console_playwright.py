@@ -104,7 +104,48 @@ def run_config(*, plan_only: bool = True, sensors: list[dict] | None = None) -> 
     }
 
 
-def overview_payload() -> dict:
+def calibration_selection_artifact(
+    *,
+    bundle_sha256: str,
+    calibration_profiles: str,
+    intrinsic_calibration_profiles: str,
+    source_run_root: str = "/tmp/posetestbot-console/calibration-source",
+    source_run_name: str = "Reusable calibration",
+) -> dict:
+    return {
+        "schema_version": "calibration_profile_selection.v1",
+        "selected_at": "2026-07-22T12:00:00+00:00",
+        "operator": "web_operator",
+        "source": {
+            "run_root": source_run_root,
+            "run_name": source_run_name,
+            "bundle_sha256": bundle_sha256,
+        },
+        "snapshot": {
+            "calibration_profiles": {
+                "relative_path": calibration_profiles,
+                "sha256": "b" * 64,
+            },
+            "intrinsic_calibration_profiles": {
+                "relative_path": intrinsic_calibration_profiles,
+                "sha256": "c" * 64,
+            },
+        },
+        "sensor_profiles": {
+            "realsense_d435:wrist-1": "profile-wrist-1",
+        },
+    }
+
+
+def valid_library_selection(**kwargs) -> dict:
+    return {
+        **calibration_selection_artifact(**kwargs),
+        "valid": True,
+        "issues": [],
+    }
+
+
+def overview_payload(config: dict | None = None) -> dict:
     sections = [
         ("run_setup", "Run Setup", "complete"),
         ("preflight", "Preflight", "pending"),
@@ -115,7 +156,7 @@ def overview_payload() -> dict:
     ]
     return {
         "run_root": RUN_ROOT,
-        "config": run_config(),
+        "config": config or run_config(),
         "config_error": None,
         "sidebar": [
             {"id": id_, "label": label, "status": status, "artifacts": []}
@@ -209,7 +250,10 @@ def install_common_mocks(
             "reason": None if generator_available else "Pinned source checkout is unavailable",
         },
     }))
-    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview_payload()))
+    page.route(
+        "**/ui/overview**",
+        lambda route: fulfill_json(route, overview_payload(config_payload)),
+    )
     page.route("**/sensors/status", lambda route: fulfill_json(route, {"schema_version": "sensor_status.v1", "families": [], "total_connected": 0, "all_expected_connected": True}))
     page.route("**/robot/status", lambda route: fulfill_json(route, {"schema_version": "robot_status.v2", "selected_profile": {"mode": "real"}}))
     page.route("**/runtime/status", lambda route: fulfill_json(route, {"schema_version": "runtime_status.v1", "runtimes": [{"runtime_id": "blenderproc", "available": True}]}))
@@ -246,18 +290,23 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_attribute(
         "src", "/assets/cow_dark.png"
     )
-    assert page.get_by_role("navigation", name="Primary navigation").get_by_role(
-        "link"
-    ).all_inner_texts() == [
+    primary_navigation = page.get_by_role("navigation", name="Primary navigation")
+    assert primary_navigation.get_by_role("link").all_inner_texts() == [
         "Dashboard",
         "Devices",
-        "Calibration Targets",
+        "Calibration Grids",
         "Workpiece Catalogue",
-        "Pose Templates",
+        "Object Layouts",
         "Workflow",
         "Cell View",
         "Jobs",
     ]
+    expect(primary_navigation.get_by_role("link", name="Workflow")).to_have_attribute(
+        "href", "#/workflow/setup"
+    )
+    expect(page.get_by_role("link", name="Open camera calibration", exact=True)).to_have_attribute(
+        "href", "#/workflow/calibration"
+    )
     assert page.evaluate("localStorage.getItem('posetestbot.theme')") is None
     assert page.evaluate("localStorage.getItem('posetestbot.selectedRun')") is None
     expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("new-run")
@@ -298,6 +347,111 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     expect(page.get_by_text("Physical capture always requires fresh operator acknowledgement.", exact=True)).to_have_count(0)
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("background-color", "rgba(0, 0, 0, 0)")
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("padding", "0px")
+
+
+def test_workflow_chooser_distinguishes_numbered_required_journeys(
+    console_server,
+    page,
+) -> None:
+    install_common_mocks(page)
+
+    page.goto(f"{console_server.url}/#/workflow/setup", wait_until="networkidle")
+
+    expect(page.get_by_role("heading", name="What do you want to do?")).to_be_visible()
+    expect(page.get_by_role("heading", name="Calibrate cameras")).to_be_visible()
+    expect(page.get_by_role("heading", name="Record an object dataset")).to_be_visible()
+    expect(page.get_by_text("Each guided workflow shows the required order", exact=False)).to_be_visible()
+
+    outlines = page.locator("main ol")
+    expect(outlines).to_have_count(2)
+    assert outlines.nth(0).locator("li").all_inner_texts() == [
+        "01Configure the run and cameras",
+        "02Choose the printed calibration grid",
+        "03Check readiness",
+        "04Record calibration images",
+        "05Calculate, review, and publish",
+    ]
+    assert outlines.nth(1).locator("li").all_inner_texts() == [
+        "01Configure cameras and select calibration",
+        "02Choose the object template and placement",
+        "03Check readiness",
+        "04Record the object dataset",
+        "05Synchronize and verify frames",
+        "06Export the BOP dataset",
+    ]
+
+    workflow_links = page.get_by_role("link", name="Start this workflow")
+    expect(workflow_links).to_have_count(2)
+    expect(workflow_links.nth(0)).to_have_attribute("href", "#/workflow/calibration")
+    expect(workflow_links.nth(1)).to_have_attribute("href", "#/workflow/dataset")
+
+
+def test_workflow_stepper_connectors_follow_numbered_steps(
+    console_server,
+    page,
+) -> None:
+    install_common_mocks(page)
+
+    page.goto(f"{console_server.url}/#/workflow/calibration", wait_until="networkidle")
+
+    stepper = page.get_by_role("navigation", name="Required workflow steps")
+    expect(stepper).to_be_visible()
+    steps = stepper.locator("li")
+    connectors = stepper.locator("[data-workflow-step-connector]")
+    expect(steps).to_have_count(5)
+    expect(connectors).to_have_count(4)
+
+    for index in range(4):
+        step_box = steps.nth(index).bounding_box()
+        number_box = steps.nth(index).locator("[data-workflow-step-number]").bounding_box()
+        connector_box = connectors.nth(index).bounding_box()
+        next_step_box = steps.nth(index + 1).bounding_box()
+        assert step_box is not None
+        assert number_box is not None
+        assert connector_box is not None
+        assert next_step_box is not None
+        assert connector_box["width"] == pytest.approx(1, abs=0.5)
+        assert connector_box["height"] == pytest.approx(20, abs=0.5)
+        assert connector_box["x"] + connector_box["width"] / 2 == pytest.approx(
+            number_box["x"] + number_box["width"] / 2,
+            abs=1,
+        )
+        assert connector_box["y"] >= step_box["y"] + step_box["height"] - 21
+        assert connector_box["y"] + connector_box["height"] <= next_step_box["y"] + 1
+
+    page.set_viewport_size({"width": 900, "height": 900})
+    for index in range(4):
+        button_box = steps.nth(index).get_by_role("button").bounding_box()
+        connector_box = connectors.nth(index).bounding_box()
+        assert button_box is not None
+        assert connector_box is not None
+        assert connector_box["width"] >= 20
+        assert connector_box["height"] == pytest.approx(1, abs=0.5)
+        assert connector_box["x"] >= button_box["x"] + button_box["width"]
+
+
+def test_responsive_shell_and_dataset_workflow_links(console_server, page) -> None:
+    config = run_config()
+    config["dataset_mode"] = "pose_template"
+    install_common_mocks(page, config_payload=config)
+    page.set_viewport_size({"width": 900, "height": 900})
+
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+
+    expect(page.locator("aside")).to_be_hidden()
+    primary_navigation = page.get_by_role("navigation", name="Primary navigation")
+    expect(primary_navigation).to_have_count(1)
+    expect(primary_navigation).to_be_visible()
+    expect(primary_navigation.get_by_role("link", name="Calibration Grids")).to_be_visible()
+    expect(primary_navigation.get_by_role("link", name="Object Layouts")).to_be_visible()
+    expect(page.get_by_role("link", name="Open object dataset", exact=True)).to_have_attribute(
+        "href", "#/workflow/dataset"
+    )
+    expect(page.get_by_text("Object dataset evidence", exact=True)).to_be_visible()
+    assert page.evaluate("getComputedStyle(document.body).minWidth") == "0px"
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
 
 
 def pose_template_source(*, available: bool) -> dict:
@@ -573,7 +727,7 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
 
     page.goto(f"{console_server.url}/#/pose-templates", wait_until="networkidle")
     expect(page.get_by_test_id("pose-templates-page")).to_be_visible()
-    expect(page.get_by_role("link", name="Pose Templates")).to_be_visible()
+    expect(page.get_by_role("link", name="Object Layouts")).to_be_visible()
     expect(page.get_by_text("Clamp", exact=True)).to_be_visible()
     expect(page.get_by_text("Small clamp", exact=False)).to_be_visible()
     manage = page.get_by_role("link", name="Manage catalogue")
@@ -1054,7 +1208,10 @@ def test_ground_truth_workflow_selection_and_full_placement(console_server, page
         else:
             fulfill_json(route, {"selection": None, "replacement_blockers": [], "ready": False})
     page.route("**/pose-templates/runs/selection**", selection_handler)
-    page.goto(f"{console_server.url}/#/workflow/ground-truth", wait_until="networkidle")
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=template",
+        wait_until="networkidle",
+    )
     expect(page.get_by_test_id("ground-truth-workflow")).to_be_visible()
     template_thumbnail = page.get_by_test_id(
         "template-thumbnail-22222222-2222-4222-8222-222222222222"
@@ -1090,7 +1247,7 @@ def test_ground_truth_workflow_selection_and_full_placement(console_server, page
     page.get_by_label("Template placement Yaw °").fill("90")
     confirmation.click()
     page.get_by_role("button", name="Select for run").click()
-    expect(page.get_by_text("Ground Truth selection queued")).to_be_visible()
+    expect(page.get_by_text("Object layout selection queued")).to_be_visible()
     assert submitted[0]["confirmed"] is True
     assert submitted[0]["template_uuid"] == "22222222-2222-4222-8222-222222222222"
     assert submitted[0]["placement"]["matrix"][0][3] == 12
@@ -1100,16 +1257,48 @@ def test_ground_truth_workflow_selection_and_full_placement(console_server, page
 def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, page) -> None:
     requests: list[dict] = []
     preflight_state = {"blocker": "missing_preflight"}
-    install_common_mocks(page, preflight_state=preflight_state, requests=requests)
+    configured = run_config(
+        sensors=[
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "display_name": "Wrist RGB-D",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+            },
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "static-1",
+                "display_name": "Static RGB-D",
+                "mounting_mode": "static",
+                "enabled": True,
+                "inverted": True,
+            },
+        ]
+    )
+    configured["calibration_target"] = {
+        "target_id": "5f09f41c-dd91-44ef-a048-1f43fc990e17",
+        "placement": {"mode": "stationary_template_base"},
+    }
+    install_common_mocks(
+        page,
+        preflight_state=preflight_state,
+        requests=requests,
+        config_payload=configured,
+    )
     page.route("**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status()))
     page.add_init_script(
         "localStorage.setItem('posetestbot.selectedSensors', "
         "JSON.stringify(['realsense_d435:wrist-1', 'realsense_d435:static-1']))"
     )
-    page.goto(f"{console_server.url}/#/workflow/setup", wait_until="networkidle")
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=configure",
+        wait_until="networkidle",
+    )
 
-    page.get_by_role("button", name="Write run config").click()
-    expect(page.get_by_text("Run configuration written")).to_be_visible()
+    page.get_by_role("button", name="Save setup").click()
+    expect(page.get_by_text("Calibration recording setup saved")).to_be_visible()
     written = next(item["body"] for item in requests if item["path"] == "/run-config")
     assert written["plan_only"] is True
     assert "mounting_mode" not in written
@@ -1120,16 +1309,22 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     assert "allow_cameras" not in json.dumps(written)
     assert "allow_real_robot" not in json.dumps(written)
 
-    page.goto(f"{console_server.url}/#/workflow/capture", wait_until="networkidle")
-    expect(page.get_by_text("Capture blocked: missing preflight")).to_be_visible()
-    page.get_by_role("button", name="Run preflight").click()
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=readiness",
+        wait_until="networkidle",
+    )
+    readiness = page.get_by_test_id("calibration-readiness-check")
+    expect(readiness).to_have_count(1)
+    expect(readiness).to_be_visible()
+    expect(readiness).to_contain_text("Readiness has not been checked")
+    readiness.get_by_role("button", name="Check readiness", exact=True).click()
     preflight_request = next(item["body"] for item in requests if item["path"] == "/pipeline/run")
     assert preflight_request["stage"] == "run_preflight"
     assert "allow_cameras" not in json.dumps(preflight_request)
 
     preflight_state["blocker"] = None
     page.reload(wait_until="networkidle")
-    page.get_by_role("button", name="Open capture gate").click()
+    page.get_by_role("button", name="Review and start capture", exact=True).click()
     expect(page.get_by_test_id("capture-timeout-envelope")).to_contain_text(
         "300 s total · 15 s sustained camera readiness (3 frames each) · 120 s to first robot packet · 60 s between robot packets"
     )
@@ -1140,7 +1335,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     page.locator('[data-testid="capture-camera-ack"]').click()
     expect(submit).to_be_enabled()
     submit.click()
-    expect(page.get_by_text("Physical capture queued")).to_be_visible()
+    expect(page.get_by_text("Calibration capture queued")).to_be_visible()
     capture_request = [item["body"] for item in requests if item["path"] == "/pipeline/run" and item["body"]["stage"] == "capture_execution"][-1]
     assert capture_request["options"] == {
         "allow_cameras": True,
@@ -1152,6 +1347,501 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
         "receive_idle_timeout_s": 60,
     }
     assert any(item["path"] == "/sensors/previews/stop" for item in requests)
+
+
+def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
+    console_server,
+    page,
+) -> None:
+    requests: list[dict] = []
+    selection_requests: list[dict] = []
+    configured = run_config(
+        sensors=[
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "display_name": "Wrist RGB-D",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+            }
+        ]
+    )
+    source_run_root = "/tmp/posetestbot-console/calibration-july-21"
+    source_bundle_sha256 = "a" * 64
+    selected_calibration_path = (
+        "processed/calibration_selection/calibration_profiles.json"
+    )
+    selected_intrinsics_path = (
+        "processed/calibration_selection/intrinsic_calibration_profiles.json"
+    )
+    selection_artifact = calibration_selection_artifact(
+        bundle_sha256=source_bundle_sha256,
+        calibration_profiles=selected_calibration_path,
+        intrinsic_calibration_profiles=selected_intrinsics_path,
+        source_run_root=source_run_root,
+        source_run_name="Calibration run July 21",
+    )
+    source = {
+        "source_run_root": source_run_root,
+        "source_run_name": "Calibration run July 21",
+        "bundle_sha256": source_bundle_sha256,
+        "valid": True,
+        "compatible": True,
+        "issues": [],
+        "calibration_profiles": {
+            "sha256": "b" * 64,
+            "valid_profile_count": 1,
+            "profiles": [
+                {
+                    "profile_id": "profile-wrist-1",
+                    "sensor_type": "realsense_d435",
+                    "sensor_id": "wrist-1",
+                    "mounting_mode": "eye_in_hand",
+                    "method": "IPPE + park",
+                    "quality": {
+                        "num_observations": 18,
+                        "num_inliers": 17,
+                        "mean_reprojection_error_px": 0.31,
+                    },
+                }
+            ],
+        },
+        "intrinsic_calibration_profiles": {
+            "sha256": "c" * 64,
+            "profile_count": 1,
+        },
+    }
+    install_common_mocks(page, requests=requests, config_payload=configured)
+    page.route("**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status()))
+    page.route(
+        "**/ui/calibrations?**",
+        lambda route: fulfill_json(
+            route,
+            {"selected": None, "calibrations": [source]},
+        ),
+    )
+
+    def select_calibration_handler(route) -> None:
+        selection_requests.append(route.request.post_data_json)
+        fulfill_json(
+            route,
+            {
+                "calibration_profiles": selected_calibration_path,
+                "intrinsic_calibration_profiles": selected_intrinsics_path,
+                "sensor_profile_mapping": [
+                    {
+                        "sensor_key": "realsense_d435:wrist-1",
+                        "profile_id": "profile-wrist-1",
+                    }
+                ],
+                "selection": selection_artifact,
+            },
+        )
+
+    page.route("**/ui/calibrations/select", select_calibration_handler)
+    page.route(
+        "**/pose-templates/library",
+        lambda route: fulfill_json(route, {"templates": []}),
+    )
+    page.route(
+        "**/pose-templates/runs/selection?**",
+        lambda route: fulfill_json(
+            route,
+            {"selection": None, "replacement_blockers": [], "ready": False},
+        ),
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=configure",
+        wait_until="networkidle",
+    )
+
+    expect(page.get_by_role("heading", name="Record an object-template dataset")).to_be_visible()
+    expect(page.get_by_role("heading", name="Saved camera calibration")).to_contain_text(
+        "Required"
+    )
+    expect(page.get_by_text("Required: select and validate a previously published calibration below.")).to_be_visible()
+    save_setup = page.get_by_role("button", name="Save setup")
+    expect(save_setup).to_be_disabled()
+    readiness_action = page.get_by_role(
+        "button", name="Check readiness", exact=True
+    )
+    expect(readiness_action).to_have_count(1)
+    expect(readiness_action).to_be_visible()
+
+    source_choice = page.get_by_role("radio").filter(
+        has_text="Calibration run July 21"
+    )
+    expect(source_choice).to_have_count(1)
+    expect(source_choice).to_contain_text("Matches saved setup")
+    source_choice.click()
+    expect(source_choice).to_have_attribute("aria-checked", "true")
+    validate_and_save = page.get_by_role(
+        "button", name="Validate and save setup", exact=True
+    )
+    expect(validate_and_save).to_be_enabled()
+    validate_and_save.click()
+
+    expect(page.get_by_text("Object dataset setup saved")).to_be_visible()
+    assert selection_requests == [
+        {
+            "run_root": RUN_ROOT,
+            "source_run_root": source_run_root,
+            "expected_bundle_sha256": source_bundle_sha256,
+            "expected_current_bundle_sha256": None,
+            "confirm_replace": False,
+            "resolution": "720p",
+            "sensors": [
+                {
+                    "sensor_type": "realsense_d435",
+                    "device_id": "wrist-1",
+                    "mounting_mode": "eye_in_hand",
+                    "inverted": False,
+                }
+            ],
+        }
+    ]
+    written = next(item["body"] for item in requests if item["path"] == "/run-config")
+    assert written["dataset_mode"] == "pose_template"
+    assert written["plan_only"] is False
+    assert written["sequence"] == "calibrated_capture_to_bop_dataset_dry_run"
+    assert written["calibration_profiles"] == selected_calibration_path
+    assert written["expected_calibration_bundle_sha256"] == source_bundle_sha256
+    assert written["sequence_options"] == {
+        "camera_rectification": {"intrinsic_profiles": selected_intrinsics_path}
+    }
+    assert written["sensors"][0]["calibration_profile_id"] == "profile-wrist-1"
+
+    readiness_steps = page.locator('[data-workflow-step="readiness"]')
+    expect(readiness_steps).to_have_count(1)
+    expect(readiness_steps).to_be_visible()
+    expect(page.get_by_test_id("dataset-readiness-check")).to_have_count(1)
+    expect(page.get_by_test_id("dataset-readiness-check")).to_contain_text(
+        "One readiness check"
+    )
+
+
+def test_dataset_setup_requires_confirmation_to_replace_selected_calibration(
+    console_server,
+    page,
+) -> None:
+    requests: list[dict] = []
+    selection_requests: list[dict] = []
+    current_bundle_sha256 = "1" * 64
+    replacement_bundle_sha256 = "2" * 64
+    current_calibration_path = (
+        "processed/calibration_inputs/current/calibration_profiles.json"
+    )
+    current_intrinsics_path = (
+        "processed/calibration_inputs/current/intrinsic_calibration_profiles.json"
+    )
+    replacement_calibration_path = (
+        "processed/calibration_inputs/replacement/calibration_profiles.json"
+    )
+    replacement_intrinsics_path = (
+        "processed/calibration_inputs/replacement/intrinsic_calibration_profiles.json"
+    )
+    configured = run_config(
+        sensors=[
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "display_name": "Wrist RGB-D",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+                "calibration_profile_id": "profile-wrist-1",
+            }
+        ]
+    )
+    configured["dataset_mode"] = "pose_template"
+    configured["calibration_profiles"] = current_calibration_path
+    configured["intrinsic_calibration_profiles"] = current_intrinsics_path
+    configured["calibration_profile_selection"] = {
+        "selection_artifact": "calibration_profile_selection.json",
+        "bundle_sha256": current_bundle_sha256,
+        "selected_at": "2026-07-22T12:00:00+00:00",
+    }
+    replacement_source_root = "/tmp/posetestbot-console/replacement-calibration"
+    replacement_source = {
+        "source_run_root": replacement_source_root,
+        "source_run_name": "Replacement calibration",
+        "bundle_sha256": replacement_bundle_sha256,
+        "valid": True,
+        "compatible": False,
+        "issues": [
+            {
+                "code": "saved_setup_changed",
+                "message": "The saved setup differs; current choices will be checked when saved.",
+            }
+        ],
+        "calibration_profiles": {
+            "sha256": "4" * 64,
+            "valid_profile_count": 1,
+            "profiles": [],
+        },
+        "intrinsic_calibration_profiles": {
+            "sha256": "5" * 64,
+            "profile_count": 1,
+        },
+    }
+    replacement_selection = calibration_selection_artifact(
+        bundle_sha256=replacement_bundle_sha256,
+        calibration_profiles=replacement_calibration_path,
+        intrinsic_calibration_profiles=replacement_intrinsics_path,
+        source_run_root=replacement_source_root,
+        source_run_name="Replacement calibration",
+    )
+
+    install_common_mocks(page, requests=requests, config_payload=configured)
+    page.route("**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status()))
+    page.route(
+        "**/ui/calibrations?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "selected": valid_library_selection(
+                    bundle_sha256=current_bundle_sha256,
+                    calibration_profiles=current_calibration_path,
+                    intrinsic_calibration_profiles=current_intrinsics_path,
+                ),
+                "calibrations": [replacement_source],
+            },
+        ),
+    )
+
+    def select_calibration_handler(route) -> None:
+        selection_requests.append(route.request.post_data_json)
+        fulfill_json(
+            route,
+            {
+                "calibration_profiles": replacement_calibration_path,
+                "intrinsic_calibration_profiles": replacement_intrinsics_path,
+                "sensor_profile_mapping": [
+                    {
+                        "sensor_key": "realsense_d435:wrist-1",
+                        "profile_id": "profile-wrist-1",
+                    }
+                ],
+                "selection": replacement_selection,
+            },
+        )
+
+    page.route("**/ui/calibrations/select", select_calibration_handler)
+    page.route(
+        "**/pose-templates/library",
+        lambda route: fulfill_json(route, {"templates": []}),
+    )
+    page.route(
+        "**/pose-templates/runs/selection?**",
+        lambda route: fulfill_json(
+            route,
+            {"selection": None, "replacement_blockers": [], "ready": False},
+        ),
+    )
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=configure",
+        wait_until="networkidle",
+    )
+
+    expect(page.get_by_text("A verified calibration snapshot is selected")).to_be_visible()
+    replacement_choice = page.get_by_role("radio").filter(
+        has_text="Replacement calibration"
+    )
+    expect(replacement_choice).to_contain_text("Validated when saved")
+    expect(replacement_choice).to_contain_text(
+        "The saved setup differs; current choices will be checked when saved."
+    )
+    replacement_choice.click()
+
+    validate_and_save = page.get_by_role(
+        "button", name="Validate and save setup", exact=True
+    )
+    expect(validate_and_save).to_be_disabled()
+    assert selection_requests == []
+    confirmation = page.get_by_label(
+        "Confirm replacing the current calibration selection"
+    )
+    expect(confirmation).not_to_be_checked()
+    confirmation.click()
+    expect(validate_and_save).to_be_enabled()
+    validate_and_save.click()
+
+    expect(page.get_by_text("Object dataset setup saved")).to_be_visible()
+    assert selection_requests == [
+        {
+            "run_root": RUN_ROOT,
+            "source_run_root": replacement_source_root,
+            "expected_bundle_sha256": replacement_bundle_sha256,
+            "expected_current_bundle_sha256": current_bundle_sha256,
+            "confirm_replace": True,
+            "resolution": "720p",
+            "sensors": [
+                {
+                    "sensor_type": "realsense_d435",
+                    "device_id": "wrist-1",
+                    "mounting_mode": "eye_in_hand",
+                    "inverted": False,
+                }
+            ],
+        }
+    ]
+    written = next(item["body"] for item in requests if item["path"] == "/run-config")
+    assert written["calibration_profiles"] == replacement_calibration_path
+    assert (
+        written["expected_calibration_bundle_sha256"]
+        == replacement_bundle_sha256
+    )
+
+
+def test_dataset_processing_is_one_ordered_operator_action(
+    console_server,
+    page,
+) -> None:
+    processing_requests: list[dict] = []
+    selected_bundle_sha256 = "d" * 64
+    selected_calibration_path = (
+        "processed/calibration_inputs/current/calibration_profiles.json"
+    )
+    selected_intrinsics_path = (
+        "processed/calibration_inputs/current/intrinsic_calibration_profiles.json"
+    )
+    configured = run_config(
+        plan_only=False,
+        sensors=[
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "display_name": "Wrist RGB-D",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+                "calibration_profile_id": "profile-wrist-1",
+            }
+        ],
+    )
+    configured["dataset_mode"] = "pose_template"
+    configured["calibration_profiles"] = selected_calibration_path
+    configured["intrinsic_calibration_profiles"] = selected_intrinsics_path
+    configured["calibration_profile_selection"] = {
+        "selection_artifact": "calibration_profile_selection.json",
+        "bundle_sha256": selected_bundle_sha256,
+        "selected_at": "2026-07-22T12:00:00+00:00",
+    }
+    configured["pose_template"] = {
+        "template_uuid": "22222222-2222-4222-8222-222222222222",
+        "placement_confirmed": True,
+    }
+    overview = overview_payload(configured)
+    capture_section = next(
+        section for section in overview["sidebar"] if section["id"] == "capture"
+    )
+    capture_section["artifacts"] = [
+        {
+            "path": "capture_execution_report.json",
+            "exists": True,
+            "status": "complete",
+        }
+    ]
+
+    install_common_mocks(page, config_payload=configured)
+    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
+    page.route("**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status()))
+    page.route(
+        "**/ui/calibrations?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "selected": valid_library_selection(
+                    bundle_sha256=selected_bundle_sha256,
+                    calibration_profiles=selected_calibration_path,
+                    intrinsic_calibration_profiles=selected_intrinsics_path,
+                ),
+                "calibrations": [],
+            },
+        ),
+    )
+    page.route(
+        "**/pose-templates/library",
+        lambda route: fulfill_json(route, {"templates": []}),
+    )
+    page.route(
+        "**/pose-templates/runs/selection?**",
+        lambda route: fulfill_json(
+            route,
+            {"selection": None, "replacement_blockers": [], "ready": False},
+        ),
+    )
+
+    def processing_handler(route) -> None:
+        processing_requests.append(route.request.post_data_json)
+        next(section for section in overview["sidebar"] if section["id"] == "sync")[
+            "artifacts"
+        ] = [
+            {
+                "path": "sync_quality_report.json",
+                "exists": True,
+                "status": "ok",
+            }
+        ]
+        next(section for section in overview["sidebar"] if section["id"] == "bop")[
+            "artifacts"
+        ] = [
+            {
+                "path": "camera_rectification_report.json",
+                "exists": True,
+                "status": "complete",
+            },
+            {
+                "path": "bop/bop_export_manifest.json",
+                "exists": True,
+                "status": "complete",
+            },
+        ]
+        fulfill_json(
+            route,
+            {"job_id": "dataset-processing-1", "status": "queued"},
+            status=202,
+        )
+
+    page.route("**/pipeline/run-config", processing_handler)
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=sync",
+        wait_until="networkidle",
+    )
+
+    processing = page.get_by_test_id("dataset-processing")
+    expect(processing).to_have_count(1)
+    expect(processing).to_contain_text("One queued job runs the required derived-data stages in order")
+    expect(processing).to_contain_text(
+        "Calibration validation is automatic here; there is no second operator preflight."
+    )
+    process_action = page.get_by_role(
+        "button", name="Process and export dataset", exact=True
+    )
+    expect(process_action).to_have_count(1)
+    expect(process_action).to_be_enabled()
+    for stale_action in (
+        "Synchronize frames",
+        "Verify synchronization",
+        "Validate selected calibration",
+        "Export BOP dataset",
+    ):
+        expect(
+            page.get_by_role("button", name=stale_action, exact=True)
+        ).to_have_count(0)
+
+    export_outcome = page.locator('[data-workflow-step="export"]')
+    expect(export_outcome).to_contain_text("BOP export has not completed")
+    expect(export_outcome).to_contain_text(
+        "Use Process and export dataset in step 5"
+    )
+
+    process_action.click()
+    expect(page.get_by_text("Dataset processing queued")).to_be_visible()
+    assert processing_requests == [{"run_root": RUN_ROOT}]
+    expect(page.get_by_text("BOP dataset is ready")).to_be_visible(timeout=5_000)
 
 
 def test_run_setup_disables_camera_without_deleting_identity_or_profile(
@@ -1208,7 +1898,10 @@ def test_run_setup_disables_camera_without_deleting_identity_or_profile(
     install_common_mocks(page, requests=requests, config_payload=configured)
     page.route("**/sensors/status", lambda route: fulfill_json(route, status))
 
-    page.goto(f"{console_server.url}/#/workflow/setup", wait_until="networkidle")
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=configure",
+        wait_until="networkidle",
+    )
 
     rows = page.locator('[data-testid="run-camera-row"]')
     expect(rows).to_have_count(3)
@@ -1216,13 +1909,13 @@ def test_run_setup_disables_camera_without_deleting_identity_or_profile(
         '[data-testid="run-camera-row"][data-sensor-key="realsense_d435:offline-1"]'
     )
     expect(offline).to_have_attribute("data-camera-state", "enabled")
-    expect(offline).to_contain_text("not capture-ready")
+    expect(offline).to_contain_text("not ready")
     page.get_by_label("Enable Offline wrist camera for this run").click()
     expect(offline).to_have_attribute("data-camera-state", "disabled")
     expect(offline).to_have_css("opacity", "0.6")
 
-    page.get_by_role("button", name="Write run config").click()
-    expect(page.get_by_text("Run configuration written")).to_be_visible()
+    page.get_by_role("button", name="Save setup").click()
+    expect(page.get_by_text("Calibration recording setup saved")).to_be_visible()
     written = next(item["body"] for item in requests if item["path"] == "/run-config")
     assert len(written["sensors"]) == 3
     disabled = next(
@@ -1376,14 +2069,14 @@ def test_calibration_target_unavailable_keeps_saved_library_navigation(
     }))
     page.goto(console_server.url, wait_until="networkidle")
 
-    expect(page.get_by_role("link", name="Calibration Targets")).to_be_visible()
+    expect(page.get_by_role("link", name="Calibration Grids")).to_be_visible()
     page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
     expect(page.get_by_text("Target generation is unavailable")).to_be_visible()
     expect(page.get_by_text("Saved target library")).to_be_visible()
     expect(page.get_by_text("git submodule update --init third_party/PoseGridGen")).to_be_visible()
 
 
-def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_state(
+def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     console_server, page
 ) -> None:
     requests: list[dict] = []
@@ -1393,12 +2086,12 @@ def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_stat
         "schema_version": "calibration_setup.v1",
         "run_root": RUN_ROOT,
         "cameras": [
-            {"sensor_key": "realsense_d435:wrist-1", "sensor_name": "realsense_wrist-1", "display_name": "Wrist RGB-D", "sensor_type": "realsense_d435", "device_id": "wrist-1"},
-            {"sensor_key": "oak_d_pro:static-1", "sensor_name": "luxonis_static-1", "display_name": "Static OAK-D", "sensor_type": "oak_d_pro", "device_id": "static-1"},
+            {"sensor_key": "realsense_d435:wrist-1", "sensor_name": "realsense_wrist-1", "display_name": "Wrist RGB-D", "sensor_type": "realsense_d435", "device_id": "wrist-1", "current_mounting_mode": "eye_in_hand"},
+            {"sensor_key": "oak_d_pro:static-1", "sensor_name": "luxonis_static-1", "display_name": "Auxiliary OAK-D", "sensor_type": "oak_d_pro", "device_id": "static-1", "current_mounting_mode": "eye_in_hand"},
         ],
         "unavailable_cameras": [],
         "saved_targets": [
-            {"target_id": "5f09f41c-dd91-44ef-a048-1f43fc990e17", "display_name": "Lab board", "valid": True},
+            {"target_id": "5f09f41c-dd91-44ef-a048-1f43fc990e17", "display_name": "Lab board", "valid": True, "selected": True},
             {"target_id": "9ab5ff1c-60f6-46b1-823d-2a912d5d4e3f", "display_name": "Alternate board", "valid": True},
         ],
         "modes": [
@@ -1467,6 +2160,25 @@ def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_stat
         "held_out_residuals": {"mean_translation_mm": 0.8, "median_translation_mm": 0.7, "mean_rotation_deg": 0.3, "median_rotation_deg": 0.2},
     }
     override = {**recommended, "candidate_id": "realsense_d435:wrist-1|SQPNP|tsai", "profile_id": "wrist_sqpnp_tsai", "pnp_method": "SQPNP", "extrinsic_method": "tsai", "recommended": False, "score": 0.2}
+    static_transform = {
+        **transform,
+        "to": "robot_flange",
+        "translation_mm": [110, 20, 530],
+        "matrix": [[1, 0, 0, 110], [0, 1, 0, 20], [0, 0, 1, 530], [0, 0, 0, 1]],
+    }
+    static_recommended = {
+        **recommended,
+        "candidate_id": "oak_d_pro:static-1|IPPE|park",
+        "profile_id": "static_ippe_park",
+        "recommended": True,
+        "score": 0.16,
+        "primary_transform": static_transform,
+        "companion_transform": {
+            **static_transform,
+            "from": "aruco_grid",
+            "to": "template_base",
+        },
+    }
     failed = {
         "candidate_id": "oak_d_pro:static-1|ITERATIVE|li", "pnp_method": "ITERATIVE", "extrinsic_method": "li", "algorithms": ["ITERATIVE", "li"], "status": "error", "validation_state": "failed", "score": None, "observation_count": 3, "inlier_count": 0, "outlier_count": 3, "outlier_ratio": 1, "error": "leave-one-pose-out validation requires at least four poses",
     }
@@ -1482,9 +2194,9 @@ def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_stat
                 {"id": "compare_robot_camera_solutions", "label": "Compare robot-camera solutions", "status": "complete"},
                 {"id": "validate_and_rank", "label": "Validate and rank", "status": "complete"},
             ]},
-            "results": {"status": "partial", "recommended_camera_count": 1, "failed_camera_count": 1, "results": [
+            "results": {"status": "complete", "recommended_camera_count": 2, "failed_camera_count": 0, "results": [
                 {**setup["cameras"][0], "status": "passing", "recommended_candidate_id": recommended["candidate_id"], "recommendation": recommended, "candidates": [recommended, override]},
-                {**setup["cameras"][1], "status": "failed", "recommended_candidate_id": None, "recommendation": None, "candidates": [failed]},
+                {**setup["cameras"][1], "status": "passing", "recommended_candidate_id": static_recommended["candidate_id"], "recommendation": static_recommended, "candidates": [static_recommended, failed]},
             ]},
             "intrinsic_comparison": {
                 "policy": "compare_factory_opencv",
@@ -1531,7 +2243,7 @@ def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_stat
                     },
                 ],
             },
-            "promotion": ({"status": "promoted", "promoted_profile_ids": ["wrist_sqpnp_tsai"]} if promoted["value"] else None),
+            "promotion": ({"status": "promoted", "promoted_profile_ids": ["wrist_sqpnp_tsai", "static_ippe_park"]} if promoted["value"] else None),
         }
 
     page.route("**/calibration/attempts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?**", lambda route: fulfill_json(route, attempt_payload()))
@@ -1549,38 +2261,74 @@ def test_two_mode_calibration_workflow_progress_results_overrides_and_saved_stat
     expect(page.get_by_text("Robot-mounted camera (eye-in-hand)")).to_be_visible()
     expect(page.get_by_text("Static camera (eye-to-hand)")).to_be_visible()
     expect(page.locator("[data-stage-id]")).to_have_count(0)
-    expect(page.get_by_text("Auto compare — recommended")).to_be_visible()
+    intrinsics_guidance = page.locator('[data-workflow-step="calculate"]')
+    expect(intrinsics_guidance).to_contain_text("Factory and OpenCV intrinsics")
+    expect(intrinsics_guidance).to_contain_text(
+        "A lower RMS alone does not make it the preferred model"
+    )
+    intrinsics_guidance.get_by_role(
+        "button", name="About Factory and OpenCV intrinsics"
+    ).hover()
+    expect(page.get_by_role("tooltip")).to_contain_text(
+        "Factory is the per-camera projection supplied by the camera SDK"
+    )
+    expect(page.get_by_text("Automatic solution comparison")).to_be_visible()
+    expect(page.locator('input[value="eye_in_hand"]')).to_be_checked()
     page.locator('input[value="eye_to_hand"]').check()
     expect(page.locator('input[value="eye_to_hand"]')).to_be_checked()
     page.locator('input[value="eye_in_hand"]').check()
-    camera_choices = page.get_by_role("checkbox")
+    camera_choices = page.get_by_test_id("calibration-workflow").get_by_role("checkbox")
+    expect(camera_choices).to_have_count(2)
     camera_choices.nth(1).click()
     expect(camera_choices.nth(1)).not_to_be_checked()
     camera_choices.nth(1).click()
-    page.get_by_role("combobox", name="Saved calibration target").click()
-    page.get_by_role("option", name="Alternate board").click()
-    expect(page.get_by_role("button", name="Run calibration")).to_be_enabled()
-    page.get_by_role("button", name="Run calibration").click()
+    expect(page.get_by_test_id("calibration-workflow").get_by_text("Lab board", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Analyze recording")).to_be_enabled()
+    page.get_by_role("button", name="Analyze recording").click()
     expect(page.get_by_text("Calibration queued")).to_be_visible()
     assert requests[0]["body"]["mode"] == "eye_in_hand"
     assert requests[0]["body"]["sensor_keys"] == ["realsense_d435:wrist-1", "oak_d_pro:static-1"]
-    assert requests[0]["body"]["target_id"] == "9ab5ff1c-60f6-46b1-823d-2a912d5d4e3f"
+    assert requests[0]["body"]["target_id"] == "5f09f41c-dd91-44ef-a048-1f43fc990e17"
     assert requests[0]["body"]["intrinsics_policy"] == "compare_factory_opencv"
 
     expect(page.get_by_text("Prepare data")).to_be_visible()
     expect(page.get_by_test_id("calibration-results")).to_be_visible()
     expect(page.get_by_test_id("calibration-acceptance-thresholds")).to_contain_text("≥15 accepted views")
-    expect(page.get_by_test_id("intrinsic-comparison-realsense_d435:wrist-1")).to_contain_text("OpenCV selected")
-    expect(page.get_by_test_id("intrinsic-comparison-oak_d_pro:static-1")).to_contain_text("coverage 2/9 is below 6/9")
+    wrist_intrinsics = page.get_by_test_id(
+        "intrinsic-comparison-realsense_d435:wrist-1"
+    )
+    expect(wrist_intrinsics).to_contain_text("Using OpenCV estimate")
+    expect(wrist_intrinsics).to_contain_text(
+        "Factory values come from the camera SDK. The OpenCV estimate is fitted from this recording's grid views."
+    )
+    expect(wrist_intrinsics).to_contain_text(
+        "OpenCV training views / image coverage"
+    )
+    expect(wrist_intrinsics).to_contain_text("18 views · 6 of 9 regions")
+    static_intrinsics = page.get_by_test_id(
+        "intrinsic-comparison-oak_d_pro:static-1"
+    )
+    expect(static_intrinsics).to_contain_text("Using factory SDK values")
+    expect(static_intrinsics).to_contain_text(
+        "The factory SDK values are compatible"
+    )
+    expect(static_intrinsics).to_contain_text("coverage 2/9 is below 6/9")
     expect(page.get_by_text("camera → robot_flange").last).to_be_visible()
-    expect(page.get_by_text("Every attempted candidate and failure").first).to_be_visible()
-    page.get_by_label("Candidate override").click()
+    expect(page.get_by_text("All attempted solutions and failures").first).to_be_visible()
+    wrist_result = page.locator(
+        '[data-camera-key="realsense_d435:wrist-1"]'
+    )
+    wrist_result.get_by_text("Alternative solution (advanced)", exact=True).click()
+    wrist_result.get_by_label("Alternative solution", exact=True).click()
     page.get_by_role("option", name="SQPNP + tsai · score 0.2000").click()
-    page.get_by_role("button", name="Accept recommendations").click()
+    page.get_by_role("button", name="Save selected calibrations").click()
     expect(page.get_by_text("Calibration acceptance queued")).to_be_visible()
-    assert requests[-1]["body"]["candidate_ids"] == {"realsense_d435:wrist-1": override["candidate_id"]}
-    expect(page.get_by_role("button", name="Recommendations saved")).to_be_visible()
-    expect(page.get_by_text("Saved 1 camera profile(s).")).to_be_visible()
+    assert requests[-1]["body"]["candidate_ids"] == {
+        "realsense_d435:wrist-1": override["candidate_id"],
+        "oak_d_pro:static-1": static_recommended["candidate_id"],
+    }
+    expect(page.get_by_role("button", name="Calibrations saved")).to_be_visible()
+    expect(page.get_by_text("Saved 2 camera profile(s).")).to_be_visible()
 
 
 def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
@@ -1735,7 +2483,7 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     )
 
     page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
-    expect(page.get_by_role("link", name="Calibration Targets")).to_be_visible()
+    expect(page.get_by_role("link", name="Calibration Grids")).to_be_visible()
     expect(page.get_by_role("img", name="Calibration target preview", exact=True)).to_be_visible()
     library_preview = page.get_by_role(
         "img",

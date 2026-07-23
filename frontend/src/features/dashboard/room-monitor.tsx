@@ -337,7 +337,7 @@ export function RoomMonitor() {
   const brightnessMessage = brightness?.message ?? "Brightness control is available after the camera opens."
 
   return (
-    <Card className="col-span-4 overflow-hidden">
+    <Card className="col-span-12 overflow-hidden xl:col-span-4">
       <CardHeader><CardTitle className="flex items-center gap-2"><Radio className="size-4 text-primary-strong" />Test cell monitor</CardTitle></CardHeader>
       <CardContent>
         <div className="surface-grid relative aspect-video overflow-hidden rounded-lg bg-muted">

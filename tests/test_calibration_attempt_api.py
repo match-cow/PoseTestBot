@@ -11,7 +11,10 @@ import pytest
 
 from posetestbot.calibration import attempts as attempt_module
 from posetestbot.calibration.posegridgen import posegridgen_capabilities
-from posetestbot.calibration.target_library import generate_target_bundle
+from posetestbot.calibration.target_library import (
+    generate_target_bundle,
+    select_target_bundle,
+)
 from posetestbot.io.artifacts import (
     ARUCO_DETECTIONS,
     DEPTH_DIR,
@@ -125,6 +128,12 @@ def calibration_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         configuration=_configuration(),
         library_root=library,
     )
+    select_target_bundle(
+        run_root=run_root,
+        target_id=bundle["target_id"],
+        placement_mode="unknown",
+        library_root=library,
+    )
     runner = FakeRunner()
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", (tmp_path / "runs").as_posix())
     monkeypatch.setattr(attempt_module, "default_target_library_root", lambda: library)
@@ -152,6 +161,7 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "oak_d_pro:2",
     }
     assert payload["saved_targets"][0]["target_id"] == bundle["target_id"]
+    assert payload["saved_targets"][0]["selected"] is True
     assert payload["solver"]["default_policy"] == "auto_compare"
     assert payload["solver"]["default_pnp_methods"] == [
         "IPPE",
@@ -324,6 +334,15 @@ def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
             "pnp_methods": ["IPPE", "IPPE"],
         },
     )
+    mounting_mismatch = client.post(
+        "/calibration/attempts",
+        json={
+            "run_root": run_root.as_posix(),
+            "mode": "eye_to_hand",
+            "sensor_keys": ["realsense_d435:1"],
+            "target_id": bundle["target_id"],
+        },
+    )
     escaped_root = client.get(
         "/calibration/setup",
         query_string={"run_root": (run_root.parents[1] / "outside").as_posix()},
@@ -335,6 +354,8 @@ def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
     assert "Unsupported board-level PnP" in unsuitable_method.get_json()["output"]
     assert duplicate_method.status_code == 400
     assert "must not contain duplicates" in duplicate_method.get_json()["output"]
+    assert mounting_mismatch.status_code == 400
+    assert "requires cameras configured as static" in mounting_mismatch.get_json()["output"]
     assert escaped_root.status_code == 400
     assert "allowed root" in escaped_root.get_json()["output"]
     assert runner.submissions == []
@@ -371,13 +392,16 @@ def test_attempt_history_is_immutable_and_promotion_accepts_partial_results(
 ) -> None:
     client, runner, run_root, bundle, _library = calibration_client
     payloads = []
-    for mode in ("eye_in_hand", "eye_to_hand"):
+    for mode, sensor_key in (
+        ("eye_in_hand", "realsense_d435:1"),
+        ("eye_to_hand", "oak_d_pro:2"),
+    ):
         response = client.post(
             "/calibration/attempts",
             json={
                 "run_root": run_root.as_posix(),
                 "mode": mode,
-                "sensor_keys": ["realsense_d435:1"],
+                "sensor_keys": [sensor_key],
                 "target_id": bundle["target_id"],
             },
         )

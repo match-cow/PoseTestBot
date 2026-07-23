@@ -100,7 +100,7 @@
 
 * { border-color: var(--border); }
 html { background: var(--workspace); }
-body { margin: 0; min-width: 1024px; min-height: 100vh; background: var(--workspace); color: var(--foreground); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+body { margin: 0; min-height: 100vh; background: var(--workspace); color: var(--foreground); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 button, [role="button"] { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 code, pre { font-variant-ligatures: none; }

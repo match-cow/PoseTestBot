@@ -1,6 +1,7 @@
 import ipaddress
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request
@@ -8,6 +9,10 @@ from flask import Blueprint, Response, jsonify, request
 from posetestbot.calibration.preflight import (
     build_calibration_preflight,
     write_calibration_preflight_with_manifest,
+)
+from posetestbot.calibration.profile_library import (
+    CalibrationSelectionConflict,
+    selected_calibration_run_config_defaults,
 )
 from posetestbot.calibration.observations import (
     build_calibration_observations,
@@ -64,6 +69,7 @@ from posetestbot.pipeline.run_config import (
     build_sequence_job_from_run_config,
     create_run_config,
     load_run_config_for_run_root,
+    run_config_lock,
     sequence_plan_from_run_config,
     sensor_configs_from_status,
     sensor_configs_from_values,
@@ -88,6 +94,8 @@ from posetestbot.pipeline.sequences import (
     get_pipeline_sequence,
     list_pipeline_sequences,
 )
+from posetestbot.pipeline.workflows import SCHEMA_VERSION as WORKFLOW_SCHEMA_VERSION
+from posetestbot.pipeline.workflows import list_operator_workflows
 from posetestbot.runtime.status import collect_runtime_status
 from posetestbot.sensors.registry import list_sensor_adapters
 from posetestbot.sensors.status import collect_sensor_status
@@ -310,6 +318,46 @@ def _run_config_from_payload(data: dict):
             data.get("sensors"),
             default_mounting_mode=mounting_mode,
         )
+    resolution = data.get("resolution", "720p")
+    expected_calibration_bundle = data.get("expected_calibration_bundle_sha256")
+    if expected_calibration_bundle is not None and (
+        not isinstance(expected_calibration_bundle, str)
+        or len(expected_calibration_bundle) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_calibration_bundle
+        )
+    ):
+        raise ValueError(
+            "expected_calibration_bundle_sha256 must be a lowercase SHA-256 digest or null"
+        )
+    selection_defaults = selected_calibration_run_config_defaults(
+        run_root,
+        sensors=sensors,
+        resolution=resolution,
+        requested_calibration_profiles=(
+            str(data["calibration_profiles"])
+            if data.get("calibration_profiles")
+            else None
+        ),
+        infer_when_omitted="calibration_profiles" not in data,
+        expected_bundle_sha256=expected_calibration_bundle,
+    )
+    if selection_defaults is not None:
+        selected_by_key = {
+            (item["sensor_type"], item["device_id"]): item["profile_id"]
+            for item in selection_defaults["sensor_profile_mapping"]
+        }
+        sensors = tuple(
+            replace(
+                sensor,
+                calibration_profile_id=selected_by_key.get(
+                    (sensor.sensor_type, sensor.device_id),
+                    sensor.calibration_profile_id,
+                ),
+            )
+            for sensor in sensors
+        )
     try:
         existing_config = load_run_config_for_run_root(run_root)
         calibration_target = existing_config.get("calibration_target")
@@ -323,13 +371,27 @@ def _run_config_from_payload(data: dict):
     return create_run_config(
         run_root=run_root,
         run_name=data.get("run_name"),
-        resolution=data.get("resolution", "720p"),
+        resolution=resolution,
         fps=int(data.get("fps", 6)),
         velocity_m_s=float(data.get("velocity", data.get("velocity_m_s", 0.2))),
         sensors=sensors,
         dataset_mode=requested_dataset_mode,
         pose_template=(pose_template if requested_dataset_mode == "pose_template" else None),
-        calibration_profiles=data.get("calibration_profiles") or None,
+        calibration_profiles=(
+            selection_defaults["calibration_profiles"]
+            if selection_defaults is not None
+            else data.get("calibration_profiles") or None
+        ),
+        intrinsic_calibration_profiles=(
+            selection_defaults["intrinsic_calibration_profiles"]
+            if selection_defaults is not None
+            else data.get("intrinsic_calibration_profiles") or None
+        ),
+        calibration_profile_selection=(
+            selection_defaults["calibration_profile_selection"]
+            if selection_defaults is not None
+            else None
+        ),
         calibration_target=calibration_target,
         sequence_id=data.get("sequence", data.get("sequence_id", "real_full_capture_validation")),
         sequence_options=sequence_options,
@@ -769,6 +831,16 @@ def pipeline_sequences():
     return jsonify({'sequences': list_pipeline_sequences(PIPELINE_SEQUENCES)})
 
 
+@app.route('/pipeline/workflows', methods=['GET'])
+def pipeline_workflows():
+    return jsonify(
+        {
+            'schema_version': WORKFLOW_SCHEMA_VERSION,
+            'workflows': list_operator_workflows(),
+        }
+    )
+
+
 @app.route('/pipeline/sequences/<sequence_id>', methods=['GET'])
 def pipeline_sequence(sequence_id):
     try:
@@ -796,11 +868,17 @@ def run_config():
         if not isinstance(data, dict):
             return jsonify({'output': 'Invalid request: JSON object required'}), 400
         try:
-            config = _run_config_from_payload(data)
-            path = write_run_config_with_manifest(data['run_root'], config)
-            config_dict = config.to_dict()
-            plan = sequence_plan_from_run_config(config_dict)
-            preflight = run_preflight_queue_summary(data['run_root'], config_dict)
+            run_root_value = data.get('run_root')
+            if not run_root_value:
+                raise ValueError('run_root is required')
+            with run_config_lock(run_root_value):
+                config = _run_config_from_payload(data)
+                path = write_run_config_with_manifest(run_root_value, config)
+                config_dict = config.to_dict()
+                plan = sequence_plan_from_run_config(config_dict)
+                preflight = run_preflight_queue_summary(run_root_value, config_dict)
+        except CalibrationSelectionConflict as exc:
+            return jsonify({'output': str(exc), 'issues': exc.issues}), 409
         except ValueError as exc:
             return jsonify({'output': str(exc)}), 400
         return jsonify(

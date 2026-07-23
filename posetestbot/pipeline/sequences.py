@@ -820,6 +820,7 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 id="calibration_preflight",
                 stage_id="calibration_preflight",
                 depends_on=("sync_quality",),
+                options={"require_valid": True},
             ),
             PipelineSequenceStepSpec(
                 id="blenderproc_prepare",
@@ -961,6 +962,7 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 id="calibration_preflight",
                 stage_id="calibration_preflight",
                 depends_on=("sync_quality",),
+                options={"require_valid": True},
             ),
             PipelineSequenceStepSpec(
                 id="camera_rectification",
@@ -971,7 +973,6 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 id="blenderproc_prepare",
                 stage_id="blenderproc_prepare",
                 depends_on=("camera_rectification",),
-                options={"calibration_profiles": "{run_root}/calibration_profiles.json"},
             ),
             PipelineSequenceStepSpec(
                 id="blenderproc_render",
@@ -983,7 +984,6 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 id="bop_export",
                 stage_id="bop_export",
                 depends_on=("blenderproc_render",),
-                options={"calibration_profiles": "{run_root}/calibration_profiles.json"},
             ),
         ),
     ),

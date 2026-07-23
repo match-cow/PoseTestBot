@@ -38,6 +38,7 @@ from posetestbot.io.artifacts import (
     BOP_POSE_TEMPLATE,
     BOP_TARGETS_BOP19,
     CALIBRATION_PROFILES,
+    CALIBRATION_PROFILE_SELECTION,
     DEPTH_DIR,
     MODELS_DIR,
     OBJECT_INSTANCES,
@@ -142,6 +143,20 @@ def default_output_folder(run_root: Path, explicit_output_folder: str | None) ->
     return run_root / BOP_DIR
 
 
+def _run_input_path(run_root: Path, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else run_root / path
+
+
+def _selected_calibration_configured(
+    run_root: Path, run_config: dict | None
+) -> bool:
+    return (
+        (run_config or {}).get("calibration_profile_selection") is not None
+        or (run_root / CALIBRATION_PROFILE_SELECTION).exists()
+    )
+
+
 def discover_exportable_sensor_folders(
     input_folder: Path,
     *,
@@ -171,7 +186,9 @@ def main() -> None:
     input_folder = default_input_folder(run_root, args.input_folder)
     output_folder = default_output_folder(run_root, args.output_folder)
     calibration_profiles_path = (
-        Path(args.calibration_profiles) if args.calibration_profiles else None
+        _run_input_path(run_root, args.calibration_profiles)
+        if args.calibration_profiles
+        else None
     )
 
     manifest = load_or_create_run_manifest(run_root)
@@ -182,6 +199,24 @@ def main() -> None:
         f".{output_folder.name}.{uuid.uuid4().hex}.tmp"
     )
     try:
+        try:
+            run_config = load_run_config_for_run_root(run_root)
+        except FileNotFoundError:
+            run_config = None
+        if _selected_calibration_configured(run_root, run_config):
+            if calibration_profiles_path is None:
+                raise ValueError(
+                    "A run with selected calibration provenance must pass its "
+                    "calibration_profiles snapshot to BOP export"
+                )
+            from posetestbot.calibration.profile_library import (
+                verify_calibration_profile_selection,
+            )
+
+            verify_calibration_profile_selection(
+                run_root,
+                expected_calibration_profiles=calibration_profiles_path,
+            )
         if output_folder.exists() and not args.overwrite:
             raise FileExistsError(
                 f"BOP dataset already exists: {output_folder}; pass --overwrite"
@@ -200,10 +235,6 @@ def main() -> None:
 
         staging_folder.parent.mkdir(parents=True, exist_ok=True)
         staging_folder.mkdir(parents=False, exist_ok=False)
-        try:
-            run_config = load_run_config_for_run_root(run_root)
-        except FileNotFoundError:
-            run_config = None
         dataset_mode = (
             str(run_config.get("dataset_mode"))
             if run_config is not None

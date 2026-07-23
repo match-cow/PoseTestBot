@@ -14,7 +14,11 @@ from posetestbot.calibration.profiles import (
     select_profile_for_sensor,
 )
 from posetestbot.calibration.target_library import validate_run_target_selection
-from posetestbot.io.artifacts import CALIBRATION_PREFLIGHT_REPORT, CALIBRATION_PROFILES
+from posetestbot.io.artifacts import (
+    CALIBRATION_PREFLIGHT_REPORT,
+    CALIBRATION_PROFILES,
+    CALIBRATION_PROFILE_SELECTION,
+)
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
     upsert_stage,
@@ -158,11 +162,30 @@ def _sensor_match(
     if explicit_profile_id:
         by_id = _profile_by_id(profiles)
         try:
-            return sensor_name, by_id[str(explicit_profile_id)]
+            profile = by_id[str(explicit_profile_id)]
         except KeyError as exc:
             raise KeyError(
                 f"Configured profile {explicit_profile_id!r} does not exist"
             ) from exc
+        if profile.sensor_type != sensor_type:
+            raise ValueError(
+                f"Configured profile {explicit_profile_id!r} belongs to sensor type "
+                f"{profile.sensor_type.value!r}, not {sensor_type.value!r}"
+            )
+        if profile.sensor_id != device_id:
+            raise ValueError(
+                f"Configured profile {explicit_profile_id!r} belongs to sensor "
+                f"{profile.sensor_id!r}, not {device_id!r}"
+            )
+        mounting_mode = MountingMode(
+            str(sensor.get("mounting_mode") or "eye_in_hand")
+        )
+        if profile.mounting_mode != mounting_mode:
+            raise ValueError(
+                f"Configured profile {explicit_profile_id!r} uses mounting mode "
+                f"{profile.mounting_mode.value!r}, not {mounting_mode.value!r}"
+            )
+        return sensor_name, profile
     mounting_mode = MountingMode(str(sensor.get("mounting_mode") or "eye_in_hand"))
     return sensor_name, select_profile_for_sensor(
         profiles,
@@ -191,6 +214,42 @@ def build_calibration_preflight(
     checks: list[dict[str, Any]] = []
     matched_sensors: list[dict[str, Any]] = []
     profiles: list[CalibrationProfile] = []
+
+    has_selection = (
+        config.get("calibration_profile_selection") is not None
+        or (run_root_path / CALIBRATION_PROFILE_SELECTION).exists()
+    )
+    if has_selection:
+        try:
+            # Imported lazily because profile-library discovery uses web run-root
+            # security, whose package also registers the preflight routes.
+            from posetestbot.calibration.profile_library import (
+                verify_calibration_profile_selection,
+            )
+
+            selection = verify_calibration_profile_selection(
+                run_root_path,
+                expected_calibration_profiles=config.get("calibration_profiles"),
+                expected_intrinsic_calibration_profiles=config.get(
+                    "intrinsic_calibration_profiles"
+                ),
+            )
+            checks.append(
+                _check(
+                    "calibration_profile_selection",
+                    "ok",
+                    "Selected calibration snapshots and camera mapping passed integrity checks.",
+                    details=selection,
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                _check(
+                    "calibration_profile_selection",
+                    "error",
+                    f"Selected calibration is invalid: {type(exc).__name__}: {exc}",
+                )
+            )
 
     if config.get("calibration_target") is not None:
         try:

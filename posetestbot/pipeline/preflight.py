@@ -8,8 +8,13 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from posetestbot.io.atomic import atomic_write_json
+from posetestbot.calibration.preflight import build_calibration_preflight
 from posetestbot.calibration.target_library import validate_run_target_selection
-from posetestbot.io.artifacts import CALIBRATION_PROFILES, RUN_PREFLIGHT_REPORT
+from posetestbot.io.artifacts import (
+    CALIBRATION_PROFILES,
+    CALIBRATION_PROFILE_SELECTION,
+    RUN_PREFLIGHT_REPORT,
+)
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
     upsert_stage,
@@ -378,6 +383,54 @@ def build_run_preflight(
                 )
             )
 
+    guided_calibrated_dataset = (
+        plan.sequence_id == "calibrated_capture_to_bop_dataset_dry_run"
+    )
+    has_calibration_selection = (
+        config.get("calibration_profile_selection") is not None
+        or (run_root_path / CALIBRATION_PROFILE_SELECTION).exists()
+    )
+    if guided_calibrated_dataset or has_calibration_selection:
+        try:
+            # Avoid importing the web-backed calibration library while the web
+            # package is still registering this preflight module.
+            from posetestbot.calibration.profile_library import (
+                verify_calibration_profile_selection,
+            )
+
+            selection = verify_calibration_profile_selection(
+                run_root_path,
+                expected_calibration_profiles=config.get("calibration_profiles"),
+                expected_intrinsic_calibration_profiles=config.get(
+                    "intrinsic_calibration_profiles"
+                ),
+            )
+            checks.append(
+                _check(
+                    "calibration_profile_selection",
+                    "ok",
+                    "Reusable calibration snapshots, hashes, and camera mapping are verified.",
+                    details=selection,
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                _check(
+                    "calibration_profile_selection",
+                    "error",
+                    (
+                        "Guided calibrated dataset runs require a verified saved "
+                        f"calibration selection: {type(exc).__name__}: {exc}"
+                        if guided_calibrated_dataset
+                        else (
+                            "Selected calibration is invalid: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    ),
+                    details={"required_by_guided_workflow": guided_calibrated_dataset},
+                )
+            )
+
     calibration_inputs = _calibration_profile_inputs(
         config=config,
         plan=plan,
@@ -415,6 +468,67 @@ def build_run_preflight(
                 },
             )
         )
+
+    calibration_step = next(
+        (step for step in plan.steps if step.stage_id == "calibration_preflight"),
+        None,
+    )
+    if calibration_step is not None:
+        try:
+            calibration_report = build_calibration_preflight(
+                run_root_path,
+                require_valid=bool(
+                    calibration_step.options.get("require_valid", False)
+                ),
+                min_observations=int(
+                    calibration_step.options.get("min_observations", 6)
+                ),
+                max_mean_reprojection_error_px=(
+                    None
+                    if calibration_step.options.get("no_reprojection_threshold")
+                    else float(
+                        calibration_step.options.get(
+                            "max_mean_reprojection_error_px", 2.0
+                        )
+                    )
+                ),
+            )
+            calibration_status = str(
+                calibration_report.get("overall_status", "error")
+            )
+            checks.append(
+                _check(
+                    "calibration_readiness",
+                    calibration_status,
+                    (
+                        "Every enabled camera has a usable calibration profile."
+                        if calibration_status == "ok"
+                        else (
+                            "Camera calibration is usable with reviewable warnings."
+                            if calibration_status == "warning"
+                            else "One or more enabled cameras lack a usable calibration profile."
+                        )
+                    ),
+                    details={
+                        "profile_path": calibration_report.get("profile_path"),
+                        "profile_count": calibration_report.get("profile_count"),
+                        "sensor_count": calibration_report.get("sensor_count"),
+                        "matched_sensor_count": calibration_report.get(
+                            "matched_sensor_count"
+                        ),
+                        "require_valid": calibration_report.get("require_valid"),
+                        "checks": calibration_report.get("checks", []),
+                    },
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                _check(
+                    "calibration_readiness",
+                    "error",
+                    f"Camera calibration readiness could not be checked: {exc}",
+                )
+            )
 
     if sensors is not None:
         expected_counts_requested = bool(sensors.get("expected_counts_requested")) or any(

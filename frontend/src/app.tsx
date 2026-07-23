@@ -26,6 +26,7 @@ export function App() {
         <Route path="/calibration-targets" element={<Page><CalibrationTargetsPage /></Page>} />
         <Route path="/workpieces" element={<Page><WorkpiecesPage /></Page>} />
         <Route path="/pose-templates" element={<Page><PoseTemplatesPage /></Page>} />
+        <Route path="/workflow" element={<Navigate to="/workflow/setup" replace />} />
         <Route path="/workflow/:phase" element={<Page><WorkflowPage /></Page>} />
         <Route path="/jobs" element={<Page><JobsPage /></Page>} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

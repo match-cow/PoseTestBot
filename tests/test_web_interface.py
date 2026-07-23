@@ -629,6 +629,72 @@ def test_overview_endpoint_reports_sequence_steps(tmp_path: Path) -> None:
     assert any(section["id"] == "sensors" for section in payload["sidebar"])
 
 
+def test_overview_uses_validated_sync_quality_as_run_level_sync_evidence(
+    tmp_path: Path,
+) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "run-sync-overview"
+    write_run_config(
+        run_root,
+        create_run_config(run_root=run_root, sequence_id="sync_to_bop_dry_run"),
+    )
+    write_json(
+        run_root / "sync_quality_report.json",
+        {
+            "schema_version": "sync_quality_report.v2",
+            "overall_status": "ok",
+            "sensor_count": 1,
+            "sensors": [{"sensor_name": "realsense_123"}],
+            "checks": [],
+        },
+    )
+
+    payload = client.get(
+        "/ui/overview", query_string={"run_root": run_root.as_posix()}
+    ).get_json()
+
+    sync_section = next(item for item in payload["sidebar"] if item["id"] == "sync")
+    sync_step = next(item for item in payload["steps"] if item["stage_id"] == "sync_run")
+    assert sync_section["artifacts"] == [
+        {"path": "sync_quality_report.json", "exists": True, "status": "ok"}
+    ]
+    assert sync_step["status"] == "complete"
+
+
+def test_overview_rejects_canceled_or_malformed_completion_evidence(
+    tmp_path: Path,
+) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "run-invalid-overview"
+    write_run_config(run_root, create_run_config(run_root=run_root))
+    write_json(
+        run_root / "capture_execution_report.json",
+        {
+            "schema_version": "capture_execution_report.v1",
+            "status": "canceled",
+        },
+    )
+    (run_root / "calibration_profiles.json").write_text("{not json\n")
+    bop_manifest = run_root / "bop" / "bop_export_manifest.json"
+    write_json(bop_manifest, {"schema_version": "bop_export_manifest.v3"})
+
+    payload = client.get(
+        "/ui/overview", query_string={"run_root": run_root.as_posix()}
+    ).get_json()
+
+    chips = {
+        chip["path"]: chip
+        for section in payload["sidebar"]
+        for chip in section["artifacts"]
+    }
+    assert chips["capture_execution_report.json"]["status"] == "canceled"
+    assert chips["calibration_profiles.json"]["status"] == "invalid"
+    assert chips["bop/bop_export_manifest.json"]["status"] == "invalid"
+    assert next(
+        item for item in payload["sidebar"] if item["id"] == "capture"
+    )["status"] == "blocked"
+
+
 def test_overview_endpoint_treats_missing_run_config_as_empty_setup(tmp_path: Path) -> None:
     client = app.test_client()
     run_root = tmp_path / "empty-web-run"

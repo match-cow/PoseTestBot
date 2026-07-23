@@ -74,6 +74,7 @@ from posetestbot.calibration.target_library import (
     default_target_library_root,
     list_target_bundles,
     replacement_blockers,
+    validate_run_target_selection,
     validate_target_bundle,
 )
 from posetestbot.calibration.targets import (
@@ -710,7 +711,6 @@ def validate_attempt_request(
     root = Path(run_root)
     if not root.is_dir():
         raise FileNotFoundError(f"Run root not found: {root}")
-    config = load_run_config_for_run_root(root)
     mode = str(value.get("mode", ""))
     if mode not in {"eye_in_hand", "eye_to_hand"}:
         raise ValueError("mode must be eye_in_hand or eye_to_hand")
@@ -731,14 +731,28 @@ def validate_attempt_request(
         ]
         raise ValueError("Selected cameras are not data-ready: " + "; ".join(messages))
     selected_cameras = [cameras[key] for key in sensor_keys]
+    expected_mounting_mode = "eye_in_hand" if mode == "eye_in_hand" else "static"
+    mounting_mismatches = [
+        str(camera["sensor_key"])
+        for camera in selected_cameras
+        if str(camera.get("current_mounting_mode") or "")
+        != expected_mounting_mode
+    ]
+    if mounting_mismatches:
+        raise ValueError(
+            f"{mode} calibration requires cameras configured as "
+            f"{expected_mounting_mode}; update run setup or remove: "
+            + ", ".join(mounting_mismatches)
+        )
     timestamp_policy = _calibration_timestamp_preflight(root, selected_cameras)
     target_id = str(value.get("target_id", ""))
-    bundle = validate_target_bundle(
-        default_target_library_root() / target_id,
-        library_root=default_target_library_root(),
-    )
-    active = config.get("calibration_target")
-    active_id = active.get("target_id") if isinstance(active, Mapping) else None
+    try:
+        selected_target = validate_run_target_selection(root)
+    except FileNotFoundError as exc:
+        raise ValueError(
+            "Select the exact printed calibration grid in workflow step 2 before analysis"
+        ) from exc
+    active_id = str(selected_target["target_id"])
     if active_id != target_id:
         blockers = [
             item
@@ -750,6 +764,15 @@ def validate_attempt_request(
                 "The calibration target conflicts with existing target-dependent artifacts; create a new run.",
                 blockers=blockers,
             )
+        raise CalibrationTargetConflict(
+            "The requested grid is not the grid selected in workflow step 2; change the run selection first.",
+            blockers=[],
+        )
+    run_target_library = root / LIBRARY_DIRECTORY
+    bundle = validate_target_bundle(
+        run_target_library / target_id,
+        library_root=run_target_library,
+    )
     solver_policy = str(value.get("solver_policy", "auto_compare"))
     if solver_policy != "auto_compare":
         raise ValueError("solver_policy must be auto_compare")

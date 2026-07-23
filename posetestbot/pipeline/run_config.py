@@ -15,7 +15,7 @@ import fcntl
 
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.config import RobotProfile, robot_profile
-from posetestbot.io.artifacts import RUN_CONFIG
+from posetestbot.io.artifacts import CALIBRATION_PROFILE_SELECTION, RUN_CONFIG
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
     upsert_stage,
@@ -34,6 +34,7 @@ LEGACY_SCHEMA_VERSION = "run_config.v1"
 SCHEMA_VERSION = "run_config.v2"
 DATASET_MODES = {"objectless", "pose_template"}
 CALIBRATION_PROFILE_OPTION_STAGES = ("blenderproc_prepare", "bop_export")
+INTRINSIC_CALIBRATION_PROFILE_OPTION_STAGES = ("camera_rectification",)
 DATASET_MODE_OPTION_STAGES = (
     "blenderproc_prepare",
     "blenderproc_render",
@@ -206,6 +207,8 @@ class PoseTestBotRunConfig:
     dataset_mode: str = "objectless"
     pose_template: Mapping[str, Any] | None = None
     calibration_profiles: str | None = None
+    intrinsic_calibration_profiles: str | None = None
+    calibration_profile_selection: Mapping[str, Any] | None = None
     calibration_target: Mapping[str, Any] | None = None
     pipeline: PipelineRunConfig = field(default_factory=PipelineRunConfig)
 
@@ -223,6 +226,14 @@ class PoseTestBotRunConfig:
             ),
             "pipeline": self.pipeline.to_dict(),
         }
+        if self.intrinsic_calibration_profiles is not None:
+            result["intrinsic_calibration_profiles"] = (
+                self.intrinsic_calibration_profiles
+            )
+        if self.calibration_profile_selection is not None:
+            result["calibration_profile_selection"] = dict(
+                self.calibration_profile_selection
+            )
         if self.schema_version == SCHEMA_VERSION:
             result["dataset_mode"] = self.dataset_mode
             result["pose_template"] = (
@@ -471,6 +482,8 @@ def create_run_config(
     dataset_mode: str | None = None,
     pose_template: Mapping[str, Any] | None = None,
     calibration_profiles: str | None = None,
+    intrinsic_calibration_profiles: str | None = None,
+    calibration_profile_selection: Mapping[str, Any] | None = None,
     calibration_target: Mapping[str, Any] | None = None,
     sequence_id: str = "real_full_capture_validation",
     sequence_options: Mapping[str, Any] | None = None,
@@ -499,6 +512,12 @@ def create_run_config(
         dataset_mode=inferred_mode,
         pose_template=dict(pose_template) if pose_template is not None else None,
         calibration_profiles=calibration_profiles,
+        intrinsic_calibration_profiles=intrinsic_calibration_profiles,
+        calibration_profile_selection=(
+            dict(calibration_profile_selection)
+            if calibration_profile_selection is not None
+            else None
+        ),
         calibration_target=(
             dict(calibration_target) if calibration_target is not None else None
         ),
@@ -588,6 +607,40 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
     if not str(capture.get("resolution", "")).strip():
         raise ValueError("Run config capture.resolution must not be empty")
     calibration_target = value.get("calibration_target")
+    intrinsic_profiles = value.get("intrinsic_calibration_profiles")
+    if intrinsic_profiles is not None and (
+        not isinstance(intrinsic_profiles, str) or not intrinsic_profiles.strip()
+    ):
+        raise ValueError(
+            "Run config intrinsic_calibration_profiles must be a non-empty path or null"
+        )
+    calibration_selection = value.get("calibration_profile_selection")
+    if calibration_selection is not None:
+        if not isinstance(calibration_selection, Mapping):
+            raise ValueError(
+                "Run config calibration_profile_selection must be an object or null"
+            )
+        if (
+            calibration_selection.get("selection_artifact")
+            != CALIBRATION_PROFILE_SELECTION
+        ):
+            raise ValueError(
+                "Run config calibration_profile_selection.selection_artifact must be "
+                f"{CALIBRATION_PROFILE_SELECTION}"
+            )
+        digest = str(calibration_selection.get("bundle_sha256", ""))
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ValueError(
+                "Run config calibration_profile_selection.bundle_sha256 must be a SHA-256 digest"
+            )
+        if not isinstance(value.get("calibration_profiles"), str) or not isinstance(
+            intrinsic_profiles, str
+        ):
+            raise ValueError(
+                "Run config calibration selection requires both calibration profile paths"
+            )
     if calibration_target is not None:
         if not isinstance(calibration_target, Mapping):
             raise ValueError("Run config calibration_target must be an object or null")
@@ -813,6 +866,15 @@ def _sequence_options_with_run_config_defaults(
                 continue
             group_options = dict(options.get(group_name, {}))
             group_options.setdefault("calibration_profiles", calibration_profiles)
+            options[group_name] = group_options
+
+    intrinsic_profiles = config.get("intrinsic_calibration_profiles")
+    if isinstance(intrinsic_profiles, str) and intrinsic_profiles.strip():
+        for group_name in INTRINSIC_CALIBRATION_PROFILE_OPTION_STAGES:
+            if group_name not in available_groups:
+                continue
+            group_options = dict(options.get(group_name, {}))
+            group_options.setdefault("intrinsic_profiles", intrinsic_profiles)
             options[group_name] = group_options
 
     for group_name in DATASET_MODE_OPTION_STAGES:

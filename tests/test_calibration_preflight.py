@@ -5,6 +5,8 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from posetestbot.calibration.preflight import (
     build_calibration_preflight,
     write_calibration_preflight_with_manifest,
@@ -20,6 +22,7 @@ from posetestbot.calibration.profiles import (
     write_profile_collection,
 )
 from posetestbot.io.artifacts import CALIBRATION_PREFLIGHT_REPORT, DATASET_MANIFEST
+from posetestbot.pipeline.preflight import build_run_preflight
 from posetestbot.pipeline.run_config import (
     create_run_config,
     sensor_config_from_token,
@@ -149,14 +152,69 @@ def test_calibration_preflight_errors_for_missing_explicit_profile(
     assert "missing_profile" in match_check["message"]
 
 
+@pytest.mark.parametrize(
+    ("profile_kwargs", "expected_message"),
+    [
+        ({"sensor_id": "999"}, "belongs to sensor '999'"),
+        ({"sensor_type": SensorType.OAK_D_PRO}, "belongs to sensor type 'oak_d_pro'"),
+        (
+            {"mounting_mode": MountingMode.STATIC},
+            "uses mounting mode 'static'",
+        ),
+    ],
+)
+def test_calibration_preflight_rejects_explicit_profile_for_different_camera_identity(
+    tmp_path: Path,
+    profile_kwargs: dict,
+    expected_message: str,
+) -> None:
+    run_root = tmp_path / "run"
+    profiles_path = run_root / "calibration_profiles.json"
+    sensor = replace(
+        sensor_config_from_token("realsense:123:eye_in_hand:Cell RealSense"),
+        calibration_profile_id="explicit_profile",
+    )
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(sensor,),
+            calibration_profiles=profiles_path.as_posix(),
+        ),
+    )
+    write_profile_collection(
+        [
+            profile(
+                profile_id="explicit_profile",
+                **({"sensor_id": "123"} | profile_kwargs),
+            )
+        ],
+        profiles_path,
+    )
+
+    report = build_calibration_preflight(run_root, require_valid=True)
+
+    match_check = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "profile_match:realsense_123"
+    )
+    assert match_check["status"] == "error"
+    assert expected_message in match_check["message"]
+
+
 def test_calibration_preflight_require_valid_turns_status_warning_into_error(
     tmp_path: Path,
 ) -> None:
     run_root = tmp_path / "run"
     profiles_path = run_root / "calibration_profiles.json"
+    sensor = replace(
+        sensor_config_from_token("realsense:123:eye_in_hand:Cell RealSense"),
+        calibration_profile_id="rs_needs_validation",
+    )
     config = create_run_config(
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:eye_in_hand:Cell RealSense"),),
+        sensors=(sensor,),
         calibration_profiles=profiles_path.as_posix(),
     )
     write_run_config(run_root, config)
@@ -178,6 +236,97 @@ def test_calibration_preflight_require_valid_turns_status_warning_into_error(
 
     assert loose_report["overall_status"] == "warning"
     assert strict_report["overall_status"] == "error"
+
+
+def test_guided_dataset_run_preflight_includes_strict_calibration_readiness(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "guided-dataset"
+    profiles_path = run_root / "calibration_profiles.json"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:eye_in_hand:Cell RealSense"),),
+        calibration_profiles=profiles_path.as_posix(),
+        sequence_id="calibrated_capture_to_bop_dataset_dry_run",
+        plan_only=False,
+    )
+    write_run_config(run_root, config)
+    write_profile_collection(
+        [
+            profile(
+                profile_id="rs_needs_validation",
+                sensor_id="123",
+                status=CalibrationStatus.NEEDS_VALIDATION,
+            )
+        ],
+        profiles_path,
+    )
+
+    report = build_run_preflight(
+        run_root,
+        include_sensor_status=False,
+        include_runtime_status=False,
+        collect_robot=lambda: {
+            "schema_version": "robot_status.v2",
+            "selected_profile": {"mode": "real"},
+        },
+    )
+
+    readiness = next(
+        check for check in report["checks"] if check["name"] == "calibration_readiness"
+    )
+    selection = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "calibration_profile_selection"
+    )
+    assert readiness["status"] == "error"
+    assert readiness["details"]["require_valid"] is True
+    assert readiness["details"]["matched_sensor_count"] == 1
+    assert selection["status"] == "error"
+    assert selection["details"]["required_by_guided_workflow"] is True
+    assert report["overall_status"] == "error"
+
+
+def test_guided_dataset_run_rejects_valid_raw_profile_path_without_selection(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "guided-raw-profile"
+    profiles_path = run_root / "legacy_profiles.json"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:eye_in_hand:Cell RealSense"),),
+        calibration_profiles=profiles_path.as_posix(),
+        sequence_id="calibrated_capture_to_bop_dataset_dry_run",
+        plan_only=False,
+    )
+    write_run_config(run_root, config)
+    write_profile_collection(
+        [profile(profile_id="rs_123_valid", sensor_id="123")], profiles_path
+    )
+
+    report = build_run_preflight(
+        run_root,
+        include_sensor_status=False,
+        include_runtime_status=False,
+        collect_robot=lambda: {
+            "schema_version": "robot_status.v2",
+            "selected_profile": {"mode": "real"},
+        },
+    )
+
+    readiness = next(
+        check for check in report["checks"] if check["name"] == "calibration_readiness"
+    )
+    selection = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "calibration_profile_selection"
+    )
+    assert readiness["status"] == "ok"
+    assert selection["status"] == "error"
+    assert selection["details"]["required_by_guided_workflow"] is True
+    assert report["overall_status"] == "error"
 
 
 def test_calibration_preflight_cli_writes_manifest_artifact(tmp_path: Path) -> None:

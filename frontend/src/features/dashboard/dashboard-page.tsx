@@ -114,8 +114,22 @@ export function DashboardPage() {
   const availableRuntimes = runtimeItems.filter((item) => item.available).length
   const recommendation = overview.data?.recommendations[0]
   const recommendedLabel = typeof recommendation?.label === "string" ? recommendation.label : overview.data?.config ? "Review workflow state" : "Configure this run"
-  const recommendedDescription = typeof recommendation?.description === "string" ? recommendation.description : overview.data?.config ? "Open the workflow to continue from the first incomplete stage." : "Write a safe, plan-only run configuration before queueing work."
-  const workflowComplete = sections.filter((section) => ["run_setup", "preflight", "capture", "sync", "calibration", "bop"].includes(section.id))
+  const recommendedDescription = typeof recommendation?.description === "string" ? recommendation.description : overview.data?.config ? "Open the guided workflow to continue from the first incomplete step." : "Choose camera calibration or object dataset recording, then configure the required inputs."
+  const datasetWorkflow = overview.data?.config?.dataset_mode === "pose_template"
+  const workflowHref = !overview.data?.config ? "/workflow/setup" : datasetWorkflow ? "/workflow/dataset" : "/workflow/calibration"
+  const workflowLabel = !overview.data?.config ? "Workflow" : datasetWorkflow ? "Object dataset" : "Camera calibration"
+  const workflowSections = datasetWorkflow
+    ? ["run_setup", "preflight", "capture", "sync", "bop"]
+    : ["run_setup", "preflight", "capture", "sync", "calibration"]
+  const workflowComplete = sections.filter((section) => workflowSections.includes(section.id))
+  const workflowSectionLabels: Record<string, string> = {
+    run_setup: "Run & cameras",
+    preflight: "Readiness",
+    capture: "Recording",
+    sync: "Synchronization",
+    calibration: "Calibration results",
+    bop: "BOP export",
+  }
 
   const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "sensors", "robot", "runtime", "capture-jobs", "jobs"].includes(String(item.queryKey[0])) })
 
@@ -123,22 +137,22 @@ export function DashboardPage() {
     <div className="space-y-6">
       <PageHeader eyebrow="Current run" title="Acquisition readiness" description="One place to understand the lab, the run, and the safest next action." actions={<Button variant="outline" onClick={refresh}><RefreshCw />Refresh</Button>} />
 
-      {activeCapture && <div className="flex items-center justify-between rounded-xl border border-primary/35 bg-primary/10 px-5 py-4"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Capture is {activeCapture.status}</div><div className="text-xs text-muted-foreground">{activeCapture.name} · keep the operator console visible</div></div></div><div className="flex gap-2"><Button variant="destructive" size="sm" onClick={() => stopCapture.mutate(activeCapture.id)} disabled={stopCapture.isPending || activeCapture.status === "canceling"}><Square />{stopCapture.isPending || activeCapture.status === "canceling" ? "Stopping…" : "Stop capture"}</Button><Button asChild size="sm"><Link to="/jobs">Open controls <ArrowRight /></Link></Button></div></div>}
-      {!activeCapture && activeJob && <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary/5 px-5 py-4"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-50" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Job is {activeJob.status}</div><div className="text-xs text-muted-foreground">{activeJob.name} · {activeJob.resources.join(", ") || "no resource locks"}</div></div></div><Button asChild size="sm"><Link to="/jobs">Open job <ArrowRight /></Link></Button></div>}
+      {activeCapture && <div className="flex flex-col items-start justify-between gap-4 rounded-xl border border-primary/35 bg-primary/10 px-5 py-4 sm:flex-row sm:items-center"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Capture is {activeCapture.status}</div><div className="text-xs text-muted-foreground">{activeCapture.name} · keep the operator console visible</div></div></div><div className="flex flex-wrap gap-2"><Button variant="destructive" size="sm" onClick={() => stopCapture.mutate(activeCapture.id)} disabled={stopCapture.isPending || activeCapture.status === "canceling"}><Square />{stopCapture.isPending || activeCapture.status === "canceling" ? "Stopping…" : "Stop capture"}</Button><Button asChild size="sm"><Link to="/jobs">Open controls <ArrowRight /></Link></Button></div></div>}
+      {!activeCapture && activeJob && <div className="flex flex-col items-start justify-between gap-4 rounded-xl border border-primary/25 bg-primary/5 px-5 py-4 sm:flex-row sm:items-center"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-50" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Job is {activeJob.status}</div><div className="text-xs text-muted-foreground">{activeJob.name} · {activeJob.resources.join(", ") || "no resource locks"}</div></div></div><Button asChild size="sm"><Link to="/jobs">Open job <ArrowRight /></Link></Button></div>}
 
       <div className="operator-grid">
-        <Card className="col-span-8 overflow-hidden">
+        <Card className="col-span-12 overflow-hidden xl:col-span-8">
           <CardHeader className="border-b border-border bg-muted/20">
             <div className="flex items-start justify-between gap-4"><div><CardDescription>Recommended next action</CardDescription><CardTitle className="mt-1 text-2xl">{recommendedLabel}</CardTitle></div><div className="grid size-11 place-items-center rounded-full bg-primary text-primary-foreground"><ArrowRight /></div></div>
           </CardHeader>
-          <CardContent className="pt-5"><p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">{recommendedDescription}</p><div className="mt-5"><Button asChild><Link to={overview.data?.config ? "/workflow/preflight" : "/workflow/setup"}><Play />Open workflow</Link></Button></div></CardContent>
+          <CardContent className="pt-5"><p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">{recommendedDescription}</p><div className="mt-5"><Button asChild><Link to={workflowHref}><Play />Open {workflowLabel.toLowerCase()}</Link></Button></div></CardContent>
         </Card>
         <RoomMonitor />
       </div>
 
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {overview.isPending || sensors.isPending ? Array.from({ length: 4 }).map((_, index) => <Skeleton className="h-40" key={index} />) : <>
-          <SummaryCard icon={ShieldCheck} label="Run preflight" value={titleCase(preflight?.status ?? "pending")} status={preflight?.status} detail={preflight?.status === "complete" ? "Artifact-backed checks are present." : "Run or refresh preflight before execution."} />
+          <SummaryCard icon={ShieldCheck} label="Readiness check" value={titleCase(preflight?.status ?? "pending")} status={preflight?.status} detail={preflight?.status === "complete" ? "Artifact-backed readiness evidence is present." : "Check or refresh readiness before recording."} />
           <SummaryCard icon={Camera} label="Sensors" value={`${sensors.data?.total_connected ?? 0} connected`} status={sensors.data?.all_expected_connected ? "connected" : "warning"} detail="RealSense, OAK-D Pro, and ZED discovery." />
           <IiwaQuickControls ready={robot.isSuccess} />
           <SummaryCard icon={Cpu} label="Optional runtimes" value={`${availableRuntimes}/${runtimeItems.length} available`} status={availableRuntimes === runtimeItems.length ? "ready" : "warning"} detail="BlenderProc and Stereolabs SDK visibility." />
@@ -146,10 +160,10 @@ export function DashboardPage() {
       </div>
 
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><Route className="size-5 text-primary-strong" />Workflow timeline</CardTitle><CardDescription>Statuses come from durable run artifacts, not browser memory.</CardDescription></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Route className="size-5 text-primary-strong" />{workflowLabel} evidence</CardTitle><CardDescription>Open the guided workflow for required actions. These statuses come from durable run artifacts, not browser memory.</CardDescription></CardHeader>
         <CardContent>
-          <div className="grid grid-cols-6 gap-2">
-            {workflowComplete.map((section, index) => <Link to={`/workflow/${section.id === "run_setup" ? "setup" : section.id === "bop" ? "bop-export" : section.id}`} key={section.id} className="group relative rounded-lg border border-border p-3 transition hover:border-primary/60 hover:bg-primary/5"><div className="mb-5 flex items-center justify-between"><span className="text-[10px] font-bold text-muted-foreground">{String(index + 1).padStart(2, "0")}</span>{section.status === "complete" ? <CheckCircle2 className="size-4 text-success" /> : section.status === "blocked" ? <AlertTriangle className="size-4 text-destructive" /> : <CircleDot className="size-4 text-muted-foreground" />}</div><div className="text-sm font-semibold">{section.label}</div><div className="mt-1 text-xs capitalize text-muted-foreground">{section.status.replaceAll("_", " ")}</div></Link>)}
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+            {workflowComplete.map((section, index) => <Link to={workflowHref} aria-label={`Open ${workflowLabel.toLowerCase()} workflow from ${workflowSectionLabels[section.id] ?? section.label}`} key={section.id} className="group relative rounded-lg border border-border p-3 transition hover:border-primary/60 hover:bg-primary/5"><div className="mb-5 flex items-center justify-between"><span className="text-[10px] font-bold text-muted-foreground">{String(index + 1).padStart(2, "0")}</span>{section.status === "complete" ? <CheckCircle2 className="size-4 text-success" aria-label="Complete" /> : section.status === "blocked" ? <AlertTriangle className="size-4 text-destructive" aria-label="Blocked" /> : <CircleDot className="size-4 text-muted-foreground" aria-label="Not complete" />}</div><div className="text-sm font-semibold">{workflowSectionLabels[section.id] ?? section.label}</div><div className="mt-1 text-xs capitalize text-muted-foreground">{section.status.replaceAll("_", " ")}</div></Link>)}
           </div>
         </CardContent>
       </Card>

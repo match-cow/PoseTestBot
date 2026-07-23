@@ -45,6 +45,7 @@ RUN_PATH_FIELDS = {"candidates", "observations", "profiles", "run_config"}
 OUTPUT_PATH_FIELDS = {"output_profiles"}
 INPUT_PATH_FIELDS = {
     "calibration_profiles",
+    "intrinsic_calibration_profiles",
     "target",
     "target_spec",
     "target_to_reference",

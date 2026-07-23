@@ -50,6 +50,33 @@ and metric reporting belong in a separate consumer repo.
   checked-in frontend with Vite; never hand-edit or selectively retain hashed
   files below `posetestbot/web/static/ui/assets/`.
 
+## Web Interface Design Policy
+
+- The operator console is a desktop-first, information-dense interface for
+  supervised lab work. Design and review the primary composition at
+  1920 x 1080 and 100% browser zoom; use 1440 x 900 as the minimum normal
+  desktop check. The persistent application sidebar, workflow step rail, and
+  side-by-side configuration, preview, and evidence panes are the canonical
+  experience.
+- Prioritize desktop clarity and useful information density. Do not reduce,
+  hide, or aggressively stack technical evidence, comparisons, provenance,
+  validation results, or required controls merely to make every view resemble
+  a phone layout. Do not add phone-specific navigation or touch-first
+  interaction unless the operator explicitly requests it.
+- Widths below the normal desktop target are best-effort fallbacks, not a
+  mobile-support commitment. Navigation, dialogs, safety acknowledgements, and
+  primary actions must remain reachable and must not overlap; inherently wide
+  tables, matrices, timelines, canvases, and steppers may use explicit local
+  scrolling. Prefer local overflow over accidental document-wide overflow, and
+  never hide safety state or required actions to accommodate a narrow viewport.
+- Prioritize Playwright coverage at desktop viewports. Use narrower viewports
+  only for a named reachability, overflow, browser-zoom, safety-control, or
+  specifically reported regression contract; mobile visual polish and feature
+  parity are not release gates.
+- Hover explanations may take advantage of mouse-oriented desktop use, but
+  they must also be available by keyboard focus or click. Required and
+  safety-critical information must never exist only inside a tooltip.
+
 ## Current Lab Hardware
 
 - 3 Intel RealSense D435-class cameras.
@@ -142,6 +169,12 @@ Do not reintroduce downstream estimator/evaluator behavior here:
   `calibration_solver_report.json`, `calibration_profiles_solved.json`,
   `calibration_validation_report.json`, and promoted
   `calibration_profiles.json` (`calibration.v2`; v1 remains loadable).
+- Run-owned reusable-calibration selection is recorded in
+  `calibration_profile_selection.json`. Exact copied
+  `calibration_profiles.json` and `intrinsic_calibration_profiles.json`
+  snapshots live below `processed/calibration_inputs/<bundle_sha256>/`; the
+  selection manifest binds their hashes and per-sensor profile mapping so a
+  later source-run change cannot alter the dataset run.
 - Intent-level calibration attempts live under
   `processed/calibration/<attempt_id>/` and retain `request.json`,
   `progress.json`, `intrinsic_comparison.json`, `pnp_candidates.json`,

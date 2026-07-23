@@ -32,7 +32,10 @@ from posetestbot.calibration.profiles import (
     load_profile_collection,
     write_profile_collection,
 )
-from posetestbot.calibration.target_library import generate_target_bundle
+from posetestbot.calibration.target_library import (
+    generate_target_bundle,
+    select_target_bundle,
+)
 from posetestbot.io.artifacts import (
     CALIBRATION_CANDIDATES,
     CALIBRATION_OBSERVATIONS,
@@ -298,7 +301,7 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
                 "sensor_type": "realsense_d435",
                 "device_id": "1",
                 "display_name": "D435",
-                "mounting_mode": "static",
+                "mounting_mode": "eye_in_hand",
             },
             {
                 "sensor_type": "oak_d_pro",
@@ -340,6 +343,12 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         library_root=library,
     )
     monkeypatch.setattr(attempt_module, "default_target_library_root", lambda: library)
+    select_target_bundle(
+        run_root=run_root,
+        target_id=bundle["target_id"],
+        placement_mode="unknown",
+        library_root=library,
+    )
     request_value = create_calibration_attempt(
         run_root,
         {
