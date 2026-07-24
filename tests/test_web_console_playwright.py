@@ -1945,10 +1945,15 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
         wait_until="networkidle",
     )
 
+    speed = page.locator("#velocity")
+    expect(speed).to_have_value("0.03")
+    expect(speed).to_have_attribute("max", "0.03")
+    expect(page.get_by_text("Full capture is an A1 joint PTP", exact=False)).to_be_visible()
     page.get_by_role("button", name="Save setup").click()
     expect(page.get_by_text("Calibration recording setup saved")).to_be_visible()
     written = next(item["body"] for item in requests if item["path"] == "/run-config")
     assert written["plan_only"] is True
+    assert written["velocity"] == 0.03
     assert "mounting_mode" not in written
     assert [sensor["mounting_mode"] for sensor in written["sensors"]] == [
         "eye_in_hand",
@@ -1974,7 +1979,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     page.reload(wait_until="networkidle")
     page.get_by_role("button", name="Review and start capture", exact=True).click()
     expect(page.get_by_test_id("capture-timeout-envelope")).to_contain_text(
-        "300 s total · 15 s sustained camera readiness (3 frames each) · 120 s to first robot packet · 60 s between robot packets"
+        "720 s total · 15 s sustained camera readiness (3 frames each) · 120 s to first robot packet · 60 s between robot packets"
     )
     submit = page.locator('[data-testid="capture-submit"]')
     expect(submit).to_be_disabled()
@@ -2004,7 +2009,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
                 "allow_cameras": True,
                 "allow_real_robot": True,
                 "include_sensors": True,
-                "timeout_s": 300,
+                "timeout_s": 720,
                 "startup_wait_s": 15,
                 "receive_start_timeout_s": 120,
                 "receive_idle_timeout_s": 60,
@@ -2926,11 +2931,10 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     page.get_by_role("button", name="Start IIWA").click()
     expect(page.get_by_role("dialog")).to_contain_text("172.31.1.200:30301")
     expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
+    expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
     page.get_by_text("I confirm this is the intended lab IIWA target.").click()
-    expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
-    page.get_by_text("I authorize motion of the real lab IIWA for this start.").click()
-    expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
-    page.get_by_text("I confirm the capture cameras and pose receiver are ready.").click()
+    expect(page.get_by_text("I authorize motion of the real lab IIWA for this start.")).to_be_visible()
+    expect(page.get_by_text("I confirm the capture cameras and pose receiver are ready.")).to_be_visible()
     expect(page.get_by_role("button", name="Queue start")).to_be_enabled()
     page.get_by_role("button", name="Queue start").click()
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
@@ -2941,6 +2945,7 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     expect(stop_warning).to_contain_text("cannot interrupt active motion")
     expect(stop_warning).to_contain_text("Sunrise must be restarted manually before another START")
     expect(page.get_by_role("button", name="Queue stop")).to_be_disabled()
+    expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
     assert [item["command"] for item in commands] == ["start_iiwa"]
     page.get_by_text("I confirm this is the intended lab IIWA target.").click()
     page.get_by_role("button", name="Queue stop").click()
@@ -2983,11 +2988,10 @@ def test_dashboard_quick_robot_controls_use_configured_target(console_server, pa
     dialog = page.get_by_role("dialog")
     expect(dialog).to_contain_text("172.31.1.147:30300")
     expect(dialog.get_by_role("button", name="Queue start")).to_be_disabled()
+    expect(dialog.get_by_role("checkbox")).to_have_count(1)
     dialog.get_by_text("I confirm this is the intended lab IIWA target.").click()
-    expect(dialog.get_by_role("button", name="Queue start")).to_be_disabled()
-    dialog.get_by_text("I authorize motion of the real lab IIWA for this start.").click()
-    expect(dialog.get_by_role("button", name="Queue start")).to_be_disabled()
-    dialog.get_by_text("I confirm the capture cameras and pose receiver are ready.").click()
+    expect(dialog.get_by_text("I authorize motion of the real lab IIWA for this start.")).to_be_visible()
+    expect(dialog.get_by_text("I confirm the capture cameras and pose receiver are ready.")).to_be_visible()
     expect(dialog.get_by_role("button", name="Queue start")).to_be_enabled()
     dialog.get_by_role("button", name="Queue start").click()
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
@@ -2998,6 +3002,7 @@ def test_dashboard_quick_robot_controls_use_configured_target(console_server, pa
     expect(stop_warning).to_contain_text("cannot interrupt active motion")
     expect(stop_warning).to_contain_text("Sunrise must be restarted manually before another START")
     expect(dialog.get_by_role("button", name="Queue stop")).to_be_disabled()
+    expect(dialog.get_by_role("checkbox")).to_have_count(1)
     dialog.get_by_text("I confirm this is the intended lab IIWA target.").click()
     dialog.get_by_role("button", name="Queue stop").click()
     expect(page.get_by_text("IIWA stop queued")).to_be_visible()

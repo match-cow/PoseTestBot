@@ -88,7 +88,7 @@ def test_real_full_capture_plan_never_persists_execution_acknowledgements(
     )
     assert capture_plan.options["warmup_frames"] == 30
     assert "--warmup-frames" in capture_plan.command
-    assert capture_execution.options["timeout_s"] == 300.0
+    assert capture_execution.options["timeout_s"] == 720.0
     assert capture_execution.options["startup_wait_s"] == 15.0
     assert capture_execution.options["receive_start_timeout_s"] == 120.0
     assert capture_execution.options["receive_idle_timeout_s"] == 60.0

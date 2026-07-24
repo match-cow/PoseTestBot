@@ -605,7 +605,7 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 depends_on=("capture_execution_plan",),
                 options={
                     "include_sensors": True,
-                    "timeout_s": 300.0,
+                    "timeout_s": 720.0,
                     "startup_wait_s": 15.0,
                     "receive_start_timeout_s": 120.0,
                     "receive_idle_timeout_s": 60.0,

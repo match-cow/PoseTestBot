@@ -68,11 +68,11 @@ public class PoseTestBot_CalibrationVarianceProposal
 	/* Keep capture motion below the requested run velocity to limit blur. */
 	private static final double CAPTURE_VELOCITY_SCALE = 0.60;
 	private static final double REPOSITION_PTP_VEL_REL = 0.08;
-	private static final double ORIENTATION_JOINT_VEL_REL = 0.04;
+	private static final double ORIENTATION_JOINT_VEL_REL = 0.03;
 	private static final double SMOOTH_MOTION_JOINT_ACCEL_REL = 0.03;
 	private static final double SMOOTH_MOTION_JOINT_JERK_REL = 0.03;
 	private static final double MIN_CART_VEL_MM_S = 8.0;
-	private static final double MAX_CART_VEL_MM_S = 45.0;
+	private static final double MAX_CART_VEL_MM_S = 30.0;
 
 	@Inject
 	private LBR robot;

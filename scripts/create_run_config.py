@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
+from posetestbot.config import DEFAULT_CAPTURE_VELOCITY_M_S
 from posetestbot.pipeline.run_config import (
     CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
     DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS,
@@ -44,7 +45,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--resolution", default="720p")
     parser.add_argument("--fps", type=int, default=6)
-    parser.add_argument("--velocity", type=float, default=0.2)
+    parser.add_argument(
+        "--velocity",
+        type=float,
+        default=DEFAULT_CAPTURE_VELOCITY_M_S,
+        help=(
+            "Requested capture-motion speed in m/s "
+            f"(default {DEFAULT_CAPTURE_VELOCITY_M_S:g}; execution is capped "
+            "independently)."
+        ),
+    )
     synchronization_source = parser.add_mutually_exclusive_group()
     synchronization_source.add_argument(
         "--synchronization-json",

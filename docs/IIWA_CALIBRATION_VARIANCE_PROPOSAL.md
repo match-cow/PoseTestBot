@@ -106,13 +106,20 @@ installed Sunrise.OS Javadoc is authoritative for the available `linRel`
 overload and must be checked during Workbench compilation.
 
 The receiver's `cartesian_velocity_m_s` is converted to Sunrise millimetres per
-second, reduced to 60% for this calibration program, and clamped to 8–45 mm/s
+second, reduced to 60% for this calibration program, and clamped to 8–30 mm/s
 for raster and relative motions. Repositioning PTP motions use 8% relative
 joint velocity. All PTP, raster `LIN`, and orientation `LIN_REL` motions use 3%
 relative joint-acceleration and joint-jerk limits to soften starting and
 braking. Because a Cartesian translation limit alone does not suitably limit a
 zero-translation orientation move, every central dither also uses an explicit
-4% relative joint-velocity limit.
+3% relative joint-velocity limit.
+
+The normal host workflow sends no more than 0.03, so its 60%-scaled calibration
+translation is at most 18 mm/s; the 30 mm/s Sunrise cap also protects commands
+from other clients. New runs default to 0.01 m/s, which the calibration
+application scales and then clamps to its 8 mm/s minimum. These software
+limits are not safety-rated, and slow motion alone does not guarantee sharp
+images: exposure/readout time and lighting still have to be verified.
 
 The program preserves exact stops instead of blending between commissioned
 waypoints, then waits 1.5 seconds after every motion leg so residual cell or

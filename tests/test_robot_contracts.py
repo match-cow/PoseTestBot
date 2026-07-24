@@ -7,10 +7,12 @@ from pathlib import Path
 import pytest
 
 from posetestbot.config import (
+    DEFAULT_CAPTURE_VELOCITY_M_S,
     DEFAULT_RECEIVER_PORT,
     DEFAULT_ROBOT_PORT,
     LAB_ROBOT_IP,
     LAB_ROBOT_RECEIVER_IP,
+    MAX_CAPTURE_COMMAND_VELOCITY_M_S,
     RobotProfile,
     robot_profile,
 )
@@ -28,6 +30,7 @@ def test_robot_profile_defaults_to_real_lab_robot(monkeypatch: pytest.MonkeyPatc
     assert profile.receiver_ip == LAB_ROBOT_RECEIVER_IP
     assert profile.command_port == DEFAULT_ROBOT_PORT
     assert profile.receiver_port == DEFAULT_RECEIVER_PORT
+    assert profile.cartesian_velocity_m_s == DEFAULT_CAPTURE_VELOCITY_M_S
 
 
 def test_robot_profile_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,6 +105,10 @@ def test_send_start_uses_selected_protocol(monkeypatch: pytest.MonkeyPatch) -> N
     message = udp.send_start(profile, protocol="v1", run_id="run-1")
 
     assert message["command"] == "start_capture"
+    assert (
+        message["cartesian_velocity_m_s"]
+        == MAX_CAPTURE_COMMAND_VELOCITY_M_S
+    )
     assert message["receiver_ip"] == "127.0.0.1"
     assert message["receiver_port"] == 18080
     assert sent == [(message, "127.0.0.1", 30301)]
@@ -127,7 +134,10 @@ def test_send_start_omits_wildcard_receiver_ip(
 
     message = udp.send_start(profile)
 
-    assert message == {"start": 0.12, "receiver_port": 18080}
+    assert message == {
+        "start": MAX_CAPTURE_COMMAND_VELOCITY_M_S,
+        "receiver_port": 18080,
+    }
     assert sent == [(message, "172.31.1.147", 30300)]
 
 

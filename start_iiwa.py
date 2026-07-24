@@ -63,7 +63,10 @@ def main():
         "--capture_vel",
         type=float,
         default=None,
-        help="Override Cartesian capture velocity in m/s.",
+        help=(
+            "Override the requested Cartesian capture velocity in m/s. "
+            "The transmitted numeric value is capped at 0.03."
+        ),
     )
     parser.add_argument(
         "--protocol",

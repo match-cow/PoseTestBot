@@ -32,7 +32,10 @@ def parse_args() -> argparse.Namespace:
         "--capture_vel",
         type=float,
         default=None,
-        help="Capture velocity in m/s. Defaults to the selected robot profile.",
+        help=(
+            "Requested capture velocity in m/s. Defaults to the selected "
+            "robot profile; the transmitted numeric value is capped at 0.03."
+        ),
     )
     parser.add_argument(
         "--ip_robot",

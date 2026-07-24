@@ -1,1 +1,0 @@
-import{c}from"./index-DKpSxYan.js";const o=[["circle",{cx:"12",cy:"12",r:"10",key:"1mglay"}],["circle",{cx:"12",cy:"12",r:"1",key:"41hilf"}]],i=c("circle-dot",o);const e=[["path",{d:"M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z",key:"10ikf1"}]],l=c("play",e);export{i as C,l as P};

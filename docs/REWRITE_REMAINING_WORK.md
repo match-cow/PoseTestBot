@@ -1,6 +1,6 @@
 # Acquisition Rewrite Remaining Work
 
-Last reviewed: 2026-07-23
+Last reviewed: 2026-07-24
 
 This is the only repository-owned planning document for unfinished rewrite
 work. Completed design plans are retained in Git history, not as live plans.
@@ -113,8 +113,9 @@ The hardened receiver uses a conservative 120-second first-packet timeout and
 60-second inter-packet timeout by default. Supervised capture injects both
 fresh acknowledgements and timeout values only into the runtime receiver
 command, records that command in the execution report, and leaves reusable
-capture/sequence plans authorization-free. The supervisor default is 300
-seconds. Every selected camera must publish at least three valid, committed
+capture/sequence plans authorization-free. The supervisor default is 720
+seconds so the lowest selectable 0.01 m/s A1 sweep can finish. Every selected
+camera must publish at least three valid, committed
 `frame_metadata.jsonl` records within the 15-second readiness window before
 receiver bind or `START`. Direct IIWA start uses the same two fresh
 acknowledgements.
@@ -124,14 +125,29 @@ acknowledgements.
 - [ ] Confirm which Sunrise application is deployed for ordinary full capture.
   `iiwa/PoseTestBot_Test.java` is the remaining likely candidate, but its name
   and deployed status are not authoritative evidence.
-- [ ] Align its command semantics with `cartesian_velocity_m_s`. It currently
-  passes that value to `setJointVelocityRel`, so the Python unit/name and robot
-  interpretation disagree.
-- [ ] Align documented receiver fallback/address behavior with the lab receiver
-  `172.31.1.169`, while retaining the command-supplied receiver target.
-- [ ] Make packet/parse/transmit failures observable instead of silently
-  swallowing them, and document that a UDP stop is not a safety stop and cannot
-  interrupt an active motion in the current program.
+- [x] Align the repository candidate's command semantics with
+  `cartesian_velocity_m_s`. It now converts the requested tangential flange
+  speed through the measured A1 orbit radius and a conservative published A1
+  speed bound before calling `setJointVelocityRel`. The host numeric START,
+  candidate Cartesian input, and candidate A1 angular velocity are
+  independently capped at 0.03, 0.03 m/s, and 3°/s respectively; this also
+  bounds an older application that interprets legacy `0.03` as 3% relative
+  joint speed.
+- [x] Align documented receiver fallback/address behavior with the lab receiver
+  `172.31.1.169`, while retaining the command-supplied receiver target and an
+  explicit wildcard-to-command-sender mode.
+- [x] Make packet/parse/transmit failures observable instead of silently
+  swallowing them, document that UDP stop is not a safety stop and cannot
+  interrupt active motion, and retain the repository candidate's v1 packet
+  sequence/run/frame evidence in the backward-compatible Python receiver.
+- [ ] Create, teach, and commission the distinct persistent ordinary-capture
+  frames `/PoseTestBot/PoseTemplateBase`, `/PoseTestBot/CaptureStart`, and
+  `/PoseTestBot/CaptureEnd`; record the measured relationship between the
+  ordinary reference frame and the calibration application's
+  `/PoseTestBot/TemplateBase`; commission the complete PTP/A1/PTP path; and
+  verify that pose-template placement plus every selected camera profile is
+  expressed in the ordinary run's dataset reference. Follow
+  [IIWA_FULL_CAPTURE_APPLICATION.md](IIWA_FULL_CAPTURE_APPLICATION.md).
 - [ ] Compile and simulate the exact controller project offline, then rename or
   replace the source only after the deployed application is identified. Keep
   the nine-frame calibration application separate from the ordinary

@@ -6,7 +6,7 @@ import json
 import socket
 from typing import Any
 
-from posetestbot.config import RobotProfile
+from posetestbot.config import RobotProfile, bounded_capture_velocity_m_s
 
 
 def _advertised_receiver_ip(receiver_ip: str) -> str | None:
@@ -75,16 +75,19 @@ def send_start(
     run_id: str | None = None,
 ) -> dict[str, Any]:
     receiver_ip = _advertised_receiver_ip(profile.receiver_ip)
+    command_velocity_m_s = bounded_capture_velocity_m_s(
+        profile.cartesian_velocity_m_s
+    )
     if protocol == "v1":
         message = structured_start_command(
-            profile.cartesian_velocity_m_s,
+            command_velocity_m_s,
             run_id,
             receiver_ip=receiver_ip,
             receiver_port=profile.receiver_port,
         )
     elif protocol == "legacy":
         message = legacy_start_command(
-            profile.cartesian_velocity_m_s,
+            command_velocity_m_s,
             receiver_ip=receiver_ip,
             receiver_port=profile.receiver_port,
         )

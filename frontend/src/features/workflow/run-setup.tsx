@@ -18,11 +18,14 @@ import type { CaptureSynchronization, RunConfig, SensorStatus } from "@/lib/cont
 import { loadSelectedSensorKeys } from "@/lib/sensor-selection"
 import { useOperator } from "@/providers/operator-provider"
 
+const DEFAULT_CAPTURE_SPEED_M_S = 0.01
+const MAX_CAPTURE_COMMAND_SPEED_M_S = 0.03
+
 const schema = z.object({
   run_name: z.string().optional(),
   resolution: z.string().min(1),
   fps: z.number().int().min(1).max(60),
-  velocity: z.number().positive().max(1),
+  velocity: z.number().min(0.01).max(MAX_CAPTURE_COMMAND_SPEED_M_S),
   synchronization_mode: z.enum(["timestamp_aligned", "hardware_trigger"]),
   hardware_sync_group_id: z.string(),
   hardware_sync_master_sensor_key: z.string(),
@@ -174,7 +177,7 @@ export function RunSetup({ intent = "camera_calibration" }: { intent?: WorkflowI
       run_name: "",
       resolution: "720p",
       fps: 6,
-      velocity: 0.2,
+      velocity: DEFAULT_CAPTURE_SPEED_M_S,
       synchronization_mode: "timestamp_aligned",
       hardware_sync_group_id: DEFAULT_HARDWARE_GROUP_ID,
       hardware_sync_master_sensor_key: "",
@@ -280,7 +283,10 @@ export function RunSetup({ intent = "camera_calibration" }: { intent?: WorkflowI
       run_name: config.run_name,
       resolution: config.capture.resolution,
       fps: config.capture.fps,
-      velocity: config.capture.velocity_m_s,
+      velocity: Math.min(
+        config.capture.velocity_m_s,
+        MAX_CAPTURE_COMMAND_SPEED_M_S,
+      ),
       synchronization_mode: synchronization.mode,
       hardware_sync_group_id: synchronization.mode === "hardware_trigger"
         ? synchronization.group_id
@@ -416,7 +422,7 @@ export function RunSetup({ intent = "camera_calibration" }: { intent?: WorkflowI
       <CardHeader><CardTitle>{intent === "camera_calibration" ? "Calibration recording setup" : "Object dataset recording setup"}</CardTitle><CardDescription>{intent === "camera_calibration" ? "Choose the cameras and capture settings used to record the printed grid." : "Choose the cameras, capture settings, and a previously saved calibration that covers every enabled camera."}</CardDescription></CardHeader>
       <CardContent><form className="space-y-6" onSubmit={form.handleSubmit((values) => save.mutate(values))}>
         <div className="grid gap-4 sm:grid-cols-2"><Field id="run-name" label="Run name" error={form.formState.errors.run_name?.message}><Input id="run-name" {...form.register("run_name")} placeholder="Defaults to folder name" /></Field><Field id="resolution" label="Image resolution" hint="Only modes shared by every enabled camera are offered."><Controller control={form.control} name="resolution" render={({ field }) => <Select value={field.value} onValueChange={field.onChange}><SelectTrigger id="resolution"><SelectValue /></SelectTrigger><SelectContent>{resolutionOptions.map((resolution) => <SelectItem value={resolution} key={resolution}>{resolution === "720p" ? "1280 × 720" : resolution === "360p" ? "672 × 376" : resolution}</SelectItem>)}</SelectContent></Select>} /></Field></div>
-        <div className="grid gap-4 sm:grid-cols-2"><Field id="fps" label={<span className="inline-flex items-center gap-1">Frames per second <HelpTip label="frames per second">The requested RGB-D frame rate for each enabled camera. Higher rates create more data and may exceed a camera or USB connection's supported mode.</HelpTip></span>} hint="How many RGB-D frames each camera should request per second." error={form.formState.errors.fps?.message}><Input id="fps" type="number" min={1} max={60} {...form.register("fps", { valueAsNumber: true })} /></Field><Field id="velocity" label={<span className="inline-flex items-center gap-1">Robot capture speed (m/s) <HelpTip label="robot capture speed">The Cartesian speed requested from the lab iiwa capture program. This setting does not authorize motion and never overrides controller-side safety limits.</HelpTip></span>} hint="Cartesian speed requested while recording. The robot application and safety configuration remain authoritative." error={form.formState.errors.velocity?.message}><Input id="velocity" type="number" min="0.01" max="1" step="0.01" {...form.register("velocity", { valueAsNumber: true })} /></Field></div>
+        <div className="grid gap-4 sm:grid-cols-2"><Field id="fps" label={<span className="inline-flex items-center gap-1">Frames per second <HelpTip label="frames per second">The requested RGB-D frame rate for each enabled camera. Higher rates create more data and may exceed a camera or USB connection's supported mode.</HelpTip></span>} hint="How many RGB-D frames each camera should request per second." error={form.formState.errors.fps?.message}><Input id="fps" type="number" min={1} max={60} {...form.register("fps", { valueAsNumber: true })} /></Field><Field id="velocity" label={<span className="inline-flex items-center gap-1">Robot capture speed limit (m/s) <HelpTip label="robot capture speed limit">Calibration raster legs use a scaled Cartesian LIN speed. The ordinary dataset application uses an A1 joint PTP and converts this tangential flange-speed limit through the measured orbit radius. The host never sends a numeric START value above 0.03, which also bounds a legacy app that interprets the value as relative joint speed. This is not a safety-rated limit.</HelpTip></span>} hint="Choose 0.01–0.03 m/s. Full capture is an A1 joint PTP; the commissioned app also caps A1 at 3°/s. Speed alone cannot guarantee sharp frames—exposure time and lighting still matter." error={form.formState.errors.velocity?.message}><Input id="velocity" type="number" min="0.01" max="0.03" step="0.01" {...form.register("velocity", { valueAsNumber: true })} /></Field></div>
 
         {intent === "object_dataset" && <section className="space-y-4 rounded-lg border bg-muted/15 p-4" data-testid="capture-synchronization-setup" aria-labelledby="capture-synchronization-heading">
           <div><h3 id="capture-synchronization-heading" className="text-sm font-semibold">Cross-camera capture synchronization</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Choose whether this dataset uses the existing timestamp association or the bounded RealSense depth-trigger contract.</p></div>

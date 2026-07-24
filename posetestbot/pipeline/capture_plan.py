@@ -8,8 +8,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.config import (
+    DEFAULT_CAPTURE_VELOCITY_M_S,
+    DEFAULT_RECEIVER_PORT,
+    DEFAULT_ROBOT_PORT,
+    MAX_CAPTURE_COMMAND_VELOCITY_M_S,
+    bounded_capture_velocity_m_s,
+)
 from posetestbot.io.atomic import atomic_write_json
-from posetestbot.config import DEFAULT_ROBOT_PORT, DEFAULT_RECEIVER_PORT
 from posetestbot.io.artifacts import CAPTURE_PLAN
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -155,12 +161,17 @@ def build_capture_plan(
     hardware_triggered = synchronization["mode"] == "hardware_trigger"
     resolution = str(capture["resolution"])
     fps = int(capture["fps"])
-    velocity = float(
+    requested_velocity = float(
         capture.get(
             "velocity_m_s",
-            _robot_float(robot, "cartesian_velocity_m_s", 0.2),
+            _robot_float(
+                robot,
+                "cartesian_velocity_m_s",
+                DEFAULT_CAPTURE_VELOCITY_M_S,
+            ),
         )
     )
+    velocity = bounded_capture_velocity_m_s(requested_velocity)
 
     if max_frames is not None and max_frames < 0:
         raise ValueError("max_frames must be greater than or equal to 0")
@@ -197,6 +208,12 @@ def build_capture_plan(
         "The plan targets the real iiwa at "
         f"{resolved_robot_ip}:{command_port}; verify the robot app is ready."
     )
+    if velocity < requested_velocity:
+        notes.append(
+            "The configured capture speed "
+            f"{requested_velocity:g} m/s is reduced to the host command cap "
+            f"{velocity:g} m/s before START."
+        )
 
     sensor_records: list[Mapping[str, Any]] = []
     enabled_sensors = [
@@ -369,6 +386,8 @@ def build_capture_plan(
         "resolution": resolution,
         "fps": fps,
         "velocity_m_s": velocity,
+        "requested_velocity_m_s": requested_velocity,
+        "command_velocity_cap_m_s": MAX_CAPTURE_COMMAND_VELOCITY_M_S,
         "sensor_count": len(capture.get("sensors", [])),
         "enabled_sensor_count": len(enabled_sensors),
         "max_frames": max_frames,

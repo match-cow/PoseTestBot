@@ -33,6 +33,13 @@ def test_capture_plan_builds_sensor_commands_then_one_receiver(tmp_path: Path) -
 
     assert plan["schema_version"] == "capture_plan.v1"
     assert plan["dry_run"] is True
+    assert plan["capture"]["requested_velocity_m_s"] == 0.15
+    assert plan["capture"]["velocity_m_s"] == 0.03
+    assert plan["capture"]["command_velocity_cap_m_s"] == 0.03
+    assert any(
+        "0.15 m/s is reduced to the host command cap 0.03 m/s" in note
+        for note in plan["notes"]
+    )
     assert plan["capture"]["enabled_sensor_count"] == 3
     assert plan["capture"]["warmup_frames"] == 30
     assert [sensor["folder"] for sensor in plan["sensors"]] == [
@@ -100,6 +107,8 @@ def test_capture_plan_builds_sensor_commands_then_one_receiver(tmp_path: Path) -
     assert "--allow-real-robot" not in receiver["command"]
     assert "--receive-start-timeout-s" not in receiver["command"]
     assert "--receive-idle-timeout-s" not in receiver["command"]
+    velocity_index = receiver["command"].index("--capture_vel")
+    assert receiver["command"][velocity_index + 1] == "0.03"
 
 
 def test_capture_plan_uses_adapter_resolution_validation(tmp_path: Path) -> None:

@@ -40,7 +40,11 @@ from posetestbot.calibration.validation import (
     build_calibration_validation,
     write_calibration_validation_with_manifest,
 )
-from posetestbot.config import DEFAULT_ROBOT_PORT, LAB_ROBOT_IP
+from posetestbot.config import (
+    DEFAULT_CAPTURE_VELOCITY_M_S,
+    DEFAULT_ROBOT_PORT,
+    LAB_ROBOT_IP,
+)
 from posetestbot.io.artifacts import (
     CAPTURE_EXECUTION_PLAN,
     CAPTURE_EXECUTION_STATUS,
@@ -544,7 +548,10 @@ def _run_config_from_payload(data: dict):
         if "velocity" in data
         else data.get(
             "velocity_m_s",
-            existing_capture.get("velocity_m_s", 0.2),
+            existing_capture.get(
+                "velocity_m_s",
+                DEFAULT_CAPTURE_VELOCITY_M_S,
+            ),
         )
     )
     return create_run_config(

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from posetestbot.io.artifacts import DATASET_MANIFEST, RUN_CONFIG
+from posetestbot.config import DEFAULT_CAPTURE_VELOCITY_M_S
 from posetestbot.pipeline.run_config import (
     CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
     HARDWARE_TRIGGER_IMPLEMENTATION,
@@ -35,6 +36,11 @@ def test_default_run_config_uses_real_robot_and_lab_sensors(tmp_path: Path) -> N
     assert data["schema_version"] == SCHEMA_VERSION
     assert data["robot_profile"]["mode"] == "real"
     assert data["robot_profile"]["robot_ip"] == "172.31.1.147"
+    assert (
+        data["robot_profile"]["cartesian_velocity_m_s"]
+        == DEFAULT_CAPTURE_VELOCITY_M_S
+    )
+    assert data["capture"]["velocity_m_s"] == DEFAULT_CAPTURE_VELOCITY_M_S
     assert data["dataset_mode"] == "objectless"
     assert "object_folder" not in data
     assert "selected_objects" not in data
@@ -62,6 +68,18 @@ def test_default_run_config_uses_real_robot_and_lab_sensors(tmp_path: Path) -> N
     assert plan.sequence_id == "real_full_capture_validation"
     assert plan.plan_only is True
     assert plan.steps[0].command[:3] == ["uv", "run", "python"]
+
+
+@pytest.mark.parametrize("velocity", [0.0, -0.01, float("inf"), float("nan")])
+def test_run_config_rejects_non_positive_or_non_finite_velocity(
+    tmp_path: Path,
+    velocity: float,
+) -> None:
+    with pytest.raises(ValueError, match="finite positive"):
+        create_run_config(
+            run_root=tmp_path / "bad-velocity",
+            velocity_m_s=velocity,
+        )
 
 
 def test_sensor_config_token_accepts_alias_and_mounting_mode() -> None:

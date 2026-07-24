@@ -120,6 +120,61 @@ full-capture gate accepts the immutable pre-START preflight embedded in an
 execution plan when the standalone report is absent, and rejects mismatched
 embedded status.
 
+## 2026-07-24 Manual IIWA Command Confirmation
+
+The Dashboard and Devices manual IIWA dialogs now use one fresh confirmation
+per START or STOP request. The single START control visibly retains target
+identity, real-robot motion authorization, and camera/pose-receiver readiness;
+checking it sends both independent backend execution gates. STOP retains its
+single target confirmation and the visible warning that UDP STOP cannot
+interrupt active motion and exits the waiting calibration application.
+
+## 2026-07-24 Ordinary IIWA Capture Candidate Hardening
+
+The repository's still-unconfirmed ordinary Sunrise candidate now uses a
+distinct persistent `/PoseTestBot/PoseTemplateBase` instead of the historical
+HRC or calibration reference. It remains disabled pending exact
+Sunrise.Workbench compilation, frame/path simulation, T1 commissioning, and
+deployed-application identification. The accompanying operator note explains
+how the calibration board, pose-template, and dataset reference transforms
+must remain explicit, including the non-portability of static-camera profiles
+between different bases.
+
+The candidate no longer moves before START or returns after its end marker. It
+converts `cartesian_velocity_m_s` into a bounded relative A1 speed from the
+measured flange orbit radius, defaults pose delivery to `172.31.1.169`, logs
+command/send/interrupt failures, and emits sequenced `robot_pose.v1` packets
+with run and Sunrise-frame identity. The hardened receiver remains compatible
+with legacy packets while retaining and validating the new metadata and
+recording sequence gaps as UDP-loss evidence.
+
+The candidate source also requires taught `/PoseTestBot/CaptureStart` and
+`/PoseTestBot/CaptureEnd` Application Data frames. After an accepted START it
+moves PTP to the start frame before sampling the A1 sweep's non-A1 joint
+branch, and it completes the end-frame PTP before emitting the terminal
+marker. Teaching and commissioning those frames and all three intervening
+paths remain operator work.
+
+The workflow speed control now states that ordinary full capture is an A1
+joint PTP whose tangential flange-speed request is converted by Sunrise. New
+runs default to 0.01 m/s and the UI permits 0.01–0.03 m/s. The host command
+boundary, candidate Cartesian input, and candidate A1 angular motion are
+independently capped at 0.03, 0.03 m/s, and 3°/s; consequently, even an
+unreconciled older application that treats legacy `0.03` as a relative joint
+speed receives no more than 3%. The calibration application was tightened to
+8–30 mm/s raster/relative motion and 3% orientation joint speed. The
+supervisor envelope is now 720 seconds so a 0.01 m/s sweep is not terminated
+by the old five-minute total limit. Operator copy explicitly notes that speed
+alone cannot guarantee sharp images because exposure/readout time and lighting
+remain camera-dependent.
+
+Repository-only validation passed all 878 default tests, the focused desktop
+Playwright speed/capture-gate regression, Ruff, frontend type checking and
+lint, the Vite production build, and diff checks. This host has no
+Sunrise/JSON-simple controller classpath, so the exact Workbench compile,
+simulation, deployed identity, frame teaching, T1 checks, and physical trial
+remain explicitly unfinished.
+
 ## 2026-07-23 Operator Console Streamlining
 
 The complete packaged operator console received a desktop-first usability and

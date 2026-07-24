@@ -146,11 +146,11 @@ def test_calibration_motion_uses_smooth_capture_and_orientation_limits() -> None
     assert "SETTLE_TIME_MS = 1500" in java
     assert "CAPTURE_VELOCITY_SCALE = 0.60" in java
     assert "REPOSITION_PTP_VEL_REL = 0.08" in java
-    assert "ORIENTATION_JOINT_VEL_REL = 0.04" in java
+    assert "ORIENTATION_JOINT_VEL_REL = 0.03" in java
     assert "SMOOTH_MOTION_JOINT_ACCEL_REL = 0.03" in java
     assert "SMOOTH_MOTION_JOINT_JERK_REL = 0.03" in java
     assert "MIN_CART_VEL_MM_S = 8.0" in java
-    assert "MAX_CART_VEL_MM_S = 45.0" in java
+    assert "MAX_CART_VEL_MM_S = 30.0" in java
     assert "requestedMmS * CAPTURE_VELOCITY_SCALE" in java
     assert ".setJointVelocityRel(ORIENTATION_JOINT_VEL_REL)" in java
     assert java.count(

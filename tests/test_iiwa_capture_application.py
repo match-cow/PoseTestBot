@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+JAVA_PATH = Path("iiwa/PoseTestBot_Test.java")
+DOC_PATH = Path("docs/IIWA_FULL_CAPTURE_APPLICATION.md")
+CALIBRATION_JAVA_PATH = Path("iiwa/PoseTestBot_CalibrationVarianceProposal.java")
+
+
+def test_ordinary_capture_uses_a_distinct_persistent_pose_template_frame() -> None:
+    java = JAVA_PATH.read_text()
+    calibration_java = CALIBRATION_JAVA_PATH.read_text()
+
+    assert 'POSE_TEMPLATE_BASE_PATH =\n\t\t\t"/PoseTestBot/PoseTemplateBase";' in java
+    assert "poseTemplateBase = requiredFrame(POSE_TEMPLATE_BASE_PATH);" in java
+    assert "robotinfo.setBase(POSE_TEMPLATE_BASE_PATH);" in java
+    assert "new Frame(" not in java
+    assert "/HRC_Hub/Template_Base" not in java
+    assert 'TEMPLATE_BASE_PATH = "/PoseTestBot/TemplateBase";' in calibration_java
+    assert "/PoseTestBot/PoseTemplateBase" not in calibration_java
+
+
+def test_ordinary_capture_is_inert_and_does_not_move_before_start() -> None:
+    java = JAVA_PATH.read_text()
+    run_body = java.split("public void run()", 1)[1].split(
+        "private void runCapture", 1
+    )[0]
+
+    assert "ENABLE_AFTER_OFFLINE_VALIDATION = false" in java
+    assert run_body.index("waitForStartCommand()") < run_body.index(
+        "runCapture(command)"
+    )
+    assert "robot.move(" not in run_body
+    assert "robot.getCurrentJointPosition()" not in run_body
+    assert "moveToA1Min();" not in run_body
+    assert "No robot motion occurs before an accepted" in java
+    assert "UDP STOP is not a safety stop" in java
+
+
+def test_capture_uses_commissioned_start_and_end_ptp_frames() -> None:
+    java = JAVA_PATH.read_text()
+    capture_body = java.split("private void runCapture", 1)[1].split(
+        "private void moveToCommissionedFrame", 1
+    )[0]
+
+    assert '"/PoseTestBot/CaptureStart"' in java
+    assert '"/PoseTestBot/CaptureEnd"' in java
+    assert "captureStartFrame = requiredFrame(CAPTURE_START_FRAME_PATH);" in java
+    assert "captureEndFrame = requiredFrame(CAPTURE_END_FRAME_PATH);" in java
+    assert "robot.move(ptp(targetFrame)" in java
+    assert capture_body.index("captureStartFrame") < capture_body.index(
+        "robot.getCurrentJointPosition()"
+    )
+    assert capture_body.index("robot.getCurrentJointPosition()") < capture_body.index(
+        "moveToA1Min();"
+    )
+    assert capture_body.index("transmitPose(") < capture_body.index("captureEndFrame")
+    assert capture_body.index("captureEndFrame") < capture_body.index(
+        "transmitEndMarker(command);"
+    )
+
+
+def test_cartesian_command_is_converted_before_joint_velocity_is_applied() -> None:
+    java = JAVA_PATH.read_text()
+
+    assert "boundedCartesianVelocityMps * 1000.0 / orbitRadiusMm" in java
+    assert "/ A1_FULL_SPEED_UPPER_BOUND_RAD_S" in java
+    assert "Math.toRadians(98.0)" in java
+    assert "MAX_CAPTURE_CARTESIAN_VELOCITY_M_S = 0.03" in java
+    assert "Math.toRadians(3.0)" in java
+    assert "Math.min(\n\t\t\t\tcartesianVelocityMps" in java
+    assert "Math.min(\n\t\t\t\trequestedAngularVelocityRadS" in java
+    assert ".setJointVelocityRel(captureJointVelocityRel)" in java
+    assert ".setJointVelocityRel(command.cartesianVelocityMps)" not in java
+    assert ".setJointVelocityRel(velocity.doubleValue())" not in java
+
+
+def test_v1_pose_packets_bind_sequence_run_and_frame_identity() -> None:
+    java = JAVA_PATH.read_text()
+
+    for field in (
+        "schema_version",
+        "packet_kind",
+        "sequence",
+        "sender_monotonic_ns",
+        "sender_wall_timestamp_ms",
+        "run_id",
+        "from_frame",
+        "to_frame",
+        "sunrise_reference_frame_path",
+    ):
+        assert f'jsonObject.put("{field}"' in java
+    assert 'jsonObject.put("from_frame", "robot_flange")' in java
+    assert 'jsonObject.put("to_frame", "template_base")' in java
+    assert "END_PACKET_COUNT = 3" in java
+
+
+def test_network_and_interrupt_failures_are_observable() -> None:
+    java = JAVA_PATH.read_text()
+
+    assert "catch (SocketException e) {\n\t\t}" not in java
+    assert "catch (IOException e) {\n\t\t}" not in java
+    assert "catch (InterruptedException e) {\n\t\t}" not in java
+    assert "Pose packet transmission failure" in java
+    assert "End marker transmission" in java
+    assert "Thread.currentThread().interrupt()" in java
+    assert 'DEFAULT_RECEIVER_IP = "172.31.1.169"' in java
+
+
+def test_full_capture_document_explains_frame_and_static_profile_boundary() -> None:
+    document = DOC_PATH.read_text()
+    normalized = " ".join(document.split())
+
+    assert "`/PoseTestBot/TemplateBase`" in document
+    assert "`/PoseTestBot/PoseTemplateBase`" in document
+    assert "`template_base_from_pose_template` is identity" in document
+    assert "must not be relabelled" in document
+    assert (
+        "Host receive/wall timestamps remain the synchronization authority"
+        in normalized
+    )
+    assert "0.03 m/s" in document
+    assert "3°/s" in document
+    assert "Speed alone cannot guarantee blur-free images" in normalized
+    assert "cannot interrupt the active A1 motion" in document

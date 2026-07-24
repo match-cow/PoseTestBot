@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, replace
 
@@ -12,7 +13,25 @@ LAB_NORMAL_NETWORK_IP = "10.145.8.132"
 
 DEFAULT_ROBOT_PORT = 30300
 DEFAULT_RECEIVER_PORT = 8080
-DEFAULT_CAPTURE_VELOCITY_M_S = 0.2
+DEFAULT_CAPTURE_VELOCITY_M_S = 0.01
+MAX_CAPTURE_COMMAND_VELOCITY_M_S = 0.03
+
+
+def bounded_capture_velocity_m_s(requested_velocity_m_s: float) -> float:
+    """Return the finite positive capture command bounded for either iiwa app.
+
+    The still-unconfirmed deployed Sunrise application may interpret the
+    numeric legacy START value as either Cartesian metres/second or a relative
+    joint velocity. Keeping the transmitted value at or below 0.03 therefore
+    bounds both interpretations while the controller deployment is reconciled.
+    """
+
+    if isinstance(requested_velocity_m_s, bool):
+        raise ValueError("Capture velocity must be a finite positive number")
+    velocity = float(requested_velocity_m_s)
+    if not math.isfinite(velocity) or velocity <= 0.0:
+        raise ValueError("Capture velocity must be a finite positive number")
+    return min(velocity, MAX_CAPTURE_COMMAND_VELOCITY_M_S)
 
 
 @dataclass(frozen=True)

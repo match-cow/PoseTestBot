@@ -31,7 +31,13 @@ def print_status(status: dict) -> None:
     print(f"Selected mode: {selected['mode']}")
     print(f"Robot command target: {selected['robot_ip']}:{selected['command_port']}")
     print(f"Receiver bind target: {selected['receiver_ip']}:{selected['receiver_port']}")
-    print(f"Velocity: {selected['cartesian_velocity_m_s']} m/s")
+    velocity = status["capture_velocity"]
+    print(f"Requested capture velocity: {velocity['requested_m_s']} m/s")
+    print(
+        "Commanded capture velocity: "
+        f"{velocity['commanded_m_s']} m/s "
+        f"(host cap {velocity['host_command_cap_m_s']} m/s)"
+    )
     if status["env_overrides"]:
         print("Environment overrides:")
         for key, value in status["env_overrides"].items():

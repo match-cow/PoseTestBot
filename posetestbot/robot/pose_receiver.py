@@ -22,7 +22,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-from posetestbot.config import RobotProfile
+from posetestbot.config import (
+    MAX_CAPTURE_COMMAND_VELOCITY_M_S,
+    RobotProfile,
+    bounded_capture_velocity_m_s,
+)
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import RAW_ROBOT_EE_POSES
 from posetestbot.io.manifest import (
@@ -38,6 +42,7 @@ DEFAULT_RECEIVE_START_TIMEOUT_S = 120.0
 DEFAULT_RECEIVE_IDLE_TIMEOUT_S = 60.0
 PARTIAL_SCHEMA_VERSION = "raw_robot_ee_poses_partial.v1"
 CLAIM_SCHEMA_VERSION = "raw_robot_ee_poses_claim.v1"
+POSE_PACKET_SCHEMA_VERSION = "robot_pose.v1"
 MAX_PACKET_BYTES = 65_535
 
 
@@ -271,7 +276,95 @@ def _cleanup_raw_pose_claim(claim: RawPoseClaim) -> None:
         claim.path.unlink(missing_ok=True)
 
 
-def _decode_packet(data: bytes) -> tuple[str, dict[str, int | float] | None]:
+def _packet_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate optional v1 sender provenance without changing legacy packets."""
+
+    schema_version = value.get("schema_version")
+    if schema_version is None:
+        return {}
+    if schema_version != POSE_PACKET_SCHEMA_VERSION:
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: unsupported schema_version "
+            f"{schema_version!r}."
+        )
+
+    packet_kind = value.get("packet_kind")
+    if packet_kind not in {"pose", "end"}:
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: packet_kind must be 'pose' or 'end'."
+        )
+    sequence = value.get("sequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: sequence must be a non-negative integer."
+        )
+    sender_monotonic_ns = value.get("sender_monotonic_ns")
+    if (
+        isinstance(sender_monotonic_ns, bool)
+        or not isinstance(sender_monotonic_ns, int)
+        or sender_monotonic_ns < 0
+    ):
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: sender_monotonic_ns must be a "
+            "non-negative integer."
+        )
+    sender_wall_timestamp_ms = value.get("sender_wall_timestamp_ms")
+    if (
+        isinstance(sender_wall_timestamp_ms, bool)
+        or not isinstance(sender_wall_timestamp_ms, int)
+        or sender_wall_timestamp_ms < 0
+    ):
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: sender_wall_timestamp_ms must be a "
+            "non-negative integer."
+        )
+
+    run_id = value.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: run_id must be a non-empty string."
+        )
+    if value.get("from_frame") != "robot_flange":
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: from_frame must be robot_flange."
+        )
+    if value.get("to_frame") != "template_base":
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: to_frame must be template_base."
+        )
+    reference_path = value.get("sunrise_reference_frame_path")
+    if (
+        not isinstance(reference_path, str)
+        or not reference_path.startswith("/")
+        or reference_path.endswith("/")
+    ):
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: sunrise_reference_frame_path must be "
+            "an absolute Application Data frame path."
+        )
+
+    motion = value.get("motion")
+    expected_kind = "end" if motion == "end" else "pose"
+    if packet_kind != expected_kind:
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: packet_kind is inconsistent with motion."
+        )
+    return {
+        "schema_version": schema_version,
+        "packet_kind": packet_kind,
+        "sequence": sequence,
+        "sender_monotonic_ns": sender_monotonic_ns,
+        "sender_wall_timestamp_ms": sender_wall_timestamp_ms,
+        "run_id": run_id.strip(),
+        "from_frame": "robot_flange",
+        "to_frame": "template_base",
+        "sunrise_reference_frame_path": reference_path,
+    }
+
+
+def _decode_packet(
+    data: bytes,
+) -> tuple[str, dict[str, int | float] | None, dict[str, Any]]:
     try:
         value = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -288,8 +381,9 @@ def _decode_packet(data: bytes) -> tuple[str, dict[str, int | float] | None]:
         raise PoseReceiverPacketError(
             "Malformed robot pose packet: motion must be a non-empty string."
         )
+    metadata = _packet_metadata(value)
     if motion == "end":
-        return motion, None
+        return motion, None, metadata
 
     pose: dict[str, int | float] = {}
     for axis in ("X", "Y", "Z", "A", "B", "C"):
@@ -303,7 +397,21 @@ def _decode_packet(data: bytes) -> tuple[str, dict[str, int | float] | None]:
                 f"Malformed robot pose packet: {axis} must be a finite number."
             )
         pose[axis] = coordinate
-    return motion, pose
+    return motion, pose, metadata
+
+
+def _stream_identity(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: metadata[key]
+        for key in (
+            "schema_version",
+            "run_id",
+            "from_frame",
+            "to_frame",
+            "sunrise_reference_frame_path",
+        )
+        if key in metadata
+    }
 
 
 def _validate_sender(
@@ -377,6 +485,13 @@ def run_pose_receiver(
         receive_idle_timeout_s=receive_idle_timeout_s,
         protocol=protocol,
     )
+    requested_velocity_m_s = profile.cartesian_velocity_m_s
+    commanded_velocity_m_s = bounded_capture_velocity_m_s(
+        requested_velocity_m_s
+    )
+    command_profile = profile.with_overrides(
+        cartesian_velocity_m_s=commanded_velocity_m_s
+    )
 
     run_root = Path(output_path)
     run_root.mkdir(parents=True, exist_ok=True)
@@ -398,13 +513,20 @@ def run_pose_receiver(
     last_packet_preview: str | None = None
     last_sender: tuple[Any, ...] | None = None
     start_message: Mapping[str, Any] = {}
+    sender_stream_identity: dict[str, Any] | None = None
+    sender_uses_v1_packets: bool | None = None
+    previous_sender_sequence: int | None = None
 
     try:
         manifest = load_or_create_run_manifest(
             run_root,
-            robot_profile=profile,
+            robot_profile=command_profile,
             capture_config={
-                "cartesian_velocity_m_s": profile.cartesian_velocity_m_s,
+                "cartesian_velocity_m_s": commanded_velocity_m_s,
+                "requested_cartesian_velocity_m_s": requested_velocity_m_s,
+                "command_velocity_cap_m_s": (
+                    MAX_CAPTURE_COMMAND_VELOCITY_M_S
+                ),
                 "protocol": protocol,
                 "mode": "real",
             },
@@ -417,12 +539,21 @@ def run_pose_receiver(
                 sock.settimeout(receive_start_timeout_s)
                 print(f"Listening on {profile.receiver_ip}:{profile.receiver_port}")
 
-                start_message = send_start_command(profile, protocol=protocol)
+                start_message = send_start_command(
+                    command_profile,
+                    protocol=protocol,
+                )
                 print(
                     "Sent start message to "
-                    f"{profile.robot_ip}:{profile.command_port} "
-                    f"with capture vel {profile.cartesian_velocity_m_s}"
+                    f"{command_profile.robot_ip}:{command_profile.command_port} "
+                    f"with capture vel {commanded_velocity_m_s}"
                 )
+                if commanded_velocity_m_s < requested_velocity_m_s:
+                    print(
+                        "Configured capture velocity "
+                        f"{requested_velocity_m_s} m/s was capped at "
+                        f"{commanded_velocity_m_s} m/s before START"
+                    )
                 print(f"Message: {start_message}")
 
                 received_any_packet = False
@@ -451,7 +582,44 @@ def run_pose_receiver(
                         sender,
                         expected_robot_ip=expected_robot_ip,
                     )
-                    motion, pose = _decode_packet(data)
+                    motion, pose, source_packet = _decode_packet(data)
+                    current_uses_v1 = bool(source_packet)
+                    if sender_uses_v1_packets is None:
+                        sender_uses_v1_packets = current_uses_v1
+                    elif current_uses_v1 != sender_uses_v1_packets:
+                        raise PoseReceiverPacketError(
+                            "Robot pose packet schema changed during capture."
+                        )
+                    if source_packet:
+                        current_identity = _stream_identity(source_packet)
+                        if sender_stream_identity is None:
+                            sender_stream_identity = current_identity
+                        elif current_identity != sender_stream_identity:
+                            raise PoseReceiverPacketError(
+                                "Robot pose packet stream identity changed during "
+                                "capture."
+                            )
+
+                        sender_sequence = int(source_packet["sequence"])
+                        if (
+                            previous_sender_sequence is not None
+                            and sender_sequence <= previous_sender_sequence
+                        ):
+                            raise PoseReceiverPacketError(
+                                "Robot pose packet sequence must increase strictly; "
+                                f"received {sender_sequence} after "
+                                f"{previous_sender_sequence}."
+                            )
+                        if previous_sender_sequence is None:
+                            source_packet["sequence_delta"] = 0
+                            source_packet["estimated_packets_lost"] = 0
+                        else:
+                            sequence_delta = sender_sequence - previous_sender_sequence
+                            source_packet["sequence_delta"] = sequence_delta
+                            source_packet["estimated_packets_lost"] = max(
+                                0, sequence_delta - 1
+                            )
+                        previous_sender_sequence = sender_sequence
                     if motion == "end":
                         if not poses:
                             raise PoseReceiverPacketError(
@@ -463,11 +631,9 @@ def run_pose_receiver(
                     if not poses:
                         sock.settimeout(receive_idle_timeout_s)
                     framename = int(round(host_wall_timestamp_ns / 1_000_000))
-                    frame_delta = (
-                        0 if not poses else framename - int(previous_frame_ts)
-                    )
+                    frame_delta = 0 if not poses else framename - int(previous_frame_ts)
                     previous_frame_ts = framename
-                    poses[len(poses)] = {
+                    pose_record: dict[str, Any] = {
                         "framename": framename,
                         "host_received_timestamp_ns": host_received_timestamp_ns,
                         "host_wall_timestamp_ns": host_wall_timestamp_ns,
@@ -475,6 +641,9 @@ def run_pose_receiver(
                         "motion": motion,
                         "pose": pose,
                     }
+                    if source_packet:
+                        pose_record["source_packet"] = source_packet
+                    poses[len(poses)] = pose_record
 
                     if verbose:
                         print(

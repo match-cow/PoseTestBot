@@ -14,6 +14,7 @@ from posetestbot.io.artifacts import DATASET_MANIFEST, RAW_ROBOT_EE_POSES
 from posetestbot.robot.pose_receiver import (
     CLAIM_SCHEMA_VERSION,
     PARTIAL_SCHEMA_VERSION,
+    POSE_PACKET_SCHEMA_VERSION,
     PoseReceiverCanceled,
     PoseReceiverOverwriteError,
     PoseReceiverPacketError,
@@ -101,6 +102,39 @@ def end_packet() -> bytes:
     return json.dumps({"motion": "end"}).encode()
 
 
+def v1_packet(
+    *,
+    sequence: int,
+    motion: str = "a1_capture_sweep",
+    reference_path: str = "/PoseTestBot/PoseTemplateBase",
+    run_id: str = "run-1",
+) -> bytes:
+    value: dict[str, Any] = {
+        "schema_version": POSE_PACKET_SCHEMA_VERSION,
+        "packet_kind": "end" if motion == "end" else "pose",
+        "sequence": sequence,
+        "sender_monotonic_ns": 1_000_000 + sequence,
+        "sender_wall_timestamp_ms": 2_000_000 + sequence,
+        "run_id": run_id,
+        "motion": motion,
+        "from_frame": "robot_flange",
+        "to_frame": "template_base",
+        "sunrise_reference_frame_path": reference_path,
+    }
+    if motion != "end":
+        value.update(
+            {
+                "X": 1.0,
+                "Y": 2.0,
+                "Z": 3.0,
+                "A": 0.1,
+                "B": 0.2,
+                "C": 0.3,
+            }
+        )
+    return json.dumps(value).encode()
+
+
 def manifest_stage(run_root: Path) -> dict[str, Any]:
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     return next(
@@ -137,7 +171,9 @@ def test_receiver_requires_both_fresh_acknowledgements_before_socket_io(
             allow_real_robot=allow_real_robot,
             allow_cameras=allow_cameras,
             socket_factory=socket_factory,
-            send_start_command=lambda *args, **kwargs: start_calls.append((args, kwargs)),
+            send_start_command=lambda *args, **kwargs: start_calls.append(
+                (args, kwargs)
+            ),
             install_signal_handlers=False,
         )
 
@@ -194,7 +230,9 @@ def test_receiver_refuses_existing_raw_artifact_before_socket_or_start(
             allow_real_robot=True,
             allow_cameras=True,
             socket_factory=socket_factory,
-            send_start_command=lambda *args, **kwargs: start_calls.append((args, kwargs)),
+            send_start_command=lambda *args, **kwargs: start_calls.append(
+                (args, kwargs)
+            ),
             install_signal_handlers=False,
         )
 
@@ -248,6 +286,119 @@ def test_receiver_success_uses_start_then_idle_timeout_and_writes_canonical_raw(
         "C": 0.3,
     }
     assert manifest_stage(run_root)["status"] == "succeeded"
+
+
+def test_receiver_caps_start_velocity_and_records_requested_value(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "bounded-start"
+    fake_socket = FakeDatagramSocket(
+        [
+            (packet(), ("192.0.2.10", 40001)),
+            (end_packet(), ("192.0.2.10", 40001)),
+        ]
+    )
+    requested_profile = profile().with_overrides(
+        cartesian_velocity_m_s=0.2
+    )
+    starts: list[RobotProfile] = []
+
+    def fake_start(robot: RobotProfile, *, protocol: str):
+        assert protocol == "legacy"
+        starts.append(robot)
+        return {"start": robot.cartesian_velocity_m_s}
+
+    run_pose_receiver(
+        run_root,
+        profile=requested_profile,
+        allow_real_robot=True,
+        allow_cameras=True,
+        socket_factory=FakeSocketFactory(fake_socket),
+        send_start_command=fake_start,
+        install_signal_handlers=False,
+    )
+
+    assert starts[0].cartesian_velocity_m_s == 0.03
+    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
+    assert manifest["capture_config"]["cartesian_velocity_m_s"] == 0.03
+    assert (
+        manifest["capture_config"]["requested_cartesian_velocity_m_s"]
+        == 0.2
+    )
+    assert manifest["capture_config"]["command_velocity_cap_m_s"] == 0.03
+
+
+def test_receiver_retains_v1_frame_identity_and_packet_loss_evidence(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "v1-packets"
+    fake_socket = FakeDatagramSocket(
+        [
+            (v1_packet(sequence=10), ("192.0.2.10", 40001)),
+            (v1_packet(sequence=12), ("192.0.2.10", 40001)),
+            (v1_packet(sequence=13, motion="end"), ("192.0.2.10", 40001)),
+        ]
+    )
+
+    result = run_pose_receiver(
+        run_root,
+        profile=profile(),
+        allow_real_robot=True,
+        allow_cameras=True,
+        socket_factory=FakeSocketFactory(fake_socket),
+        send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
+        install_signal_handlers=False,
+    )
+
+    saved = json.loads(result.raw_pose_path.read_text())
+    assert saved["0"]["source_packet"] == {
+        "schema_version": POSE_PACKET_SCHEMA_VERSION,
+        "packet_kind": "pose",
+        "sequence": 10,
+        "sender_monotonic_ns": 1_000_010,
+        "sender_wall_timestamp_ms": 2_000_010,
+        "run_id": "run-1",
+        "from_frame": "robot_flange",
+        "to_frame": "template_base",
+        "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
+        "sequence_delta": 0,
+        "estimated_packets_lost": 0,
+    }
+    assert saved["1"]["source_packet"]["sequence_delta"] == 2
+    assert saved["1"]["source_packet"]["estimated_packets_lost"] == 1
+
+
+def test_receiver_rejects_v1_reference_frame_change_mid_stream(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "frame-changed"
+
+    with pytest.raises(PoseReceiverPacketError, match="identity changed"):
+        run_pose_receiver(
+            run_root,
+            profile=profile(),
+            allow_real_robot=True,
+            allow_cameras=True,
+            socket_factory=FakeSocketFactory(
+                FakeDatagramSocket(
+                    [
+                        (v1_packet(sequence=1), ("192.0.2.10", 30300)),
+                        (
+                            v1_packet(
+                                sequence=2,
+                                reference_path="/PoseTestBot/TemplateBase",
+                            ),
+                            ("192.0.2.10", 30300),
+                        ),
+                    ]
+                )
+            ),
+            send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
+            install_signal_handlers=False,
+        )
+
+    partial = next(run_root.glob("raw_robot_ee_poses.partial.*.json"))
+    assert json.loads(partial.read_text())["received_pose_count"] == 1
 
 
 def test_receiver_claims_canonical_raw_path_before_bind_or_start(
@@ -318,7 +469,9 @@ def test_receiver_never_replaces_foreign_artifact_that_displaces_its_claim(
     foreign_bytes = b'{"foreign": true}\n'
 
     def replace_claim(*_args, **_kwargs):
-        assert json.loads(raw_path.read_text())["schema_version"] == CLAIM_SCHEMA_VERSION
+        assert (
+            json.loads(raw_path.read_text())["schema_version"] == CLAIM_SCHEMA_VERSION
+        )
         raw_path.unlink()
         raw_path.write_bytes(foreign_bytes)
         return {"start": 0.02}
@@ -357,9 +510,7 @@ def test_receiver_start_and_idle_timeouts_preserve_unique_partial_evidence(
             allow_real_robot=True,
             allow_cameras=True,
             receive_start_timeout_s=0.25,
-            socket_factory=FakeSocketFactory(
-                FakeDatagramSocket([socket.timeout()])
-            ),
+            socket_factory=FakeSocketFactory(FakeDatagramSocket([socket.timeout()])),
             send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
             install_signal_handlers=False,
         )
@@ -430,9 +581,7 @@ def test_receiver_rejects_end_marker_before_any_pose(tmp_path: Path) -> None:
             allow_real_robot=True,
             allow_cameras=True,
             socket_factory=FakeSocketFactory(
-                FakeDatagramSocket(
-                    [(end_packet(), ("192.0.2.10", 30300))]
-                )
+                FakeDatagramSocket([(end_packet(), ("192.0.2.10", 30300))])
             ),
             send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
             install_signal_handlers=False,
@@ -458,7 +607,9 @@ def test_receiver_bind_failure_records_failed_manifest_without_sending_start(
             socket_factory=FakeSocketFactory(
                 FakeDatagramSocket([], bind_error=OSError("address unavailable"))
             ),
-            send_start_command=lambda *args, **kwargs: start_calls.append((args, kwargs)),
+            send_start_command=lambda *args, **kwargs: start_calls.append(
+                (args, kwargs)
+            ),
             install_signal_handlers=False,
         )
 

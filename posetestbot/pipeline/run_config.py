@@ -15,7 +15,11 @@ from typing import Any, Mapping
 import fcntl
 
 from posetestbot.io.atomic import atomic_write_json
-from posetestbot.config import RobotProfile, robot_profile
+from posetestbot.config import (
+    DEFAULT_CAPTURE_VELOCITY_M_S,
+    RobotProfile,
+    robot_profile,
+)
 from posetestbot.io.artifacts import CALIBRATION_PROFILE_SELECTION, RUN_CONFIG
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -182,7 +186,7 @@ class CaptureRunConfig:
 
     resolution: str = "720p"
     fps: int = 6
-    velocity_m_s: float = 0.2
+    velocity_m_s: float = DEFAULT_CAPTURE_VELOCITY_M_S
     sensors: tuple[SensorRunConfig, ...] = ()
     synchronization: CaptureSynchronizationConfig = field(
         default_factory=CaptureSynchronizationConfig
@@ -704,7 +708,7 @@ def create_run_config(
     run_name: str | None = None,
     resolution: str = "720p",
     fps: int = 6,
-    velocity_m_s: float = 0.2,
+    velocity_m_s: float = DEFAULT_CAPTURE_VELOCITY_M_S,
     sensors: tuple[SensorRunConfig, ...] | None = None,
     dataset_mode: str | None = None,
     pose_template: Mapping[str, Any] | None = None,
@@ -841,6 +845,21 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         raise ValueError("Run config capture.fps must be positive")
     if not str(capture.get("resolution", "")).strip():
         raise ValueError("Run config capture.resolution must not be empty")
+    try:
+        velocity_m_s = float(
+            capture.get(
+                "velocity_m_s",
+                robot.get("cartesian_velocity_m_s"),
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Run config capture.velocity_m_s must be a finite positive number"
+        ) from exc
+    if not math.isfinite(velocity_m_s) or velocity_m_s <= 0.0:
+        raise ValueError(
+            "Run config capture.velocity_m_s must be a finite positive number"
+        )
     calibration_target = value.get("calibration_target")
     intrinsic_profiles = value.get("intrinsic_calibration_profiles")
     if intrinsic_profiles is not None and (

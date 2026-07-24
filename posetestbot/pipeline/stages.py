@@ -514,7 +514,7 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 name="timeout_s",
                 flag="--timeout-s",
                 kind="float",
-                default=300.0,
+                default=720.0,
             ),
             PipelineParameter(
                 name="startup_wait_s",

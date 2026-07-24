@@ -97,7 +97,7 @@ and LL/LC/LR = lower-left/lower-center/lower-right.
 - [ ] Compile the exact controller project's Sunrise.OS API level and confirm
   `Transformation.ofDeg(...)` plus `linRel(offset, calibrationCenter)` resolve.
 - [ ] Confirm the controller API accepts the 3% relative joint-acceleration and
-  joint-jerk limits on all motion types and the 4% relative joint-velocity
+  joint-jerk limits on all motion types and the 3% relative joint-velocity
   limit on every orientation `LIN_REL` motion.
 - [ ] Resolve `/PoseTestBot/TemplateBase` and all nine child frames.
 - [ ] Validate every raster endpoint and swept path:
@@ -147,9 +147,9 @@ and LL/LC/LR = lower-left/lower-center/lower-right.
   actual joint branch, fixed-origin behavior, camera visibility, and cables.
 - [ ] Confirm every motion accelerates and decelerates with the expected 3%
   acceleration/jerk limits,
-  each leg gets a 1.5-second vibration dwell, the orientation dither uses 4%
+  each leg gets a 1.5-second vibration dwell, the orientation dither uses 3%
   relative joint velocity, and the raster uses the expected 60%-scaled
-  Cartesian velocity (8–45 mm/s), without treating those limits as safety
+  Cartesian velocity (8–30 mm/s), without treating those limits as safety
   functions.
 - [ ] Confirm each dwell is followed by `_settled` robot-pose samples and that
   synchronized camera frames include sharp, stationary calibration views.
