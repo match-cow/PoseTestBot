@@ -51,6 +51,9 @@ TEMPLATE_PDF = "pose_template.pdf"
 PREVIEW_JSON = "pose_template_preview.json"
 THUMBNAIL_JSON = "pose_template_thumbnail.json"
 ARCHIVE_STATE = "archive_state.json"
+DELETION_DIRECTORY = ".deleted"
+DELETION_TOMBSTONE_SCHEMA_VERSION = "pose_template_deletion_tombstone.v1"
+DELETION_TOMBSTONE_MAX_JSON_BYTES = 64 * 1024
 MAX_INSTANCES = 200
 THUMBNAIL_MAX_CONTOURS = MAX_INSTANCES * 2
 THUMBNAIL_MAX_POINTS = 4096
@@ -174,6 +177,28 @@ def _read_bounded_json(path: Path, *, maximum_bytes: int, label: str) -> Any:
         raise ValueError(f"{label} exceeds its {maximum_bytes}-byte limit")
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _deletion_paths(library: Path, template_uuid: str) -> tuple[Path, Path, Path]:
+    opaque_id = _uuid(template_uuid, label="template_uuid")
+    deletion_root = library.resolve() / DELETION_DIRECTORY
+    return (
+        deletion_root,
+        deletion_root / f"{opaque_id}.json",
+        deletion_root / f"{opaque_id}.assets",
+    )
+
+
+def _assert_template_uuid_not_retired(library: Path, template_uuid: str) -> None:
+    deletion_root, tombstone_path, _cleanup_path = _deletion_paths(
+        library, template_uuid
+    )
+    if deletion_root.is_symlink():
+        raise ValueError("Pose-template deletion records must not be symlinked")
+    if tombstone_path.is_symlink() or tombstone_path.exists():
+        raise ValueError(
+            f"Pose-template UUID has been permanently retired: {template_uuid}"
+        )
 
 
 def _load_archive_state_lightweight(bundle_dir: Path) -> dict[str, Any]:
@@ -1060,17 +1085,18 @@ def _generate_template_bundle(
     template_uuid: str | None = None,
     cloned_from: str | None = None,
 ) -> dict[str, Any]:
+    opaque_id = _uuid(template_uuid or uuid.uuid4(), label="template_uuid")
+    library = Path(library_root or default_template_library_root())
+    _assert_template_uuid_not_retired(library, opaque_id)
+    destination = library / opaque_id
+    if destination.exists():
+        raise ValueError(f"Pose template already exists: {opaque_id}")
     preview = build_template_preview(configuration, catalog_root=catalog_root)
     if not preview["valid"]:
         raise ValueError(
             "Pose template is invalid: "
             + "; ".join(item["message"] for item in preview["errors"])
         )
-    opaque_id = _uuid(template_uuid or uuid.uuid4(), label="template_uuid")
-    library = Path(library_root or default_template_library_root())
-    destination = library / opaque_id
-    if destination.exists():
-        raise ValueError(f"Pose template already exists: {opaque_id}")
     stage = library / f".{opaque_id}.{uuid.uuid4().hex}.tmp"
     stage.mkdir(parents=True, exist_ok=False)
     try:
@@ -1199,6 +1225,7 @@ def _generate_template_bundle(
                 snapshot_instances, catalog_root=root
             )
             with template_library_lock(library):
+                _assert_template_uuid_not_retired(library, opaque_id)
                 if destination.exists() or destination.is_symlink():
                     raise ValueError(f"Pose template already exists: {opaque_id}")
                 os.replace(stage, destination)
@@ -1747,6 +1774,202 @@ def set_template_archive_state(
             archive,
         )
         return {**bundle, "archive": archive}
+
+
+def _load_template_deletion_tombstone(
+    tombstone_path: Path, *, template_uuid: str, cleanup_path: Path
+) -> dict[str, Any]:
+    value = _read_bounded_json(
+        tombstone_path,
+        maximum_bytes=DELETION_TOMBSTONE_MAX_JSON_BYTES,
+        label="Pose-template deletion tombstone",
+    )
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") != DELETION_TOMBSTONE_SCHEMA_VERSION
+        or value.get("template_uuid") != template_uuid
+    ):
+        raise ValueError("Pose-template deletion tombstone is invalid")
+    cleanup = value.get("asset_cleanup")
+    expected_path = cleanup_path.name
+    if (
+        not isinstance(cleanup, Mapping)
+        or cleanup.get("path") != expected_path
+        or cleanup.get("status") not in {"pending", "complete"}
+    ):
+        raise ValueError("Pose-template deletion cleanup record is invalid")
+    return dict(value)
+
+
+def _template_deletion_result(
+    tombstone: Mapping[str, Any], *, already_deleted: bool
+) -> dict[str, Any]:
+    cleanup = tombstone["asset_cleanup"]
+    return {
+        **tombstone,
+        "schema_version": "pose_template_library_delete.v1",
+        "status": (
+            "deleted"
+            if cleanup["status"] == "complete"
+            else "deleted_cleanup_pending"
+        ),
+        "already_deleted": already_deleted,
+    }
+
+
+def delete_template_bundle(
+    template_uuid: str,
+    *,
+    library_root: str | Path | None = None,
+    cleanup_assets: bool = True,
+) -> dict[str, Any]:
+    """Permanently retire one active or archived global library bundle.
+
+    Run selections own complete copied snapshots and remain valid. The live
+    UUID directory is atomically moved out of the library before cleanup, and a
+    retained tombstone prevents identity reuse and makes failed cleanup
+    retryable. Web handlers can set ``cleanup_assets=False`` and queue the
+    potentially slow removal through :class:`LocalJobRunner`.
+    """
+
+    library = Path(library_root or default_template_library_root())
+    opaque_id = _uuid(template_uuid, label="template_uuid")
+    with template_library_lock(library):
+        deletion_root, tombstone_path, cleanup_path = _deletion_paths(
+            library, opaque_id
+        )
+        if deletion_root.is_symlink():
+            raise ValueError("Pose-template deletion records must not be symlinked")
+        deletion_root.mkdir(parents=True, exist_ok=True)
+        if tombstone_path.is_symlink() or cleanup_path.is_symlink():
+            raise ValueError("Pose-template deletion paths must not be symlinked")
+
+        destination = library.resolve() / opaque_id
+        already_deleted = not destination.exists()
+        if destination.is_symlink():
+            raise ValueError("Pose-template bundle must not be a symlink")
+
+        if destination.exists():
+            if cleanup_path.exists():
+                raise ValueError(
+                    "Pose-template deletion has both live and pending asset trees"
+                )
+            bundle, _strict_legacy_fallback = (
+                _load_template_bundle_detail_unlocked(
+                    opaque_id, library_root=library
+                )
+            )
+            if tombstone_path.exists():
+                tombstone = _load_template_deletion_tombstone(
+                    tombstone_path,
+                    template_uuid=opaque_id,
+                    cleanup_path=cleanup_path,
+                )
+                if (
+                    tombstone["asset_cleanup"]["status"] != "pending"
+                    or tombstone.get("display_name") != bundle["display_name"]
+                    or tombstone.get("bundle_sha256") != bundle["bundle_sha256"]
+                    or tombstone.get("state") != bundle["archive"]["state"]
+                ):
+                    raise ValueError(
+                        "Pose-template deletion tombstone does not match the live bundle"
+                    )
+            else:
+                deleted_at = utc_now_iso()
+                tombstone = {
+                    "schema_version": DELETION_TOMBSTONE_SCHEMA_VERSION,
+                    "template_uuid": opaque_id,
+                    "display_name": bundle["display_name"],
+                    "bundle_sha256": bundle["bundle_sha256"],
+                    "state": bundle["archive"]["state"],
+                    "deleted_at": deleted_at,
+                    "asset_cleanup": {
+                        "status": "pending",
+                        "path": cleanup_path.name,
+                        "last_attempt_at": None,
+                        "last_error": None,
+                    },
+                }
+                atomic_write_json(tombstone_path, tombstone)
+            os.replace(destination, cleanup_path)
+        elif tombstone_path.exists():
+            tombstone = _load_template_deletion_tombstone(
+                tombstone_path,
+                template_uuid=opaque_id,
+                cleanup_path=cleanup_path,
+            )
+        else:
+            raise KeyError(f"Unknown pose-template bundle: {opaque_id}")
+
+        cleanup = dict(tombstone["asset_cleanup"])
+        if not cleanup_assets or cleanup["status"] == "complete":
+            return _template_deletion_result(
+                tombstone, already_deleted=already_deleted
+            )
+        cleanup.update(last_attempt_at=utc_now_iso(), last_error=None)
+        tombstone["asset_cleanup"] = cleanup
+        atomic_write_json(tombstone_path, tombstone)
+
+    cleanup_error: str | None = None
+    try:
+        if cleanup_path.exists():
+            shutil.rmtree(cleanup_path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        cleanup_error = (f"{type(exc).__name__}: {exc}")[:2_000]
+
+    with template_library_lock(library):
+        tombstone = _load_template_deletion_tombstone(
+            tombstone_path,
+            template_uuid=opaque_id,
+            cleanup_path=cleanup_path,
+        )
+        cleanup = dict(tombstone["asset_cleanup"])
+        # A concurrent retry may already have completed the cleanup. Never
+        # downgrade that durable result because this attempt observed a race.
+        if cleanup["status"] != "complete":
+            if cleanup_error is None:
+                cleanup.update(status="complete", last_error=None)
+            else:
+                cleanup.update(status="pending", last_error=cleanup_error)
+            tombstone["asset_cleanup"] = cleanup
+            atomic_write_json(tombstone_path, tombstone)
+        return _template_deletion_result(
+            tombstone, already_deleted=already_deleted
+        )
+
+
+def record_template_cleanup_submission_failure(
+    template_uuid: str,
+    error: Exception,
+    *,
+    library_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Persist why retired bundle assets could not be queued for cleanup."""
+
+    library = Path(library_root or default_template_library_root())
+    opaque_id = _uuid(template_uuid, label="template_uuid")
+    with template_library_lock(library):
+        _deletion_root, tombstone_path, cleanup_path = _deletion_paths(
+            library, opaque_id
+        )
+        tombstone = _load_template_deletion_tombstone(
+            tombstone_path,
+            template_uuid=opaque_id,
+            cleanup_path=cleanup_path,
+        )
+        cleanup = dict(tombstone["asset_cleanup"])
+        if cleanup["status"] != "complete":
+            cleanup.update(
+                last_attempt_at=utc_now_iso(),
+                last_error=(
+                    f"Cleanup job could not be queued: {type(error).__name__}: {error}"
+                )[:2_000],
+            )
+            tombstone["asset_cleanup"] = cleanup
+            atomic_write_json(tombstone_path, tombstone)
+        return _template_deletion_result(tombstone, already_deleted=True)
 
 
 def clone_template_configuration(

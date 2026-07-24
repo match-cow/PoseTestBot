@@ -277,21 +277,13 @@ def test_metadata_and_archive_mutations_preserve_geometry_and_are_revisioned(
         )
 
 
-def test_delete_requires_archive_tombstones_identity_and_never_reuses_it(
+def test_direct_active_delete_tombstones_identity_and_never_reuses_it(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "object_catalog"
     library = tmp_path / "pose_templates"
     first = add_workpiece(root, cad_file(tmp_path / "first.stl"))
 
-    with pytest.raises(ValueError, match="must be archived"):
-        delete_catalog_object(
-            first["catalog_uuid"],
-            catalog_root=root,
-            template_library_root=library,
-        )
-
-    set_catalog_object_state(first["catalog_uuid"], state="archived", catalog_root=root)
     deleted = delete_catalog_object(
         first["catalog_uuid"],
         catalog_root=root,

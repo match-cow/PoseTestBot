@@ -64,8 +64,8 @@ transforms, the PDF page boundary, or GT.
    the name, alias, description, tags, groups, and custom attributes. Use the
    single orbitable bounded 3D preview and compact isometric cards to identify
    the object without loading its full canonical PLY. Archive is reversible;
-   permanent deletion is available only after archiving and explicit
-   confirmation, and only when no pose-template bundle references the
+   permanent deletion is available directly from either lifecycle state after
+   explicit confirmation, and only when no pose-template bundle references the
    workpiece. If a unitless CAD file was interpreted at the
    wrong scale, archive it, inspect the before/after dimensions, and create an
    audited metre-to-millimetre (×1000) or millimetre-to-metre (÷1000) geometry
@@ -85,6 +85,10 @@ transforms, the PDF page boundary, or GT.
    manifest; clone to make another immutable version. If a referenced
    workpiece now has a different geometry revision, cloning fails clearly and
    the operator must create a new template and review its stable orientation.
+   Any active or archived global template version can also be permanently
+   deleted after explicit confirmation. Its library entry disappears
+   immediately; asset cleanup continues as a background job visible under
+   **Jobs**. Run-owned copied snapshots remain intact.
 4. Create or update the run in pose-template mode:
 
    ```bash
@@ -136,6 +140,12 @@ transforms, the PDF page boundary, or GT.
   from instance records; authoritative exact contours remain hash-verified in
   `pose_template_preview.json`, so this reduces synchronous metadata cost
   without changing the PDF, placement, or GT.
+  Permanent deletion atomically removes the global UUID directory from library
+  visibility before a disk job cleans its files. The job continues after
+  navigation and remains visible under **Jobs**. A compact retained tombstone
+  below `working_data/pose_templates/.deleted/` prevents UUID reuse and records
+  retryable cleanup status; run-owned snapshots do not depend on the deleted
+  source directory.
 - Run selection: `pose_template_selection.json` plus the copied bundle at
   `processed/pose_template_selection/`. A hidden
   `.pose_template_selection.transaction.json` exists only while a replacement

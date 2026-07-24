@@ -262,7 +262,9 @@ def test_workpiece_upload_queues_validated_metadata_and_catalog_resource(
     assert len(runner.submissions) == 1
 
 
-def test_workpiece_patch_archive_restore_and_confirmed_delete(workpiece_client) -> None:
+def test_workpiece_patch_archive_restore_and_direct_confirmed_delete(
+    workpiece_client,
+) -> None:
     client, _runner, working, record = workpiece_client
     endpoint = f"/workpieces/catalog/{record['catalog_uuid']}"
 
@@ -286,21 +288,16 @@ def test_workpiece_patch_archive_restore_and_confirmed_delete(workpiece_client) 
     assert immutable.status_code == 400
     assert "immutable workpiece fields" in immutable.get_json()["output"]
 
-    active_delete = client.delete(endpoint, json={"confirm": True})
-    assert active_delete.status_code == 400
-    assert "must be archived" in active_delete.get_json()["output"]
-
     archived = client.post(f"{endpoint}/archive")
     assert archived.status_code == 200
     assert archived.get_json()["state"] == "archived"
     restored = client.post(f"{endpoint}/restore")
     assert restored.status_code == 200
     assert restored.get_json()["state"] == "active"
-    assert client.post(f"{endpoint}/archive").status_code == 200
-
     unconfirmed = client.delete(endpoint, json={})
     assert unconfirmed.status_code == 400
     assert "confirm must be true" in unconfirmed.get_json()["output"]
+    assert client.get(endpoint).get_json()["state"] == "active"
     deleted = client.delete(endpoint, json={"confirm": True})
     assert deleted.status_code == 200
     assert deleted.get_json()["status"] == "deleted"
@@ -351,7 +348,6 @@ def test_workpiece_delete_reports_pose_template_references_as_conflict(
 ) -> None:
     client, _runner, working, record = workpiece_client
     endpoint = f"/workpieces/catalog/{record['catalog_uuid']}"
-    assert client.post(f"{endpoint}/archive").status_code == 200
     blockers = [
         {
             "template_uuid": "22222222-2222-4222-8222-222222222222",
@@ -373,7 +369,7 @@ def test_workpiece_delete_reports_pose_template_references_as_conflict(
     assert response.get_json()["blockers"] == blockers
     catalog = load_catalog(working / "object_catalog")
     assert catalog["objects"][0]["catalog_uuid"] == record["catalog_uuid"]
-    assert catalog["objects"][0]["state"] == "archived"
+    assert catalog["objects"][0]["state"] == "active"
 
 
 def test_workpiece_unit_correction_requires_intent_and_queues_catalog_job(

@@ -1091,7 +1091,7 @@ def delete_catalog_object(
     catalog_root: str | Path | None = None,
     template_library_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Delete one archived, unreferenced entry while retaining a tombstone."""
+    """Delete one active or archived unreferenced entry, retaining a tombstone."""
 
     root = Path(catalog_root or default_catalog_root())
     opaque_id = _validate_uuid(catalog_uuid, label="catalog_uuid")
@@ -1153,8 +1153,6 @@ def delete_catalog_object(
                     **existing_tombstone,
                 }
             raise KeyError(f"Unknown catalog object: {opaque_id}")
-        if item["state"] != "archived":
-            raise ValueError("A workpiece must be archived before it can be deleted")
         blockers = _template_delete_blockers(
             opaque_id, library_root=template_library_root
         )

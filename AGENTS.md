@@ -215,6 +215,8 @@ Do not reintroduce downstream estimator/evaluator behavior here:
 - Pose-template artifacts: global immutable
   `pose_templates/<uuid>/pose_template_bundle.json`, exact
   `pose_template_preview.json`, bounded `pose_template_thumbnail.json`,
+  retained deletion tombstones and temporary cleanup trees below
+  `pose_templates/.deleted/`,
   run-owned `pose_template_selection.json`, its hidden durable
   `.pose_template_selection.transaction.json` journal while replacement is in
   progress, and `object_instances.json`.
@@ -238,12 +240,20 @@ size, and SHA-256.
 Serialize every catalogue mutation across threads and processes, write an
 atomic numbered revision before replacing the current manifest, and never
 reuse a UUID or BOP `obj_id`. Archive is reversible. Permanent deletion is
-allowed only for an archived workpiece after explicit confirmation and only
-when no pose-template bundle references it. Fail closed if any published
-bundle cannot be validated, serialize bundle publication with catalogue
-deletion, commit the tombstone before removing assets, and retain the
-tombstone. Record asset-cleanup status and errors in that tombstone; a repeated
-confirmed delete of the retired UUID must safely retry pending cleanup.
+available directly for active or archived workpieces after explicit
+confirmation and only when no pose-template bundle references it. Fail closed
+if any published bundle cannot be validated, serialize bundle publication with
+catalogue deletion, commit the tombstone before removing assets, and retain
+the tombstone. Record asset-cleanup status and errors in that tombstone; a
+repeated confirmed delete of the retired UUID must safely retry pending
+cleanup.
+
+Pose-template permanent deletion is likewise available directly for active or
+archived global bundles after explicit confirmation. Atomically retire the
+UUID from library visibility and retain its tombstone before queueing physical
+asset removal through `LocalJobRunner` with disk resources. Existing run-owned
+snapshots remain independent. A repeated confirmed delete must safely retry
+pending cleanup, and a tombstoned template UUID must never be reused.
 
 Workpiece JSON export/import is metadata-only. The JSON does not embed CAD,
 canonical PLY, or texture bytes, and import updates matching local UUIDs while

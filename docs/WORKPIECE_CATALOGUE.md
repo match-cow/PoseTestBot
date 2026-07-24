@@ -195,8 +195,8 @@ copied geometry and transforms; correction never rewrites them.
 - **Archive** hides a workpiece from new pose-template selection and is
   reversible with **Restore**. Existing immutable templates and selected runs
   are unchanged.
-- **Delete** is permanent and deliberately narrower. The workpiece must already
-  be archived, the request must contain explicit confirmation, and no active or
+- **Delete** is permanent and available directly for active or archived
+  workpieces. The request must contain explicit confirmation, and no active or
   archived pose-template bundle may reference its catalogue UUID. Deletion also
   strictly validates every published bundle's declared tree and hashes and
   fails closed on an unreadable, partial, modified, symlinked, or undeclared

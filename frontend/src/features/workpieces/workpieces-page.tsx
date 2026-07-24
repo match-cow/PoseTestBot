@@ -581,6 +581,8 @@ export function WorkpiecesPage() {
   const refresh = () => {
     void status.refetch()
     void catalogue.refetch()
+    void client.invalidateQueries({ queryKey: ["pose-template-orientations"] })
+    void client.invalidateQueries({ queryKey: ["pose-template-orientation-thumbnail"] })
   }
   const openUpload = () => {
     setUploadValidationAttempted(false)
@@ -706,7 +708,7 @@ export function WorkpiecesPage() {
                       onClick={() => { setUnitConversion("meter_to_millimeter"); setUnitCorrectionOperator(""); setUnitCorrectionConfirmed(false); setUnitCorrectionOpen(true) }}
                     ><Scaling />Correct model units</Button>
                     <Button variant="outline" onClick={() => setConfirmation({ action: selected.state === "active" ? "archive" : "restore", item: selected })}>{selected.state === "active" ? <Archive /> : <RotateCcw />}{selected.state === "active" ? "Archive" : "Restore"}</Button>
-                    <Button variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${selected.name}`} title={selected.state === "active" ? "Archive this workpiece before deleting it" : "Permanently delete this archived workpiece"} disabled={selected.state !== "archived"} onClick={() => setConfirmation({ action: "delete", item: selected })}><Trash2 />Delete</Button>
+                    <Button variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${selected.name}`} title="Permanently delete this workpiece" onClick={() => setConfirmation({ action: "delete", item: selected })}><Trash2 />Delete</Button>
                   </div>
                 </div>
                 {selected.state === "active" && <div className="rounded-lg border border-dashed bg-muted/25 px-4 py-3 text-xs text-muted-foreground"><strong className="text-foreground">Wrong model scale?</strong> Archive this workpiece first, then use <span className="font-medium text-foreground">Correct model units</span>. Existing immutable templates keep their original geometry snapshot.</div>}

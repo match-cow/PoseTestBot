@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Box, LoaderCircle, TriangleAlert } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { api } from "@/lib/api"
+import { api, errorMessage } from "@/lib/api"
 import type {
   CatalogObject,
   Matrix4x4,
@@ -186,6 +186,22 @@ export function useWorkpieceOrientationThumbnail(object: CatalogObject, enabled 
   })
 }
 
+export function workpieceThumbnailFailure(error: unknown) {
+  const detail = errorMessage(error)
+  if (detail.toLocaleLowerCase().includes("unsupported implementation revision")) {
+    return {
+      detail,
+      message: "Preview/server revision mismatch. Restart PoseTestBot, then reload.",
+      restartRequired: true,
+    }
+  }
+  return {
+    detail,
+    message: "Card preview is stale or unavailable. Select this workpiece and refresh it.",
+    restartRequired: false,
+  }
+}
+
 export function WorkpieceIsometricThumbnail({ object, className }: { object: CatalogObject; className?: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [shouldLoad, setShouldLoad] = useState(false)
@@ -218,11 +234,19 @@ export function WorkpieceIsometricThumbnail({ object, className }: { object: Cat
     convex_proxy: "convex safety proxy",
   }[approximation?.strategy ?? "quadric_decimation"]
   const detail = `${displayedFaces.toLocaleString()} of ${sourceFaces.toLocaleString()} source faces shown as a ${strategy}${warning ? "; source topology could not be retained within the card budget" : ""}`
+  const failure = thumbnail.error ? workpieceThumbnailFailure(thumbnail.error) : null
   return <div ref={containerRef} className={cn("relative grid h-24 w-full place-items-center overflow-hidden rounded-md border bg-muted/30", className)} data-testid={`workpiece-thumbnail-${object.catalog_uuid}`}>
     {!shouldLoad ? <Box className="size-5 text-muted-foreground/45" />
-      : thumbnail.isPending ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+      : thumbnail.isPending || (thumbnail.isFetching && !thumbnail.data) ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
       : thumbnail.data ? <IsometricMeshPreview mesh={thumbnail.data.preview_mesh} label={object.name} testId={`workpiece-isometric-${object.catalog_uuid}`} />
-        : <div className="grid place-items-center gap-1 px-2 text-center text-[9px] text-muted-foreground"><Box className="size-5" /><span>Card preview is stale or unavailable. Select this workpiece and refresh it.</span></div>}
+        : <div
+          className="grid place-items-center gap-1 px-2 text-center text-[9px] text-muted-foreground"
+          data-testid={`workpiece-thumbnail-error-${object.catalog_uuid}`}
+          title={failure?.detail}
+        >
+          {failure?.restartRequired ? <TriangleAlert className="size-5 text-warning" /> : <Box className="size-5" />}
+          <span>{failure?.message ?? "Card preview is unavailable."}</span>
+        </div>}
     {reduced ? <Tooltip><TooltipTrigger asChild><span
       className={cn("pointer-events-auto absolute bottom-1 right-1 rounded px-1 py-0.5 text-[8px] font-semibold uppercase tracking-wide text-white", warning ? "bg-amber-800/90" : "bg-black/65")}
       tabIndex={0}

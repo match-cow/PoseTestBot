@@ -6,6 +6,7 @@ from pathlib import Path
 
 import trimesh
 
+from posetestbot.jobs.runner import ResourceBusyError
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.pose_templates.catalog import import_catalog_object
 from posetestbot.pose_templates.library import generate_template_bundle
@@ -217,6 +218,28 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
     assert runner.submissions[-1]["resources"] == ["disk_io"]
     assert runner.submissions[-1]["command"][3] == "scripts/run_pose_template_select.py"
 
+    library_endpoint = f"/pose-templates/library/{bundle['template_uuid']}"
+    unconfirmed_delete = client.delete(library_endpoint, json={})
+    assert unconfirmed_delete.status_code == 400
+    assert "confirm must be true" in unconfirmed_delete.get_json()["output"]
+    deleted = client.delete(library_endpoint, json={"confirm": True})
+    assert deleted.status_code == 202
+    assert deleted.get_json()["schema_version"] == "pose_template_library_delete.v1"
+    assert deleted.get_json()["status"] == "deleted_cleanup_pending"
+    assert deleted.get_json()["job_id"] == "posejob8"
+    assert runner.submissions[-1]["name"] == "pose_template_delete_cleanup"
+    assert runner.submissions[-1]["command"][3:] == [
+        "scripts/run_pose_template_delete_cleanup.py",
+        "--template-uuid",
+        bundle["template_uuid"],
+    ]
+    assert runner.submissions[-1]["resources"] == [
+        "disk_io",
+        f"pose_template_library:{bundle['template_uuid']}",
+    ]
+    assert client.get(library_endpoint).status_code == 404
+    assert client.get("/pose-templates/library").get_json()["templates"] == []
+
 
 def test_pose_template_api_remains_browsable_when_source_is_missing(
     tmp_path: Path, monkeypatch
@@ -236,3 +259,50 @@ def test_pose_template_api_remains_browsable_when_source_is_missing(
     assert client.get("/pose-templates/status").get_json()["status"] == "missing"
     assert client.get("/pose-templates/catalog").status_code == 200
     assert client.get("/pose-templates/library").status_code == 200
+
+
+def test_pose_template_delete_reports_pending_after_cleanup_queue_conflict(
+    monkeypatch,
+) -> None:
+    template_uuid = "22222222-2222-4222-8222-222222222222"
+    pending = {
+        "schema_version": "pose_template_library_delete.v1",
+        "template_uuid": template_uuid,
+        "status": "deleted_cleanup_pending",
+        "asset_cleanup": {
+            "status": "pending",
+            "path": f"{template_uuid}.assets",
+            "last_error": None,
+        },
+    }
+
+    class BusyRunner:
+        def submit(self, **_kwargs):
+            raise ResourceBusyError("Requested resources are busy: disk_io")
+
+    monkeypatch.setattr(routes, "job_runner", BusyRunner())
+    monkeypatch.setattr(
+        routes,
+        "delete_template_bundle",
+        lambda _template_uuid, cleanup_assets: pending,
+    )
+    monkeypatch.setattr(
+        routes,
+        "record_template_cleanup_submission_failure",
+        lambda _template_uuid, error: {
+            **pending,
+            "asset_cleanup": {
+                **pending["asset_cleanup"],
+                "last_error": str(error),
+            },
+        },
+    )
+
+    response = create_app().test_client().delete(
+        f"/pose-templates/library/{template_uuid}",
+        json={"confirm": True},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "deleted_cleanup_pending"
+    assert "resources are busy" in response.get_json()["cleanup_job_error"]

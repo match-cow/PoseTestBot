@@ -30,10 +30,12 @@ from posetestbot.pose_templates.library import (
     BUNDLE_MANIFEST,
     TEMPLATE_PDF,
     clone_template_configuration,
+    delete_template_bundle,
     load_template_bundle_detail,
     load_template_bundle_preview,
     load_template_thumbnail,
     list_template_bundle_summaries,
+    record_template_cleanup_submission_failure,
     resolve_template_bundle_asset,
     resolve_template_bundle_download,
     set_template_archive_state,
@@ -458,6 +460,54 @@ def library_list():
 def library_detail(template_uuid: str):
     try:
         return jsonify(load_template_bundle_detail(template_uuid))
+    except Exception as exc:
+        return _error(exc)
+
+
+@pose_templates_bp.delete("/pose-templates/library/<template_uuid>")
+def library_delete(template_uuid: str):
+    try:
+        value = _json()
+        if value.get("confirm") is not True:
+            raise ValueError("confirm must be true to delete a pose template")
+        result = delete_template_bundle(template_uuid, cleanup_assets=False)
+        if result["asset_cleanup"]["status"] == "complete":
+            return jsonify(result)
+        try:
+            job = job_runner.submit(
+                name="pose_template_delete_cleanup",
+                command=[
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/run_pose_template_delete_cleanup.py",
+                    "--template-uuid",
+                    result["template_uuid"],
+                ],
+                cwd=APP_ROOT,
+                resources=[
+                    "disk_io",
+                    f"pose_template_library:{result['template_uuid']}",
+                ],
+                parameters={"template_uuid": result["template_uuid"]},
+            )
+        except Exception as cleanup_error:
+            result = record_template_cleanup_submission_failure(
+                template_uuid, cleanup_error
+            )
+            return jsonify(
+                {**result, "cleanup_job_error": str(cleanup_error)[:2_000]}
+            )
+        return (
+            jsonify(
+                {
+                    **result,
+                    "job": job.to_dict(),
+                    "job_id": job.id,
+                }
+            ),
+            202,
+        )
     except Exception as exc:
         return _error(exc)
 

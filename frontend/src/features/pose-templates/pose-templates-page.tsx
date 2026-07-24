@@ -24,6 +24,18 @@ import { TemplateLayoutCanvas, type PositionedTemplateInstance } from "./templat
 
 const ALL_FILTER = "__all__"
 const TERMINAL_JOB_STATES = new Set(["succeeded", "failed", "canceled"])
+type LibraryAction = "archive" | "restore" | "clone" | "delete"
+interface LibraryActionResult {
+  job_id?: string
+  status?: string
+  cleanup_job_error?: string
+  asset_cleanup?: { last_error?: string | null }
+}
+interface PendingTemplateCleanup {
+  item: PoseTemplateBundle
+  id?: string
+  error?: string
+}
 
 function facetValues(values: string[]) {
   const byCasefoldedValue = new Map<string, string>()
@@ -143,6 +155,8 @@ export function PoseTemplatesPage() {
   const [previewBusy, setPreviewBusy] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [pendingLibraryJob, setPendingLibraryJob] = useState<{ id: string; kind: "generate" | "clone" } | null>(null)
+  const [pendingCleanup, setPendingCleanup] = useState<PendingTemplateCleanup | null>(null)
+  const [deleteConfirmation, setDeleteConfirmation] = useState<PoseTemplateBundle | null>(null)
   const previewSequence = useRef(0)
 
   const source = useQuery({ queryKey: ["pose-template-source"], queryFn: () => api<PoseTemplateSourceStatus>("/pose-templates/status") })
@@ -152,6 +166,12 @@ export function PoseTemplatesPage() {
     queryKey: ["pose-template-library-job", pendingLibraryJob?.id],
     queryFn: () => api<{ job: Job }>(`/jobs/${pendingLibraryJob!.id}`),
     enabled: Boolean(pendingLibraryJob),
+    refetchInterval: (queryState) => TERMINAL_JOB_STATES.has(queryState.state.data?.job.status ?? "") ? false : 600,
+  })
+  const cleanupJob = useQuery({
+    queryKey: ["pose-template-cleanup-job", pendingCleanup?.id],
+    queryFn: () => api<{ job: Job }>(`/jobs/${pendingCleanup!.id}`),
+    enabled: Boolean(pendingCleanup?.id),
     refetchInterval: (queryState) => TERMINAL_JOB_STATES.has(queryState.state.data?.job.status ?? "") ? false : 600,
   })
   useEffect(() => {
@@ -165,6 +185,19 @@ export function PoseTemplatesPage() {
     }
     queueMicrotask(() => setPendingLibraryJob(null))
   }, [client, libraryJob.data?.job, pendingLibraryJob])
+  useEffect(() => {
+    const job = cleanupJob.data?.job
+    if (!pendingCleanup?.id || !job || !TERMINAL_JOB_STATES.has(job.status)) return
+    if (job.status === "succeeded") {
+      toast.success("Pose-template file cleanup finished", { description: pendingCleanup.item.display_name })
+      queueMicrotask(() => setPendingCleanup(null))
+    } else {
+      const detail = jobFailureDetail(job)
+      if (pendingCleanup.error === detail) return
+      toast.warning("Pose template is deleted, but file cleanup needs attention", { description: detail })
+      queueMicrotask(() => setPendingCleanup((current) => current ? { ...current, error: detail } : current))
+    }
+  }, [cleanupJob.data?.job, pendingCleanup])
   const objects = useMemo(() => catalog.data?.objects ?? [], [catalog.data?.objects])
   const allTags = useMemo(() => facetValues(objects.filter((item) => item.state === "active").flatMap((item) => item.tags)), [objects])
   const allGroups = useMemo(() => facetValues(objects.filter((item) => item.state === "active").flatMap((item) => item.groups)), [objects])
@@ -276,19 +309,38 @@ export function PoseTemplatesPage() {
     },
     onError: (error) => toast.error("Generation failed", { description: errorMessage(error) }),
   })
-  const libraryAction = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: "archive" | "restore" | "clone" }) => api<{ job_id?: string }>(`/pose-templates/library/${id}/${action}`, { method: "POST", body: action === "clone" ? JSON.stringify({}) : undefined }),
+  const libraryAction = useMutation<LibraryActionResult, Error, { item: PoseTemplateBundle; action: LibraryAction }>({
+    mutationFn: ({ item, action }) => action === "delete"
+      ? api<LibraryActionResult>(`/pose-templates/library/${item.template_uuid}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) })
+      : api<LibraryActionResult>(`/pose-templates/library/${item.template_uuid}/${action}`, { method: "POST", body: action === "clone" ? JSON.stringify({}) : undefined }),
     onSuccess: (value, variables) => {
       if (variables.action === "clone" && value.job_id) {
         setPendingLibraryJob({ id: value.job_id, kind: "clone" })
         toast.success("Clone generation queued", { description: `Job ${value.job_id}` })
         void client.invalidateQueries({ queryKey: ["jobs"] })
+      } else if (variables.action === "delete" && value.status) {
+        if (value.status === "deleted_cleanup_pending") {
+          const cleanupError = value.cleanup_job_error ?? value.asset_cleanup?.last_error ?? undefined
+          setPendingCleanup({ item: variables.item, id: value.job_id, error: value.job_id ? undefined : cleanupError })
+          if (value.job_id) {
+            toast.success("Pose template deleted", { description: `File cleanup continues after navigation in job ${value.job_id}.` })
+            void client.invalidateQueries({ queryKey: ["jobs"] })
+          } else {
+            toast.warning("Pose template deleted; file cleanup is pending", { description: cleanupError ?? variables.item.display_name })
+          }
+        } else {
+          toast.success("Pose template deleted", { description: variables.item.display_name })
+          setPendingCleanup((current) => current?.item.template_uuid === variables.item.template_uuid ? null : current)
+        }
+        setDeleteConfirmation(null)
+        client.removeQueries({ queryKey: ["pose-template-library-thumbnail", variables.item.template_uuid] })
+        void client.invalidateQueries({ queryKey: ["pose-template-library"] })
       } else {
         toast.success(`Template ${variables.action}d`)
         void client.invalidateQueries({ queryKey: ["pose-template-library"] })
       }
     },
-    onError: (error) => toast.error("Template action failed", { description: errorMessage(error) }),
+    onError: (error, variables) => toast.error(variables.action === "delete" ? "Pose template was not deleted" : "Template action failed", { description: errorMessage(error) }),
   })
 
   const addChosenOrientation = () => {
@@ -324,6 +376,7 @@ export function PoseTemplatesPage() {
 
     <Card className={source.data?.available ? "border-success/35" : "border-warning/50"}><CardContent className="flex items-start justify-between gap-5 pt-4"><div><div className="flex items-center gap-2 text-sm font-semibold">PoseTemplateCreator <StatusBadge status={source.data?.status} /></div><p className="mt-1 text-xs text-muted-foreground">{source.data?.available ? `Pinned revision ${source.data.revision?.slice(0, 12)} · stable-pose analysis and exact closed-contour validation available` : source.data?.reason ?? "Checking source checkout…"}</p>{!source.data?.available && <code className="mt-2 block rounded bg-muted px-2 py-1 text-[11px]">bash scripts/install.sh --with-posetemplatecreator</code>}</div>{source.data?.capabilities && <div className="text-right text-[11px] text-muted-foreground">PLY · STL · OBJ<br />up to {source.data.capabilities.limits.instances} instances</div>}</CardContent></Card>
     {pendingLibraryJob && <Card className="border-primary/35 bg-primary/5" data-testid="pose-template-library-job"><CardContent className="flex items-center justify-between py-4"><div className="flex items-center gap-3"><LoaderCircle className="size-4 animate-spin text-primary" /><div><div className="text-sm font-semibold">{pendingLibraryJob.kind === "clone" ? "Cloning immutable template" : "Generating immutable template"}</div><div className="mt-0.5 font-mono text-[10px] text-muted-foreground">{pendingLibraryJob.id}</div></div></div><StatusBadge status={libraryJob.data?.job.status ?? "queued"} /></CardContent></Card>}
+    {pendingCleanup && <Card className={pendingCleanup.error ? "border-warning/50 bg-warning/5" : "border-primary/35 bg-primary/5"} data-testid="pose-template-cleanup-job"><CardContent className="flex items-center justify-between gap-4 py-4"><div className="flex items-center gap-3">{pendingCleanup.error ? <Trash2 className="size-4 text-warning" /> : <LoaderCircle className="size-4 animate-spin text-primary" />}<div><div className="text-sm font-semibold">{pendingCleanup.error ? "Deleted template cleanup needs attention" : "Cleaning deleted template files"}</div><div className="mt-0.5 text-[10px] text-muted-foreground">{pendingCleanup.item.display_name}{pendingCleanup.id ? <span className="font-mono"> · {pendingCleanup.id}</span> : null} · cleanup continues after navigation</div>{pendingCleanup.error && <div className="mt-1 max-w-3xl text-[10px] text-warning">{pendingCleanup.error}</div>}</div></div><div className="flex items-center gap-2">{pendingCleanup.error && <Button size="sm" variant="outline" disabled={libraryAction.isPending} onClick={() => libraryAction.mutate({ item: pendingCleanup.item, action: "delete" })}><RefreshCw />Retry cleanup</Button>}<Button size="sm" variant="outline" asChild><Link to="/jobs">Open Jobs</Link></Button>{pendingCleanup.id && <StatusBadge status={cleanupJob.data?.job.status ?? "queued"} />}</div></CardContent></Card>}
 
     <section className="space-y-3" aria-labelledby="choose-workpieces-heading">
       <div className="flex items-end justify-between gap-4"><div><div className="mb-1 text-[10px] font-bold uppercase tracking-[.16em] text-primary-strong">Step 1</div><h2 id="choose-workpieces-heading" className="text-lg font-semibold">Choose catalogue workpieces</h2><p className="text-xs text-muted-foreground">Only active workpieces can be added. Tags and groups narrow the catalogue independently.</p></div><Button asChild variant="outline"><Link to="/workpieces"><PackageSearch />Manage catalogue</Link></Button></div>
@@ -341,7 +394,30 @@ export function PoseTemplatesPage() {
       </div>
     </section>
 
-    <section className="space-y-3"><div><div className="mb-1 text-[10px] font-bold uppercase tracking-[.16em] text-primary-strong">Step 3</div><h2 className="text-lg font-semibold">Immutable template library</h2><p className="text-xs text-muted-foreground">Cards use bounded footprint thumbnails; a Simplified label means points or secondary contours were reduced for fast browsing. The PDF and immutable full preview remain exact. Archive is reversible and selected run snapshots remain unchanged.</p></div><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{library.data?.templates.map((item) => <Card key={item.template_uuid}><CardContent className="space-y-3 p-3"><TemplateFootprintThumbnail bundle={item} /><div className="flex items-start justify-between gap-3"><div><div className="font-semibold">{item.display_name}</div><div className="mt-1 text-[10px] text-muted-foreground">{item.instances.length} instance{item.instances.length === 1 ? "" : "s"} · {item.template_uuid.slice(0, 8)}</div></div><StatusBadge status={item.archive.state} /></div><div className="flex flex-wrap gap-2"><Button asChild size="sm"><a href={`/pose-templates/library/${item.template_uuid}/download/pdf`}><Download />PDF</a></Button><Button asChild size="sm" variant="outline"><a href={`/pose-templates/library/${item.template_uuid}/download/manifest`}><Download />Manifest</a></Button><Button size="sm" variant="outline" disabled={Boolean(pendingLibraryJob) || libraryAction.isPending} onClick={() => libraryAction.mutate({ id: item.template_uuid, action: "clone" })}><Copy />Clone</Button><Button size="sm" variant="ghost" disabled={libraryAction.isPending} onClick={() => libraryAction.mutate({ id: item.template_uuid, action: item.archive.state === "active" ? "archive" : "restore" })}>{item.archive.state === "active" ? <Archive /> : <RotateCcw />}{item.archive.state === "active" ? "Archive" : "Restore"}</Button></div></CardContent></Card>)}</div></section>
+    <section className="space-y-3">
+      <div><div className="mb-1 text-[10px] font-bold uppercase tracking-[.16em] text-primary-strong">Step 3</div><h2 className="text-lg font-semibold">Immutable template library</h2><p className="text-xs text-muted-foreground">Cards use bounded footprint thumbnails; a Simplified label means points or secondary contours were reduced for fast browsing. The PDF and immutable full preview remain exact. Archive is reversible; permanent deletion removes only the global library version, while run-owned snapshots remain unchanged.</p></div>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{library.data?.templates.map((item) => <Card key={item.template_uuid} data-testid={`pose-template-library-card-${item.template_uuid}`}><CardContent className="space-y-3 p-3">
+        <TemplateFootprintThumbnail bundle={item} />
+        <div className="flex items-start justify-between gap-3"><div><div className="font-semibold">{item.display_name}</div><div className="mt-1 text-[10px] text-muted-foreground">{item.instances.length} instance{item.instances.length === 1 ? "" : "s"} · {item.template_uuid.slice(0, 8)}</div></div><StatusBadge status={item.archive.state} /></div>
+        <div className="flex flex-wrap gap-2">
+          <Button asChild size="sm"><a href={`/pose-templates/library/${item.template_uuid}/download/pdf`}><Download />PDF</a></Button>
+          <Button asChild size="sm" variant="outline"><a href={`/pose-templates/library/${item.template_uuid}/download/manifest`}><Download />Manifest</a></Button>
+          <Button size="sm" variant="outline" disabled={Boolean(pendingLibraryJob) || libraryAction.isPending} onClick={() => libraryAction.mutate({ item, action: "clone" })}><Copy />Clone</Button>
+          <Button size="sm" variant="ghost" disabled={libraryAction.isPending} onClick={() => libraryAction.mutate({ item, action: item.archive.state === "active" ? "archive" : "restore" })}>{item.archive.state === "active" ? <Archive /> : <RotateCcw />}{item.archive.state === "active" ? "Archive" : "Restore"}</Button>
+          <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${item.display_name}`} title="Permanently delete this pose-template version" disabled={libraryAction.isPending} onClick={() => setDeleteConfirmation(item)}><Trash2 />Delete</Button>
+        </div>
+      </CardContent></Card>)}</div>
+    </section>
+
+    <Dialog open={deleteConfirmation !== null} onOpenChange={(open) => { if (!open && !libraryAction.isPending) setDeleteConfirmation(null) }}>
+      <DialogContent data-testid="pose-template-delete-confirmation">
+        <DialogHeader>
+          <DialogTitle>Permanently delete {deleteConfirmation?.display_name ?? "this pose template"}?</DialogTitle>
+          <DialogDescription>The library entry is removed immediately. Its PDF, preview, and copied object assets are then cleaned in a background job that continues after navigation and is visible in Jobs. Existing run-owned snapshots remain intact. This action cannot be undone.</DialogDescription>
+        </DialogHeader>
+        <DialogFooter><Button variant="outline" onClick={() => setDeleteConfirmation(null)} disabled={libraryAction.isPending}>Cancel</Button><Button variant="destructive" onClick={() => deleteConfirmation && libraryAction.mutate({ item: deleteConfirmation, action: "delete" })} disabled={libraryAction.isPending}>{libraryAction.isPending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}Confirm delete</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog open={chooser !== null} onOpenChange={(open) => { if (!open) setChooser(null) }}><DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto" data-testid="orientation-chooser"><DialogHeader><DialogTitle>Choose how {chooser?.object.name ?? "this workpiece"} rests</DialogTitle><DialogDescription>PoseTemplateCreator found stable orientations. Compare the same-scale isometric view with the exact selected slice contour. A 0 mm slice is true contact; a positive slice is an adaptive printable cross-section near the base (typically 0.5–5% of object height).</DialogDescription></DialogHeader>{chooser && <div className="grid grid-cols-3 gap-3" role="radiogroup" aria-label={`Stable orientation for ${chooser.object.name}`}>{chooser.analysis.orientations.map((orientation) => { const bounds = orientationBounds(orientation); const selected = chooser.orientationId === orientation.orientation_id; return <button type="button" role="radio" aria-checked={selected} className={`overflow-hidden rounded-lg border text-left transition-colors ${selected ? "border-primary bg-primary/5 ring-2 ring-primary/30" : "hover:border-foreground/25"}`} onClick={() => setChooser({ ...chooser, orientationId: orientation.orientation_id })} key={orientation.orientation_id}><div className="grid grid-cols-2 gap-px bg-border"><div className="relative h-32 bg-[#10171d]"><span className="absolute left-2 top-2 z-10 rounded bg-black/55 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white">3D</span><IsometricMeshPreview mesh={chooser.analysis.preview_mesh} transform={orientation.source_to_placed} commonSpan={orientationProjectionSpan} label={`${chooser.object.name} ${orientation.label}`} testId={`orientation-isometric-${orientation.orientation_id}`} /></div><div className="relative h-32 bg-white"><span className="absolute left-2 top-2 z-10 rounded bg-white/85 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-700">Slice</span><BaseContourPreview orientation={orientation} /></div></div><div className="p-3"><div className="flex items-center justify-between gap-2"><span className="text-xs font-semibold">{orientation.label}</span>{selected && <CheckCircle2 className="size-4 text-primary" />}</div><div className="mt-1 text-[10px] text-muted-foreground">{Math.round(orientation.probability * 100)}% stability estimate · {(bounds.maxX - bounds.minX).toFixed(1)} × {(bounds.maxY - bounds.minY).toFixed(1)} mm · slice z {orientation.slice_z_mm.toFixed(2)} mm</div></div></button>})}</div>}<DialogFooter><Button variant="outline" onClick={() => setChooser(null)}>Cancel</Button><Button onClick={addChosenOrientation} disabled={!chooser || instances.length >= maxInstances}><Plus />Add selected orientation</Button></DialogFooter></DialogContent></Dialog>
   </div>

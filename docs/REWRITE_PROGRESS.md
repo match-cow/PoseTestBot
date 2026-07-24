@@ -227,6 +227,25 @@ associated RGB images are not certified to share a moving-robot or illumination
 instant.
 Current BlenderProc GT/masks do not render the articulated iiwa.
 
+## 2026-07-24 Workpiece Preview Runtime/Cache Recovery
+
+- Bounded Workpiece Catalogue and Pose Templates cards now distinguish an
+  implementation-revision mismatch from an ordinary missing/stale preview and
+  visibly direct the operator to restart PoseTestBot and reload. The backend's
+  exact validation error remains available on the card for diagnosis.
+- The Catalogue's top-level **Refresh** action now invalidates both ranked
+  orientation and bounded-thumbnail queries, so a restarted runtime or newly
+  generated cache recovers without leaving React Query's earlier failure on
+  screen. Desktop Playwright coverage exercises the mismatch on both pages and
+  verifies recovery through that refresh action.
+- Workpiece deletion is now directly available from both active and archived
+  states while retaining explicit confirmation, reference blockers, stable
+  UUID/BOP-ID tombstones, and retryable asset cleanup. Pose-template library
+  cards also expose confirmed permanent deletion for active or archived
+  versions; deletion atomically retires the global bundle, retains a UUID
+  tombstone, queues physical asset cleanup as a disk job visible under
+  **Jobs**, and leaves run-owned copied snapshots unchanged.
+
 ## 2026-07-23 Workpiece Recognition Preview Fidelity
 
 - The selected Workpiece Catalogue detail now loads the hash-versioned exact
@@ -337,7 +356,7 @@ Implementation of the dedicated **Workpiece Catalogue** feature is complete:
   use a separate at-most-256-KiB, canonical-hash-bound orientation thumbnail;
   only the selected editor path reads ranked orientations and exact contours;
 - serialized Flask/worker mutations with cross-process locking and atomic
-  numbered revisions, and made permanent deletion require archive, explicit
+  numbered revisions, and made permanent deletion require explicit
   confirmation, zero pose-template references, and a fully valid published
   template library while retaining never-reused UUID/BOP-ID tombstones;
 - serialized immutable template publication against catalogue deletion, made

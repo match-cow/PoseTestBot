@@ -20,6 +20,7 @@ from posetestbot.pipeline.run_config import (
     write_run_config,
 )
 from posetestbot.pose_templates import adapter
+from posetestbot.pose_templates import library as library_module
 from posetestbot.pose_templates.catalog import (
     correct_catalog_object_units,
     import_catalog_object,
@@ -33,6 +34,7 @@ from posetestbot.pose_templates.library import (
     build_template_preview,
     build_template_thumbnail,
     clone_template_configuration,
+    delete_template_bundle,
     generate_template_bundle,
     load_template_thumbnail,
     set_template_archive_state,
@@ -194,6 +196,92 @@ def test_legacy_full_pose_preview_compensation_and_immutable_bundle(
     manifest.write_text(json.dumps(tampered))
     with pytest.raises(ValueError, match="manifest hash mismatch"):
         validate_template_bundle(bundle["bundle_path"], library_root=library)
+
+
+def test_direct_active_template_delete_preserves_run_snapshot_and_retires_uuid(
+    tmp_path: Path,
+) -> None:
+    catalog, record = managed_box(tmp_path)
+    library = tmp_path / "library"
+    configuration = template_configuration(record["catalog_uuid"])
+    bundle = generate_template_bundle(
+        configuration,
+        catalog_root=catalog,
+        library_root=library,
+    )
+    run = tmp_path / "run"
+    run.mkdir()
+    write_run_config(
+        run,
+        create_run_config(run_root=run, dataset_mode="pose_template"),
+    )
+    selected = select_pose_template(
+        run,
+        bundle["template_uuid"],
+        placement={"matrix": np.eye(4).tolist()},
+        confirmed=True,
+        operator="pytest",
+        library_root=library,
+    )
+
+    deleted = delete_template_bundle(
+        bundle["template_uuid"], library_root=library
+    )
+
+    assert deleted["schema_version"] == "pose_template_library_delete.v1"
+    assert deleted["status"] == "deleted"
+    assert deleted["state"] == "active"
+    assert not Path(bundle["bundle_path"]).exists()
+    tombstone = library / ".deleted" / f"{bundle['template_uuid']}.json"
+    assert json.loads(tombstone.read_text())["asset_cleanup"]["status"] == "complete"
+    assert load_pose_template_selection(run)["bundle_sha256"] == selected["bundle_sha256"]
+    repeated = delete_template_bundle(
+        bundle["template_uuid"], library_root=library
+    )
+    assert repeated["already_deleted"] is True
+    with pytest.raises(ValueError, match="permanently retired"):
+        generate_template_bundle(
+            configuration,
+            catalog_root=catalog,
+            library_root=library,
+            template_uuid=bundle["template_uuid"],
+        )
+
+
+def test_template_delete_records_cleanup_failure_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, record = managed_box(tmp_path)
+    library = tmp_path / "library"
+    bundle = generate_template_bundle(
+        template_configuration(record["catalog_uuid"]),
+        catalog_root=catalog,
+        library_root=library,
+    )
+    cleanup_path = library / ".deleted" / f"{bundle['template_uuid']}.assets"
+    original_rmtree = library_module.shutil.rmtree
+    attempts = 0
+
+    def fail_once(path: str | Path, *args: object, **kwargs: object) -> None:
+        nonlocal attempts
+        if Path(path) == cleanup_path and attempts == 0:
+            attempts += 1
+            raise OSError("injected template cleanup failure")
+        original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(library_module.shutil, "rmtree", fail_once)
+    first = delete_template_bundle(bundle["template_uuid"], library_root=library)
+
+    assert first["status"] == "deleted_cleanup_pending"
+    assert "injected template cleanup failure" in first["asset_cleanup"]["last_error"]
+    assert not Path(bundle["bundle_path"]).exists()
+    assert cleanup_path.is_dir()
+
+    second = delete_template_bundle(bundle["template_uuid"], library_root=library)
+
+    assert second["status"] == "deleted"
+    assert second["already_deleted"] is True
+    assert not cleanup_path.exists()
 
 
 def test_template_thumbnail_is_deterministically_bounded_and_keeps_every_primary(

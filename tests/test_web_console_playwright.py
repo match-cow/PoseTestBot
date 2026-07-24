@@ -803,9 +803,10 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
     preview_posts = {"count": 0}
     availability = {"available": True}
     orientation_ready = {"value": False}
+    library_payload = pose_template_library()
     page.route("**/pose-templates/status", lambda route: fulfill_json(route, pose_template_source(available=availability["available"])))
     page.route("**/workpieces/catalog", lambda route: fulfill_json(route, pose_template_catalog()))
-    page.route("**/pose-templates/library", lambda route: fulfill_json(route, pose_template_library()))
+    page.route("**/pose-templates/library", lambda route: fulfill_json(route, library_payload))
     def orientation_handler(route) -> None:
         if route.request.method == "POST":
             orientation_ready["value"] = True
@@ -825,6 +826,7 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
     page.route("**/jobs/generate-job", lambda route: fulfill_json(route, {"job": {"id": "generate-job", "status": "succeeded", "message": None, "tail": []}}))
     page.route("**/jobs/clone-job", lambda route: fulfill_json(route, {"job": {"id": "clone-job", "status": "failed", "message": "Command exited with status 1", "tail": ["Canonical geometry changed; analyze stable orientations again.", "Command exited with code 1"]}}))
     page.route("**/jobs/orientation-job", lambda route: fulfill_json(route, {"job": {"id": "orientation-job", "status": "succeeded", "message": None, "tail": []}}))
+    page.route("**/jobs/delete-cleanup-job", lambda route: fulfill_json(route, {"job": {"id": "delete-cleanup-job", "status": "running", "message": None, "tail": []}}))
 
     def preview_handler(route) -> None:
         if route.request.method == "POST":
@@ -839,6 +841,28 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
     page.route("**/pose-templates/preview**", preview_handler)
     page.route("**/pose-templates/generate", lambda route: (requests.append({"path": "/pose-templates/generate", "body": route.request.post_data_json}), fulfill_json(route, {"job_id": "generate-job"}, status=202))[1])
     page.route("**/pose-templates/library/*/clone", lambda route: (requests.append({"path": "/library/clone", "body": {}}), fulfill_json(route, {"job_id": "clone-job"}, status=202))[1])
+    def template_delete_handler(route) -> None:
+        requests.append({
+            "path": "/library/delete",
+            "method": route.request.method,
+            "body": route.request.post_data_json,
+        })
+        library_payload["templates"].clear()
+        fulfill_json(
+            route,
+            {
+                "schema_version": "pose_template_library_delete.v1",
+                "status": "deleted_cleanup_pending",
+                "job_id": "delete-cleanup-job",
+                "asset_cleanup": {"status": "pending", "last_error": None},
+            },
+            status=202,
+        )
+
+    page.route(
+        "**/pose-templates/library/22222222-2222-4222-8222-222222222222",
+        template_delete_handler,
+    )
 
     page.goto(f"{console_server.url}/#/pose-templates", wait_until="networkidle")
     expect(page.get_by_test_id("pose-templates-page")).to_be_visible()
@@ -889,6 +913,23 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
     assert {item["path"] for item in requests} >= {"/pose-templates/generate", "/library/clone"}
     generation = next(item for item in reversed(requests) if item["path"] == "/pose-templates/generate")
     assert generation["body"]["configuration"]["print_compensation"]["x_scale"] == 1.01
+    page.get_by_role("button", name="Delete Clamp pair").click()
+    deletion = page.get_by_test_id("pose-template-delete-confirmation")
+    expect(deletion).to_contain_text("library entry is removed immediately")
+    expect(deletion).to_contain_text("continues after navigation")
+    expect(deletion).to_contain_text("Existing run-owned snapshots remain intact")
+    deletion.get_by_role("button", name="Confirm delete").click()
+    expect(page.get_by_text("Pose template deleted")).to_be_visible()
+    expect(page.get_by_test_id("pose-template-library-card-22222222-2222-4222-8222-222222222222")).to_have_count(0)
+    cleanup = page.get_by_test_id("pose-template-cleanup-job")
+    expect(cleanup).to_contain_text("cleanup continues after navigation")
+    expect(cleanup.get_by_role("link", name="Open Jobs")).to_have_attribute("href", "#/jobs")
+    delete_request = next(item for item in requests if item["path"] == "/library/delete")
+    assert delete_request == {
+        "path": "/library/delete",
+        "method": "DELETE",
+        "body": {"confirm": True},
+    }
 
     availability["available"] = False
     page.reload(wait_until="networkidle")
@@ -1177,11 +1218,7 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     expect(page.get_by_text("Workpiece restored")).to_be_visible()
     assert any(value["path"].endswith("/restore") for value in requests)
 
-    page.get_by_role("button", name="Archive").click()
-    page.get_by_test_id("workpiece-action-confirmation").get_by_role(
-        "button", name="Confirm archive"
-    ).click()
-    expect(page.get_by_text("Workpiece archived")).to_be_visible()
+    expect(page.get_by_role("button", name="Delete New clamp")).to_be_enabled()
     page.get_by_role("button", name="Delete New clamp").click()
     confirmation = page.get_by_test_id("workpiece-action-confirmation")
     expect(confirmation).to_contain_text("permanently removes")
@@ -1348,6 +1385,99 @@ def test_workpiece_selected_detail_renders_exact_canonical_mesh(
     page.get_by_role("button", name="Refresh card preview").click()
     expect(page.get_by_text("Recognition preview refreshed")).to_be_visible()
     assert page_errors == []
+
+
+def test_workpiece_thumbnail_revision_mismatch_is_actionable_and_refresh_recovers(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    catalogue = pose_template_catalog()
+    workpiece = catalogue["objects"][0]
+    preview_ready = {"value": False}
+    page.route(
+        "**/workpieces/status",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "workpiece_catalog_status.v1",
+                "available": True,
+                "status": "available",
+                "reason": None,
+                "counts": {"active": 1, "archived": 0, "total": 1},
+            },
+        ),
+    )
+    page.route(
+        "**/workpieces/catalog",
+        lambda route: fulfill_json(route, catalogue),
+    )
+    page.route(
+        "**/pose-templates/status",
+        lambda route: fulfill_json(route, pose_template_source(available=True)),
+    )
+    page.route(
+        "**/pose-templates/library",
+        lambda route: fulfill_json(
+            route,
+            {"schema_version": "pose_template_library.v1", "templates": []},
+        ),
+    )
+
+    def thumbnail_handler(route) -> None:
+        if preview_ready["value"]:
+            fulfill_json(
+                route,
+                pose_template_orientation_thumbnail(workpiece["catalog_uuid"]),
+            )
+            return
+        fulfill_json(
+            route,
+            {
+                "output": (
+                    "Orientation thumbnail was produced by an unsupported "
+                    "implementation revision"
+                ),
+                "analysis_required": True,
+            },
+            status=409,
+        )
+
+    page.route(
+        "**/pose-templates/workpieces/*/orientation-thumbnail",
+        thumbnail_handler,
+    )
+
+    page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
+    failure = page.get_by_test_id(
+        f"workpiece-thumbnail-error-{workpiece['catalog_uuid']}"
+    )
+    expect(failure).to_contain_text(
+        "Preview/server revision mismatch. Restart PoseTestBot, then reload."
+    )
+    expect(failure).to_have_attribute(
+        "title",
+        "Orientation thumbnail was produced by an unsupported implementation revision",
+    )
+
+    page.goto(f"{console_server.url}/#/pose-templates", wait_until="networkidle")
+    expect(
+        page.get_by_test_id(
+            f"workpiece-thumbnail-error-{workpiece['catalog_uuid']}"
+        )
+    ).to_contain_text("Preview/server revision mismatch")
+
+    page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
+    expect(
+        page.get_by_test_id(
+            f"workpiece-thumbnail-error-{workpiece['catalog_uuid']}"
+        )
+    ).to_be_visible()
+    preview_ready["value"] = True
+    page.get_by_role("button", name="Refresh workpiece catalogue").click()
+    expect(
+        page.get_by_test_id(f"workpiece-isometric-{workpiece['catalog_uuid']}")
+    ).to_be_visible()
+    expect(failure).to_have_count(0)
 
 
 def test_workpiece_dense_card_uses_lazy_canvas_and_accessible_lod_evidence(
