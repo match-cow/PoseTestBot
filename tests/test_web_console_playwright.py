@@ -316,11 +316,11 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     primary_navigation = page.get_by_role("navigation", name="Primary navigation")
     assert primary_navigation.get_by_role("link").all_inner_texts() == [
         "Dashboard",
-        "Devices",
-        "Calibration Grids",
-        "Workpiece Catalogue",
-        "Object Layouts",
         "Workflow",
+        "Devices",
+        "Calibration Targets",
+        "Workpiece Catalogue",
+        "Pose Templates",
         "Cell View",
         "Jobs",
     ]
@@ -336,10 +336,20 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     page.get_by_role("combobox", name="Selected run").click()
     page.get_by_role("option", name="old-run · sync_aruco").click()
     expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("old-run")
-    page.get_by_role("link", name="Devices").click()
+    page.get_by_role("complementary", name="Application sidebar").get_by_role(
+        "link", name="Devices"
+    ).click()
     expect(page).to_have_url(f"{console_server.url}/#/devices")
     page.reload(wait_until="networkidle")
     expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("old-run")
+    page.get_by_role("button", name="Choose run path").click()
+    expect(page.locator("#new-run-path")).to_have_value("/tmp/posetestbot-console/old-run")
+    page.keyboard.press("Escape")
+    page.get_by_role("button", name="Open operator console guide").click()
+    expect(page.get_by_role("heading", name="Operator console guide")).to_be_visible()
+    expect(page.get_by_text("Choose an outcome in Workflow", exact=True)).to_be_visible()
+    expect(page.get_by_text("IIWA STOP is not a safety stop", exact=False)).to_be_visible()
+    page.keyboard.press("Escape")
     theme_toggle = page.get_by_role("button", name="Switch to light theme")
     theme_toggle_box = theme_toggle.bounding_box()
     assert theme_toggle_box is not None
@@ -355,7 +365,9 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     expect(page.get_by_role("link", name="Open PoseTestBot on GitHub")).to_have_attribute(
         "href", "https://github.com/match-cow/PoseTestBot"
     )
-    sidebar_rgb = page.locator("aside").evaluate(
+    sidebar_rgb = page.get_by_role(
+        "complementary", name="Application sidebar"
+    ).evaluate(
         """element => {
             const canvas = document.createElement("canvas")
             canvas.width = 1
@@ -370,6 +382,22 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     expect(page.get_by_text("Physical capture always requires fresh operator acknowledgement.", exact=True)).to_have_count(0)
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("background-color", "rgba(0, 0, 0, 0)")
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("padding", "0px")
+
+
+def test_primary_navigation_resets_document_scroll_position(console_server, page) -> None:
+    install_common_mocks(page)
+    page.goto(f"{console_server.url}/#/workflow/dataset", wait_until="networkidle")
+    page.evaluate("window.scrollTo(0, 1200)")
+    assert page.evaluate("window.scrollY") > 500
+
+    page.get_by_role("complementary", name="Application sidebar").get_by_role(
+        "link", name="Devices"
+    ).click()
+
+    expect(page).to_have_url(f"{console_server.url}/#/devices")
+    expect(page.get_by_role("heading", name="Devices")).to_be_visible()
+    page.wait_for_function("window.scrollY === 0")
+    assert page.evaluate("window.scrollY") == 0
 
 
 def test_workflow_chooser_distinguishes_numbered_required_journeys(
@@ -419,6 +447,13 @@ def test_workflow_stepper_connectors_follow_numbered_steps(
 
     stepper = page.get_by_role("navigation", name="Required workflow steps")
     expect(stepper).to_be_visible()
+    expect(page).to_have_url(
+        f"{console_server.url}/#/workflow/calibration?step=target"
+    )
+    expect(page.get_by_role("heading", name="Calibrate cameras")).to_be_in_viewport()
+    expect(stepper.locator('[aria-current="step"]')).to_contain_text(
+        "Choose the printed calibration grid"
+    )
     steps = stepper.locator("li")
     connectors = stepper.locator("[data-workflow-step-connector]")
     expect(steps).to_have_count(5)
@@ -522,8 +557,8 @@ def test_responsive_shell_and_dataset_workflow_links(console_server, page) -> No
     primary_navigation = page.get_by_role("navigation", name="Primary navigation")
     expect(primary_navigation).to_have_count(1)
     expect(primary_navigation).to_be_visible()
-    expect(primary_navigation.get_by_role("link", name="Calibration Grids")).to_be_visible()
-    expect(primary_navigation.get_by_role("link", name="Object Layouts")).to_be_visible()
+    expect(primary_navigation.get_by_role("link", name="Calibration Targets")).to_be_visible()
+    expect(primary_navigation.get_by_role("link", name="Pose Templates")).to_be_visible()
     expect(page.get_by_role("link", name="Open object dataset", exact=True)).to_have_attribute(
         "href", "#/workflow/dataset"
     )
@@ -807,7 +842,7 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
 
     page.goto(f"{console_server.url}/#/pose-templates", wait_until="networkidle")
     expect(page.get_by_test_id("pose-templates-page")).to_be_visible()
-    expect(page.get_by_role("link", name="Object Layouts")).to_be_visible()
+    expect(page.get_by_role("link", name="Pose Templates")).to_be_visible()
     expect(page.get_by_text("Clamp", exact=True)).to_be_visible()
     expect(page.get_by_text("Small clamp", exact=False)).to_be_visible()
     manage = page.get_by_role("link", name="Manage catalogue")
@@ -2667,6 +2702,47 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     expect(page).to_have_url(f"{console_server.url}/#/dashboard")
 
 
+def test_jobs_filters_and_progressively_reveals_history(console_server, page) -> None:
+    install_common_mocks(page)
+    history = []
+    for index in range(25):
+        failed = index == 24
+        history.append({
+            "id": f"history-{index:02d}",
+            "name": "failed_calibration" if failed else f"completed_job_{index:02d}",
+            "command": ["uv"],
+            "cwd": "/repo",
+            "status": "failed" if failed else "succeeded",
+            "created_at": f"2026-07-{index + 1:02d}T12:00:00Z",
+            "log_path": f"/tmp/history-{index:02d}.log",
+            "started_at": f"2026-07-{index + 1:02d}T12:00:01Z",
+            "ended_at": f"2026-07-{index + 1:02d}T12:00:02Z",
+            "returncode": 1 if failed else 0,
+            "message": "solver evidence failed" if failed else "complete",
+            "tail": [],
+            "resources": ["cpu"],
+            "parameters": {"run_root": RUN_ROOT},
+        })
+    page.route(
+        "**/jobs",
+        lambda route: fulfill_json(route, {"jobs": history, "resources": {}}),
+    )
+
+    page.goto(f"{console_server.url}/#/jobs", wait_until="networkidle")
+
+    expect(page.get_by_role("button", name="Log")).to_have_count(20)
+    page.get_by_role("button", name="Show 5 older jobs").click()
+    expect(page.get_by_role("button", name="Log")).to_have_count(25)
+    page.get_by_role("combobox", name="Filter jobs by status").click()
+    page.get_by_role("option", name="Failed (1)").click()
+    expect(page.get_by_text("failed_calibration", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Log")).to_have_count(1)
+    page.get_by_label("Search jobs").fill("no such job")
+    expect(page.get_by_role("heading", name="No matching jobs")).to_be_visible()
+    page.get_by_role("button", name="Clear filters").click()
+    expect(page.get_by_role("button", name="Log")).to_have_count(20)
+
+
 def test_calibration_target_unavailable_keeps_saved_library_navigation(
     console_server, page
 ) -> None:
@@ -2678,7 +2754,7 @@ def test_calibration_target_unavailable_keeps_saved_library_navigation(
     }))
     page.goto(console_server.url, wait_until="networkidle")
 
-    expect(page.get_by_role("link", name="Calibration Grids")).to_be_visible()
+    expect(page.get_by_role("link", name="Calibration Targets")).to_be_visible()
     page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
     expect(page.get_by_text("Target generation is unavailable")).to_be_visible()
     expect(page.get_by_text("Saved target library")).to_be_visible()
@@ -3667,7 +3743,7 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     )
 
     page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
-    expect(page.get_by_role("link", name="Calibration Grids")).to_be_visible()
+    expect(page.get_by_role("link", name="Calibration Targets")).to_be_visible()
     expect(page.get_by_role("img", name="Calibration target preview", exact=True)).to_be_visible()
     library_preview = page.get_by_role(
         "img",
@@ -3708,7 +3784,7 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     generated = next(item["body"] for item in requests if item["path"] == "/calibration-targets/generate")
     assert generated["display_name"] == "Printed target 01"
     assert generated["configuration"]["print_compensation"] == {"x_percent": 101, "y_percent": 99}
-    expect(page.get_by_text(f"Active for {RUN_ROOT}")).to_have_count(0)
+    expect(page.get_by_text("Active for this run", exact=True)).to_have_count(0)
 
     pdf_link = page.get_by_role("link", name="PDF")
     expect(pdf_link).to_have_attribute(
@@ -3729,12 +3805,12 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     expect(page.get_by_text("Calibration target selected")).to_be_visible()
     selection = [item["body"] for item in requests if item["path"] == "/calibration-targets/select"][-1]
     assert selection == {"run_root": RUN_ROOT, "placement": "posegridgen_board_to_base"}
-    expect(page.get_by_text(f"Active for {RUN_ROOT}")).to_be_visible()
+    expect(page.get_by_text("Active for this run", exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="Delete Anisotropic calibration board")).to_be_disabled()
 
     page.get_by_role("combobox", name="Selected run").click()
     page.get_by_role("option", name="old-run · sync_aruco").click()
-    expect(page.get_by_text(f"Active for {old_run}")).to_have_count(0)
+    expect(page.get_by_text("Active for this run", exact=True)).to_have_count(0)
     expect(page.get_by_role("button", name="Select for run")).to_be_visible()
     assert any("old-run" in url for url in library_urls)
 

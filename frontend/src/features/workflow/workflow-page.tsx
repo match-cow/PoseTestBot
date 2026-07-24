@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { ArrowLeft, ArrowRight, Boxes, Camera, Database, Grid3X3, ListTree, RefreshCw, Settings2, Sparkles } from "lucide-react"
@@ -82,7 +82,7 @@ function OptionalAction({ icon: Icon, title, description, to, action }: { icon: 
   return <Card className="border-dashed bg-muted/15"><CardContent className="flex flex-col gap-4 py-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground"><Icon aria-hidden="true" className="size-4" /></span><div><div className="flex items-center gap-2 text-sm font-semibold">{title}<span className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Optional</span></div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p></div></div><Button asChild variant="outline" size="sm"><Link to={to}>{action}<ArrowRight aria-hidden="true" /></Link></Button></CardContent></Card>
 }
 
-function JourneyShell({ journey, steps, selectedStep, onSelectStep, children }: { journey: JourneyId; steps: WorkflowStepDefinition[]; selectedStep: string | null; onSelectStep: (stepId: string) => void; children: React.ReactNode }) {
+function JourneyShell({ journey, steps, selectedStep, onSelectStep, children }: { journey: JourneyId; steps: WorkflowStepDefinition[]; selectedStep: string | null; onSelectStep: (stepId: string, scroll?: boolean) => void; children: React.ReactNode }) {
   const meta = journey === "calibration" ? {
     eyebrow: "Guided workflow · reusable camera geometry",
     title: "Calibrate cameras",
@@ -92,13 +92,21 @@ function JourneyShell({ journey, steps, selectedStep, onSelectStep, children }: 
     title: "Record an object-template dataset",
     description: "Use a previously published calibration and a confirmed physical object template to record, synchronize, and export a BOP dataset.",
   }
+  const fallbackStep = steps.find((step) => step.status === "current" || step.status === "running")?.id
+    ?? steps.find((step) => step.status !== "complete")?.id
+    ?? steps.at(-1)?.id
+  const effectiveStep = selectedStep && steps.some((step) => step.id === selectedStep) ? selectedStep : fallbackStep
+  useEffect(() => {
+    if (!effectiveStep || selectedStep === effectiveStep) return
+    onSelectStep(effectiveStep, false)
+  }, [effectiveStep, onSelectStep, selectedStep])
   return <div className="space-y-6">
     <div className="flex items-center gap-2 text-xs"><Button asChild variant="ghost" size="sm"><Link to="/workflow/setup"><ArrowLeft aria-hidden="true" />Choose workflow</Link></Button><span className="text-muted-foreground">/</span><span className="font-semibold">{meta.title}</span></div>
     <PageHeader eyebrow={meta.eyebrow} title={meta.title} description={meta.description} />
     <JourneyNavigation current={journey} />
     <div className="grid items-start gap-6 xl:grid-cols-[270px_minmax(0,1fr)]">
-      <WorkflowStepper steps={steps} onSelect={onSelectStep} />
-      <div className="min-w-0 space-y-9" data-selected-step={selectedStep ?? ""}>{children}</div>
+      <WorkflowStepper steps={steps} selectedStep={effectiveStep} onSelect={onSelectStep} />
+      <div className="min-w-0 space-y-9" data-selected-step={effectiveStep ?? ""}>{children}</div>
     </div>
   </div>
 }
@@ -183,6 +191,7 @@ export function WorkflowPage() {
   const queryClient = useQueryClient()
   const page = (phase ?? "setup") as WorkflowPageId
   const selectedStep = searchParams.get("step")
+  const [autoResumedStep, setAutoResumedStep] = useState<string | null>(null)
   const overview = useQuery({
     queryKey: ["overview", selectedRun],
     queryFn: () => api<Overview>(query("/ui/overview", { run_root: selectedRun })),
@@ -198,13 +207,15 @@ export function WorkflowPage() {
 
   useEffect(() => {
     if (!selectedStep || !["calibration", "dataset"].includes(page)) return
+    if (autoResumedStep === selectedStep) return
     const frame = window.requestAnimationFrame(() => document.getElementById(`workflow-step-${selectedStep}`)?.scrollIntoView({ behavior: "smooth", block: "start" }))
     return () => window.cancelAnimationFrame(frame)
-  }, [overview.isPending, page, selectedStep])
+  }, [autoResumedStep, overview.isPending, page, selectedStep])
 
-  const selectStep = (stepId: string) => {
+  const selectStep = (stepId: string, scroll = true) => {
+    setAutoResumedStep(scroll ? null : stepId)
     setSearchParams({ step: stepId }, { replace: true })
-    window.requestAnimationFrame(() => document.getElementById(`workflow-step-${stepId}`)?.scrollIntoView({ behavior: "smooth", block: "start" }))
+    if (scroll) window.requestAnimationFrame(() => document.getElementById(`workflow-step-${stepId}`)?.scrollIntoView({ behavior: "smooth", block: "start" }))
   }
   const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "run-config", "calibration", "pose-template-run"].includes(String(item.queryKey[0])) })
 

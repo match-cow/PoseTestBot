@@ -88,6 +88,27 @@ def test_ui_bootstrap_includes_robot_control_defaults() -> None:
     assert "/tmp" in payload["allowed_run_roots"]
 
 
+def test_capture_jobs_tolerates_runner_without_resource_lock_reporting(
+    monkeypatch,
+) -> None:
+    class MinimalRunner:
+        def list(self):
+            return []
+
+    monkeypatch.setattr(web_legacy, "job_runner", MinimalRunner())
+
+    response = app.test_client().get("/capture/jobs")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "active_count": 0,
+        "jobs": [],
+        "resources": {},
+        "run_root": None,
+        "status_artifact": None,
+    }
+
+
 def test_preview_poll_log_filter_only_hides_sensor_preview_successes() -> None:
     poll_filter = _PreviewPollLogFilter()
 

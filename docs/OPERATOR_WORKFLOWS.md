@@ -253,6 +253,14 @@ selection reason, and deltas are retained in attempt-level
 - Legacy workflow URLs redirect into the matching guided step; they are route
   compatibility aliases, not separate workflows.
 
+The sidebar groups supporting pages by purpose. Devices and the reusable
+Calibration Target, Workpiece Catalogue, and Pose Template libraries prepare
+inputs; Cell and Jobs inspect evidence and background work. Each page shows its
+workflow handoff because visiting or editing a reusable library does not by
+itself mutate the selected run. The global **Operator console guide** summarizes
+these scopes and the physical-execution boundary without replacing the
+step-local prerequisites and safety text.
+
 The machine-readable contract mirrors the same compact five- and six-step
 spines. Its `required`, `optional`, and `automatic` fields let other clients
 preserve the distinction between operator decisions and queued computation

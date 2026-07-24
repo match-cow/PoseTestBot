@@ -21,7 +21,9 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { EmptyState } from "@/components/empty-state"
+import { HelpTip } from "@/components/help-tip"
 import { PageHeader } from "@/components/page-header"
+import { ProcessHandoff } from "@/components/process-handoff"
 import { StatusBadge } from "@/components/status-badge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -628,8 +630,15 @@ export function WorkpiecesPage() {
         <Button variant="outline" onClick={refresh} aria-label="Refresh workpiece catalogue"><RefreshCw className={status.isFetching || catalogue.isFetching ? "animate-spin" : ""} />Refresh</Button>
         <Button asChild variant="outline" data-testid="workpiece-catalog-export"><a href="/workpieces/catalog/export" download><Download />Export JSON</a></Button>
         <Button variant="outline" onClick={() => setImportOpen(true)} data-testid="workpiece-catalog-import"><FileJson />Import JSON</Button>
+        <HelpTip label="catalogue JSON portability">JSON import and export move metadata only. Back up or copy the managed object_catalog asset tree separately to move CAD, canonical PLY, and texture bytes.</HelpTip>
         <Button onClick={openUpload} disabled={!serviceAvailable || Boolean(pendingUpload)} data-testid="workpiece-upload-button"><FileUp />Add workpiece</Button>
       </>}
+    />
+    <ProcessHandoff
+      title="Active workpieces become pose-template choices"
+      description="Manage stable object identity and canonical geometry here. Next, choose physical resting orientations and arrange active workpieces into an immutable printable template."
+      to="/pose-templates"
+      action="Arrange pose template"
     />
 
     <Card className={serviceAvailable ? "border-success/30" : "border-destructive/40"} data-testid="workpiece-catalog-status">
@@ -675,7 +684,7 @@ export function WorkpiecesPage() {
     {catalogue.isPending ? <Card><CardContent className="grid min-h-80 place-items-center text-sm text-muted-foreground"><div><LoaderCircle className="mx-auto mb-2 size-5 animate-spin" />Loading workpieces…</div></CardContent></Card>
       : catalogue.isError ? <Card className="border-destructive/40"><CardHeader><CardTitle>Catalogue unavailable</CardTitle><CardDescription>{errorMessage(catalogue.error)}</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={() => catalogue.refetch()}><RefreshCw />Try again</Button></CardContent></Card>
         : objects.length === 0 ? <EmptyState icon={Box} title="No workpieces yet" description="Upload a PLY, STL, or OBJ file to build the persistent catalogue." action={<Button onClick={openUpload} disabled={!serviceAvailable}><FileUp />Add first workpiece</Button>} />
-          : <div className="grid grid-cols-[minmax(285px,.72fr)_minmax(0,1.65fr)] items-start gap-5">
+          : <div className="grid items-start gap-5 xl:grid-cols-[minmax(285px,.72fr)_minmax(0,1.65fr)]">
             <Card data-testid="workpiece-catalog-list">
               <CardHeader className="border-b"><div className="flex items-center justify-between gap-3"><div><CardTitle>Objects</CardTitle><CardDescription className="mt-1">{filtered.length} of {objects.length} visible</CardDescription></div><Layers3 className="size-5 text-muted-foreground" /></div></CardHeader>
               <CardContent className="max-h-[74rem] space-y-2 overflow-y-auto p-3">

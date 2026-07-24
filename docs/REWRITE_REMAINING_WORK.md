@@ -53,6 +53,14 @@ The rewrite already provides:
   `rewrite_calibration_validation.v1`, and
   `rewrite_bop_export_readiness.v1`.
 
+The console now makes **Workflow** the canonical operator path and explicitly
+hands supporting library, configuration, inspection, and job pages back to the
+relevant guided step. Status labels distinguish configuration from hardware
+readiness, long job histories have client-side filtering and progressive
+disclosure, and required process or safety instructions remain visible rather
+than existing only in tooltips. These software improvements do not replace the
+operator-run camera, controller, capture, calibration, or BOP acceptance below.
+
 Historical real evidence at
 `working_data/hot_full_capture_fixed_20260710_1351` passes
 `rewrite_full_capture.v1` at 10/10 for the three RealSense cameras. It remains
@@ -337,6 +345,13 @@ These tasks are useful but do not replace the real-data gates.
   metadata-only and skips workpieces whose UUID-addressed assets are absent on
   the importing host; normal filesystem backup of the managed asset tree is
   the current binary-preservation path.
+- [ ] Bound persisted job-history loading and the `/jobs` response with an
+  explicit retention or server-side pagination contract. The console now
+  filters and progressively reveals the returned history, but
+  `LocalJobRunner` still loads every retained `job.json` and the API still
+  serializes the complete operator-visible history on each request. Preserve
+  active jobs, failed-job diagnostics, logs, and resource ownership when
+  introducing the bound.
 
 ## Repository Exit Criteria
 

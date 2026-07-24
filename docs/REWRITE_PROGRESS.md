@@ -101,6 +101,56 @@ full-capture gate accepts the immutable pre-START preflight embedded in an
 execution plan when the standalone report is absent, and rejects mismatched
 embedded status.
 
+## 2026-07-23 Operator Console Streamlining
+
+The complete packaged operator console received a desktop-first usability and
+process audit:
+
+- grouped navigation into **Operate**, **Prepare**, and **Inspect**, moved the
+  canonical **Workflow** beside the Dashboard, aligned navigation labels with
+  page titles, and added an always-available console guide that explains the
+  two outcomes, safety boundary, and core evidence terms;
+- added compact workflow handoffs to Devices, Calibration Targets, Workpiece
+  Catalogue, Pose Templates, Cell, and Jobs so each supporting page names its
+  scope, its durable output, and the next guided step;
+- distinguished a configured robot profile from a verified or ready robot,
+  exposed dashboard API failures, clarified that device labels and mounts are
+  saved separately from the browser-local run draft, and added keyboard- and
+  click-accessible help for technical calibration and placement controls;
+- made the workflow resume the first running or incomplete required step,
+  reflected the viewed step in the URL and step rail without skipping the
+  journey title on initial resume, reset document scroll when moving between
+  pages, reset the run-path dialog to the current run on every open, and allowed
+  Enter to submit it;
+- made long job histories operable with search, state filters, active-first
+  ordering, 20-row progressive disclosure, clearer timing and resource-lock
+  evidence, guarded repeated cancellation, and visible log-load failures;
+- improved normal-desktop and narrower reachability across the utility pages
+  without hiding evidence or converting the console into a phone-first layout;
+  and
+- replaced the sprawling README with a short acquisition boundary, five-step
+  console start, page-handoff table, safety summary, outputs, validation
+  commands, and focused documentation index. Development guidance now records
+  the same handoff, status-language, visible-instruction, and bounded-history
+  contracts in `AGENTS.md`.
+
+This pass changed only software and documentation. Validation did not send a
+robot command, authorize motion, execute physical capture, or satisfy any
+physical acceptance item in
+[REWRITE_REMAINING_WORK.md](REWRITE_REMAINING_WORK.md). The visual audit loaded
+the console's ordinary local status and monitor surfaces.
+
+Validation completed on 2026-07-23:
+
+- all 860 non-browser pytest tests and all 42 explicitly marked desktop
+  Playwright tests passed;
+- Ruff, frontend type checking and lint, the production Vite build, installer
+  check-only path, shell syntax, and `git diff --check` passed;
+- the packaged console was visually inspected at 1920 × 1080 and 1440 × 900,
+  including every primary page, both guided journeys, the global guide,
+  handoffs, long job history, and cross-page scroll restoration; and
+- no robot command, physical capture, or rewrite acceptance gate was executed.
+
 ## 2026-07-23 Combined Mixed-Mount Hardware Synchronization
 
 - Added the explicit `run_config.v3` `capture.synchronization` contract.

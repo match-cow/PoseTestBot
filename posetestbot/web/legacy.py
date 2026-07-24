@@ -889,6 +889,8 @@ def cancel_job(job_id):
 def list_capture_jobs():
     run_root = request.args.get('run_root') or None
     jobs = _capture_jobs_for_run(run_root)
+    resource_holders = getattr(job_runner, "resource_holders", None)
+    resources = resource_holders() if callable(resource_holders) else {}
     status_artifact = None
     if run_root:
         try:
@@ -902,7 +904,7 @@ def list_capture_jobs():
             'run_root': run_root,
             'jobs': jobs,
             'active_count': sum(1 for job in jobs if job['active']),
-            'resources': job_runner.resource_holders(),
+            'resources': resources,
             'status_artifact': status_artifact,
         }
     )

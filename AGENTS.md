@@ -76,6 +76,24 @@ and metric reporting belong in a separate consumer repo.
 - Hover explanations may take advantage of mouse-oriented desktop use, but
   they must also be available by keyboard focus or click. Required and
   safety-critical information must never exist only inside a tooltip.
+- Treat the two guided outcomes under **Workflow** as the canonical operator
+  path. A supporting page must state where it feeds that path, distinguish
+  reusable-library authoring from active-run mutation, and link to the next or
+  returning workflow step when the handoff is not obvious.
+- Name control scope precisely. In particular, distinguish browser-local
+  drafts, global catalogue/library mutations, run-owned snapshots, readiness
+  evidence, and physical execution authorization. A successful status request
+  must not be presented as hardware readiness: use labels such as
+  `configured`, `connected`, `verified`, and `ready` only for their actual
+  contracts.
+- Keep required instructions and disabled-action reasons visible near the
+  affected control. Use `HelpTip` for supplemental definitions and technical
+  context, not as the only location for prerequisites, safety state, or the
+  next required action.
+- Background-job submissions must say that work continues after navigation and
+  provide a route to **Jobs**. Long job or evidence histories need filtering
+  and bounded progressive disclosure while keeping active and failed work easy
+  to find.
 
 ## Current Lab Hardware
 

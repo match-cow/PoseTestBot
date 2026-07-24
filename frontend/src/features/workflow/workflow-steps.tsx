@@ -33,11 +33,11 @@ export function WorkflowStatus({ status, compact = false }: { status: WorkflowSt
   </span>
 }
 
-export function WorkflowStepper({ steps, onSelect }: { steps: WorkflowStepDefinition[]; onSelect: (stepId: string) => void }) {
+export function WorkflowStepper({ steps, selectedStep, onSelect }: { steps: WorkflowStepDefinition[]; selectedStep?: string | null; onSelect: (stepId: string) => void }) {
   return <nav aria-label="Required workflow steps" className="rounded-xl border bg-card p-3 xl:sticky xl:top-[88px]">
     <ol className="flex gap-0 overflow-x-auto pb-1 xl:block xl:overflow-visible xl:pb-0">
       {steps.map((step, index) => {
-        const active = step.status === "current" || step.status === "running"
+        const active = selectedStep ? step.id === selectedStep : step.status === "current" || step.status === "running"
         return <li key={step.id} className="flex min-w-[210px] flex-1 items-center xl:min-w-0 xl:flex-col xl:items-stretch">
           <button
             type="button"

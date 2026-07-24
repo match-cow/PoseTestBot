@@ -3,6 +3,7 @@ import { useState } from "react"
 import { Link } from "react-router-dom"
 import { AlertTriangle, ArrowRight, Bot, Camera, CheckCircle2, CircleDot, Cpu, Play, Power, RefreshCw, Route, ShieldCheck, Square } from "lucide-react"
 import { toast } from "sonner"
+import { HelpTip } from "@/components/help-tip"
 import { PageHeader } from "@/components/page-header"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
@@ -32,7 +33,7 @@ function SummaryCard({ icon: Icon, label, value, status, detail }: { icon: typeo
 
 type IiwaCommand = "start_iiwa" | "stop_iiwa"
 
-function IiwaQuickControls({ ready }: { ready: boolean }) {
+function IiwaQuickControls({ profileStatus }: { profileStatus: "checking" | "configured" | "error" }) {
   const { robotTarget } = useOperator()
   const queryClient = useQueryClient()
   const [command, setCommand] = useState<IiwaCommand | null>(null)
@@ -71,8 +72,8 @@ function IiwaQuickControls({ ready }: { ready: boolean }) {
   return (
     <Card data-testid="iiwa-quick-controls">
       <CardContent className="pt-5">
-        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Bot className="size-4 text-primary-strong" /></div><StatusBadge status={ready ? "ready" : "warning"} /></div>
-        <div className="mt-5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Robot control</div>
+        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Bot className="size-4 text-primary-strong" /></div><StatusBadge status={profileStatus}>{profileStatus}</StatusBadge></div>
+        <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Robot control <HelpTip label="robot control status">Configured means the fixed lab profile loaded. It does not contact the robot or prove that the Sunrise application is running.</HelpTip></div>
         <div className="mt-1 font-display text-lg font-semibold">Lab IIWA</div>
         <p className="mt-1 text-xs text-muted-foreground">Quick commands use the configured lab target and require confirmation.</p>
         <div className="mt-4 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start_iiwa")} disabled={robotCommand.isPending}><Power />Start IIWA</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop_iiwa")} disabled={robotCommand.isPending}><Square />Stop IIWA</Button></div>
@@ -132,11 +133,21 @@ export function DashboardPage() {
   }
 
   const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "sensors", "robot", "runtime", "capture-jobs", "jobs"].includes(String(item.queryKey[0])) })
+  const statusErrors = [
+    overview.isError && "run evidence",
+    sensors.isError && "sensor discovery",
+    robot.isError && "robot profile",
+    runtime.isError && "runtime status",
+    capture.isError && "capture status",
+    jobs.isError && "job status",
+  ].filter(Boolean) as string[]
+  const robotProfileStatus = robot.isPending ? "checking" : robot.isError ? "error" : "configured"
 
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Current run" title="Acquisition readiness" description="One place to understand the lab, the run, and the safest next action." actions={<Button variant="outline" onClick={refresh}><RefreshCw />Refresh</Button>} />
 
+      {statusErrors.length > 0 && <div role="alert" className="flex flex-col gap-3 rounded-xl border border-destructive/35 bg-destructive/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="text-sm font-semibold">Some dashboard status is unavailable</div><p className="mt-1 text-xs text-muted-foreground">Could not load {statusErrors.join(", ")}. Missing responses are not treated as ready; refresh before relying on this overview.</p></div></div><Button variant="outline" size="sm" onClick={refresh}><RefreshCw />Refresh status</Button></div>}
       {activeCapture && <div className="flex flex-col items-start justify-between gap-4 rounded-xl border border-primary/35 bg-primary/10 px-5 py-4 sm:flex-row sm:items-center"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Capture is {activeCapture.status}</div><div className="text-xs text-muted-foreground">{activeCapture.name} · keep the operator console visible</div></div></div><div className="flex flex-wrap gap-2"><Button variant="destructive" size="sm" onClick={() => stopCapture.mutate(activeCapture.id)} disabled={stopCapture.isPending || activeCapture.status === "canceling"}><Square />{stopCapture.isPending || activeCapture.status === "canceling" ? "Stopping…" : "Stop capture"}</Button><Button asChild size="sm"><Link to="/jobs">Open controls <ArrowRight /></Link></Button></div></div>}
       {!activeCapture && activeJob && <div className="flex flex-col items-start justify-between gap-4 rounded-xl border border-primary/25 bg-primary/5 px-5 py-4 sm:flex-row sm:items-center"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-50" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Job is {activeJob.status}</div><div className="text-xs text-muted-foreground">{activeJob.name} · {activeJob.resources.join(", ") || "no resource locks"}</div></div></div><Button asChild size="sm"><Link to="/jobs">Open job <ArrowRight /></Link></Button></div>}
 
@@ -154,7 +165,7 @@ export function DashboardPage() {
         {overview.isPending || sensors.isPending ? Array.from({ length: 4 }).map((_, index) => <Skeleton className="h-40" key={index} />) : <>
           <SummaryCard icon={ShieldCheck} label="Readiness check" value={titleCase(preflight?.status ?? "pending")} status={preflight?.status} detail={preflight?.status === "complete" ? "Artifact-backed readiness evidence is present." : "Check or refresh readiness before recording."} />
           <SummaryCard icon={Camera} label="Sensors" value={`${sensors.data?.total_connected ?? 0} connected`} status={sensors.data?.all_expected_connected ? "connected" : "warning"} detail="RealSense, OAK-D Pro, and ZED discovery." />
-          <IiwaQuickControls ready={robot.isSuccess} />
+          <IiwaQuickControls profileStatus={robotProfileStatus} />
           <SummaryCard icon={Cpu} label="Optional runtimes" value={`${availableRuntimes}/${runtimeItems.length} available`} status={availableRuntimes === runtimeItems.length ? "ready" : "warning"} detail="BlenderProc and Stereolabs SDK visibility." />
         </>}
       </div>
