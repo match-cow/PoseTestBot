@@ -157,16 +157,17 @@ paths remain operator work.
 
 The workflow speed control now states that ordinary full capture is an A1
 joint PTP whose tangential flange-speed request is converted by Sunrise. New
-runs default to 0.01 m/s and the UI permits 0.01–0.03 m/s. The host command
-boundary, candidate Cartesian input, and candidate A1 angular motion are
-independently capped at 0.03, 0.03 m/s, and 3°/s; consequently, even an
-unreconciled older application that treats legacy `0.03` as a relative joint
-speed receives no more than 3%. The calibration application was tightened to
-8–30 mm/s raster/relative motion and 3% orientation joint speed. The
-supervisor envelope is now 720 seconds so a 0.01 m/s sweep is not terminated
-by the old five-minute total limit. Operator copy explicitly notes that speed
-alone cannot guarantee sharp images because exposure/readout time and lighting
-remain camera-dependent.
+runs default to 0.01 m/s and the UI permits 0.01–0.03 m/s. Run-owned
+acquisition commands, candidate Cartesian input, and candidate A1 angular
+motion are independently capped at 0.03, 0.03 m/s, and 3°/s. The separately
+acknowledged Dashboard/Devices manual motion-test command requests 0.1 m/s,
+ten times its former 0.01 m/s request, and shows that value in its confirmation
+dialog and job provenance. The deployed Sunrise application may apply a lower
+controller-side cap. The calibration application retains 8–30 mm/s
+raster/relative motion and 3% orientation joint speed. The supervisor envelope
+is now 720 seconds so a 0.01 m/s sweep is not terminated by the old five-minute
+total limit. Operator copy explicitly notes that speed alone cannot guarantee
+sharp images because exposure/readout time and lighting remain camera-dependent.
 
 Repository-only validation passed all 878 default tests, the focused desktop
 Playwright speed/capture-gate regression, Ruff, frontend type checking and

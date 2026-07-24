@@ -15,15 +15,18 @@ DEFAULT_ROBOT_PORT = 30300
 DEFAULT_RECEIVER_PORT = 8080
 DEFAULT_CAPTURE_VELOCITY_M_S = 0.01
 MAX_CAPTURE_COMMAND_VELOCITY_M_S = 0.03
+MANUAL_TEST_COMMAND_VELOCITY_M_S = 0.1
 
 
-def bounded_capture_velocity_m_s(requested_velocity_m_s: float) -> float:
-    """Return the finite positive capture command bounded for either iiwa app.
+def bounded_capture_velocity_m_s(
+    requested_velocity_m_s: float,
+    *,
+    maximum_velocity_m_s: float = MAX_CAPTURE_COMMAND_VELOCITY_M_S,
+) -> float:
+    """Return a finite positive command bounded by the selected command path.
 
-    The still-unconfirmed deployed Sunrise application may interpret the
-    numeric legacy START value as either Cartesian metres/second or a relative
-    joint velocity. Keeping the transmitted value at or below 0.03 therefore
-    bounds both interpretations while the controller deployment is reconciled.
+    Acquisition uses the conservative 0.03 default. Explicit manual motion
+    tests may supply their separately acknowledged command limit.
     """
 
     if isinstance(requested_velocity_m_s, bool):
@@ -31,7 +34,10 @@ def bounded_capture_velocity_m_s(requested_velocity_m_s: float) -> float:
     velocity = float(requested_velocity_m_s)
     if not math.isfinite(velocity) or velocity <= 0.0:
         raise ValueError("Capture velocity must be a finite positive number")
-    return min(velocity, MAX_CAPTURE_COMMAND_VELOCITY_M_S)
+    maximum = float(maximum_velocity_m_s)
+    if not math.isfinite(maximum) or maximum <= 0.0:
+        raise ValueError("Maximum capture velocity must be a finite positive number")
+    return min(velocity, maximum)
 
 
 @dataclass(frozen=True)

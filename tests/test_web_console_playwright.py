@@ -2930,6 +2930,9 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     page.get_by_label("Command port").fill("30301")
     page.get_by_role("button", name="Start IIWA").click()
     expect(page.get_by_role("dialog")).to_contain_text("172.31.1.200:30301")
+    expect(page.get_by_role("dialog")).to_contain_text(
+        "Manual test request: 0.1 m/s (100 mm/s)"
+    )
     expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
     expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
     page.get_by_text("I confirm this is the intended lab IIWA target.").click()
@@ -2987,6 +2990,7 @@ def test_dashboard_quick_robot_controls_use_configured_target(console_server, pa
     controls.get_by_role("button", name="Start IIWA").click()
     dialog = page.get_by_role("dialog")
     expect(dialog).to_contain_text("172.31.1.147:30300")
+    expect(dialog).to_contain_text("Manual test request: 0.1 m/s (100 mm/s)")
     expect(dialog.get_by_role("button", name="Queue start")).to_be_disabled()
     expect(dialog.get_by_role("checkbox")).to_have_count(1)
     dialog.get_by_text("I confirm this is the intended lab IIWA target.").click()

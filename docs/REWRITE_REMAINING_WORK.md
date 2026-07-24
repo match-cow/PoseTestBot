@@ -128,11 +128,12 @@ acknowledgements.
 - [x] Align the repository candidate's command semantics with
   `cartesian_velocity_m_s`. It now converts the requested tangential flange
   speed through the measured A1 orbit radius and a conservative published A1
-  speed bound before calling `setJointVelocityRel`. The host numeric START,
-  candidate Cartesian input, and candidate A1 angular velocity are
-  independently capped at 0.03, 0.03 m/s, and 3°/s respectively; this also
-  bounds an older application that interprets legacy `0.03` as 3% relative
-  joint speed.
+  speed bound before calling `setJointVelocityRel`. Run-owned acquisition
+  START, candidate Cartesian input, and candidate A1 angular velocity are
+  independently capped at 0.03, 0.03 m/s, and 3°/s respectively. The
+  separately acknowledged manual Dashboard/Devices motion test sends 0.1;
+  reconcile the deployed application before treating that value as Cartesian
+  m/s rather than 10% relative joint speed.
 - [x] Align documented receiver fallback/address behavior with the lab receiver
   `172.31.1.169`, while retaining the command-supplied receiver target and an
   explicit wildcard-to-command-sender mode.

@@ -197,11 +197,13 @@ def test_start_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
         "172.31.1.150",
         "--port_robot",
         "30305",
+        "--manual-test-speed",
         "--allow-real-robot",
         "--allow-cameras",
     ]
     assert fake_runner.submitted[0]["parameters"]["robot_ip"] == "172.31.1.150"
     assert fake_runner.submitted[0]["parameters"]["robot_port"] == 30305
+    assert fake_runner.submitted[0]["parameters"]["commanded_velocity_m_s"] == 0.1
     assert fake_runner.submitted[0]["parameters"]["allow_real_robot"] is True
     assert fake_runner.submitted[0]["parameters"]["allow_cameras"] is True
 

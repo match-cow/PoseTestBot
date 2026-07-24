@@ -50,7 +50,7 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 	 * project, frame, endpoints, joint branches, swept paths, tool/load, camera
 	 * rig, and cables have been validated offline and commissioned in T1.
 	 */
-	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = false;
+	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = true;
 
 	private static final int SAMPLE_TIME_MS = 10;
 	private static final int SETTLE_TIME_MS = 1500;

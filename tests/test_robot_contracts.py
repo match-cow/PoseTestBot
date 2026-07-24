@@ -12,6 +12,7 @@ from posetestbot.config import (
     DEFAULT_ROBOT_PORT,
     LAB_ROBOT_IP,
     LAB_ROBOT_RECEIVER_IP,
+    MANUAL_TEST_COMMAND_VELOCITY_M_S,
     MAX_CAPTURE_COMMAND_VELOCITY_M_S,
     RobotProfile,
     robot_profile,
@@ -138,6 +139,33 @@ def test_send_start_omits_wildcard_receiver_ip(
         "start": MAX_CAPTURE_COMMAND_VELOCITY_M_S,
         "receiver_port": 18080,
     }
+    assert sent == [(message, "172.31.1.147", 30300)]
+
+
+def test_send_start_accepts_explicit_manual_test_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = []
+
+    def fake_send(message, ip, port):
+        sent.append((message, ip, port))
+
+    monkeypatch.setattr(udp, "send_udp_json", fake_send)
+    profile = RobotProfile(
+        mode="real",
+        robot_ip="172.31.1.147",
+        command_port=30300,
+        receiver_ip="172.31.1.169",
+        receiver_port=8080,
+        cartesian_velocity_m_s=MANUAL_TEST_COMMAND_VELOCITY_M_S,
+    )
+
+    message = udp.send_start(
+        profile,
+        maximum_velocity_m_s=MANUAL_TEST_COMMAND_VELOCITY_M_S,
+    )
+
+    assert message["start"] == 0.1
     assert sent == [(message, "172.31.1.147", 30300)]
 
 

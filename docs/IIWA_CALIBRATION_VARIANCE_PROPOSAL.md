@@ -121,6 +121,11 @@ application scales and then clamps to its 8 mm/s minimum. These software
 limits are not safety-rated, and slow motion alone does not guarantee sharp
 images: exposure/readout time and lighting still have to be verified.
 
+The separately acknowledged Dashboard/Devices manual motion test sends `0.1`
+instead of the run-owned acquisition value. This application scales that
+request and clamps the resulting translation to its existing 30 mm/s maximum;
+repositioning and orientation limits remain unchanged.
+
 The program preserves exact stops instead of blending between commissioned
 waypoints, then waits 1.5 seconds after every motion leg so residual cell or
 camera-rig vibration can decay before the next direction change. It transmits

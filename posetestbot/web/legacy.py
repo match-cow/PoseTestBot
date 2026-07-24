@@ -44,6 +44,7 @@ from posetestbot.config import (
     DEFAULT_CAPTURE_VELOCITY_M_S,
     DEFAULT_ROBOT_PORT,
     LAB_ROBOT_IP,
+    MANUAL_TEST_COMMAND_VELOCITY_M_S,
 )
 from posetestbot.io.artifacts import (
     CAPTURE_EXECUTION_PLAN,
@@ -798,9 +799,16 @@ def run_command():
                 {
                     "allow_real_robot": True,
                     "allow_cameras": True,
+                    "commanded_velocity_m_s": MANUAL_TEST_COMMAND_VELOCITY_M_S,
                 }
             )
-            command_args.extend(["--allow-real-robot", "--allow-cameras"])
+            command_args.extend(
+                [
+                    "--manual-test-speed",
+                    "--allow-real-robot",
+                    "--allow-cameras",
+                ]
+            )
     except ValueError as exc:
         return jsonify({'output': str(exc)}), 400
     command_array = list(spec["command"]) + command_args
