@@ -2021,6 +2021,86 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     assert capture_setup["post_queue_reads"] >= 2
 
 
+def test_readiness_background_refresh_preserves_visible_evidence(
+    console_server,
+    page,
+) -> None:
+    preflight_state = {"blocker": "missing_preflight"}
+    configured = run_config()
+    install_common_mocks(
+        page,
+        preflight_state=preflight_state,
+        config_payload=configured,
+    )
+    config_reads = {"count": 0}
+
+    def delayed_config_handler(route) -> None:
+        config_reads["count"] += 1
+        if config_reads["count"] > 1:
+            threading.Event().wait(0.3)
+        fulfill_json(
+            route,
+            {
+                "config": configured,
+                "preflight": {"queue_blocker": preflight_state["blocker"]},
+            },
+        )
+
+    page.unroute("**/run-config**")
+    page.route("**/run-config**", delayed_config_handler)
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=readiness",
+        wait_until="networkidle",
+    )
+
+    readiness = page.get_by_test_id("calibration-readiness-check")
+    expect(readiness).to_contain_text("Readiness has not been checked")
+    expect(
+        readiness.get_by_role("button", name="Check readiness", exact=True)
+    ).to_be_enabled()
+    readiness.evaluate(
+        """card => {
+            window.__readinessTextSnapshots = []
+            const record = () => window.__readinessTextSnapshots.push(card.innerText)
+            record()
+            window.__readinessTextObserver = new MutationObserver(record)
+            window.__readinessTextObserver.observe(card, {
+                attributes: true,
+                characterData: true,
+                childList: true,
+                subtree: true,
+            })
+        }"""
+    )
+
+    with page.expect_request(
+        lambda request: (
+            request.method == "GET"
+            and urlparse(request.url).path == "/run-config"
+        ),
+        timeout=5_000,
+    ):
+        page.wait_for_timeout(2_300)
+    page.wait_for_timeout(500)
+
+    snapshots = page.evaluate(
+        """() => {
+            window.__readinessTextObserver.disconnect()
+            return window.__readinessTextSnapshots
+        }"""
+    )
+    assert config_reads["count"] >= 2
+    assert all("Checking saved run readiness" not in text for text in snapshots)
+    assert all(
+        "Reading the latest durable readiness evidence" not in text
+        for text in snapshots
+    )
+    expect(readiness).to_contain_text("Readiness has not been checked")
+    expect(
+        readiness.get_by_role("button", name="Check readiness", exact=True)
+    ).to_be_enabled()
+
+
 def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     console_server,
     page,

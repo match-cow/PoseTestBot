@@ -301,7 +301,7 @@ export function WorkflowPage() {
     </WorkflowStepCard>
 
     <WorkflowStepCard id="readiness" number={3} title="Check readiness" description="Run one consolidated operator check after cameras and the exact printed grid are selected." status={calibrationStatuses[2]} help="The saved report proves which configuration was checked. Physical capture repeats the time-sensitive safety checks at startup.">
-      <ReadinessCheck runRoot={selectedRun} intent="calibration" preflight={preflight} loading={config.isFetching} requirements={calibrationRequirements} />
+      <ReadinessCheck runRoot={selectedRun} intent="calibration" preflight={preflight} loading={config.isPending} requirements={calibrationRequirements} />
     </WorkflowStepCard>
 
     <WorkflowStepCard id="capture" number={4} title="Record calibration images" description="Mount the selected grid as described for the calibration mode, clear the workcell, then authorize the supervised capture." status={calibrationStatuses[3]} help="Eye-in-hand means the camera moves with the robot while the grid remains stationary. Eye-to-hand means the camera is static while the grid moves rigidly with the robot.">
@@ -328,7 +328,7 @@ export function WorkflowPage() {
       </WorkflowStepCard>
 
       <WorkflowStepCard id="readiness" number={3} title="Check readiness" description="Run one consolidated operator check after calibration and object placement are confirmed." status={datasetStatuses[2]} help="This is the only visible preflight step. The capture supervisor still repeats live checks immediately before hardware starts.">
-        <ReadinessCheck runRoot={selectedRun} intent="dataset" preflight={preflight} loading={config.isFetching} requirements={datasetRequirements} />
+        <ReadinessCheck runRoot={selectedRun} intent="dataset" preflight={preflight} loading={config.isPending} requirements={datasetRequirements} />
       </WorkflowStepCard>
 
       <WorkflowStepCard id="capture" number={4} title="Record the object dataset" description="Place the objects exactly as confirmed, clear the workcell, then authorize supervised camera and robot capture." status={datasetStatuses[3]} help="Raw RGB, depth, timestamp, and robot-pose evidence is preserved. Use a new run folder rather than overwriting a prior capture.">
