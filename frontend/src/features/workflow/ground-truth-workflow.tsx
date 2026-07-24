@@ -109,7 +109,7 @@ export function GroundTruthWorkflow() {
     </Card>
 
     <Card>
-      <CardHeader><CardTitle>Choose an object layout and record its position</CardTitle><CardDescription>Choose the exact printed layout used in the cell, then enter its measured position relative to the workcell reference. Preview cards may simplify display geometry; saved object identities and placement remain exact.</CardDescription></CardHeader>
+      <CardHeader><CardTitle>Choose an object layout and record its position</CardTitle><CardDescription>Choose the exact printed layout used in the cell, then enter its measured position relative to the workcell reference. Cards use simplified footprints for browsing; selecting one loads its exact immutable object geometry and identity details.</CardDescription></CardHeader>
       <CardContent className="space-y-5">
         <div>
           <Label>Object layout <span className="text-destructive">Required</span></Label>
@@ -134,8 +134,8 @@ export function GroundTruthWorkflow() {
         </div>
 
         {selectedBundle && <div className="overflow-hidden rounded-lg border">
-          <div className="flex items-center justify-between border-b bg-muted/40 px-3 py-2"><div><div className="text-xs font-semibold">{selectedBundle.display_name}</div><div className="text-[10px] text-muted-foreground">Immutable object assets · Z up</div></div><span className="text-[10px] text-muted-foreground">Interactive detail</span></div>
-          <div className="h-72">{selectedPreview.isPending ? <div className="grid size-full place-items-center text-xs text-muted-foreground"><LoaderCircle className="mr-2 inline size-4 animate-spin" />Loading exact scene…</div> : selectedPreview.data ? <TemplateScenePreview bundle={selectedBundle} preview={selectedPreview.data} /> : <div className="grid size-full place-items-center text-xs text-muted-foreground">The immutable preview is unavailable.</div>}</div>
+          <div className="flex items-center justify-between border-b bg-muted/40 px-3 py-2"><div><div className="text-xs font-semibold">{selectedBundle.display_name}</div><div className="text-[10px] text-muted-foreground">Exact immutable object assets · Z up</div></div><span className="text-[10px] text-muted-foreground">Identify · focus · verify placement</span></div>
+          <div className="h-[25rem]">{selectedPreview.isPending ? <div className="grid size-full place-items-center text-xs text-muted-foreground"><LoaderCircle className="mr-2 inline size-4 animate-spin" />Loading exact scene…</div> : selectedPreview.data ? <TemplateScenePreview bundle={selectedBundle} preview={selectedPreview.data} /> : <div className="grid size-full place-items-center text-xs text-muted-foreground">The immutable preview is unavailable.</div>}</div>
         </div>}
 
         <div className="grid gap-3 lg:grid-cols-[1fr_210px]">

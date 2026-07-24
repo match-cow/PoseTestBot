@@ -389,7 +389,7 @@ export interface PoseTemplateBundle {
     instance_uuid: string
     catalog_uuid?: string
     orientation_id?: string
-    catalog: { catalog_uuid?: string; name: string; obj_id: number }
+    catalog: { catalog_uuid?: string; name: string; obj_id: number; canonical_ply_sha256?: string }
     pose_template_from_object?: { matrix: Matrix4x4 }
   }>
 }
@@ -407,7 +407,8 @@ export interface PoseTemplatePreview {
     instance_uuid: string
     catalog_uuid?: string
     orientation_id?: string
-    catalog: { catalog_uuid?: string; name: string; obj_id: number }
+    catalog: { catalog_uuid?: string; name: string; obj_id: number; canonical_ply_sha256?: string }
+    orientation?: { label?: string } | null
     pose_template_from_object?: { matrix: Matrix4x4 }
     preview_mesh_sha256?: string | null
     compensated_contours: Array<Array<{ x_mm: number; y_mm: number }>>

@@ -171,6 +171,7 @@ def test_bundle_listing_downloads_and_traversal_rejection(target_client) -> None
     )
     assert listing.status_code == 200
     assert listing.get_json()["bundles"][0]["target_id"] == bundle["target_id"]
+    assert listing.get_json()["replacement_blockers"] == []
 
     preview = client.get(
         f"/calibration-targets/bundles/{bundle['target_id']}/preview.png"
@@ -258,7 +259,7 @@ def test_bundle_delete_rejects_target_active_for_selected_run(target_client) -> 
 
 
 def test_selection_conflict_returns_concrete_blocker_paths(target_client) -> None:
-    client, _runner, run, bundle = target_client
+    client, runner, run, bundle = target_client
     select_target_bundle(
         run_root=run,
         target_id=bundle["target_id"],
@@ -268,6 +269,26 @@ def test_selection_conflict_returns_concrete_blocker_paths(target_client) -> Non
     sensor = run / "processed" / "synchronized" / "realsense_1"
     sensor.mkdir(parents=True)
     (sensor / ARUCO_DETECTIONS).write_text("{}\n")
+
+    unchanged = client.post(
+        f"/calibration-targets/bundles/{bundle['target_id']}/select",
+        json={
+            "run_root": run.as_posix(),
+            "placement": "unknown",
+        },
+    )
+
+    assert unchanged.status_code == 200
+    assert unchanged.get_json()["status"] == "unchanged"
+    assert unchanged.get_json()["evidence"]["target_id"] == bundle["target_id"]
+    assert runner.submissions == []
+
+    listing = client.get(
+        "/calibration-targets/bundles", query_string={"run_root": run.as_posix()}
+    )
+    assert listing.get_json()["replacement_blockers"] == [
+        f"processed/synchronized/realsense_1/{ARUCO_DETECTIONS}"
+    ]
 
     response = client.post(
         f"/calibration-targets/bundles/{bundle['target_id']}/select",

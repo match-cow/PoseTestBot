@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-23
+Last updated: 2026-07-24
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -42,6 +42,25 @@ The active gates are:
 - `rewrite_full_capture.v1`
 - `rewrite_calibration_validation.v1`
 - `rewrite_bop_export_readiness.v1`
+
+Calibration-target reuse is explicit in the operator console. A saved target is
+a global reusable library entry and can be selected by every fresh calibration
+run, including after cameras move. Once target-dependent evidence exists, only
+that run-owned target/placement snapshot is locked: reviewing the active target
+is read-only, replacement controls explain the fresh-run requirement before
+submission, and an exact repeat selection is an idempotent success rather than
+a queued mutation. Existing raw and derived calibration evidence remains
+untouched.
+
+Workflow pose-template selection now uses each bundle's exact immutable
+canonical PLY assets for the selected 3D detail instead of the compact
+stable-orientation proxy. The scene initially frames the objects rather than
+the entire printed sheet, retains source vertex colours and open-surface
+visibility, and maps numbered scene markers to a persistent object index with
+the workpiece name, BOP object ID, dimensions, face count, and orientation.
+Operators can focus one instance, refit all objects, or return to the sheet
+overview; the bounded proxy remains only as a per-object loading/error
+fallback.
 
 The Cell view now composes the run's actual context surface: exact compensated
 pose-template footprint contours for object-bearing runs, the selected or

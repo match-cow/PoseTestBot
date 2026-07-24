@@ -27,6 +27,7 @@ from posetestbot.calibration.target_library import (
     list_target_bundles,
     replacement_blockers,
     validate_bundle_placement,
+    validate_run_target_selection,
     validate_target_bundle,
 )
 from posetestbot.calibration.target_preview import render_target_preview_png
@@ -129,11 +130,13 @@ def calibration_target_bundles():
     bundles = list_target_bundles(
         library_root=default_target_library_root(), run_root=run_root
     )
+    blockers = replacement_blockers(run_root) if run_root else []
     return jsonify(
         {
             "schema_version": "calibration_target_library.v1",
             "run_root": run_root,
             "bundles": bundles,
+            "replacement_blockers": blockers,
         }
     )
 
@@ -223,22 +226,40 @@ def calibration_target_select(target_id: str):
             raise ValueError(
                 "placement must be one of: " + ", ".join(sorted(PLACEMENT_MODES))
             )
+        config = load_run_config_for_run_root(run_root)
+        existing = config.get("calibration_target")
+        if isinstance(existing, dict):
+            current_mode = existing.get("placement", {}).get("mode")
+            if (
+                existing.get("target_id") == target_id
+                and current_mode == placement
+            ):
+                evidence = validate_run_target_selection(run_root)
+                return (
+                    jsonify(
+                        {
+                            "schema_version": "calibration_target_selection.v1",
+                            "status": "unchanged",
+                            "run_root": str(Path(run_root)),
+                            "selection": existing,
+                            "evidence": evidence,
+                            "blockers": [],
+                        }
+                    ),
+                    200,
+                )
         bundle = validate_target_bundle(
             default_target_library_root() / target_id,
             library_root=default_target_library_root(),
         )
         validate_bundle_placement(bundle, placement)
-        config = load_run_config_for_run_root(run_root)
-        existing = config.get("calibration_target")
         if isinstance(existing, dict):
-            current_mode = existing.get("placement", {}).get("mode")
-            if existing.get("target_id") != bundle["target_id"] or current_mode != placement:
-                blockers = replacement_blockers(run_root)
-                if blockers:
-                    raise CalibrationTargetConflict(
-                        "The active calibration target cannot be replaced; create a new run.",
-                        blockers=blockers,
-                    )
+            blockers = replacement_blockers(run_root)
+            if blockers:
+                raise CalibrationTargetConflict(
+                    "The active calibration target cannot be replaced; create a new run.",
+                    blockers=blockers,
+                )
         job = job_runner.submit(
             name="calibration_target_select",
             command=[

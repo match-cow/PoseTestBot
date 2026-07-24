@@ -1654,19 +1654,90 @@ def test_pose_templates_add_instance_with_real_catalog_and_preview(
 def test_ground_truth_workflow_selection_and_full_placement(console_server, page) -> None:
     install_common_mocks(page)
     submitted: list[dict] = []
+    exact_asset_requests: list[str] = []
     library_payload = pose_template_library()
+    second_instance = {
+        "instance_uuid": "55555555-5555-4555-8555-555555555555",
+        "catalog_uuid": "88888888-8888-4888-8888-888888888888",
+        "catalog": {
+            "catalog_uuid": "88888888-8888-4888-8888-888888888888",
+            "name": "Gauge block",
+            "obj_id": 8,
+            "canonical_ply_sha256": "f" * 64,
+        },
+        "pose_template_from_object": {
+            "matrix": [
+                [1, 0, 0, 105],
+                [0, 1, 0, 75],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
+            ]
+        },
+    }
+    library_payload["templates"][0]["instances"][0]["catalog"][
+        "canonical_ply_sha256"
+    ] = "b" * 64
+    library_payload["templates"][0]["instances"].append(second_instance)
     second_template = json.loads(json.dumps(library_payload["templates"][0]))
     second_template["template_uuid"] = "44444444-4444-4444-8444-444444444444"
     second_template["display_name"] = "Clamp portrait"
     library_payload["templates"].append(second_template)
+    preview_payload = immutable_template_preview()
+    preview_payload["instances"][0]["catalog"]["canonical_ply_sha256"] = "b" * 64
+    preview_payload["instances"][0]["orientation"] = {"label": "Wide base"}
+    preview_payload["instances"].append({
+        **second_instance,
+        "preview_mesh_sha256": "f" * 64,
+        "orientation": {"label": "Flat face"},
+        "compensated_contours": [[
+            {"x_mm": 80, "y_mm": 55},
+            {"x_mm": 105, "y_mm": 55},
+            {"x_mm": 105, "y_mm": 65},
+            {"x_mm": 80, "y_mm": 65},
+        ]],
+    })
+    preview_payload["preview_meshes"]["f" * 64] = {
+        "vertices": [
+            [-12.5, -5, -2.5],
+            [12.5, -5, -2.5],
+            [12.5, 5, -2.5],
+            [-12.5, 5, -2.5],
+            [-12.5, -5, 2.5],
+            [12.5, -5, 2.5],
+            [12.5, 5, 2.5],
+            [-12.5, 5, 2.5],
+        ],
+        "faces": [
+            [0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6],
+            [0, 4, 5], [0, 5, 1], [1, 5, 6], [1, 6, 2],
+            [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0],
+        ],
+    }
     page.route("**/pose-templates/library", lambda route: fulfill_json(route, library_payload))
-    page.route("**/pose-templates/library/*/preview", lambda route: fulfill_json(route, immutable_template_preview()))
+    page.route("**/pose-templates/library/*/preview", lambda route: fulfill_json(route, preview_payload))
     page.route("**/pose-templates/library/*/thumbnail", lambda route: fulfill_json(route, immutable_template_thumbnail()))
-    page.route("**/pose-templates/library/*/assets/*/canonical_ply", lambda route: route.fulfill(
-        status=200,
-        content_type="application/octet-stream",
-        body="ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n20 0 0\n0 10 0\n3 0 1 2\n",
-    ))
+    exact_assets = {
+        "33333333-3333-4333-8333-333333333333": trimesh.creation.box(
+            extents=(20, 10, 12)
+        ).export(file_type="ply"),
+        "55555555-5555-4555-8555-555555555555": trimesh.creation.box(
+            extents=(25, 10, 5)
+        ).export(file_type="ply"),
+    }
+
+    def exact_asset_handler(route) -> None:
+        exact_asset_requests.append(route.request.url)
+        instance_uuid = urlparse(route.request.url).path.split("/")[-2]
+        route.fulfill(
+            status=200,
+            content_type="application/octet-stream",
+            body=exact_assets[instance_uuid],
+        )
+
+    page.route(
+        "**/pose-templates/library/*/assets/*/canonical_ply*",
+        exact_asset_handler,
+    )
     page.route("**/jobs/selection-job", lambda route: fulfill_json(route, {"job": {"id": "selection-job", "status": "succeeded", "message": None, "tail": []}}))
 
     def selection_handler(route) -> None:
@@ -1695,6 +1766,30 @@ def test_ground_truth_workflow_selection_and_full_placement(console_server, page
     expect(page.get_by_test_id("selected-template-scene")).to_be_visible(timeout=15_000)
     expect(page.get_by_test_id("selected-template-scene")).to_have_attribute("data-origin-offset-mm", "15,15")
     expect(page.get_by_test_id("selected-template-scene").locator("canvas")).to_have_count(1)
+    expect(page.get_by_text("Exact immutable PLY detail")).to_be_visible()
+    object_index = page.get_by_test_id("selected-template-object-index")
+    expect(
+        object_index.get_by_role(
+            "button", name="Focus Clamp, obj_000007, instance 1"
+        )
+    ).to_be_visible()
+    gauge_focus = object_index.get_by_role(
+        "button", name="Focus Gauge block, obj_000008, instance 2"
+    )
+    expect(gauge_focus).to_be_visible()
+    expect(object_index.get_by_text("20 × 10 × 12 mm · 12 faces")).to_be_visible(
+        timeout=15_000
+    )
+    expect(object_index.get_by_text("25 × 10 × 5 mm · 12 faces")).to_be_visible(
+        timeout=15_000
+    )
+    assert len(exact_asset_requests) == 2
+    assert all("sha256=" in request for request in exact_asset_requests)
+    gauge_focus.click()
+    expect(gauge_focus).to_have_attribute("aria-pressed", "true")
+    sheet_focus = page.get_by_role("button", name="Fit printed sheet")
+    sheet_focus.click()
+    expect(sheet_focus).to_have_attribute("aria-pressed", "true")
     confirmation = page.get_by_label("I confirm this measured physical placement")
     confirmation.click()
     expect(confirmation).to_be_checked()
@@ -3753,9 +3848,9 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
 ) -> None:
     requests: list[dict] = []
     library_urls: list[str] = []
-    blocked = {"value": True}
     deleted = {"value": False}
     selected_runs: set[str] = set()
+    locked_runs: set[str] = set()
     target_id = "5f09f41c-dd91-44ef-a048-1f43fc990e17"
     old_run = "/tmp/posetestbot-console/old-run"
     configuration = {
@@ -3802,6 +3897,9 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
         return {
             "schema_version": "calibration_target_library.v1",
             "run_root": run_root,
+            "replacement_blockers": (
+                ["calibration_observations.json"] if run_root in locked_runs else []
+            ),
             "bundles": [] if deleted["value"] else [{
                 "target_id": target_id,
                 "display_name": "Anisotropic calibration board",
@@ -3863,17 +3961,8 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     def select_handler(route) -> None:
         body = route.request.post_data_json
         requests.append({"path": "/calibration-targets/select", "body": body})
-        if blocked["value"]:
-            fulfill_json(
-                route,
-                {
-                    "output": "The active calibration target cannot be replaced; create a new run.",
-                    "blockers": ["calibration_observations.json"],
-                },
-                status=409,
-            )
-            return
         selected_runs.add(body["run_root"])
+        locked_runs.add(body["run_root"])
         fulfill_json(route, {"job_id": "select-1", "job": {"id": "select-1", "status": "queued"}}, status=202)
 
     page.route(f"**/calibration-targets/bundles/{target_id}/select", select_handler)
@@ -3953,16 +4042,27 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     page.get_by_role("combobox", name="Target placement").click()
     page.get_by_role("option", name="Use PoseGridGen board pose").click()
     page.get_by_role("button", name="Select target").click()
-    expect(page.get_by_text("Target was not selected")).to_be_visible()
-    expect(page.get_by_text("The active calibration target cannot be replaced; create a new run.")).to_be_visible()
-    expect(page.get_by_text("calibration_observations.json", exact=False)).to_be_visible()
-
-    blocked["value"] = False
-    page.get_by_role("button", name="Select target").click()
     expect(page.get_by_text("Calibration target selected")).to_be_visible()
     selection = [item["body"] for item in requests if item["path"] == "/calibration-targets/select"][-1]
     assert selection == {"run_root": RUN_ROOT, "placement": "posegridgen_board_to_base"}
     expect(page.get_by_text("Active for this run", exact=True)).to_be_visible()
+    reuse_notice = page.get_by_test_id("calibration-target-reuse-notice")
+    expect(reuse_notice).to_contain_text("Target selection fixed for this run")
+    expect(reuse_notice).to_contain_text(
+        "after moving cameras, choose a fresh run folder"
+    )
+    select_request_count = len(
+        [item for item in requests if item["path"] == "/calibration-targets/select"]
+    )
+    page.get_by_role("button", name="Review active target").click()
+    expect(page.get_by_role("combobox", name="Target placement")).to_be_disabled()
+    expect(page.get_by_text("Placement is fixed only for this completed run")).to_be_visible()
+    page.get_by_role("dialog").get_by_role(
+        "button", name="Close", exact=True
+    ).first.click()
+    assert len(
+        [item for item in requests if item["path"] == "/calibration-targets/select"]
+    ) == select_request_count
     expect(page.get_by_role("button", name="Delete Anisotropic calibration board")).to_be_disabled()
 
     page.get_by_role("combobox", name="Selected run").click()
