@@ -227,6 +227,19 @@ associated RGB images are not certified to share a moving-robot or illumination
 instant.
 Current BlenderProc GT/masks do not render the articulated iiwa.
 
+## 2026-07-24 Pose-Template Orientation Preview Fidelity
+
+- The stable-orientation chooser now renders the topology-aware recognition
+  mesh (up to 4,096 vertices and 8,192 faces) instead of the deliberately tiny
+  160-vertex/256-face printable-layout proxy. The selected-instance inspection
+  uses the same higher-fidelity surface, preserving holes, recesses, handles,
+  and separated mechanical features that identify a workpiece.
+- Orientation comparisons now use a wider two-column desktop layout with
+  larger rasterized 3D views, explicit displayed/source face counts, and a
+  visible warning if only the proxy fallback is available. Desktop Playwright
+  coverage proves that the chooser and selected-instance inspection consume
+  the recognition mesh while catalogue cards retain their bounded card mesh.
+
 ## 2026-07-24 Workpiece Preview Runtime/Cache Recovery
 
 - Bounded Workpiece Catalogue and Pose Templates cards now distinguish an

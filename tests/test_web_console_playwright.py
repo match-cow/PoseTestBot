@@ -686,6 +686,27 @@ def pose_template_orientation_analysis(catalog_uuid: str = "11111111-1111-4111-8
             "vertices": [[-10, -5, 0], [10, -5, 0], [10, 5, 0], [-10, 5, 0], [0, 0, 12]],
             "faces": [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4], [0, 3, 2], [0, 2, 1]],
         },
+        "recognition_mesh": {
+            "vertices": [[-10, -5, 0], [10, -5, 0], [10, 5, 0], [-10, 5, 0], [-10, -5, 12], [10, -5, 12], [10, 5, 12], [-10, 5, 12]],
+            "faces": [[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6], [0, 4, 5], [0, 5, 1], [1, 5, 6], [1, 6, 2], [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0]],
+        },
+        "recognition_mesh_approximation": {
+            "strategy": "welded_source",
+            "implementation_revision": "posetestbot_posetemplatecreator_adapter.v4",
+            "source_vertices": 8,
+            "source_faces": 12,
+            "welded_vertices": 8,
+            "welded_faces": 12,
+            "result_vertices": 8,
+            "result_faces": 12,
+            "source_components": 1,
+            "source_euler_number": 2,
+            "result_components": 1,
+            "result_euler_number": 2,
+            "topology_preserved": True,
+            "spatial_resolution": None,
+            "fallback_reason": None,
+        },
         "orientations": [
             {
                 "orientation_id": "stable-wide",
@@ -887,17 +908,23 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
     assert page.get_by_test_id("pose-template-preview-canvas").evaluate("element => getComputedStyle(element).backgroundColor") != "rgb(255, 255, 255)"
     page.get_by_role("button", name="Choose orientation for Clamp").click()
     chooser = page.get_by_test_id("orientation-chooser")
-    expect(chooser).to_contain_text("Compare the same-scale isometric view")
+    expect(chooser).to_contain_text("same-scale high-detail recognition surface")
+    expect(chooser).to_contain_text("tiny printable-layout proxy is not used")
     wide_slice = chooser.get_by_role("img", name="Wide base exact selected slice contour")
     expect(wide_slice.locator("path")).to_have_attribute("fill-rule", "evenodd")
     expect(wide_slice.locator("path")).to_have_attribute("transform", "translate(0 0) scale(1 -1)")
-    expect(page.get_by_test_id("workpiece-isometric-11111111-1111-4111-8111-111111111111").locator("polygon")).to_have_count(6)
-    wide_points = page.get_by_test_id("orientation-isometric-stable-wide").locator("polygon").first.get_attribute("points")
+    expect(page.get_by_test_id("workpiece-isometric-11111111-1111-4111-8111-111111111111").locator("polygon")).to_have_count(12)
+    wide_preview = page.get_by_test_id("orientation-isometric-stable-wide")
+    expect(wide_preview.locator("polygon")).to_have_count(12)
+    expect(wide_preview.locator("xpath=..")).to_have_attribute("data-preview-quality", "recognition")
+    expect(page.get_by_test_id("orientation-preview-quality-stable-wide")).to_contain_text("Full recognition surface · 12 of 12 source faces")
+    wide_points = wide_preview.locator("polygon").first.get_attribute("points")
     side_points = page.get_by_test_id("orientation-isometric-stable-side").locator("polygon").first.get_attribute("points")
     assert wide_points != side_points
     chooser.get_by_role("radio").filter(has_text="Side base").click()
     chooser.get_by_role("button", name="Add selected orientation").click()
     expect(page.get_by_label("Clamp X mm")).to_be_visible()
+    expect(page.get_by_test_id("selected-instance-isometric").locator("polygon")).to_have_count(12)
     assert page_errors == []
     page.get_by_label("Clamp Rotation °").fill("27.5")
     page.get_by_label("X print %").fill("101")

@@ -72,8 +72,10 @@ transforms, the PDF page boundary, or GT.
    revision. Restore it only after checking the corrected preview.
 2. Open **Pose Templates** and filter the active workpieces by name, alias, tag,
    or group. Duplicate physical instances are allowed. Choose a ranked stable
-   orientation using the same-scale isometric view and exact base footprint,
-   then add it to the page. Drag or use arrow keys to position it, use the
+   orientation using the same-scale, topology-aware recognition surface and
+   exact base footprint, then add it to the page. This chooser uses the bounded
+   high-detail mesh (up to 4,096 vertices and 8,192 faces), not the tiny
+   printable-layout proxy. Drag or use arrow keys to position it, use the
    rotation handle, or enter exact X/Y/rotation values. PoseTestBot retains the
    upstream orientation ID, probability, grounded transform, slice height, and
    contours instead of accepting uploaded geometry in this workflow.
