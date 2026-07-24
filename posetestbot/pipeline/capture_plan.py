@@ -30,6 +30,7 @@ from posetestbot.sensors.registry import (
 
 
 SCHEMA_VERSION = "capture_plan.v1"
+PLAN_BUILD_OPTION_NAMES = ("max_frames", "warmup_frames")
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,28 @@ def _run_config_relative_path(run_root: Path, run_config_path: str | Path | None
         return path.resolve().relative_to(run_root.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def capture_plan_build_options(
+    plan: Mapping[str, Any],
+) -> dict[str, int | None]:
+    """Return validated plan-local options needed to rebuild a capture plan."""
+
+    capture_options = plan.get("capture")
+    if not isinstance(capture_options, Mapping):
+        raise ValueError("Persisted capture plan capture options must be an object")
+
+    options: dict[str, int | None] = {}
+    for name in PLAN_BUILD_OPTION_NAMES:
+        value = capture_options.get(name)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+        ):
+            raise ValueError(
+                f"Persisted capture plan {name} must be null or a nonnegative integer"
+            )
+        options[name] = value
+    return options
 
 
 def build_capture_plan(

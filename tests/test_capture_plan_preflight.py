@@ -427,6 +427,35 @@ def test_capture_plan_preflight_writes_report_and_manifest(tmp_path: Path) -> No
     assert manifest["capture_config"]["fps"] == 6
 
 
+def test_capture_plan_preflight_accepts_persisted_plan_build_options(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-with-plan-options"
+    config = create_run_config(
+        run_root=run_root,
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+    )
+    write_run_config(run_root, config)
+    write_capture_plan_with_manifest(
+        run_root,
+        config.to_dict(),
+        max_frames=12,
+        warmup_frames=30,
+    )
+
+    report = build_capture_plan_preflight(
+        run_root,
+        include_sensor_status=False,
+        allow_real_robot=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["overall_status"] == "warning"
+    assert checks["capture_plan_current_config"]["status"] == "ok"
+    assert report["capture_plan"]["capture"]["max_frames"] == 12
+    assert report["capture_plan"]["capture"]["warmup_frames"] == 30
+
+
 def test_capture_plan_preflight_rejects_persisted_hardware_plan_after_mode_change(
     tmp_path: Path,
 ) -> None:

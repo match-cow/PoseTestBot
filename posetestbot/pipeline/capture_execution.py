@@ -32,6 +32,7 @@ from posetestbot.io.manifest import (
 )
 from posetestbot.pipeline.capture_plan import (
     build_capture_plan,
+    capture_plan_build_options,
     load_capture_plan,
 )
 from posetestbot.pipeline.capture_plan_preflight import build_capture_plan_preflight
@@ -1102,33 +1103,14 @@ def _validate_capture_execution_boundary(
         raise ValueError("Run configuration capture.fps must be positive")
     plan_path = run_root / CAPTURE_PLAN
     persisted_plan: dict[str, Any] | None = None
-    max_frames: int | None = None
-    warmup_frames: int | None = None
+    build_options: dict[str, int | None] = {}
     if plan_path.is_file():
         persisted_plan = load_capture_plan(run_root)
-        capture_options = persisted_plan.get("capture")
-        if not isinstance(capture_options, Mapping):
-            raise ValueError("Persisted capture plan capture options must be an object")
-        for name in ("max_frames", "warmup_frames"):
-            value = capture_options.get(name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-            ):
-                raise ValueError(
-                    f"Persisted capture plan {name} must be null or a nonnegative integer"
-                )
-            if name == "max_frames":
-                max_frames = value
-            else:
-                warmup_frames = value
+        build_options = capture_plan_build_options(persisted_plan)
     elif os.path.lexists(plan_path):
         raise ValueError(f"Capture plan path is not a regular file: {plan_path}")
 
-    expected_plan = build_capture_plan(
-        config,
-        max_frames=max_frames,
-        warmup_frames=warmup_frames,
-    ).to_dict()
+    expected_plan = build_capture_plan(config, **build_options).to_dict()
     expected_receiver = _receiver_command_from_plan(expected_plan)
     expected_fingerprints = _capture_command_fingerprints(expected_plan)
     expected_prefix = (

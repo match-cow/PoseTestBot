@@ -21,6 +21,7 @@ from posetestbot.io.manifest import (
 )
 from posetestbot.pipeline.capture_plan import (
     build_capture_plan,
+    capture_plan_build_options,
     capture_plan_path,
     write_capture_plan,
 )
@@ -788,26 +789,37 @@ def build_capture_plan_preflight(
 
     plan: dict[str, Any] | None = None
     canonical_plan: dict[str, Any] | None = None
+    canonical_plan_object = None
     plan_build_error: str | None = None
-    if not pre_plan_has_errors:
-        try:
-            canonical_plan = build_capture_plan(config).to_dict()
-        except ValueError as exc:
-            plan_build_error = str(exc)
     if plan_file.exists():
         with open(plan_file, "r") as f:
             plan = json.load(f)
-    elif pre_plan_has_errors:
+        if isinstance(plan, Mapping):
+            try:
+                build_options = capture_plan_build_options(plan)
+            except ValueError as exc:
+                plan_build_error = str(exc)
+        else:
+            build_options = {}
+            plan_build_error = "Persisted capture plan must be a JSON object."
+    else:
+        build_options = {}
+
+    if not pre_plan_has_errors and plan_build_error is None:
+        try:
+            canonical_plan_object = build_capture_plan(config, **build_options)
+            canonical_plan = canonical_plan_object.to_dict()
+        except ValueError as exc:
+            plan_build_error = str(exc)
+
+    if plan is None and pre_plan_has_errors:
         plan_build_error = (
             "Capture plan was not built because configuration capability checks failed."
         )
-    elif canonical_plan is not None:
+    elif plan is None and canonical_plan_object is not None:
         if write_plan_if_missing:
-            write_capture_plan(
-                run_root_path,
-                build_capture_plan(config),
-            )
-        plan = canonical_plan
+            write_capture_plan(run_root_path, canonical_plan_object)
+        plan = canonical_plan_object.to_dict()
 
     plan_matches_current_config = (
         plan is not None
@@ -838,7 +850,10 @@ def build_capture_plan_preflight(
                     "canonical plan for the current run configuration; "
                     "regenerate it before capture."
                     if plan is not None and canonical_plan is not None
-                    else "A canonical current-config capture plan is unavailable."
+                    else (
+                        plan_build_error
+                        or "A canonical current-config capture plan is unavailable."
+                    )
                 )
             ),
         ),
