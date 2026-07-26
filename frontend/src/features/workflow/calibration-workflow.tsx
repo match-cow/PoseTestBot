@@ -14,6 +14,7 @@ import { useOperator } from "@/providers/operator-provider"
 
 type CalibrationMode = "eye_in_hand" | "eye_to_hand"
 type SynchronizationPolicy = "auto_offset" | "fixed_zero"
+const REQUIRED_AUTO_TIMING_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_cv.v2"
 type Camera = { sensor_key: string; sensor_name: string; display_name: string; sensor_type: string; device_id: string; current_mounting_mode?: string | null }
 type SavedTarget = { target_id: string; display_name: string; valid: boolean; selected?: boolean }
 type Setup = {
@@ -27,12 +28,15 @@ type Setup = {
     intrinsics_policy: string
     intrinsics_policies: Array<{ id: string; label: string }>
     synchronization?: {
+      implementation_revision?: string
       default_policy: SynchronizationPolicy
       policies: Array<{ id: SynchronizationPolicy; label: string; description: string }>
       search: {
         minimum_robot_pose_time_offset_ms: number
         maximum_robot_pose_time_offset_ms: number
         step_ms: number
+        minimum_motion_count_per_cross_validation_fold?: number
+        maximum_leave_one_motion_out_search_adjusted_sign_p_value?: number
       }
     }
     thresholds: {
@@ -44,6 +48,10 @@ type Setup = {
       min_pnp_grid_columns: number
       min_accepted_views: number
       min_coverage_cells: number
+      image_coverage_tail_support_views?: number
+      min_image_centroid_x_span_ratio?: number
+      min_image_centroid_y_span_ratio?: number
+      min_image_centroid_hull_area_ratio?: number
       max_per_view_reprojection_error_px: number
       max_intrinsic_rms_reprojection_error_px: number
       min_motion_poses: number
@@ -94,6 +102,32 @@ type ResidualSummary = {
   max_rotation_deg: number
 }
 type TimeOffsetMetric = { residuals: ResidualSummary }
+type TimeOffsetMotionMethod = {
+  status: "ok" | "error"
+  motion_count: number
+  positive_motion_count: number
+  material_motion_count: number
+  positive_sign_p_value: number
+  candidate_search_adjusted_positive_sign_p_value: number
+  median_improvement: {
+    absolute_translation_mm: number
+    relative_translation: number | null
+    rotation_change_deg: number
+  }
+}
+type TimeOffsetMotionConsistency = {
+  status: "ok" | "error"
+  strategy: string
+  motion_count: number
+  candidate_search_adjustment: "bonferroni"
+  candidate_search_hypothesis_count: number
+  methods: Record<string, TimeOffsetMotionMethod>
+  thresholds: {
+    minimum_median_absolute_translation_mm: number
+    minimum_median_relative_translation: number
+    maximum_search_adjusted_positive_sign_p_value: number
+  }
+}
 type TimeOffsetSensor = {
   sensor_key: string
   sensor_name?: string
@@ -105,16 +139,20 @@ type TimeOffsetSensor = {
   candidate_robot_pose_time_offset_ms: number
   evidence_strength: string
   boundary_hit: boolean
+  selection_extrinsic_method?: string
+  improvement_evidence_strategy?: string
   split?: { motion_count: number; selected_observation_count: number; fold_motion_counts: Record<string, number> }
   cross_validation?: {
     zero_offset: TimeOffsetMetric
     candidate: TimeOffsetMetric
     improvement: { absolute_translation_mm: number; relative_translation: number | null; rotation_change_deg: number }
   }
+  motion_consistency?: TimeOffsetMotionConsistency | null
   checks: Array<{ name: string; status: string; actual?: unknown; threshold?: unknown; warning_threshold?: unknown; failure_threshold?: unknown }>
   curve: Array<{ robot_pose_time_offset_ms: number; residuals: ResidualSummary }>
 }
 type TimeOffsetSearch = {
+  implementation_revision?: string
   policy: SynchronizationPolicy
   status: "complete" | "failed"
   sign_convention: { operator_equation: string; positive_operator_value: string; conversion: string }
@@ -177,6 +215,8 @@ export function CalibrationWorkflow() {
   const synchronizationPolicy = synchronizationSelection?.runRoot === selectedRun
     ? synchronizationSelection.value
     : setup.data?.solver.synchronization?.default_policy ?? "auto_offset"
+  const backendTimingRevision = setup.data?.solver.synchronization?.implementation_revision
+  const autoTimingRuntimeReady = backendTimingRevision === REQUIRED_AUTO_TIMING_IMPLEMENTATION_REVISION
   const activeAttemptId = attemptSelection?.runRoot === selectedRun ? attemptSelection.attemptId : setup.data?.latest_attempt?.attempt_id ?? null
 
   const attempt = useQuery({
@@ -200,6 +240,9 @@ export function CalibrationWorkflow() {
   const createAttempt = useMutation({
     mutationFn: () => {
       if (!selectedMode) throw new Error("Choose how the cameras are mounted before analyzing the recording")
+      if (synchronizationPolicy === "auto_offset" && !autoTimingRuntimeReady) {
+        throw new Error("Restart the PoseTestBot backend before creating an Auto time-aligned attempt")
+      }
       return api<{ attempt_id: string; job_id: string }>("/calibration/attempts", { method: "POST", body: JSON.stringify({ run_root: selectedRun, mode: selectedMode, sensor_keys: sensorKeys, target_id: targetId, solver_policy: "auto_compare", intrinsics_policy: "compare_factory_opencv", synchronization_policy: synchronizationPolicy }) })
     },
     onSuccess: (value) => { setAttemptSelection({ runRoot: selectedRun, attemptId: value.attempt_id }); setOverrideSelection(null); toast.success("Calibration queued", { description: `Attempt ${value.attempt_id} · job ${value.job_id}` }); queryClient.invalidateQueries({ queryKey: ["calibration", "setup", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["jobs"] }) },
@@ -211,6 +254,7 @@ export function CalibrationWorkflow() {
     onError: (error) => toast.error("Recommendations were not accepted", { description: errorMessage(error) }),
   })
   const canRun = Boolean(selectedMode) && sensorKeys.length > 0 && Boolean(targetId) && !createAttempt.isPending
+    && (synchronizationPolicy !== "auto_offset" || autoTimingRuntimeReady)
   const passingSelections = useMemo(() => attempt.data?.results?.results.filter((result) => {
     const selected = overrides[result.sensor_key]
     return result.candidates.some((candidate) => candidate.candidate_id === selected && candidate.status === "passing")
@@ -227,13 +271,13 @@ export function CalibrationWorkflow() {
         const mountingLabel = camera.current_mounting_mode === "static" ? "Static" : camera.current_mounting_mode === "eye_in_hand" ? "Robot-mounted" : "Mounting not recorded"
         return <Label key={camera.sensor_key} className={`flex items-start gap-3 rounded-md p-2 ${compatible ? "cursor-pointer hover:bg-muted/50" : "opacity-55"}`}><Checkbox disabled={!compatible} checked={compatible && sensorKeys.includes(camera.sensor_key)} onCheckedChange={(checked) => setSensorSelection({ runRoot: selectedRun, values: checked === true ? [...sensorKeys, camera.sensor_key] : sensorKeys.filter((key) => key !== camera.sensor_key) })} /><span><span className="block text-sm font-medium">{camera.display_name}</span><span className="block font-mono text-[10px] font-normal text-muted-foreground">{camera.sensor_key}</span><span className="mt-0.5 block text-[10px] font-normal text-muted-foreground">{mountingLabel}{compatible ? "" : " · use the other calibration mode"}</span></span></Label>
       })}{!setup.data.cameras.length && <div className="p-3 text-xs text-destructive">No captured camera has complete RGB-D, timestamp, and robot-pose evidence.</div>}</div>{setup.data.unavailable_cameras.length > 0 && <details className="rounded border border-warning/40 p-3 text-xs"><summary className="cursor-pointer font-medium">{setup.data.unavailable_cameras.length} unavailable camera folder(s)</summary><div className="mt-2 space-y-1 text-muted-foreground">{setup.data.unavailable_cameras.map((camera) => <div key={camera.sensor_key}>{camera.display_name}: {camera.errors.join("; ")}</div>)}</div></details>}</fieldset>
-        <div className="space-y-5"><div className="space-y-2"><Label>Printed calibration grid from step 2 <span className="text-destructive">Required</span></Label>{selectedTarget ? <div className="rounded-lg border border-success/30 bg-success/5 p-3"><div className="text-sm font-semibold">{selectedTarget.display_name}</div><div className="mt-1 font-mono text-[10px] text-muted-foreground">{selectedTarget.target_id}</div><p className="mt-2 text-[11px] text-muted-foreground">The analysis uses the run-owned, hash-verified copy selected before capture.</p></div> : <div className="rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><div className="font-semibold text-destructive">No valid grid is bound to this run</div><p className="mt-1 text-muted-foreground">Return to step 2 and select the exact printed board. Grid choice cannot be overridden during analysis.</p></div>}<div className="flex items-center justify-between text-xs text-muted-foreground"><span>The saved marker geometry must match the physical print exactly.</span><Link to="/calibration-targets" className="text-primary-strong underline-offset-4 hover:underline">Review selected grid</Link></div></div><div className="space-y-2"><div className="text-sm font-semibold">Automatic solution comparison</div><p className="text-xs leading-relaxed text-muted-foreground">PoseTestBot compares supported grid-pose and robot-camera methods, validates them on held-out motion, and recommends only passing results.</p><details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">How acceptance is decided</summary><div className="border-t px-3 py-3 text-[11px] leading-relaxed text-muted-foreground" data-testid="calibration-acceptance-thresholds">Requires ≥{setup.data.solver.thresholds.min_accepted_views} accepted views spanning ≥{setup.data.solver.thresholds.min_coverage_cells} of 9 image regions, and ≥{setup.data.solver.thresholds.min_motion_poses} robot poses over ≥{setup.data.solver.thresholds.min_translation_span_mm} mm / ≥{setup.data.solver.thresholds.min_rotation_span_deg}°. Each grid view needs ≥{setup.data.solver.thresholds.min_pnp_common_inliers} supported corners across at least {setup.data.solver.thresholds.min_pnp_supported_markers} markers and a whole-grid error ≤{setup.data.solver.thresholds.max_pnp_all_point_mean_reprojection_error_px} px. Camera and robot timestamps must be within {setup.data.solver.thresholds.max_nearest_pose_delta_ms} ms. A new OpenCV lens estimate needs held-out proof, ≤{setup.data.solver.thresholds.max_per_view_reprojection_error_px} px per view, and ≤{setup.data.solver.thresholds.max_intrinsic_rms_reprojection_error_px} px RMS.</div></details></div></div>
+        <div className="space-y-5"><div className="space-y-2"><Label>Printed calibration grid from step 2 <span className="text-destructive">Required</span></Label>{selectedTarget ? <div className="rounded-lg border border-success/30 bg-success/5 p-3"><div className="text-sm font-semibold">{selectedTarget.display_name}</div><div className="mt-1 font-mono text-[10px] text-muted-foreground">{selectedTarget.target_id}</div><p className="mt-2 text-[11px] text-muted-foreground">The analysis uses the run-owned, hash-verified copy selected before capture.</p></div> : <div className="rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><div className="font-semibold text-destructive">No valid grid is bound to this run</div><p className="mt-1 text-muted-foreground">Return to step 2 and select the exact printed board. Grid choice cannot be overridden during analysis.</p></div>}<div className="flex items-center justify-between text-xs text-muted-foreground"><span>The saved marker geometry must match the physical print exactly.</span><Link to="/calibration-targets" className="text-primary-strong underline-offset-4 hover:underline">Review selected grid</Link></div></div><div className="space-y-2"><div className="text-sm font-semibold">Automatic solution comparison</div><p className="text-xs leading-relaxed text-muted-foreground">PoseTestBot compares supported grid-pose and robot-camera methods, validates them on held-out motion, and recommends only passing results.</p><details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">How acceptance is decided</summary><div className="border-t px-3 py-3 text-[11px] leading-relaxed text-muted-foreground" data-testid="calibration-acceptance-thresholds">Requires ≥{setup.data.solver.thresholds.min_accepted_views} accepted views and ≥{setup.data.solver.thresholds.min_motion_poses} robot poses over ≥{setup.data.solver.thresholds.min_translation_span_mm} mm / ≥{setup.data.solver.thresholds.min_rotation_span_deg}°. Robot-camera field coverage must span ≥{((setup.data.solver.thresholds.min_image_centroid_x_span_ratio ?? 0.45) * 100).toFixed(0)}% of image width and ≥{((setup.data.solver.thresholds.min_image_centroid_y_span_ratio ?? 0.35) * 100).toFixed(0)}% of image height with ≥{((setup.data.solver.thresholds.min_image_centroid_hull_area_ratio ?? 0.10) * 100).toFixed(0)}% supported centroid-hull area; each extreme needs ≥{setup.data.solver.thresholds.image_coverage_tail_support_views ?? 5} views. The 3 × 3 centroid-cell count remains diagnostic. Each grid view needs ≥{setup.data.solver.thresholds.min_pnp_common_inliers} supported corners across at least {setup.data.solver.thresholds.min_pnp_supported_markers} markers and a whole-grid error ≤{setup.data.solver.thresholds.max_pnp_all_point_mean_reprojection_error_px} px. Camera and robot timestamps must be within {setup.data.solver.thresholds.max_nearest_pose_delta_ms} ms. A new OpenCV lens estimate separately needs ≥{setup.data.solver.thresholds.min_coverage_cells} of 9 image regions, held-out proof, ≤{setup.data.solver.thresholds.max_per_view_reprojection_error_px} px per view, and ≤{setup.data.solver.thresholds.max_intrinsic_rms_reprojection_error_px} px RMS.</div></details></div></div>
       </div>
       <fieldset className="space-y-3" data-testid="calibration-synchronization-policy">
         <legend className="text-sm font-semibold">Auto time alignment</legend>
         <div className="grid gap-3 xl:grid-cols-2">
           <Label className={`cursor-pointer rounded-lg border p-4 ${synchronizationPolicy === "auto_offset" ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "border-border"}`}>
-            <span className="flex items-start gap-3"><input type="radio" name="calibration-synchronization-policy" value="auto_offset" checked={synchronizationPolicy === "auto_offset"} onChange={() => setSynchronizationSelection({ runRoot: selectedRun, value: "auto_offset" })} className="mt-1" /><span><span className="block font-semibold">Estimate robot-pose time offset (recommended)</span><span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">Search separately for each camera and apply an offset only when fixed, motion-disjoint checks show a consistent improvement.</span></span></span>
+            <span className="flex items-start gap-3"><input type="radio" name="calibration-synchronization-policy" value="auto_offset" checked={synchronizationPolicy === "auto_offset"} onChange={() => setSynchronizationSelection({ runRoot: selectedRun, value: "auto_offset" })} className="mt-1" /><span><span className="block font-semibold">Estimate robot-pose time offset (recommended)</span><span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">Search separately for each camera, then require aggregate improvement plus consistent leave-one-motion-out evidence from both reference solvers.</span></span></span>
           </Label>
           <Label className={`cursor-pointer rounded-lg border p-4 ${synchronizationPolicy === "fixed_zero" ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "border-border"}`}>
             <span className="flex items-start gap-3"><input type="radio" name="calibration-synchronization-policy" value="fixed_zero" checked={synchronizationPolicy === "fixed_zero"} onChange={() => setSynchronizationSelection({ runRoot: selectedRun, value: "fixed_zero" })} className="mt-1" /><span><span className="block font-semibold">Use captured timestamps (0 ms)</span><span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">Skip estimation only when the camera/robot timing path has been independently validated at zero offset.</span></span></span>
@@ -243,9 +287,10 @@ export function CalibrationWorkflow() {
           <span><span className="font-semibold text-foreground">What it changes:</span> Auto time alignment estimates effective latency for this capture path. It does not synchronize hardware clocks or rewrite raw frame or robot timestamps.</span>
           <HelpTip label="robot-pose time-offset sign">A positive robot-pose time offset pairs a frame at time t with a robot pose recorded later at t + offset. The lower-level dataset sync delta has the opposite sign.</HelpTip>
         </div>
-        {setup.data.solver.synchronization?.search && <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">Time-alignment search limits</summary><div className="border-t px-3 py-3 text-[11px] text-muted-foreground">Fixed search: {formatSigned(setup.data.solver.synchronization.search.minimum_robot_pose_time_offset_ms, " ms")} to {formatSigned(setup.data.solver.synchronization.search.maximum_robot_pose_time_offset_ms, " ms")} in {setup.data.solver.synchronization.search.step_ms.toFixed(1)} ms steps. These limits are recorded with the attempt and are not tuned interactively.</div></details>}
+        {synchronizationPolicy === "auto_offset" && !autoTimingRuntimeReady && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs leading-relaxed" data-testid="calibration-backend-restart-required"><div className="font-semibold text-destructive">Backend restart required</div><p className="mt-1 text-muted-foreground">This page requires timing revision <span className="font-mono">{REQUIRED_AUTO_TIMING_IMPLEMENTATION_REVISION}</span>, but the running backend reports <span className="font-mono">{backendTimingRevision ?? "no revision"}</span>. Restart the PoseTestBot service and reload this page before analyzing with Auto time alignment. Otherwise the attempt would preserve the obsolete timing rule.</p></div>}
+        {setup.data.solver.synchronization?.search && <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">Time-alignment search limits and acceptance rule</summary><div className="space-y-2 border-t px-3 py-3 text-[11px] text-muted-foreground"><p>Fixed search: {formatSigned(setup.data.solver.synchronization.search.minimum_robot_pose_time_offset_ms, " ms")} to {formatSigned(setup.data.solver.synchronization.search.maximum_robot_pose_time_offset_ms, " ms")} in {setup.data.solver.synchronization.search.step_ms.toFixed(1)} ms steps. These limits are recorded with the attempt and are not tuned interactively.</p><p>At least {(setup.data.solver.synchronization.search.minimum_motion_count_per_cross_validation_fold ?? 4) * 3} eligible motion groups are required. After candidate selection, every motion is held out once while the robot-camera transform is fitted from the other motions. Both reference solvers must retain a median improvement of at least 0.25 mm and 10%, with a one-sided sign-consistency probability corrected across the full offset search no greater than {(setup.data.solver.synchronization.search.maximum_leave_one_motion_out_search_adjusted_sign_p_value ?? 0.05).toFixed(2)}.</p></div></details>}
       </fieldset>
-      <Button className="w-full" size="lg" disabled={!canRun} onClick={() => createAttempt.mutate()}>{createAttempt.isPending ? <LoaderCircle className="animate-spin" /> : <Grid3X3 />}Analyze recording</Button>{!canRun && <p className="text-center text-xs text-muted-foreground">Confirm one mounting group, at least one matching camera, and the step-2 printed grid to continue.</p>}
+      <Button className="w-full" size="lg" disabled={!canRun} onClick={() => createAttempt.mutate()}>{createAttempt.isPending ? <LoaderCircle className="animate-spin" /> : <Grid3X3 />}Analyze recording</Button>{!canRun && <p className="text-center text-xs text-muted-foreground">{synchronizationPolicy === "auto_offset" && !autoTimingRuntimeReady ? "Restart the PoseTestBot backend and reload this page to use the current Auto time-alignment rule." : "Confirm one mounting group, at least one matching camera, and the step-2 printed grid to continue."}</p>}
     </CardContent></Card>
 
     {activeAttemptId && <Card className="border-primary/25"><CardHeader><CardTitle className="flex items-center justify-between text-base"><span>Calculation progress</span><span className="font-mono text-[10px] font-normal text-muted-foreground">{activeAttemptId}</span></CardTitle><CardDescription>{attempt.data?.progress.message ?? "Loading attempt…"}</CardDescription></CardHeader><CardContent><p className="mb-3 text-xs leading-relaxed text-muted-foreground" data-testid="calibration-duration-guidance">A three-camera comparison usually takes 10–20 minutes. The background job continues if you leave this page; returning to this run restores its progress and results.</p><div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">{attempt.data?.progress.phases.map((phase, index) => <div key={phase.id} data-phase-id={phase.id} className={`rounded-lg border p-3 ${phase.status === "running" ? "border-primary bg-primary/5" : phase.status === "complete" ? "border-success/40 bg-success/5" : phase.status === "failed" ? "border-destructive/40 bg-destructive/5" : ""}`}><div className="flex items-center gap-2 text-xs font-semibold"><span className="grid size-5 place-items-center rounded-full bg-muted font-mono text-[10px]">{index + 1}</span>{phase.label}</div><div className="mt-2 flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">{phase.status === "running" && <LoaderCircle className="size-3 animate-spin" />}{phase.status === "complete" && <CheckCircle2 className="size-3 text-success" />}{phase.status === "failed" && <TriangleAlert className="size-3 text-destructive" />}{phase.status}</div></div>)}</div></CardContent></Card>}
@@ -257,10 +302,13 @@ export function CalibrationWorkflow() {
 
 function TimeAlignmentSummary({ search }: { search: TimeOffsetSearch | null }) {
   if (!search) return <Card className="border-warning/40 bg-warning/5" data-testid="calibration-time-alignment"><CardContent className="py-4 text-xs"><div className="font-semibold">Legacy timing evidence unavailable</div><p className="mt-1 text-muted-foreground">This historical attempt predates saved time-alignment evidence and is not reusable for a new dataset. Its immutable calculation evidence remains available for review.</p></CardContent></Card>
+  const currentTimingRevision = search.policy !== "auto_offset"
+    || search.implementation_revision === REQUIRED_AUTO_TIMING_IMPLEMENTATION_REVISION
   return <Card className={search.status === "failed" ? "border-destructive/40" : ""} data-testid="calibration-time-alignment">
     <CardHeader><CardTitle className="flex items-center gap-2 text-base">Auto time-alignment evidence <HelpTip label="robot-pose time-offset evidence">A positive offset uses a later robot pose. The lower-level dataset sync delta has the opposite sign. Neither value rewrites raw timestamps.</HelpTip></CardTitle><CardDescription>The offset estimates effective capture/pose latency; it is not evidence that the hardware clocks are synchronized.</CardDescription></CardHeader>
     <CardContent className="space-y-4">
-      {search.status === "failed" && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs" data-testid="calibration-time-alignment-failed"><div className="font-semibold text-destructive">Auto time alignment stopped this calibration</div><p className="mt-1 text-muted-foreground">At least one camera did not pass the offset stability and improvement gates. No robot-camera result was generated or saved; inspect the rejected candidate and checks below.</p></div>}
+      {!currentTimingRevision && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs" data-testid="calibration-attempt-legacy-timing-revision"><div className="font-semibold text-destructive">This attempt used an obsolete timing rule</div><p className="mt-1 text-muted-foreground">The immutable attempt records <span className="font-mono">{search.implementation_revision ?? "no timing revision"}</span>, so it did not run the current search-corrected leave-one-motion-out gate. It cannot be upgraded in place. Restart the PoseTestBot backend and create a new attempt from the same preserved recordings.</p></div>}
+      {search.status === "failed" && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs" data-testid="calibration-time-alignment-failed"><div className="font-semibold text-destructive">Auto time alignment stopped this calibration</div><p className="mt-1 text-muted-foreground">{currentTimingRevision ? "At least one camera did not pass offset stability, aggregate improvement, or leave-one-motion-out consistency. No robot-camera result was generated or saved; inspect the rejected candidate and checks below." : "This result was decided by the recorded legacy rule. No robot-camera result was generated or saved; create a fresh attempt after restarting the backend."}</p></div>}
       <div className="overflow-x-auto rounded-lg border">
         <table className="min-w-[1040px] w-full text-left text-[11px]">
           <caption className="sr-only">Motion-disjoint per-camera time-offset search decisions</caption>
@@ -269,6 +317,8 @@ function TimeAlignmentSummary({ search }: { search: TimeOffsetSearch | null }) {
             const baseline = sensor.cross_validation?.zero_offset.residuals
             const selected = sensor.cross_validation?.candidate.residuals
             const relative = sensor.cross_validation?.improvement.relative_translation
+            const motionMethods = sensor.motion_consistency?.methods ?? {}
+            const motionMethod = motionMethods[sensor.selection_extrinsic_method ?? ""] ?? Object.values(motionMethods)[0]
             const warningChecks = sensor.checks.filter((check) => check.status === "warning")
             const errorChecks = sensor.checks.filter((check) => check.status === "error")
             const warning = sensor.status === "failed" || sensor.boundary_hit || warningChecks.length > 0 || errorChecks.length > 0
@@ -282,13 +332,14 @@ function TimeAlignmentSummary({ search }: { search: TimeOffsetSearch | null }) {
               <td className="px-3 py-3 font-mono tabular-nums">{baseline && selected ? `${baseline.mean_rotation_deg.toFixed(3)} → ${selected.mean_rotation_deg.toFixed(3)}°` : "—"}{baseline && selected && <div className="mt-1 text-[9px] text-muted-foreground">0 ms → {candidateLabel}</div>}</td>
               <td className="px-3 py-3 tabular-nums">{sensor.split ? `${sensor.split.motion_count} / ${sensor.split.selected_observation_count}` : "—"}</td>
               <td className="px-3 py-3 tabular-nums">{relative === null || relative === undefined ? "—" : `${(relative * 100).toFixed(1)}%`}</td>
-              <td className="px-3 py-3"><span className="capitalize">{sensor.evidence_strength.replaceAll("_", " ")}</span>{sensor.boundary_hit ? " · boundary" : ""}{warningChecks.length > 0 && <div className="mt-1 text-[9px] text-warning-foreground">{warningChecks.map((check) => check.name.replaceAll("_", " ")).join("; ")}</div>}{errorChecks.length > 0 && <div className="mt-1 text-[9px] text-destructive">{errorChecks.map((check) => check.name.replaceAll("_", " ")).join("; ")}</div>}</td>
+              <td className="px-3 py-3"><span className="capitalize">{sensor.evidence_strength.replaceAll("_", " ")}</span>{sensor.boundary_hit ? " · boundary" : ""}{motionMethod && <div className="mt-1 text-[9px] tabular-nums" data-testid={`timing-motion-summary-${sensor.sensor_key}`}>{motionMethod.positive_motion_count}/{motionMethod.motion_count} held-out motions improved · corrected p {formatProbability(motionMethod.candidate_search_adjusted_positive_sign_p_value)}</div>}{warningChecks.length > 0 && <div className="mt-1 text-[9px] text-warning-foreground">{warningChecks.map((check) => check.name.replaceAll("_", " ")).join("; ")}</div>}{errorChecks.length > 0 && <div className="mt-1 text-[9px] text-destructive">{errorChecks.map((check) => check.name.replaceAll("_", " ")).join("; ")}</div>}</td>
             </tr>
           })}</tbody>
         </table>
       </div>
       <div className="space-y-2">{search.sensors.map((sensor) => <details className="rounded-lg border" key={sensor.sensor_key}><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">Advanced offset evidence · {sensor.display_name ?? sensor.sensor_key}</summary><div className="space-y-3 border-t p-3 text-[11px]">
         <div className="grid gap-2 sm:grid-cols-3"><Datum label="Candidate offset" value={formatSigned(sensor.candidate_robot_pose_time_offset_ms, " ms")} /><Datum label="Applied offset" value={formatSigned(sensor.selected_robot_pose_time_offset_ms, " ms")} /><Datum label="Decision reason" value={sensor.decision_reason.replaceAll("_", " ")} /></div>
+        {sensor.motion_consistency && <section className="space-y-2 rounded border p-3" data-testid={`timing-motion-consistency-${sensor.sensor_key}`}><div><div className="font-semibold">Leave-one-motion-out timing consistency</div><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Each row refits the robot-camera transform without the motion being scored. Median improvement must clear both materiality thresholds. Because the candidate was selected from this fixed motion set, the positive-motion sign test is Bonferroni-corrected for all {sensor.motion_consistency.candidate_search_hypothesis_count} nonzero offset candidates.</p></div><div className="overflow-x-auto"><table className="w-full min-w-[700px] text-left"><thead className="text-muted-foreground"><tr><th className="py-1 pr-3">Reference solver</th><th className="py-1 pr-3">Motions improved</th><th className="py-1 pr-3">Material motions</th><th className="py-1 pr-3">Median improvement</th><th className="py-1 pr-3">Raw sign p</th><th className="py-1 pr-3">Search-corrected p</th><th className="py-1">State</th></tr></thead><tbody>{Object.entries(sensor.motion_consistency.methods).map(([method, evidence]) => <tr className="border-t" key={method}><td className="py-1.5 pr-3 font-mono uppercase">{method}</td><td className="py-1.5 pr-3 tabular-nums">{evidence.positive_motion_count}/{evidence.motion_count}</td><td className="py-1.5 pr-3 tabular-nums">{evidence.material_motion_count}/{evidence.motion_count}</td><td className="py-1.5 pr-3 tabular-nums">{evidence.median_improvement.absolute_translation_mm.toFixed(3)} mm · {evidence.median_improvement.relative_translation === null ? "—" : `${(evidence.median_improvement.relative_translation * 100).toFixed(1)}%`}</td><td className="py-1.5 pr-3 font-mono">{formatProbability(evidence.positive_sign_p_value)}</td><td className="py-1.5 pr-3 font-mono">{formatProbability(evidence.candidate_search_adjusted_positive_sign_p_value)}</td><td className="py-1.5 capitalize">{evidence.status}</td></tr>)}</tbody></table></div></section>}
         {sensor.checks.length > 0 && <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left"><thead className="text-muted-foreground"><tr><th className="py-1 pr-3">Check</th><th className="py-1 pr-3">State</th><th className="py-1 pr-3">Actual</th><th className="py-1">Threshold</th></tr></thead><tbody>{sensor.checks.map((check) => <tr className="border-t" key={check.name}><td className="py-1.5 pr-3">{check.name.replaceAll("_", " ")}</td><td className="py-1.5 pr-3 capitalize">{check.status}</td><td className="py-1.5 pr-3 font-mono">{compactJson(check.actual)}</td><td className="py-1.5 font-mono">{compactJson(check.threshold ?? check.warning_threshold ?? check.failure_threshold)}</td></tr>)}</tbody></table></div>}
         {sensor.curve.length > 0 && <div className="max-h-52 overflow-auto rounded border"><table className="w-full text-left font-mono text-[10px]"><caption className="sr-only">Motion-disjoint search curve for {sensor.sensor_key}</caption><thead className="sticky top-0 bg-muted"><tr><th className="px-2 py-1">Offset</th><th className="px-2 py-1">Mean translation</th><th className="px-2 py-1">Mean rotation</th></tr></thead><tbody>{sensor.curve.map((sample) => <tr className="border-t" key={sample.robot_pose_time_offset_ms}><td className="px-2 py-1">{formatSigned(sample.robot_pose_time_offset_ms, " ms")}</td><td className="px-2 py-1">{sample.residuals.mean_translation_mm.toFixed(3)} mm</td><td className="px-2 py-1">{sample.residuals.mean_rotation_deg.toFixed(3)}°</td></tr>)}</tbody></table></div>}
       </div></details>)}</div>
@@ -331,6 +382,7 @@ function Metric({ label, value }: { label: string; value: string }) { return <di
 function Datum({ label, value }: { label: string; value: string }) { return <div><span className="text-muted-foreground">{label}</span><div className="mt-1 font-mono text-[10px] capitalize">{value}</div></div> }
 function format(value: number | null | undefined, suffix: string) { return value === null || value === undefined ? "—" : `${value.toFixed(3)}${suffix}` }
 function formatSigned(value: number, suffix: string) { return `${value >= 0 ? "+" : ""}${value.toFixed(1)}${suffix}` }
+function formatProbability(value: number) { return value < 0.001 ? value.toExponential(2) : value.toFixed(3) }
 function compactJson(value: unknown) {
   if (value === undefined || value === null) return "—"
   if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(3)

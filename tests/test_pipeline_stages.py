@@ -41,6 +41,8 @@ def test_bop_export_stage_builds_dataset_export_command(tmp_path: Path) -> None:
     assert "processed/synchronized" in job.command
     assert "--write-multiview-targets" in job.command
     assert "--write-coco-annotations" in job.command
+    assert job.parameters["options"]["annotation_source"] == "none"
+    assert job.command[job.command.index("--annotation-source") + 1] == "none"
     assert job.resources == ["disk_io"]
 
 

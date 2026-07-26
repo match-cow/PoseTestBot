@@ -13,6 +13,7 @@ from posetestbot.config import (
     DEFAULT_RECEIVER_PORT,
     DEFAULT_ROBOT_PORT,
     MAX_CAPTURE_COMMAND_VELOCITY_M_S,
+    MAX_OBJECT_DATASET_COMMAND_VELOCITY_M_S,
     bounded_capture_velocity_m_s,
 )
 from posetestbot.io.atomic import atomic_write_json
@@ -171,7 +172,20 @@ def build_capture_plan(
             ),
         )
     )
-    velocity = bounded_capture_velocity_m_s(requested_velocity)
+    extended_object_dataset_speed = (
+        config.get("dataset_mode") == "pose_template"
+        and requested_velocity > MAX_CAPTURE_COMMAND_VELOCITY_M_S
+    )
+    command_velocity_cap = (
+        MAX_OBJECT_DATASET_COMMAND_VELOCITY_M_S
+        if extended_object_dataset_speed
+        else MAX_CAPTURE_COMMAND_VELOCITY_M_S
+    )
+    command_protocol = "v1" if extended_object_dataset_speed else "legacy"
+    velocity = bounded_capture_velocity_m_s(
+        requested_velocity,
+        maximum_velocity_m_s=command_velocity_cap,
+    )
 
     if max_frames is not None and max_frames < 0:
         raise ValueError("max_frames must be greater than or equal to 0")
@@ -213,6 +227,14 @@ def build_capture_plan(
             "The configured capture speed "
             f"{requested_velocity:g} m/s is reduced to the host command cap "
             f"{velocity:g} m/s before START."
+        )
+    if command_protocol == "v1":
+        notes.append(
+            "This object-dataset request exceeds the conservative legacy "
+            f"{MAX_CAPTURE_COMMAND_VELOCITY_M_S:g} m/s range, so START uses "
+            "the structured robot_command.v1 protocol. The commissioned "
+            "Sunrise application must support that protocol and applies its "
+            "own A1 angular-speed limit."
         )
 
     sensor_records: list[Mapping[str, Any]] = []
@@ -370,6 +392,15 @@ def build_capture_plan(
         "--port_robot",
         str(command_port),
     ]
+    if command_protocol == "v1":
+        receiver_command.extend(
+            [
+                "--protocol",
+                "v1",
+                "--maximum-command-velocity-m-s",
+                str(command_velocity_cap),
+            ]
+        )
     commands.append(
         CaptureCommandPlan(
             role="robot_pose_receiver",
@@ -387,7 +418,8 @@ def build_capture_plan(
         "fps": fps,
         "velocity_m_s": velocity,
         "requested_velocity_m_s": requested_velocity,
-        "command_velocity_cap_m_s": MAX_CAPTURE_COMMAND_VELOCITY_M_S,
+        "command_velocity_cap_m_s": command_velocity_cap,
+        "command_protocol": command_protocol,
         "sensor_count": len(capture.get("sensors", [])),
         "enabled_sensor_count": len(enabled_sensors),
         "max_frames": max_frames,

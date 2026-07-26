@@ -379,7 +379,7 @@ def build_run_preflight(
                 _check(
                     "pose_template_selection",
                     "error",
-                    f"Objectful Ground Truth requires a valid confirmed pose template: {exc}",
+                    f"Object-bearing dataset export requires a valid confirmed pose template: {exc}",
                 )
             )
 

@@ -59,6 +59,9 @@ def test_calibrated_dataset_sequences_require_valid_profiles_and_allow_injection
         assert preflight.options == {"require_valid": True}
 
     guided = PIPELINE_SEQUENCES["calibrated_capture_to_bop_dataset_dry_run"]
-    for step_id in ("blenderproc_prepare", "bop_export"):
-        step = next(step for step in guided.steps if step.id == step_id)
-        assert "calibration_profiles" not in step.options
+    assert all(
+        step.stage_id not in {"blenderproc_prepare", "blenderproc_render"}
+        for step in guided.steps
+    )
+    export = next(step for step in guided.steps if step.id == "bop_export")
+    assert export.options == {"annotation_source": "none", "overwrite": True}

@@ -147,9 +147,9 @@ def valid_library_selection(**kwargs) -> dict:
 
 def overview_payload(config: dict | None = None) -> dict:
     resolved_config = config or run_config()
-    selected_bundle = (
-        resolved_config.get("calibration_profile_selection") or {}
-    ).get("bundle_sha256", "a" * 64)
+    selected_bundle = (resolved_config.get("calibration_profile_selection") or {}).get(
+        "bundle_sha256", "a" * 64
+    )
     sections = [
         ("run_setup", "Run Setup", "complete"),
         ("preflight", "Preflight", "pending"),
@@ -239,72 +239,217 @@ def install_common_mocks(
     config_payload: dict | None = None,
 ) -> None:
     requests = requests if requests is not None else []
-    preflight_state = preflight_state if preflight_state is not None else {"blocker": None}
+    preflight_state = (
+        preflight_state if preflight_state is not None else {"blocker": None}
+    )
     config_payload = config_payload if config_payload is not None else run_config()
 
-    page.route("**/ui/bootstrap", lambda route: fulfill_json(route, {
-        "schema_version": "web_bootstrap.v1",
-        "brand": {
-            "name": "PoseTestBot",
-            "logo_url": "/assets/cow_light.png",
-            "logo_urls": {
-                "light": "/assets/cow_light.png",
-                "dark": "/assets/cow_dark.png",
+    page.route(
+        "**/ui/bootstrap",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "web_bootstrap.v1",
+                "brand": {
+                    "name": "PoseTestBot",
+                    "logo_url": "/assets/cow_light.png",
+                    "logo_urls": {
+                        "light": "/assets/cow_light.png",
+                        "dark": "/assets/cow_dark.png",
+                    },
+                    "favicon_url": "/assets/cow_favicon.png",
+                },
+                "robot": {"ip": "172.31.1.147", "port": 30300},
+                "default_run_root": "/tmp/posetestbot-console/default",
+                "allowed_run_roots": ["/tmp/posetestbot-console"],
             },
-            "favicon_url": "/assets/cow_favicon.png",
-        },
-        "robot": {"ip": "172.31.1.147", "port": 30300},
-        "default_run_root": "/tmp/posetestbot-console/default",
-        "allowed_run_roots": ["/tmp/posetestbot-console"],
-    }))
-    page.route("**/ui/runs", lambda route: fulfill_json(route, {
-        "schema_version": "web_run_index.v1",
-        "runs": [
-            {"path": RUN_ROOT, "name": "new-run", "sequence": "real_full_capture_validation", "plan_only": True, "config_valid": True, "config_error": None, "modified_at": "2026-07-10T12:00:00Z"},
-            {"path": "/tmp/posetestbot-console/old-run", "name": "old-run", "sequence": "sync_aruco", "plan_only": True, "config_valid": True, "config_error": None, "modified_at": "2026-07-09T12:00:00Z"},
-        ],
-    }))
-    page.route("**/calibration-targets/status", lambda route: fulfill_json(route, {
-        "schema_version": "calibration_target_generator_status.v1",
-        "generation_available": generator_available,
-        "generator": {
-            "checkout": "/repo/third_party/PoseGridGen",
-            "required_revision": "ad152e369e8d2746d0cf66cb1455f2371b0ec0f0",
-            "reason": None if generator_available else "Pinned source checkout is unavailable",
-        },
-    }))
+        ),
+    )
+    page.route(
+        "**/ui/runs",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "web_run_index.v1",
+                "runs": [
+                    {
+                        "path": RUN_ROOT,
+                        "name": "new-run",
+                        "sequence": "real_full_capture_validation",
+                        "plan_only": True,
+                        "config_valid": True,
+                        "config_error": None,
+                        "modified_at": "2026-07-10T12:00:00Z",
+                    },
+                    {
+                        "path": "/tmp/posetestbot-console/old-run",
+                        "name": "old-run",
+                        "sequence": "sync_aruco",
+                        "plan_only": True,
+                        "config_valid": True,
+                        "config_error": None,
+                        "modified_at": "2026-07-09T12:00:00Z",
+                    },
+                ],
+            },
+        ),
+    )
+    page.route(
+        "**/calibration-targets/status",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "calibration_target_generator_status.v1",
+                "generation_available": generator_available,
+                "generator": {
+                    "checkout": "/repo/third_party/PoseGridGen",
+                    "required_revision": "ad152e369e8d2746d0cf66cb1455f2371b0ec0f0",
+                    "reason": None
+                    if generator_available
+                    else "Pinned source checkout is unavailable",
+                },
+            },
+        ),
+    )
     page.route(
         "**/ui/overview**",
         lambda route: fulfill_json(route, overview_payload(config_payload)),
     )
-    page.route("**/sensors/status", lambda route: fulfill_json(route, {"schema_version": "sensor_status.v1", "families": [], "total_connected": 0, "all_expected_connected": True}))
-    page.route("**/robot/status", lambda route: fulfill_json(route, {"schema_version": "robot_status.v2", "selected_profile": {"mode": "real"}}))
-    page.route("**/runtime/status", lambda route: fulfill_json(route, {"schema_version": "runtime_status.v1", "runtimes": [{"runtime_id": "blenderproc", "available": True}]}))
-    page.route("**/capture/jobs**", lambda route: fulfill_json(route, {"jobs": [], "active_count": 0, "resources": {}, "status_artifact": None}))
-    page.route("**/jobs", lambda route: fulfill_json(route, {"jobs": [], "resources": {}}))
-    page.route("**/monitoring/webcam", lambda route: fulfill_json(route, {"job": {"id": "monitor-1", "status": "failed"}, "webrtc_status": {"schema_version": "monitor_webrtc.v1", "transport": "webrtc", "status": "failed", "signaling_ready": False, "peer_count": 0, "frame_count": 0, "selected_node": None, "error": "mock camera offline"}}))
-    page.route("**/pipeline/sequences", lambda route: fulfill_json(route, {"sequences": [{"id": "real_full_capture_validation", "label": "Real Full Capture Validation", "description": "Safe plan", "steps": []}]}))
-    page.route("**/pipeline/stages", lambda route: fulfill_json(route, {"stages": [{"id": "capture_plan", "label": "Capture Plan", "description": "Write a command plan without hardware.", "resources": ["disk_io"], "parameters": []}]}))
+    page.route(
+        "**/sensors/status",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "sensor_status.v1",
+                "families": [],
+                "total_connected": 0,
+                "all_expected_connected": True,
+            },
+        ),
+    )
+    page.route(
+        "**/robot/status",
+        lambda route: fulfill_json(
+            route,
+            {"schema_version": "robot_status.v2", "selected_profile": {"mode": "real"}},
+        ),
+    )
+    page.route(
+        "**/runtime/status",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "runtime_status.v1",
+                "runtimes": [{"runtime_id": "blenderproc", "available": True}],
+            },
+        ),
+    )
+    page.route(
+        "**/capture/jobs**",
+        lambda route: fulfill_json(
+            route,
+            {"jobs": [], "active_count": 0, "resources": {}, "status_artifact": None},
+        ),
+    )
+    page.route(
+        "**/jobs", lambda route: fulfill_json(route, {"jobs": [], "resources": {}})
+    )
+    page.route(
+        "**/monitoring/webcam",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {"id": "monitor-1", "status": "failed"},
+                "webrtc_status": {
+                    "schema_version": "monitor_webrtc.v1",
+                    "transport": "webrtc",
+                    "status": "failed",
+                    "signaling_ready": False,
+                    "peer_count": 0,
+                    "frame_count": 0,
+                    "selected_node": None,
+                    "error": "mock camera offline",
+                },
+            },
+        ),
+    )
+    page.route(
+        "**/pipeline/sequences",
+        lambda route: fulfill_json(
+            route,
+            {
+                "sequences": [
+                    {
+                        "id": "real_full_capture_validation",
+                        "label": "Real Full Capture Validation",
+                        "description": "Safe plan",
+                        "steps": [],
+                    }
+                ]
+            },
+        ),
+    )
+    page.route(
+        "**/pipeline/stages",
+        lambda route: fulfill_json(
+            route,
+            {
+                "stages": [
+                    {
+                        "id": "capture_plan",
+                        "label": "Capture Plan",
+                        "description": "Write a command plan without hardware.",
+                        "resources": ["disk_io"],
+                        "parameters": [],
+                    }
+                ]
+            },
+        ),
+    )
 
     def config_handler(route) -> None:
         if route.request.method == "POST":
-            requests.append({"path": "/run-config", "body": route.request.post_data_json})
-            fulfill_json(route, {"config": config_payload, "output": "written"}, status=201)
+            requests.append(
+                {"path": "/run-config", "body": route.request.post_data_json}
+            )
+            fulfill_json(
+                route, {"config": config_payload, "output": "written"}, status=201
+            )
         else:
-            fulfill_json(route, {"config": config_payload, "preflight": {"queue_blocker": preflight_state["blocker"]}})
+            fulfill_json(
+                route,
+                {
+                    "config": config_payload,
+                    "preflight": {"queue_blocker": preflight_state["blocker"]},
+                },
+            )
+
     page.route("**/run-config**", config_handler)
 
     def pipeline_handler(route) -> None:
         requests.append({"path": "/pipeline/run", "body": route.request.post_data_json})
-        fulfill_json(route, {"job_id": f"job-{len(requests)}", "status": "queued"}, status=202)
+        fulfill_json(
+            route, {"job_id": f"job-{len(requests)}", "status": "queued"}, status=202
+        )
+
     page.route("**/pipeline/run", pipeline_handler)
-    page.route("**/sensors/previews/stop", lambda route: (requests.append({"path": "/sensors/previews/stop", "body": {}}), fulfill_json(route, {"jobs": []}))[1])
+    page.route(
+        "**/sensors/previews/stop",
+        lambda route: (
+            requests.append({"path": "/sensors/previews/stop", "body": {}}),
+            fulfill_json(route, {"jobs": []}),
+        )[1],
+    )
 
 
-def test_navigation_run_fallback_persistence_and_both_themes(console_server, page) -> None:
+def test_navigation_run_fallback_persistence_and_both_themes(
+    console_server, page
+) -> None:
     install_common_mocks(page)
     page.emulate_media(color_scheme="dark")
-    page.add_init_script("if (!localStorage.getItem('posetestbot.selectedRun')) localStorage.setItem('posetestbot.selectedRun', '/tmp/posetestbot-console/deleted-run'); localStorage.removeItem('posetestbot.theme')")
+    page.add_init_script(
+        "if (!localStorage.getItem('posetestbot.selectedRun')) localStorage.setItem('posetestbot.selectedRun', '/tmp/posetestbot-console/deleted-run'); localStorage.removeItem('posetestbot.theme')"
+    )
 
     page.goto(console_server.url, wait_until="networkidle")
 
@@ -327,9 +472,9 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     expect(primary_navigation.get_by_role("link", name="Workflow")).to_have_attribute(
         "href", "#/workflow/setup"
     )
-    expect(page.get_by_role("link", name="Open camera calibration", exact=True)).to_have_attribute(
-        "href", "#/workflow/calibration"
-    )
+    expect(
+        page.get_by_role("link", name="Open camera calibration", exact=True)
+    ).to_have_attribute("href", "#/workflow/calibration")
     assert page.evaluate("localStorage.getItem('posetestbot.theme')") is None
     assert page.evaluate("localStorage.getItem('posetestbot.selectedRun')") is None
     expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("new-run")
@@ -343,12 +488,18 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
     page.reload(wait_until="networkidle")
     expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("old-run")
     page.get_by_role("button", name="Choose run path").click()
-    expect(page.locator("#new-run-path")).to_have_value("/tmp/posetestbot-console/old-run")
+    expect(page.locator("#new-run-path")).to_have_value(
+        "/tmp/posetestbot-console/old-run"
+    )
     page.keyboard.press("Escape")
     page.get_by_role("button", name="Open operator console guide").click()
     expect(page.get_by_role("heading", name="Operator console guide")).to_be_visible()
-    expect(page.get_by_text("Choose an outcome in Workflow", exact=True)).to_be_visible()
-    expect(page.get_by_text("IIWA STOP is not a safety stop", exact=False)).to_be_visible()
+    expect(
+        page.get_by_text("Choose an outcome in Workflow", exact=True)
+    ).to_be_visible()
+    expect(
+        page.get_by_text("IIWA STOP is not a safety stop", exact=False)
+    ).to_be_visible()
     page.keyboard.press("Escape")
     theme_toggle = page.get_by_role("button", name="Switch to light theme")
     theme_toggle_box = theme_toggle.bounding_box()
@@ -362,9 +513,9 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
         "src", "/assets/cow_light.png"
     )
     assert page.evaluate("localStorage.getItem('posetestbot.theme')") == "light"
-    expect(page.get_by_role("link", name="Open PoseTestBot on GitHub")).to_have_attribute(
-        "href", "https://github.com/match-cow/PoseTestBot"
-    )
+    expect(
+        page.get_by_role("link", name="Open PoseTestBot on GitHub")
+    ).to_have_attribute("href", "https://github.com/match-cow/PoseTestBot")
     sidebar_rgb = page.get_by_role(
         "complementary", name="Application sidebar"
     ).evaluate(
@@ -379,12 +530,21 @@ def test_navigation_run_fallback_persistence_and_both_themes(console_server, pag
         }"""
     )
     assert min(sidebar_rgb[:3]) > 220
-    expect(page.get_by_text("Physical capture always requires fresh operator acknowledgement.", exact=True)).to_have_count(0)
-    expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("background-color", "rgba(0, 0, 0, 0)")
+    expect(
+        page.get_by_text(
+            "Physical capture always requires fresh operator acknowledgement.",
+            exact=True,
+        )
+    ).to_have_count(0)
+    expect(page.get_by_role("img", name="PoseTestBot")).to_have_css(
+        "background-color", "rgba(0, 0, 0, 0)"
+    )
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("padding", "0px")
 
 
-def test_primary_navigation_resets_document_scroll_position(console_server, page) -> None:
+def test_primary_navigation_resets_document_scroll_position(
+    console_server, page
+) -> None:
     install_common_mocks(page)
     page.goto(f"{console_server.url}/#/workflow/dataset", wait_until="networkidle")
     page.evaluate("window.scrollTo(0, 1200)")
@@ -411,7 +571,9 @@ def test_workflow_chooser_distinguishes_numbered_required_journeys(
     expect(page.get_by_role("heading", name="What do you want to do?")).to_be_visible()
     expect(page.get_by_role("heading", name="Calibrate cameras")).to_be_visible()
     expect(page.get_by_role("heading", name="Record an object dataset")).to_be_visible()
-    expect(page.get_by_text("Each guided workflow shows the required order", exact=False)).to_be_visible()
+    expect(
+        page.get_by_text("Each guided workflow shows the required order", exact=False)
+    ).to_be_visible()
 
     outlines = page.locator("main ol")
     expect(outlines).to_have_count(2)
@@ -447,9 +609,7 @@ def test_workflow_stepper_connectors_follow_numbered_steps(
 
     stepper = page.get_by_role("navigation", name="Required workflow steps")
     expect(stepper).to_be_visible()
-    expect(page).to_have_url(
-        f"{console_server.url}/#/workflow/calibration?step=target"
-    )
+    expect(page).to_have_url(f"{console_server.url}/#/workflow/calibration?step=target")
     expect(page.get_by_role("heading", name="Calibrate cameras")).to_be_in_viewport()
     expect(stepper.locator('[aria-current="step"]')).to_contain_text(
         "Choose the printed calibration grid"
@@ -461,7 +621,9 @@ def test_workflow_stepper_connectors_follow_numbered_steps(
 
     for index in range(4):
         step_box = steps.nth(index).bounding_box()
-        number_box = steps.nth(index).locator("[data-workflow-step-number]").bounding_box()
+        number_box = (
+            steps.nth(index).locator("[data-workflow-step-number]").bounding_box()
+        )
         connector_box = connectors.nth(index).bounding_box()
         next_step_box = steps.nth(index + 1).bounding_box()
         assert step_box is not None
@@ -541,7 +703,9 @@ def test_new_run_path_renders_guided_setup_when_run_config_is_missing(
     expect(setup).to_be_visible()
     expect(setup.get_by_test_id("run-camera-row")).to_have_count(2)
     expect(setup.get_by_role("button", name="Save setup")).to_be_enabled()
-    expect(page.get_by_role("navigation", name="Required workflow steps")).to_be_visible()
+    expect(
+        page.get_by_role("navigation", name="Required workflow steps")
+    ).to_be_visible()
     expect(page.get_by_role("combobox", name="Selected run")).to_contain_text(fresh_run)
 
 
@@ -557,11 +721,15 @@ def test_responsive_shell_and_dataset_workflow_links(console_server, page) -> No
     primary_navigation = page.get_by_role("navigation", name="Primary navigation")
     expect(primary_navigation).to_have_count(1)
     expect(primary_navigation).to_be_visible()
-    expect(primary_navigation.get_by_role("link", name="Calibration Targets")).to_be_visible()
-    expect(primary_navigation.get_by_role("link", name="Pose Templates")).to_be_visible()
-    expect(page.get_by_role("link", name="Open object dataset", exact=True)).to_have_attribute(
-        "href", "#/workflow/dataset"
-    )
+    expect(
+        primary_navigation.get_by_role("link", name="Calibration Targets")
+    ).to_be_visible()
+    expect(
+        primary_navigation.get_by_role("link", name="Pose Templates")
+    ).to_be_visible()
+    expect(
+        page.get_by_role("link", name="Open object dataset", exact=True)
+    ).to_have_attribute("href", "#/workflow/dataset")
     expect(page.get_by_text("Object dataset evidence", exact=True)).to_be_visible()
     assert page.evaluate("getComputedStyle(document.body).minWidth") == "0px"
     assert page.evaluate(
@@ -579,7 +747,13 @@ def pose_template_source(*, available: bool) -> dict:
         "reason": None if available else "PoseTemplateCreator checkout is missing",
         "capabilities": {
             "formats": ["ply", "stl", "obj"],
-            "limits": {"cad_bytes": 52428800, "batch_bytes": 104857600, "faces": 1000000, "contour_vertices": 10000, "instances": 200},
+            "limits": {
+                "cad_bytes": 52428800,
+                "batch_bytes": 104857600,
+                "faces": 1000000,
+                "contour_vertices": 10000,
+                "instances": 200,
+            },
         },
     }
 
@@ -587,108 +761,199 @@ def pose_template_source(*, available: bool) -> dict:
 def pose_template_catalog() -> dict:
     return {
         "schema_version": "object_catalog.v1",
-        "objects": [{
-            "catalog_uuid": "11111111-1111-4111-8111-111111111111",
-            "obj_id": 7,
-            "name": "Clamp",
-            "alias": "Small clamp",
-            "description": "Textured fixture",
-            "tags": ["metal", "reflective"],
-            "groups": ["clamps", "validation set"],
-            "attributes": {"owner": "vision", "finish": "matte"},
-            "source_filename": "clamp.stl",
-            "source_format": "stl",
-            "source_sha256": "a" * 64,
-            "canonical_ply_sha256": "b" * 64,
-            "geometry_revision": 1,
-            "source_to_mm_scale": 1.0,
-            "texture_sha256": "c" * 64,
-            "created_at": "2026-07-20T09:00:00Z",
-            "updated_at": "2026-07-20T10:00:00Z",
-            "archived_at": None,
-            "state": "active",
-            "extraction": {"vertices": 8, "faces": 12, "bounds_mm": [[-5, -5, -5], [5, 5, 5]], "watertight": True},
-            "assets": {
-                "source": {"path": "objects/1/source/clamp.stl", "sha256": "a" * 64, "size_bytes": 100, "media_type": "application/octet-stream"},
-                "canonical_ply": {"path": "objects/1/derived/canonical.ply", "sha256": "b" * 64, "size_bytes": 80, "media_type": "application/octet-stream"},
-                "texture": {"path": "objects/1/texture/texture.png", "sha256": "c" * 64, "size_bytes": 40, "media_type": "image/png"},
-            },
-            "usage": {"template_count": 0, "templates": []},
-        }],
+        "objects": [
+            {
+                "catalog_uuid": "11111111-1111-4111-8111-111111111111",
+                "obj_id": 7,
+                "name": "Clamp",
+                "alias": "Small clamp",
+                "description": "Textured fixture",
+                "tags": ["metal", "reflective"],
+                "groups": ["clamps", "validation set"],
+                "attributes": {"owner": "vision", "finish": "matte"},
+                "source_filename": "clamp.stl",
+                "source_format": "stl",
+                "source_sha256": "a" * 64,
+                "canonical_ply_sha256": "b" * 64,
+                "geometry_revision": 1,
+                "source_to_mm_scale": 1.0,
+                "texture_sha256": "c" * 64,
+                "created_at": "2026-07-20T09:00:00Z",
+                "updated_at": "2026-07-20T10:00:00Z",
+                "archived_at": None,
+                "state": "active",
+                "extraction": {
+                    "vertices": 8,
+                    "faces": 12,
+                    "bounds_mm": [[-5, -5, -5], [5, 5, 5]],
+                    "watertight": True,
+                },
+                "assets": {
+                    "source": {
+                        "path": "objects/1/source/clamp.stl",
+                        "sha256": "a" * 64,
+                        "size_bytes": 100,
+                        "media_type": "application/octet-stream",
+                    },
+                    "canonical_ply": {
+                        "path": "objects/1/derived/canonical.ply",
+                        "sha256": "b" * 64,
+                        "size_bytes": 80,
+                        "media_type": "application/octet-stream",
+                    },
+                    "texture": {
+                        "path": "objects/1/texture/texture.png",
+                        "sha256": "c" * 64,
+                        "size_bytes": 40,
+                        "media_type": "image/png",
+                    },
+                },
+                "usage": {"template_count": 0, "templates": []},
+            }
+        ],
     }
 
 
 def workpiece_catalog() -> dict:
     value = pose_template_catalog()
-    value.update({
-        "version": 4,
-        "created_at": "2026-07-20T09:00:00Z",
-        "updated_at": "2026-07-21T11:00:00Z",
-        "next_obj_id": 9,
-        "tombstones": [],
-    })
-    value["objects"].append({
-        "catalog_uuid": "88888888-8888-4888-8888-888888888888",
-        "obj_id": 8,
-        "name": "Gauge block",
-        "alias": "Archived gauge",
-        "description": "Reference ceramic block",
-        "tags": ["Metal", "reference"],
-        "groups": ["gauges"],
-        "attributes": {"length_mm": "25"},
-        "source_filename": "gauge.ply",
-        "source_format": "ply",
-        "source_sha256": "d" * 64,
-        "canonical_ply_sha256": "e" * 64,
-        "geometry_revision": 1,
-        "source_to_mm_scale": 1.0,
-        "texture_sha256": None,
-        "created_at": "2026-07-20T09:30:00Z",
-        "updated_at": "2026-07-21T11:00:00Z",
-        "archived_at": "2026-07-21T11:00:00Z",
-        "state": "archived",
-        "extraction": {"vertices": 8, "faces": 12, "bounds_mm": [[-12.5, -5, -2.5], [12.5, 5, 2.5]], "watertight": True},
-        "assets": {
-            "source": {"path": "objects/8/source/gauge.ply", "sha256": "d" * 64, "size_bytes": 120, "media_type": "application/octet-stream"},
-            "canonical_ply": {"path": "objects/8/derived/canonical.ply", "sha256": "e" * 64, "size_bytes": 90, "media_type": "application/octet-stream"},
-        },
-        "usage": {"template_count": 0, "templates": []},
-    })
+    value.update(
+        {
+            "version": 4,
+            "created_at": "2026-07-20T09:00:00Z",
+            "updated_at": "2026-07-21T11:00:00Z",
+            "next_obj_id": 9,
+            "tombstones": [],
+        }
+    )
+    value["objects"].append(
+        {
+            "catalog_uuid": "88888888-8888-4888-8888-888888888888",
+            "obj_id": 8,
+            "name": "Gauge block",
+            "alias": "Archived gauge",
+            "description": "Reference ceramic block",
+            "tags": ["Metal", "reference"],
+            "groups": ["gauges"],
+            "attributes": {"length_mm": "25"},
+            "source_filename": "gauge.ply",
+            "source_format": "ply",
+            "source_sha256": "d" * 64,
+            "canonical_ply_sha256": "e" * 64,
+            "geometry_revision": 1,
+            "source_to_mm_scale": 1.0,
+            "texture_sha256": None,
+            "created_at": "2026-07-20T09:30:00Z",
+            "updated_at": "2026-07-21T11:00:00Z",
+            "archived_at": "2026-07-21T11:00:00Z",
+            "state": "archived",
+            "extraction": {
+                "vertices": 8,
+                "faces": 12,
+                "bounds_mm": [[-12.5, -5, -2.5], [12.5, 5, 2.5]],
+                "watertight": True,
+            },
+            "assets": {
+                "source": {
+                    "path": "objects/8/source/gauge.ply",
+                    "sha256": "d" * 64,
+                    "size_bytes": 120,
+                    "media_type": "application/octet-stream",
+                },
+                "canonical_ply": {
+                    "path": "objects/8/derived/canonical.ply",
+                    "sha256": "e" * 64,
+                    "size_bytes": 90,
+                    "media_type": "application/octet-stream",
+                },
+            },
+            "usage": {"template_count": 0, "templates": []},
+        }
+    )
     return value
 
 
 def pose_template_library() -> dict:
     return {
         "schema_version": "pose_template_library.v1",
-        "templates": [{
-            "template_uuid": "22222222-2222-4222-8222-222222222222",
-            "display_name": "Clamp pair",
-            "description": "fixture",
-            "created_at": "2026-07-20T10:00:00Z",
-            "bundle_sha256": "d" * 64,
-            "archive": {"state": "active"},
-            "page": {"size": "A3", "orientation": "landscape", "width_mm": 420, "height_mm": 297},
-            "instances": [{
-                "instance_uuid": "33333333-3333-4333-8333-333333333333",
-                "catalog_uuid": "11111111-1111-4111-8111-111111111111",
-                "catalog": {"catalog_uuid": "11111111-1111-4111-8111-111111111111", "name": "Clamp", "obj_id": 7},
-                "pose_template_from_object": {"matrix": [[1, 0, 0, 45], [0, 1, 0, 55], [0, 0, 1, 0], [0, 0, 0, 1]]},
-            }],
-        }],
+        "templates": [
+            {
+                "template_uuid": "22222222-2222-4222-8222-222222222222",
+                "display_name": "Clamp pair",
+                "description": "fixture",
+                "created_at": "2026-07-20T10:00:00Z",
+                "bundle_sha256": "d" * 64,
+                "archive": {"state": "active"},
+                "page": {
+                    "size": "A3",
+                    "orientation": "landscape",
+                    "width_mm": 420,
+                    "height_mm": 297,
+                },
+                "instances": [
+                    {
+                        "instance_uuid": "33333333-3333-4333-8333-333333333333",
+                        "catalog_uuid": "11111111-1111-4111-8111-111111111111",
+                        "catalog": {
+                            "catalog_uuid": "11111111-1111-4111-8111-111111111111",
+                            "name": "Clamp",
+                            "obj_id": 7,
+                        },
+                        "pose_template_from_object": {
+                            "matrix": [
+                                [1, 0, 0, 45],
+                                [0, 1, 0, 55],
+                                [0, 0, 1, 0],
+                                [0, 0, 0, 1],
+                            ]
+                        },
+                    }
+                ],
+            }
+        ],
     }
 
 
-def pose_template_orientation_analysis(catalog_uuid: str = "11111111-1111-4111-8111-111111111111") -> dict:
+def pose_template_orientation_analysis(
+    catalog_uuid: str = "11111111-1111-4111-8111-111111111111",
+) -> dict:
     return {
         "schema_version": "pose_template_orientation_analysis.v1",
         "catalog_uuid": catalog_uuid,
         "preview_mesh": {
-            "vertices": [[-10, -5, 0], [10, -5, 0], [10, 5, 0], [-10, 5, 0], [0, 0, 12]],
+            "vertices": [
+                [-10, -5, 0],
+                [10, -5, 0],
+                [10, 5, 0],
+                [-10, 5, 0],
+                [0, 0, 12],
+            ],
             "faces": [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4], [0, 3, 2], [0, 2, 1]],
         },
         "recognition_mesh": {
-            "vertices": [[-10, -5, 0], [10, -5, 0], [10, 5, 0], [-10, 5, 0], [-10, -5, 12], [10, -5, 12], [10, 5, 12], [-10, 5, 12]],
-            "faces": [[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6], [0, 4, 5], [0, 5, 1], [1, 5, 6], [1, 6, 2], [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0]],
+            "vertices": [
+                [-10, -5, 0],
+                [10, -5, 0],
+                [10, 5, 0],
+                [-10, 5, 0],
+                [-10, -5, 12],
+                [10, -5, 12],
+                [10, 5, 12],
+                [-10, 5, 12],
+            ],
+            "faces": [
+                [0, 1, 2],
+                [0, 2, 3],
+                [4, 6, 5],
+                [4, 7, 6],
+                [0, 4, 5],
+                [0, 5, 1],
+                [1, 5, 6],
+                [1, 6, 2],
+                [2, 6, 7],
+                [2, 7, 3],
+                [3, 7, 4],
+                [3, 4, 0],
+            ],
         },
         "recognition_mesh_approximation": {
             "strategy": "welded_source",
@@ -712,23 +977,53 @@ def pose_template_orientation_analysis(catalog_uuid: str = "11111111-1111-4111-8
                 "orientation_id": "stable-wide",
                 "label": "Wide base",
                 "probability": 0.82,
-                "source_to_placed": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+                "source_to_placed": [
+                    [1, 0, 0, 0],
+                    [0, 1, 0, 0],
+                    [0, 0, 1, 0],
+                    [0, 0, 0, 1],
+                ],
                 "slice_z_mm": 0.1,
-                "contours": [{"points": [{"x_mm": -10, "y_mm": -5}, {"x_mm": 10, "y_mm": -5}, {"x_mm": 7, "y_mm": 5}, {"x_mm": -10, "y_mm": 3}]}],
+                "contours": [
+                    {
+                        "points": [
+                            {"x_mm": -10, "y_mm": -5},
+                            {"x_mm": 10, "y_mm": -5},
+                            {"x_mm": 7, "y_mm": 5},
+                            {"x_mm": -10, "y_mm": 3},
+                        ]
+                    }
+                ],
             },
             {
                 "orientation_id": "stable-side",
                 "label": "Side base",
                 "probability": 0.18,
-                "source_to_placed": [[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 5], [0, 0, 0, 1]],
+                "source_to_placed": [
+                    [1, 0, 0, 0],
+                    [0, 0, -1, 0],
+                    [0, 1, 0, 5],
+                    [0, 0, 0, 1],
+                ],
                 "slice_z_mm": 0.1,
-                "contours": [{"points": [{"x_mm": -10, "y_mm": -6}, {"x_mm": 10, "y_mm": -6}, {"x_mm": 10, "y_mm": 6}, {"x_mm": -10, "y_mm": 6}]}],
+                "contours": [
+                    {
+                        "points": [
+                            {"x_mm": -10, "y_mm": -6},
+                            {"x_mm": 10, "y_mm": -6},
+                            {"x_mm": 10, "y_mm": 6},
+                            {"x_mm": -10, "y_mm": 6},
+                        ]
+                    }
+                ],
             },
         ],
     }
 
 
-def pose_template_orientation_thumbnail(catalog_uuid: str = "11111111-1111-4111-8111-111111111111") -> dict:
+def pose_template_orientation_thumbnail(
+    catalog_uuid: str = "11111111-1111-4111-8111-111111111111",
+) -> dict:
     analysis = pose_template_orientation_analysis(catalog_uuid)
     orientation = analysis["orientations"][0]
     return {
@@ -758,21 +1053,48 @@ def immutable_template_preview() -> dict:
             "print_compensation": {"x_scale": 1.01, "y_scale": 0.99},
         },
         "page": {"width_mm": 420, "height_mm": 297},
-        "instances": [{
-            "instance_uuid": "33333333-3333-4333-8333-333333333333",
-            "catalog_uuid": "11111111-1111-4111-8111-111111111111",
-            "catalog": {"name": "Clamp", "obj_id": 7},
-            "pose_template_from_object": {"matrix": [[1, 0, 0, 45], [0, 1, 0, 55], [0, 0, 1, 0], [0, 0, 0, 1]]},
-            "preview_mesh_sha256": "b" * 64,
-            "compensated_contours": [
-                [{"x_mm": 30, "y_mm": 30}, {"x_mm": 50, "y_mm": 30}, {"x_mm": 47, "y_mm": 42}, {"x_mm": 30, "y_mm": 40}],
-                [{"x_mm": 36, "y_mm": 34}, {"x_mm": 40, "y_mm": 34}, {"x_mm": 40, "y_mm": 37}, {"x_mm": 36, "y_mm": 37}],
-            ],
-        }],
+        "instances": [
+            {
+                "instance_uuid": "33333333-3333-4333-8333-333333333333",
+                "catalog_uuid": "11111111-1111-4111-8111-111111111111",
+                "catalog": {"name": "Clamp", "obj_id": 7},
+                "pose_template_from_object": {
+                    "matrix": [[1, 0, 0, 45], [0, 1, 0, 55], [0, 0, 1, 0], [0, 0, 0, 1]]
+                },
+                "preview_mesh_sha256": "b" * 64,
+                "compensated_contours": [
+                    [
+                        {"x_mm": 30, "y_mm": 30},
+                        {"x_mm": 50, "y_mm": 30},
+                        {"x_mm": 47, "y_mm": 42},
+                        {"x_mm": 30, "y_mm": 40},
+                    ],
+                    [
+                        {"x_mm": 36, "y_mm": 34},
+                        {"x_mm": 40, "y_mm": 34},
+                        {"x_mm": 40, "y_mm": 37},
+                        {"x_mm": 36, "y_mm": 37},
+                    ],
+                ],
+            }
+        ],
         "preview_meshes": {
             "b" * 64: {
-                "vertices": [[-10, -5, 0], [10, -5, 0], [10, 5, 0], [-10, 5, 0], [0, 0, 12]],
-                "faces": [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4], [0, 3, 2], [0, 2, 1]],
+                "vertices": [
+                    [-10, -5, 0],
+                    [10, -5, 0],
+                    [10, 5, 0],
+                    [-10, 5, 0],
+                    [0, 0, 12],
+                ],
+                "faces": [
+                    [0, 1, 4],
+                    [1, 2, 4],
+                    [2, 3, 4],
+                    [3, 0, 4],
+                    [0, 3, 2],
+                    [0, 2, 1],
+                ],
             }
         },
         "errors": [],
@@ -789,19 +1111,21 @@ def immutable_template_thumbnail() -> dict:
         "valid": True,
         "configuration": preview["configuration"],
         "page": preview["page"],
-        "instances": [{
-            "instance_uuid": preview["instances"][0]["instance_uuid"],
-            "catalog": preview["instances"][0]["catalog"],
-            "compensated_contours": contours,
-            "primary_contour_source_index": 0,
-            "approximation": {
-                "truncated": False,
-                "source_contours": len(contours),
-                "included_contours": len(contours),
-                "source_points": point_count,
-                "included_points": point_count,
-            },
-        }],
+        "instances": [
+            {
+                "instance_uuid": preview["instances"][0]["instance_uuid"],
+                "catalog": preview["instances"][0]["catalog"],
+                "compensated_contours": contours,
+                "primary_contour_source_index": 0,
+                "approximation": {
+                    "truncated": False,
+                    "source_contours": len(contours),
+                    "included_contours": len(contours),
+                    "source_points": point_count,
+                    "included_points": point_count,
+                },
+            }
+        ],
         "approximation": {
             "approximate": False,
             "truncated": False,
@@ -810,14 +1134,23 @@ def immutable_template_thumbnail() -> dict:
             "included_contours": len(contours),
             "source_points": point_count,
             "included_points": point_count,
-            "limits": {"instances": 200, "contours": 400, "points": 4096, "points_per_contour": 48},
+            "limits": {
+                "instances": 200,
+                "contours": 400,
+                "points": 4096,
+                "points_per_contour": 48,
+            },
         },
     }
 
 
-def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console_server, page) -> None:
+def test_pose_templates_editor_catalog_generation_and_unavailable_browse(
+    console_server, page
+) -> None:
     install_common_mocks(page)
-    page.add_init_script("Object.defineProperty(Crypto.prototype, 'randomUUID', { value: undefined, configurable: true })")
+    page.add_init_script(
+        "Object.defineProperty(Crypto.prototype, 'randomUUID', { value: undefined, configurable: true })"
+    )
     page_errors: list[str] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     requests: list[dict] = []
@@ -825,49 +1158,171 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
     availability = {"available": True}
     orientation_ready = {"value": False}
     library_payload = pose_template_library()
-    page.route("**/pose-templates/status", lambda route: fulfill_json(route, pose_template_source(available=availability["available"])))
-    page.route("**/workpieces/catalog", lambda route: fulfill_json(route, pose_template_catalog()))
-    page.route("**/pose-templates/library", lambda route: fulfill_json(route, library_payload))
+    page.route(
+        "**/pose-templates/status",
+        lambda route: fulfill_json(
+            route, pose_template_source(available=availability["available"])
+        ),
+    )
+    page.route(
+        "**/workpieces/catalog",
+        lambda route: fulfill_json(route, pose_template_catalog()),
+    )
+    page.route(
+        "**/pose-templates/library", lambda route: fulfill_json(route, library_payload)
+    )
+
     def orientation_handler(route) -> None:
         if route.request.method == "POST":
             orientation_ready["value"] = True
-            fulfill_json(route, {"job_id": "orientation-job", "request_id": "d" * 32}, status=202)
+            fulfill_json(
+                route, {"job_id": "orientation-job", "request_id": "d" * 32}, status=202
+            )
         elif orientation_ready["value"]:
             fulfill_json(route, pose_template_orientation_analysis())
         else:
-            fulfill_json(route, {"output": "Cached orientation analysis is stale", "analysis_required": True}, status=409)
+            fulfill_json(
+                route,
+                {
+                    "output": "Cached orientation analysis is stale",
+                    "analysis_required": True,
+                },
+                status=409,
+            )
 
     page.route("**/pose-templates/workpieces/*/orientations", orientation_handler)
     page.route(
         "**/pose-templates/workpieces/*/orientation-thumbnail",
-        lambda route: fulfill_json(route, pose_template_orientation_thumbnail()) if orientation_ready["value"] else fulfill_json(route, {"output": "Orientation thumbnail unavailable", "analysis_required": True}, status=404),
+        lambda route: (
+            fulfill_json(route, pose_template_orientation_thumbnail())
+            if orientation_ready["value"]
+            else fulfill_json(
+                route,
+                {
+                    "output": "Orientation thumbnail unavailable",
+                    "analysis_required": True,
+                },
+                status=404,
+            )
+        ),
     )
-    page.route("**/pose-templates/library/*/preview", lambda route: fulfill_json(route, immutable_template_preview()))
-    page.route("**/pose-templates/library/*/thumbnail", lambda route: fulfill_json(route, immutable_template_thumbnail()))
-    page.route("**/jobs/generate-job", lambda route: fulfill_json(route, {"job": {"id": "generate-job", "status": "succeeded", "message": None, "tail": []}}))
-    page.route("**/jobs/clone-job", lambda route: fulfill_json(route, {"job": {"id": "clone-job", "status": "failed", "message": "Command exited with status 1", "tail": ["Canonical geometry changed; analyze stable orientations again.", "Command exited with code 1"]}}))
-    page.route("**/jobs/orientation-job", lambda route: fulfill_json(route, {"job": {"id": "orientation-job", "status": "succeeded", "message": None, "tail": []}}))
-    page.route("**/jobs/delete-cleanup-job", lambda route: fulfill_json(route, {"job": {"id": "delete-cleanup-job", "status": "running", "message": None, "tail": []}}))
+    page.route(
+        "**/pose-templates/library/*/preview",
+        lambda route: fulfill_json(route, immutable_template_preview()),
+    )
+    page.route(
+        "**/pose-templates/library/*/thumbnail",
+        lambda route: fulfill_json(route, immutable_template_thumbnail()),
+    )
+    page.route(
+        "**/jobs/generate-job",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "generate-job",
+                    "status": "succeeded",
+                    "message": None,
+                    "tail": [],
+                }
+            },
+        ),
+    )
+    page.route(
+        "**/jobs/clone-job",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "clone-job",
+                    "status": "failed",
+                    "message": "Command exited with status 1",
+                    "tail": [
+                        "Canonical geometry changed; analyze stable orientations again.",
+                        "Command exited with code 1",
+                    ],
+                }
+            },
+        ),
+    )
+    page.route(
+        "**/jobs/orientation-job",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "orientation-job",
+                    "status": "succeeded",
+                    "message": None,
+                    "tail": [],
+                }
+            },
+        ),
+    )
+    page.route(
+        "**/jobs/delete-cleanup-job",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "delete-cleanup-job",
+                    "status": "running",
+                    "message": None,
+                    "tail": [],
+                }
+            },
+        ),
+    )
 
     def preview_handler(route) -> None:
         if route.request.method == "POST":
             preview_posts["count"] += 1
             if preview_posts["count"] == 1:
-                fulfill_json(route, {"output": "Resources busy: cpu, disk_io"}, status=409)
+                fulfill_json(
+                    route, {"output": "Resources busy: cpu, disk_io"}, status=409
+                )
                 return
-            requests.append({"path": "/pose-templates/preview", "body": route.request.post_data_json})
-            fulfill_json(route, {"job_id": "preview-job", "request_id": "a" * 32}, status=202)
+            requests.append(
+                {
+                    "path": "/pose-templates/preview",
+                    "body": route.request.post_data_json,
+                }
+            )
+            fulfill_json(
+                route, {"job_id": "preview-job", "request_id": "a" * 32}, status=202
+            )
         else:
             fulfill_json(route, immutable_template_preview())
+
     page.route("**/pose-templates/preview**", preview_handler)
-    page.route("**/pose-templates/generate", lambda route: (requests.append({"path": "/pose-templates/generate", "body": route.request.post_data_json}), fulfill_json(route, {"job_id": "generate-job"}, status=202))[1])
-    page.route("**/pose-templates/library/*/clone", lambda route: (requests.append({"path": "/library/clone", "body": {}}), fulfill_json(route, {"job_id": "clone-job"}, status=202))[1])
+    page.route(
+        "**/pose-templates/generate",
+        lambda route: (
+            requests.append(
+                {
+                    "path": "/pose-templates/generate",
+                    "body": route.request.post_data_json,
+                }
+            ),
+            fulfill_json(route, {"job_id": "generate-job"}, status=202),
+        )[1],
+    )
+    page.route(
+        "**/pose-templates/library/*/clone",
+        lambda route: (
+            requests.append({"path": "/library/clone", "body": {}}),
+            fulfill_json(route, {"job_id": "clone-job"}, status=202),
+        )[1],
+    )
+
     def template_delete_handler(route) -> None:
-        requests.append({
-            "path": "/library/delete",
-            "method": route.request.method,
-            "body": route.request.post_data_json,
-        })
+        requests.append(
+            {
+                "path": "/library/delete",
+                "method": route.request.method,
+                "body": route.request.post_data_json,
+            }
+        )
         library_payload["templates"].clear()
         fulfill_json(
             route,
@@ -894,51 +1349,101 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
     expect(manage).to_be_visible()
     expect(manage).to_have_attribute("href", "#/workpieces")
     expect(page.get_by_role("button", name="Upload CAD")).to_have_count(0)
-    library_thumbnail = page.get_by_test_id("template-thumbnail-22222222-2222-4222-8222-222222222222")
+    library_thumbnail = page.get_by_test_id(
+        "template-thumbnail-22222222-2222-4222-8222-222222222222"
+    )
     expect(library_thumbnail.locator("path")).to_have_count(1)
     expect(library_thumbnail.locator("path")).to_have_attribute("fill-rule", "evenodd")
-    expect(library_thumbnail.locator('g[transform="translate(0 297) scale(1 -1)"]')).to_have_count(1)
-    page.get_by_role("textbox", name="Filter template workpieces").fill("no such object")
-    expect(page.get_by_text("No active workpieces match these filters.")).to_be_visible()
+    expect(
+        library_thumbnail.locator('g[transform="translate(0 297) scale(1 -1)"]')
+    ).to_have_count(1)
+    page.get_by_role("textbox", name="Filter template workpieces").fill(
+        "no such object"
+    )
+    expect(
+        page.get_by_text("No active workpieces match these filters.")
+    ).to_be_visible()
     page.get_by_role("textbox", name="Filter template workpieces").fill("small clamp")
     expect(page.get_by_text("Clamp", exact=True)).to_be_visible()
     page.get_by_role("textbox", name="Filter template workpieces").fill("")
     expect(page.get_by_label("X print %")).to_have_value("100")
     expect(page.get_by_label("Y print %")).to_have_value("100")
-    assert page.get_by_test_id("pose-template-preview-canvas").evaluate("element => getComputedStyle(element).backgroundColor") != "rgb(255, 255, 255)"
+    assert (
+        page.get_by_test_id("pose-template-preview-canvas").evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        )
+        != "rgb(255, 255, 255)"
+    )
     page.get_by_role("button", name="Choose orientation for Clamp").click()
     chooser = page.get_by_test_id("orientation-chooser")
     expect(chooser).to_contain_text("same-scale high-detail recognition surface")
     expect(chooser).to_contain_text("tiny printable-layout proxy is not used")
-    wide_slice = chooser.get_by_role("img", name="Wide base exact selected slice contour")
+    wide_slice = chooser.get_by_role(
+        "img", name="Wide base exact selected slice contour"
+    )
     expect(wide_slice.locator("path")).to_have_attribute("fill-rule", "evenodd")
-    expect(wide_slice.locator("path")).to_have_attribute("transform", "translate(0 0) scale(1 -1)")
-    expect(page.get_by_test_id("workpiece-isometric-11111111-1111-4111-8111-111111111111").locator("polygon")).to_have_count(12)
+    expect(wide_slice.locator("path")).to_have_attribute(
+        "transform", "translate(0 0) scale(1 -1)"
+    )
+    expect(
+        page.get_by_test_id(
+            "workpiece-isometric-11111111-1111-4111-8111-111111111111"
+        ).locator("polygon")
+    ).to_have_count(12)
     wide_preview = page.get_by_test_id("orientation-isometric-stable-wide")
     expect(wide_preview.locator("polygon")).to_have_count(12)
-    expect(wide_preview.locator("xpath=..")).to_have_attribute("data-preview-quality", "recognition")
-    expect(page.get_by_test_id("orientation-preview-quality-stable-wide")).to_contain_text("Full recognition surface · 12 of 12 source faces")
+    expect(wide_preview.locator("xpath=..")).to_have_attribute(
+        "data-preview-quality", "recognition"
+    )
+    expect(
+        page.get_by_test_id("orientation-preview-quality-stable-wide")
+    ).to_contain_text("Full recognition surface · 12 of 12 source faces")
     wide_points = wide_preview.locator("polygon").first.get_attribute("points")
-    side_points = page.get_by_test_id("orientation-isometric-stable-side").locator("polygon").first.get_attribute("points")
+    side_points = (
+        page.get_by_test_id("orientation-isometric-stable-side")
+        .locator("polygon")
+        .first.get_attribute("points")
+    )
     assert wide_points != side_points
     chooser.get_by_role("radio").filter(has_text="Side base").click()
     chooser.get_by_role("button", name="Add selected orientation").click()
     expect(page.get_by_label("Clamp X mm")).to_be_visible()
-    expect(page.get_by_test_id("selected-instance-isometric").locator("polygon")).to_have_count(12)
+    expect(
+        page.get_by_test_id("selected-instance-isometric").locator("polygon")
+    ).to_have_count(12)
     assert page_errors == []
     page.get_by_label("Clamp Rotation °").fill("27.5")
     page.get_by_label("X print %").fill("101")
-    expect(page.get_by_role("button", name="Generate immutable version")).to_be_enabled(timeout=15_000)
+    expect(page.get_by_role("button", name="Generate immutable version")).to_be_enabled(
+        timeout=15_000
+    )
     assert preview_posts["count"] >= 2
     page.get_by_role("button", name="Generate immutable version").click()
     expect(page.get_by_text("Immutable template generation queued")).to_be_visible()
-    assert requests[-1]["body"]["configuration"]["instances"][0]["orientation_id"] == "stable-side"
-    assert requests[-1]["body"]["configuration"]["instances"][0]["pose"]["rotation_deg"] == 27.5
+    assert (
+        requests[-1]["body"]["configuration"]["instances"][0]["orientation_id"]
+        == "stable-side"
+    )
+    assert (
+        requests[-1]["body"]["configuration"]["instances"][0]["pose"]["rotation_deg"]
+        == 27.5
+    )
     expect(page.get_by_role("button", name="Clone")).to_be_enabled(timeout=15_000)
     page.get_by_role("button", name="Clone").click()
-    expect(page.get_by_text("Canonical geometry changed; analyze stable orientations again.")).to_be_visible(timeout=15_000)
-    assert {item["path"] for item in requests} >= {"/pose-templates/generate", "/library/clone"}
-    generation = next(item for item in reversed(requests) if item["path"] == "/pose-templates/generate")
+    expect(
+        page.get_by_text(
+            "Canonical geometry changed; analyze stable orientations again."
+        )
+    ).to_be_visible(timeout=15_000)
+    assert {item["path"] for item in requests} >= {
+        "/pose-templates/generate",
+        "/library/clone",
+    }
+    generation = next(
+        item
+        for item in reversed(requests)
+        if item["path"] == "/pose-templates/generate"
+    )
     assert generation["body"]["configuration"]["print_compensation"]["x_scale"] == 1.01
     page.get_by_role("button", name="Delete Clamp pair").click()
     deletion = page.get_by_test_id("pose-template-delete-confirmation")
@@ -947,11 +1452,19 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
     expect(deletion).to_contain_text("Existing run-owned snapshots remain intact")
     deletion.get_by_role("button", name="Confirm delete").click()
     expect(page.get_by_text("Pose template deleted")).to_be_visible()
-    expect(page.get_by_test_id("pose-template-library-card-22222222-2222-4222-8222-222222222222")).to_have_count(0)
+    expect(
+        page.get_by_test_id(
+            "pose-template-library-card-22222222-2222-4222-8222-222222222222"
+        )
+    ).to_have_count(0)
     cleanup = page.get_by_test_id("pose-template-cleanup-job")
     expect(cleanup).to_contain_text("cleanup continues after navigation")
-    expect(cleanup.get_by_role("link", name="Open Jobs")).to_have_attribute("href", "#/jobs")
-    delete_request = next(item for item in requests if item["path"] == "/library/delete")
+    expect(cleanup.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
+    delete_request = next(
+        item for item in requests if item["path"] == "/library/delete"
+    )
     assert delete_request == {
         "path": "/library/delete",
         "method": "DELETE",
@@ -961,7 +1474,9 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(console
     availability["available"] = False
     page.reload(wait_until="networkidle")
     expect(page.get_by_text("PoseTemplateCreator checkout is missing")).to_be_visible()
-    expect(page.get_by_text("bash scripts/install.sh --with-posetemplatecreator")).to_be_visible()
+    expect(
+        page.get_by_text("bash scripts/install.sh --with-posetemplatecreator")
+    ).to_be_visible()
     expect(page.get_by_text("Clamp", exact=True)).to_be_visible()
     expect(page.get_by_role("link", name="Manage catalogue")).to_be_visible()
 
@@ -987,20 +1502,23 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
 
     def status_handler(route) -> None:
         active = sum(value["state"] == "active" for value in catalogue["objects"])
-        fulfill_json(route, {
-            "schema_version": "workpiece_catalog_status.v1",
-            "available": True,
-            "status": "available",
-            "reason": None,
-            "catalog_root": "/repo/working_data/object_catalog",
-            "formats": ["ply", "stl", "obj"],
-            "limits": {"cad_bytes": 52428800, "batch_bytes": 104857600},
-            "counts": {
-                "active": active,
-                "archived": len(catalogue["objects"]) - active,
-                "total": len(catalogue["objects"]),
+        fulfill_json(
+            route,
+            {
+                "schema_version": "workpiece_catalog_status.v1",
+                "available": True,
+                "status": "available",
+                "reason": None,
+                "catalog_root": "/repo/working_data/object_catalog",
+                "formats": ["ply", "stl", "obj"],
+                "limits": {"cad_bytes": 52428800, "batch_bytes": 104857600},
+                "counts": {
+                    "active": active,
+                    "archived": len(catalogue["objects"]) - active,
+                    "total": len(catalogue["objects"]),
+                },
             },
-        })
+        )
 
     def catalog_handler(route) -> None:
         request = route.request
@@ -1010,55 +1528,100 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
             fulfill_json(route, catalogue)
             return
         if path == "/workpieces/catalog/import" and request.method == "POST":
-            requests.append({"path": path, "method": request.method, "body": request.post_data or ""})
-            fulfill_json(route, {
-                "schema_version": "workpiece_catalog_import.v1",
-                "updated": [catalogue["objects"][0]["catalog_uuid"]],
-                "unchanged": [catalogue["objects"][1]["catalog_uuid"]],
-                "skipped_missing_assets": [],
-            })
+            requests.append(
+                {
+                    "path": path,
+                    "method": request.method,
+                    "body": request.post_data or "",
+                }
+            )
+            fulfill_json(
+                route,
+                {
+                    "schema_version": "workpiece_catalog_import.v1",
+                    "updated": [catalogue["objects"][0]["catalog_uuid"]],
+                    "unchanged": [catalogue["objects"][1]["catalog_uuid"]],
+                    "skipped_missing_assets": [],
+                },
+            )
             return
         if path == "/workpieces/catalog/upload" and request.method == "POST":
-            requests.append({"path": path, "method": request.method, "body": request.post_data or ""})
-            catalogue["objects"].append({
-                "catalog_uuid": "99999999-9999-4999-8999-999999999999",
-                "obj_id": 9,
-                "name": "New clamp",
-                "alias": "Queued workpiece",
-                "description": None,
-                "tags": ["new", "metal"],
-                "groups": ["incoming"],
-                "attributes": {},
-                "source_filename": "new-clamp.stl",
-                "source_format": "stl",
-                "source_sha256": "f" * 64,
-                "canonical_ply_sha256": "1" * 64,
-                "texture_sha256": None,
-                "created_at": "2026-07-22T12:00:00Z",
-                "updated_at": "2026-07-22T12:00:00Z",
-                "archived_at": None,
-                "state": "active",
-                "extraction": {"vertices": 8, "faces": 12, "bounds_mm": [[-4, -4, -4], [4, 4, 4]], "watertight": True},
-                "assets": {
-                    "source": {"path": "objects/9/source/new-clamp.stl", "sha256": "f" * 64},
-                    "canonical_ply": {"path": "objects/9/derived/canonical.ply", "sha256": "1" * 64},
-                },
-                "usage": {"template_count": 0, "templates": []},
-            })
-            fulfill_json(route, {"job_id": "workpiece-upload-job", "request_id": "a" * 32}, status=202)
+            requests.append(
+                {
+                    "path": path,
+                    "method": request.method,
+                    "body": request.post_data or "",
+                }
+            )
+            catalogue["objects"].append(
+                {
+                    "catalog_uuid": "99999999-9999-4999-8999-999999999999",
+                    "obj_id": 9,
+                    "name": "New clamp",
+                    "alias": "Queued workpiece",
+                    "description": None,
+                    "tags": ["new", "metal"],
+                    "groups": ["incoming"],
+                    "attributes": {},
+                    "source_filename": "new-clamp.stl",
+                    "source_format": "stl",
+                    "source_sha256": "f" * 64,
+                    "canonical_ply_sha256": "1" * 64,
+                    "texture_sha256": None,
+                    "created_at": "2026-07-22T12:00:00Z",
+                    "updated_at": "2026-07-22T12:00:00Z",
+                    "archived_at": None,
+                    "state": "active",
+                    "extraction": {
+                        "vertices": 8,
+                        "faces": 12,
+                        "bounds_mm": [[-4, -4, -4], [4, 4, 4]],
+                        "watertight": True,
+                    },
+                    "assets": {
+                        "source": {
+                            "path": "objects/9/source/new-clamp.stl",
+                            "sha256": "f" * 64,
+                        },
+                        "canonical_ply": {
+                            "path": "objects/9/derived/canonical.ply",
+                            "sha256": "1" * 64,
+                        },
+                    },
+                    "usage": {"template_count": 0, "templates": []},
+                }
+            )
+            fulfill_json(
+                route,
+                {"job_id": "workpiece-upload-job", "request_id": "a" * 32},
+                status=202,
+            )
             return
         parts = path.removeprefix("/workpieces/catalog/").split("/")
         catalog_uuid = parts[0]
         current = item(catalog_uuid)
-        if len(parts) == 2 and parts[1] == "unit-corrections" and request.method == "POST":
+        if (
+            len(parts) == 2
+            and parts[1] == "unit-corrections"
+            and request.method == "POST"
+        ):
             body = request.post_data_json
             requests.append({"path": path, "method": request.method, "body": body})
             current["geometry_revision"] = 2
-            current["source_to_mm_scale"] = 0.001 if body["conversion"] == "millimeter_to_meter" else 1000.0
+            current["source_to_mm_scale"] = (
+                0.001 if body["conversion"] == "millimeter_to_meter" else 1000.0
+            )
             current["canonical_ply_sha256"] = "2" * 64
             factor = 0.001 if body["conversion"] == "millimeter_to_meter" else 1000.0
-            current["extraction"]["bounds_mm"] = [[coordinate * factor for coordinate in corner] for corner in current["extraction"]["bounds_mm"]]
-            fulfill_json(route, {"job_id": "unit-correction-job", "request_id": "b" * 32}, status=202)
+            current["extraction"]["bounds_mm"] = [
+                [coordinate * factor for coordinate in corner]
+                for corner in current["extraction"]["bounds_mm"]
+            ]
+            fulfill_json(
+                route,
+                {"job_id": "unit-correction-job", "request_id": "b" * 32},
+                status=202,
+            )
             return
         if len(parts) == 1 and request.method == "PATCH":
             body = request.post_data_json
@@ -1067,28 +1630,45 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
             current["updated_at"] = "2026-07-22T12:30:00Z"
             fulfill_json(route, current)
             return
-        if len(parts) == 2 and parts[1] in {"archive", "restore"} and request.method == "POST":
+        if (
+            len(parts) == 2
+            and parts[1] in {"archive", "restore"}
+            and request.method == "POST"
+        ):
             requests.append({"path": path, "method": request.method, "body": None})
             current["state"] = "archived" if parts[1] == "archive" else "active"
-            current["archived_at"] = "2026-07-22T12:45:00Z" if parts[1] == "archive" else None
+            current["archived_at"] = (
+                "2026-07-22T12:45:00Z" if parts[1] == "archive" else None
+            )
             fulfill_json(route, current)
             return
         if len(parts) == 1 and request.method == "DELETE":
-            requests.append({"path": path, "method": request.method, "body": request.post_data_json})
+            requests.append(
+                {"path": path, "method": request.method, "body": request.post_data_json}
+            )
             delete_requests["count"] += 1
             if delete_requests["count"] == 1:
-                fulfill_json(route, {
-                    "output": "Workpiece is referenced by or cannot be checked against pose-template bundles",
-                    "blockers": [{
-                        "template_uuid": "22222222-2222-4222-8222-222222222222",
-                        "display_name": "Clamp pair",
-                        "state": "active",
-                        "reason": "catalog_reference",
-                    }],
-                }, status=409)
+                fulfill_json(
+                    route,
+                    {
+                        "output": "Workpiece is referenced by or cannot be checked against pose-template bundles",
+                        "blockers": [
+                            {
+                                "template_uuid": "22222222-2222-4222-8222-222222222222",
+                                "display_name": "Clamp pair",
+                                "state": "active",
+                                "reason": "catalog_reference",
+                            }
+                        ],
+                    },
+                    status=409,
+                )
                 return
             catalogue["objects"].remove(current)
-            fulfill_json(route, {"schema_version": "workpiece_catalog_delete.v1", "status": "deleted"})
+            fulfill_json(
+                route,
+                {"schema_version": "workpiece_catalog_delete.v1", "status": "deleted"},
+            )
             return
         fulfill_json(route, {"output": "Unexpected workpiece request"}, status=404)
 
@@ -1112,8 +1692,34 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
             ),
         ),
     )
-    page.route("**/jobs/workpiece-upload-job", lambda route: fulfill_json(route, {"job": {"id": "workpiece-upload-job", "status": "succeeded", "message": None, "tail": []}}))
-    page.route("**/jobs/unit-correction-job", lambda route: fulfill_json(route, {"job": {"id": "unit-correction-job", "status": "succeeded", "message": None, "tail": []}}))
+    page.route(
+        "**/jobs/workpiece-upload-job",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "workpiece-upload-job",
+                    "status": "succeeded",
+                    "message": None,
+                    "tail": [],
+                }
+            },
+        ),
+    )
+    page.route(
+        "**/jobs/unit-correction-job",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "unit-correction-job",
+                    "status": "succeeded",
+                    "message": None,
+                    "tail": [],
+                }
+            },
+        ),
+    )
 
     page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
 
@@ -1124,7 +1730,11 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     expect(page.get_by_role("heading", name="3D preview")).to_be_visible()
     expect(page.get_by_test_id("workpiece-previews")).to_have_count(0)
     expect(page.get_by_role("button", name="Select Clamp")).to_be_visible()
-    expect(page.get_by_test_id("workpiece-isometric-11111111-1111-4111-8111-111111111111").locator("polygon")).to_have_count(6)
+    expect(
+        page.get_by_test_id(
+            "workpiece-isometric-11111111-1111-4111-8111-111111111111"
+        ).locator("polygon")
+    ).to_have_count(6)
     expect(page.get_by_role("button", name="Select Gauge block")).to_have_count(0)
 
     page.get_by_label("Search workpieces").fill("not present")
@@ -1148,8 +1758,12 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     page.get_by_role("button", name="Select Gauge block").click()
     page.get_by_role("button", name="Correct model units").click()
     correction = page.get_by_test_id("workpiece-unit-correction-dialog")
-    expect(correction.get_by_text("File was authored in metres — enlarge ×1000")).to_be_visible()
-    expect(correction.get_by_text("Model is 1000× too large — shrink ÷1000")).to_be_visible()
+    expect(
+        correction.get_by_text("File was authored in metres — enlarge ×1000")
+    ).to_be_visible()
+    expect(
+        correction.get_by_text("Model is 1000× too large — shrink ÷1000")
+    ).to_be_visible()
     expect(correction.get_by_text("Current dimensions")).to_be_visible()
     expect(correction.get_by_text("After correction")).to_be_visible()
     correction.get_by_role("radio").filter(has_text="shrink ÷1000").click()
@@ -1157,7 +1771,9 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     correction.get_by_label("Confirm unit correction").click()
     correction.get_by_role("button", name="Queue unit correction").click()
     expect(page.get_by_text("Workpiece units corrected")).to_be_visible()
-    unit_request = next(value for value in requests if value["path"].endswith("/unit-corrections"))
+    unit_request = next(
+        value for value in requests if value["path"].endswith("/unit-corrections")
+    )
     assert unit_request["body"] == {
         "conversion": "millimeter_to_meter",
         "confirm": True,
@@ -1201,22 +1817,28 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     }
 
     page.get_by_test_id("workpiece-catalog-import").click()
-    page.get_by_test_id("workpiece-import-input").set_input_files({
-        "name": "object_catalog.json",
-        "mimeType": "application/json",
-        "buffer": json.dumps(workpiece_catalog()).encode(),
-    })
+    page.get_by_test_id("workpiece-import-input").set_input_files(
+        {
+            "name": "object_catalog.json",
+            "mimeType": "application/json",
+            "buffer": json.dumps(workpiece_catalog()).encode(),
+        }
+    )
     page.get_by_role("button", name="Import metadata").click()
     expect(page.get_by_text("Catalogue metadata imported")).to_be_visible()
-    import_request = next(value for value in requests if value["path"].endswith("/import"))
+    import_request = next(
+        value for value in requests if value["path"].endswith("/import")
+    )
     assert "object_catalog.json" in import_request["body"]
 
     page.get_by_test_id("workpiece-upload-button").click()
-    page.get_by_test_id("workpiece-cad-input").set_input_files({
-        "name": "new-clamp.stl",
-        "mimeType": "application/octet-stream",
-        "buffer": b"solid clamp",
-    })
+    page.get_by_test_id("workpiece-cad-input").set_input_files(
+        {
+            "name": "new-clamp.stl",
+            "mimeType": "application/octet-stream",
+            "buffer": b"solid clamp",
+        }
+    )
     page.get_by_test_id("workpiece-upload-name").fill("New clamp")
     page.get_by_test_id("workpiece-upload-alias").fill("Queued workpiece")
     page.get_by_test_id("workpiece-upload-tags").fill("new, metal")
@@ -1224,7 +1846,9 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     page.get_by_role("button", name="Upload and inspect").click()
     expect(page.get_by_text("Workpiece inspection queued")).to_be_visible()
     expect(page.get_by_text("Workpiece added to the catalogue")).to_be_visible()
-    upload_request = next(value for value in requests if value["path"].endswith("/upload"))
+    upload_request = next(
+        value for value in requests if value["path"].endswith("/upload")
+    )
     assert "new-clamp.stl" in upload_request["body"]
     assert "Queued workpiece" in upload_request["body"]
     expect(page.get_by_role("button", name="Select New clamp")).to_be_visible()
@@ -1286,9 +1910,11 @@ def test_workpiece_selected_detail_renders_exact_canonical_mesh(
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     page.on(
         "request",
-        lambda request: canonical_mesh_requests.append(request.url)
-        if urlparse(request.url).path.endswith("/assets/canonical_ply")
-        else None,
+        lambda request: (
+            canonical_mesh_requests.append(request.url)
+            if urlparse(request.url).path.endswith("/assets/canonical_ply")
+            else None
+        ),
     )
     page.route(
         "**/pose-templates/workpieces/*/orientation-thumbnail",
@@ -1349,9 +1975,7 @@ def test_workpiece_selected_detail_renders_exact_canonical_mesh(
     )
     assert screenshot is not None
     background = screenshot[2, 2].astype(np.int16)
-    foreground = (
-        np.linalg.norm(screenshot.astype(np.int16) - background, axis=2) > 24
-    )
+    foreground = np.linalg.norm(screenshot.astype(np.int16) - background, axis=2) > 24
     component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
         foreground.astype(np.uint8),
         connectivity=8,
@@ -1363,8 +1987,7 @@ def test_workpiece_selected_detail_renders_exact_canonical_mesh(
         if stats[index, cv2.CC_STAT_AREA] > 1_000
         and stats[index, cv2.CC_STAT_LEFT] > 2
         and stats[index, cv2.CC_STAT_TOP] > 2
-        and stats[index, cv2.CC_STAT_LEFT] + stats[index, cv2.CC_STAT_WIDTH]
-        < width - 2
+        and stats[index, cv2.CC_STAT_LEFT] + stats[index, cv2.CC_STAT_WIDTH] < width - 2
         and stats[index, cv2.CC_STAT_TOP] + stats[index, cv2.CC_STAT_HEIGHT]
         < height - 2
     ]
@@ -1488,16 +2111,12 @@ def test_workpiece_thumbnail_revision_mismatch_is_actionable_and_refresh_recover
 
     page.goto(f"{console_server.url}/#/pose-templates", wait_until="networkidle")
     expect(
-        page.get_by_test_id(
-            f"workpiece-thumbnail-error-{workpiece['catalog_uuid']}"
-        )
+        page.get_by_test_id(f"workpiece-thumbnail-error-{workpiece['catalog_uuid']}")
     ).to_contain_text("Preview/server revision mismatch")
 
     page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
     expect(
-        page.get_by_test_id(
-            f"workpiece-thumbnail-error-{workpiece['catalog_uuid']}"
-        )
+        page.get_by_test_id(f"workpiece-thumbnail-error-{workpiece['catalog_uuid']}")
     ).to_be_visible()
     preview_ready["value"] = True
     page.get_by_role("button", name="Refresh workpiece catalogue").click()
@@ -1526,18 +2145,18 @@ def test_workpiece_dense_card_uses_lazy_canvas_and_accessible_lod_evidence(
         "faces": 2_048,
     }
     sections = 513
-    vertices = [[0, 0, 1.5], *[
-        [
-            10 * np.cos(2 * np.pi * index / sections),
-            7 * np.sin(2 * np.pi * index / sections),
-            0.8 * np.sin(6 * np.pi * index / sections),
-        ]
-        for index in range(sections)
-    ]]
-    faces = [
-        [0, index + 1, (index + 1) % sections + 1]
-        for index in range(sections)
+    vertices = [
+        [0, 0, 1.5],
+        *[
+            [
+                10 * np.cos(2 * np.pi * index / sections),
+                7 * np.sin(2 * np.pi * index / sections),
+                0.8 * np.sin(6 * np.pi * index / sections),
+            ]
+            for index in range(sections)
+        ],
     ]
+    faces = [[0, index + 1, (index + 1) % sections + 1] for index in range(sections)]
     thumbnail = pose_template_orientation_thumbnail(workpiece["catalog_uuid"])
     thumbnail["preview_mesh"] = {"vertices": vertices, "faces": faces}
     thumbnail["recognition_mesh_approximation"] = {
@@ -1560,13 +2179,16 @@ def test_workpiece_dense_card_uses_lazy_canvas_and_accessible_lod_evidence(
 
     page.route(
         "**/workpieces/status",
-        lambda route: fulfill_json(route, {
-            "schema_version": "workpiece_catalog_status.v1",
-            "available": True,
-            "status": "available",
-            "reason": None,
-            "counts": {"active": 1, "archived": 0, "total": 1},
-        }),
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "workpiece_catalog_status.v1",
+                "available": True,
+                "status": "available",
+                "reason": None,
+                "counts": {"active": 1, "archived": 0, "total": 1},
+            },
+        ),
     )
     page.route(
         "**/workpieces/catalog",
@@ -1579,9 +2201,7 @@ def test_workpiece_dense_card_uses_lazy_canvas_and_accessible_lod_evidence(
 
     page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
 
-    rendered = page.get_by_test_id(
-        f"workpiece-isometric-{workpiece['catalog_uuid']}"
-    )
+    rendered = page.get_by_test_id(f"workpiece-isometric-{workpiece['catalog_uuid']}")
     expect(rendered).to_have_count(1)
     expect(rendered).to_have_js_property("tagName", "CANVAS")
     expect(rendered.locator("polygon")).to_have_count(0)
@@ -1621,17 +2241,39 @@ def test_pose_templates_add_instance_with_real_catalog_and_preview(
     )
 
     install_common_mocks(page)
-    page.add_init_script("Object.defineProperty(Crypto.prototype, 'randomUUID', { value: undefined, configurable: true })")
+    page.add_init_script(
+        "Object.defineProperty(Crypto.prototype, 'randomUUID', { value: undefined, configurable: true })"
+    )
     page_errors: list[str] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
-    page.route("**/pose-templates/status", lambda route: fulfill_json(route, pose_template_source(available=True)))
-    page.route("**/pose-templates/library", lambda route: fulfill_json(route, {"schema_version": "pose_template_library.v1", "templates": []}))
-    page.route("**/pose-templates/workpieces/*/orientations", lambda route: fulfill_json(route, pose_template_orientation_analysis(record["catalog_uuid"])))
-    page.route("**/pose-templates/workpieces/*/orientation-thumbnail", lambda route: fulfill_json(route, pose_template_orientation_thumbnail(record["catalog_uuid"])))
+    page.route(
+        "**/pose-templates/status",
+        lambda route: fulfill_json(route, pose_template_source(available=True)),
+    )
+    page.route(
+        "**/pose-templates/library",
+        lambda route: fulfill_json(
+            route, {"schema_version": "pose_template_library.v1", "templates": []}
+        ),
+    )
+    page.route(
+        "**/pose-templates/workpieces/*/orientations",
+        lambda route: fulfill_json(
+            route, pose_template_orientation_analysis(record["catalog_uuid"])
+        ),
+    )
+    page.route(
+        "**/pose-templates/workpieces/*/orientation-thumbnail",
+        lambda route: fulfill_json(
+            route, pose_template_orientation_thumbnail(record["catalog_uuid"])
+        ),
+    )
 
     def preview_handler(route) -> None:
         if route.request.method == "POST":
-            fulfill_json(route, {"job_id": "preview-job", "request_id": "c" * 32}, status=202)
+            fulfill_json(
+                route, {"job_id": "preview-job", "request_id": "c" * 32}, status=202
+            )
         else:
             fulfill_json(route, immutable_template_preview())
 
@@ -1640,18 +2282,32 @@ def test_pose_templates_add_instance_with_real_catalog_and_preview(
 
     expect(page.get_by_text("Browser box", exact=True)).to_be_visible()
     page.get_by_role("button", name="Choose orientation for Browser box").click()
-    page.get_by_test_id("orientation-chooser").get_by_role("button", name="Add selected orientation").click()
-    expect(page.get_by_role("button", name="Select and move Browser box")).to_have_count(1)
+    page.get_by_test_id("orientation-chooser").get_by_role(
+        "button", name="Add selected orientation"
+    ).click()
+    expect(
+        page.get_by_role("button", name="Select and move Browser box")
+    ).to_have_count(1)
     page.get_by_role("button", name="Choose orientation for Browser box").click()
-    page.get_by_test_id("orientation-chooser").get_by_role("button", name="Add selected orientation").click()
-    expect(page.get_by_role("button", name="Select and move Browser box")).to_have_count(2)
+    page.get_by_test_id("orientation-chooser").get_by_role(
+        "button", name="Add selected orientation"
+    ).click()
+    expect(
+        page.get_by_role("button", name="Select and move Browser box")
+    ).to_have_count(2)
     page.get_by_role("button", name="Remove Browser box instance").click()
-    expect(page.get_by_role("button", name="Select and move Browser box")).to_have_count(1)
-    expect(page.get_by_role("button", name="Generate immutable version")).to_be_enabled(timeout=15_000)
+    expect(
+        page.get_by_role("button", name="Select and move Browser box")
+    ).to_have_count(1)
+    expect(page.get_by_role("button", name="Generate immutable version")).to_be_enabled(
+        timeout=15_000
+    )
     assert page_errors == []
 
 
-def test_ground_truth_workflow_selection_and_full_placement(console_server, page) -> None:
+def test_ground_truth_workflow_selection_and_full_placement(
+    console_server, page
+) -> None:
     install_common_mocks(page)
     submitted: list[dict] = []
     exact_asset_requests: list[str] = []
@@ -1685,17 +2341,21 @@ def test_ground_truth_workflow_selection_and_full_placement(console_server, page
     preview_payload = immutable_template_preview()
     preview_payload["instances"][0]["catalog"]["canonical_ply_sha256"] = "b" * 64
     preview_payload["instances"][0]["orientation"] = {"label": "Wide base"}
-    preview_payload["instances"].append({
-        **second_instance,
-        "preview_mesh_sha256": "f" * 64,
-        "orientation": {"label": "Flat face"},
-        "compensated_contours": [[
-            {"x_mm": 80, "y_mm": 55},
-            {"x_mm": 105, "y_mm": 55},
-            {"x_mm": 105, "y_mm": 65},
-            {"x_mm": 80, "y_mm": 65},
-        ]],
-    })
+    preview_payload["instances"].append(
+        {
+            **second_instance,
+            "preview_mesh_sha256": "f" * 64,
+            "orientation": {"label": "Flat face"},
+            "compensated_contours": [
+                [
+                    {"x_mm": 80, "y_mm": 55},
+                    {"x_mm": 105, "y_mm": 55},
+                    {"x_mm": 105, "y_mm": 65},
+                    {"x_mm": 80, "y_mm": 65},
+                ]
+            ],
+        }
+    )
     preview_payload["preview_meshes"]["f" * 64] = {
         "vertices": [
             [-12.5, -5, -2.5],
@@ -1708,14 +2368,31 @@ def test_ground_truth_workflow_selection_and_full_placement(console_server, page
             [-12.5, 5, 2.5],
         ],
         "faces": [
-            [0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6],
-            [0, 4, 5], [0, 5, 1], [1, 5, 6], [1, 6, 2],
-            [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0],
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [1, 5, 6],
+            [1, 6, 2],
+            [2, 6, 7],
+            [2, 7, 3],
+            [3, 7, 4],
+            [3, 4, 0],
         ],
     }
-    page.route("**/pose-templates/library", lambda route: fulfill_json(route, library_payload))
-    page.route("**/pose-templates/library/*/preview", lambda route: fulfill_json(route, preview_payload))
-    page.route("**/pose-templates/library/*/thumbnail", lambda route: fulfill_json(route, immutable_template_thumbnail()))
+    page.route(
+        "**/pose-templates/library", lambda route: fulfill_json(route, library_payload)
+    )
+    page.route(
+        "**/pose-templates/library/*/preview",
+        lambda route: fulfill_json(route, preview_payload),
+    )
+    page.route(
+        "**/pose-templates/library/*/thumbnail",
+        lambda route: fulfill_json(route, immutable_template_thumbnail()),
+    )
     exact_assets = {
         "33333333-3333-4333-8333-333333333333": trimesh.creation.box(
             extents=(20, 10, 12)
@@ -1738,14 +2415,30 @@ def test_ground_truth_workflow_selection_and_full_placement(console_server, page
         "**/pose-templates/library/*/assets/*/canonical_ply*",
         exact_asset_handler,
     )
-    page.route("**/jobs/selection-job", lambda route: fulfill_json(route, {"job": {"id": "selection-job", "status": "succeeded", "message": None, "tail": []}}))
+    page.route(
+        "**/jobs/selection-job",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "selection-job",
+                    "status": "succeeded",
+                    "message": None,
+                    "tail": [],
+                }
+            },
+        ),
+    )
 
     def selection_handler(route) -> None:
         if route.request.method == "POST":
             submitted.append(route.request.post_data_json)
             fulfill_json(route, {"job_id": "selection-job"}, status=202)
         else:
-            fulfill_json(route, {"selection": None, "replacement_blockers": [], "ready": False})
+            fulfill_json(
+                route, {"selection": None, "replacement_blockers": [], "ready": False}
+            )
+
     page.route("**/pose-templates/runs/selection**", selection_handler)
     page.goto(
         f"{console_server.url}/#/workflow/dataset?step=template",
@@ -1764,14 +2457,16 @@ def test_ground_truth_workflow_selection_and_full_placement(console_server, page
     )
     page.get_by_role("radio", name="Select Clamp pair").click()
     expect(page.get_by_test_id("selected-template-scene")).to_be_visible(timeout=15_000)
-    expect(page.get_by_test_id("selected-template-scene")).to_have_attribute("data-origin-offset-mm", "15,15")
-    expect(page.get_by_test_id("selected-template-scene").locator("canvas")).to_have_count(1)
+    expect(page.get_by_test_id("selected-template-scene")).to_have_attribute(
+        "data-origin-offset-mm", "15,15"
+    )
+    expect(
+        page.get_by_test_id("selected-template-scene").locator("canvas")
+    ).to_have_count(1)
     expect(page.get_by_text("Exact immutable PLY detail")).to_be_visible()
     object_index = page.get_by_test_id("selected-template-object-index")
     expect(
-        object_index.get_by_role(
-            "button", name="Focus Clamp, obj_000007, instance 1"
-        )
+        object_index.get_by_role("button", name="Focus Clamp, obj_000007, instance 1")
     ).to_be_visible()
     gauge_focus = object_index.get_by_role(
         "button", name="Focus Gauge block, obj_000008, instance 2"
@@ -1817,7 +2512,9 @@ def test_ground_truth_workflow_selection_and_full_placement(console_server, page
     assert submitted[0]["placement"]["matrix"][2][3] == 34
 
 
-def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, page) -> None:
+def test_run_config_preflight_blocker_and_fresh_capture_gates(
+    console_server, page
+) -> None:
     requests: list[dict] = []
     preflight_state = {"blocker": "missing_preflight"}
     configured = run_config(
@@ -1850,7 +2547,9 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
         requests=requests,
         config_payload=configured,
     )
-    page.route("**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status()))
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status())
+    )
     capture_setup = {"queued": False, "post_queue_reads": 0}
 
     def calibration_setup_handler(route) -> None:
@@ -1948,7 +2647,9 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     speed = page.locator("#velocity")
     expect(speed).to_have_value("0.03")
     expect(speed).to_have_attribute("max", "0.03")
-    expect(page.get_by_text("Full capture is an A1 joint PTP", exact=False)).to_be_visible()
+    expect(
+        page.get_by_text("Full capture is an A1 joint PTP", exact=False)
+    ).to_be_visible()
     page.get_by_role("button", name="Save setup").click()
     expect(page.get_by_text("Calibration recording setup saved")).to_be_visible()
     written = next(item["body"] for item in requests if item["path"] == "/run-config")
@@ -1971,7 +2672,9 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     expect(readiness).to_be_visible()
     expect(readiness).to_contain_text("Readiness has not been checked")
     readiness.get_by_role("button", name="Check readiness", exact=True).click()
-    preflight_request = next(item["body"] for item in requests if item["path"] == "/pipeline/run")
+    preflight_request = next(
+        item["body"] for item in requests if item["path"] == "/pipeline/run"
+    )
     assert preflight_request["stage"] == "run_preflight"
     assert "allow_cameras" not in json.dumps(preflight_request)
 
@@ -1979,7 +2682,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     page.reload(wait_until="networkidle")
     page.get_by_role("button", name="Review and start capture", exact=True).click()
     expect(page.get_by_test_id("capture-timeout-envelope")).to_contain_text(
-        "720 s total · 15 s sustained camera readiness (3 frames each) · 120 s to first robot packet · 60 s between robot packets"
+        "720 s total · 15 s sustained camera readiness (3 frames each) · 5 s maximum live camera-metadata pause · 120 s to first robot packet · 60 s between robot packets"
     )
     submit = page.locator('[data-testid="capture-submit"]')
     expect(submit).to_be_disabled()
@@ -1990,9 +2693,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
     submit.click()
     expect(page.get_by_text("Calibration capture queued")).to_be_visible()
     capture_request = [
-        item["body"]
-        for item in requests
-        if item["path"] == "/pipeline/run-sequence"
+        item["body"] for item in requests if item["path"] == "/pipeline/run-sequence"
     ][-1]
     assert capture_request == {
         "sequence": "real_full_capture_validation",
@@ -2013,6 +2714,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(console_server, pa
                 "startup_wait_s": 15,
                 "receive_start_timeout_s": 120,
                 "receive_idle_timeout_s": 60,
+                "camera_metadata_idle_timeout_s": 5,
             },
         },
     }
@@ -2080,8 +2782,7 @@ def test_readiness_background_refresh_preserves_visible_evidence(
 
     with page.expect_request(
         lambda request: (
-            request.method == "GET"
-            and urlparse(request.url).path == "/run-config"
+            request.method == "GET" and urlparse(request.url).path == "/run-config"
         ),
         timeout=5_000,
     ):
@@ -2200,7 +2901,9 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         },
     }
     install_common_mocks(page, requests=requests, config_payload=configured)
-    page.route("**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status()))
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status())
+    )
     page.route(
         "**/ui/calibrations?**",
         lambda route: fulfill_json(
@@ -2252,29 +2955,44 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         wait_until="networkidle",
     )
 
-    expect(page.get_by_role("heading", name="Record an object-template dataset")).to_be_visible()
-    expect(page.get_by_role("heading", name="Saved camera calibration")).to_contain_text(
-        "Required"
-    )
-    expect(page.get_by_text("Required: select and validate a previously published calibration below.")).to_be_visible()
+    expect(
+        page.get_by_role("heading", name="Record an object-template dataset")
+    ).to_be_visible()
+    speed = page.get_by_label("Requested robot capture speed (m/s)")
+    expect(speed).to_have_value("0.2")
+    expect(speed).to_have_attribute("max", "1")
+    expect(
+        page.get_by_text(
+            "Requests above 0.03 m/s require the commissioned structured-command app",
+            exact=False,
+        )
+    ).to_be_visible()
+    expect(
+        page.get_by_text(
+            "Speed alone cannot guarantee sharp frames", exact=False
+        )
+    ).to_be_visible()
+    speed.fill("0.15")
+    expect(
+        page.get_by_role("heading", name="Saved camera calibration")
+    ).to_contain_text("Required")
+    expect(
+        page.get_by_text(
+            "Required: select and validate a previously published calibration below."
+        )
+    ).to_be_visible()
     save_setup = page.get_by_role("button", name="Save setup")
     expect(save_setup).to_be_disabled()
-    readiness_action = page.get_by_role(
-        "button", name="Check readiness", exact=True
-    )
+    readiness_action = page.get_by_role("button", name="Check readiness", exact=True)
     expect(readiness_action).to_have_count(1)
     expect(readiness_action).to_be_visible()
 
-    source_choice = page.get_by_role("radio").filter(
-        has_text="Calibration run July 21"
-    )
+    source_choice = page.get_by_role("radio").filter(has_text="Calibration run July 21")
     expect(source_choice).to_have_count(1)
     expect(source_choice).to_contain_text("Camera settings match")
     source_choice.click()
     expect(source_choice).to_have_attribute("aria-checked", "true")
-    synchronization_mode = page.get_by_role(
-        "combobox", name="Synchronization mode"
-    )
+    synchronization_mode = page.get_by_role("combobox", name="Synchronization mode")
     expect(synchronization_mode).to_contain_text(
         "Hardware-triggered RealSense depth exposure"
     )
@@ -2285,17 +3003,21 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     page.get_by_role(
         "option", name="Hardware-triggered RealSense depth exposure"
     ).click()
-    expect(page.get_by_text("Depth-only hardware synchronization boundary")).to_be_visible()
-    expect(page.get_by_text("not certified as hardware-synchronous across cameras")).to_be_visible()
+    expect(
+        page.get_by_text("Depth-only hardware synchronization boundary")
+    ).to_be_visible()
+    expect(
+        page.get_by_text("not certified as hardware-synchronous across cameras")
+    ).to_be_visible()
     expect(page.get_by_test_id("hardware-sync-contract-status")).to_contain_text(
         "Hardware trigger configuration is complete"
     )
-    expect(page.get_by_test_id("hardware-sync-qualification-requirement")).to_contain_text(
-        "Current physical qualification required before recording"
-    )
-    expect(page.get_by_test_id("hardware-sync-qualification-requirement")).to_contain_text(
-        "hardware_sync_qualification.json"
-    )
+    expect(
+        page.get_by_test_id("hardware-sync-qualification-requirement")
+    ).to_contain_text("Current physical qualification required before recording")
+    expect(
+        page.get_by_test_id("hardware-sync-qualification-requirement")
+    ).to_contain_text("hardware_sync_qualification.json")
     page.get_by_label("Trigger group ID").fill("research-mixed-rig")
     validate_and_save = page.get_by_role(
         "button", name="Validate and save setup", exact=True
@@ -2331,6 +3053,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     written = next(item["body"] for item in requests if item["path"] == "/run-config")
     assert written["dataset_mode"] == "pose_template"
     assert written["plan_only"] is False
+    assert written["velocity"] == 0.15
     assert written["sequence"] == "calibrated_capture_to_bop_dataset_dry_run"
     assert written["calibration_profiles"] == selected_calibration_path
     assert written["expected_calibration_bundle_sha256"] == source_bundle_sha256
@@ -2431,7 +3154,9 @@ def test_dataset_setup_requires_confirmation_to_replace_selected_calibration(
     )
 
     install_common_mocks(page, requests=requests, config_payload=configured)
-    page.route("**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status()))
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status())
+    )
     page.route(
         "**/ui/calibrations?**",
         lambda route: fulfill_json(
@@ -2481,7 +3206,9 @@ def test_dataset_setup_requires_confirmation_to_replace_selected_calibration(
         wait_until="networkidle",
     )
 
-    expect(page.get_by_text("A verified calibration snapshot is selected")).to_be_visible()
+    expect(
+        page.get_by_text("A verified calibration snapshot is selected")
+    ).to_be_visible()
     replacement_choice = page.get_by_role("radio").filter(
         has_text="Replacement calibration"
     )
@@ -2525,10 +3252,7 @@ def test_dataset_setup_requires_confirmation_to_replace_selected_calibration(
     ]
     written = next(item["body"] for item in requests if item["path"] == "/run-config")
     assert written["calibration_profiles"] == replacement_calibration_path
-    assert (
-        written["expected_calibration_bundle_sha256"]
-        == replacement_bundle_sha256
-    )
+    assert written["expected_calibration_bundle_sha256"] == replacement_bundle_sha256
 
 
 def test_dataset_workflow_blocks_an_invalid_saved_timing_contract(
@@ -2569,9 +3293,7 @@ def test_dataset_workflow_blocks_an_invalid_saved_timing_contract(
         "status": "error",
         "bundle_sha256": selected_bundle_sha256,
         "sensors": [],
-        "error": (
-            "Profile profile-wrist-1 has no verified robot pose time offset."
-        ),
+        "error": ("Profile profile-wrist-1 has no verified robot pose time offset."),
     }
 
     install_common_mocks(page, config_payload=configured)
@@ -2680,10 +3402,30 @@ def test_dataset_processing_is_one_ordered_operator_action(
             "status": "complete",
         }
     ]
+    next(section for section in overview["sidebar"] if section["id"] == "sync")[
+        "artifacts"
+    ] = [
+        {
+            "path": "sync_quality_report.json",
+            "exists": True,
+            "status": "ok",
+        }
+    ]
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "artifacts"
+    ] = [
+        {
+            "path": "camera_rectification_report.json",
+            "exists": True,
+            "status": "complete",
+        }
+    ]
 
     install_common_mocks(page, config_payload=configured)
     page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
-    page.route("**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status()))
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status())
+    )
     page.route(
         "**/ui/calibrations?**",
         lambda route: fulfill_json(
@@ -2759,23 +3501,17 @@ def test_dataset_processing_is_one_ordered_operator_action(
     expect(timing_policy).to_contain_text("fallback forbidden")
     expect(timing_policy).to_contain_text("20.000 ms")
     page.mouse.move(0, 0)
-    timing_policy.get_by_role(
-        "button", name="About robot-pose time offset"
-    ).hover()
+    timing_policy.get_by_role("button", name="About robot-pose time offset").hover()
     expect(page.get_by_role("tooltip")).to_contain_text(
         "Positive means pair the frame with a robot pose recorded later"
     )
     page.keyboard.press("Escape")
-    timing_policy.get_by_role(
-        "button", name="About calibration timestamp pair"
-    ).hover()
+    timing_policy.get_by_role("button", name="About calibration timestamp pair").hover()
     expect(page.get_by_role("tooltip")).to_contain_text(
         "exact frame and robot clock fields"
     )
     page.keyboard.press("Escape")
-    timing_policy.get_by_role(
-        "button", name="About maximum robot-pose gap"
-    ).hover()
+    timing_policy.get_by_role("button", name="About maximum robot-pose gap").hover()
     expect(page.get_by_role("tooltip")).to_contain_text(
         "frame is excluded when its nearest robot pose is farther away"
     )
@@ -2794,9 +3530,25 @@ def test_dataset_processing_is_one_ordered_operator_action(
 
     processing = page.get_by_test_id("dataset-processing")
     expect(processing).to_have_count(1)
-    expect(processing).to_contain_text("One queued job runs the required derived-data stages in order")
+    sync_step = page.locator('[data-workflow-step="sync"]')
+    expect(sync_step.get_by_text("Current step", exact=True)).to_be_visible()
+    expect(
+        sync_step.get_by_text(
+            "Copy models and write the annotation-free BOP dataset",
+            exact=True,
+        )
+    ).to_be_visible()
+    expect(processing).to_contain_text(
+        "One queued job synchronizes, rectifies, and writes the image/model BOP dataset"
+    )
+    expect(processing).to_contain_text(
+        "It does not run BlenderProc or generate rendered GT/masks"
+    )
     expect(processing).to_contain_text(
         "Calibration validation is automatic here; there is no second operator preflight."
+    )
+    expect(processing).to_contain_text(
+        "Copy models and write the annotation-free BOP dataset"
     )
     process_action = page.get_by_role(
         "button", name="Process and export dataset", exact=True
@@ -2809,20 +3561,25 @@ def test_dataset_processing_is_one_ordered_operator_action(
         "Validate selected calibration",
         "Export BOP dataset",
     ):
-        expect(
-            page.get_by_role("button", name=stale_action, exact=True)
-        ).to_have_count(0)
+        expect(page.get_by_role("button", name=stale_action, exact=True)).to_have_count(
+            0
+        )
 
     export_outcome = page.locator('[data-workflow-step="export"]')
     expect(export_outcome).to_contain_text("BOP export has not completed")
-    expect(export_outcome).to_contain_text(
-        "Use Process and export dataset in step 5"
-    )
+    expect(export_outcome).to_contain_text("Use Process and export dataset in step 5")
+    expect(export_outcome).to_contain_text("without running BlenderProc")
 
     process_action.click()
     expect(page.get_by_text("Dataset processing queued")).to_be_visible()
     assert processing_requests == [{"run_root": RUN_ROOT}]
-    expect(page.get_by_text("BOP dataset is ready")).to_be_visible(timeout=5_000)
+    expect(page.get_by_text("BOP image/model export is ready")).to_be_visible(
+        timeout=5_000
+    )
+    expect(export_outcome).to_contain_text(
+        "has populated object targets and is ready for pose-estimator consumption"
+    )
+    expect(sync_step.get_by_text("Complete", exact=True)).to_be_visible()
 
 
 def test_run_setup_disables_camera_without_deleting_identity_or_profile(
@@ -2909,13 +3666,17 @@ def test_run_setup_disables_camera_without_deleting_identity_or_profile(
     } == {"wrist-1", "static-1"}
 
 
-def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page) -> None:
+def test_robot_controls_validate_and_confirm_start_and_stop(
+    console_server, page
+) -> None:
     commands: list[dict] = []
     install_common_mocks(page)
 
     def command_handler(route) -> None:
         commands.append(route.request.post_data_json)
-        fulfill_json(route, {"job_id": f"robot-{len(commands)}", "status": "queued"}, status=202)
+        fulfill_json(
+            route, {"job_id": f"robot-{len(commands)}", "status": "queued"}, status=202
+        )
 
     page.route("**/run-command", command_handler)
     page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
@@ -2936,8 +3697,12 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
     expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
     page.get_by_text("I confirm this is the intended lab IIWA target.").click()
-    expect(page.get_by_text("I authorize motion of the real lab IIWA for this start.")).to_be_visible()
-    expect(page.get_by_text("I confirm the capture cameras and pose receiver are ready.")).to_be_visible()
+    expect(
+        page.get_by_text("I authorize motion of the real lab IIWA for this start.")
+    ).to_be_visible()
+    expect(
+        page.get_by_text("I confirm the capture cameras and pose receiver are ready.")
+    ).to_be_visible()
     expect(page.get_by_role("button", name="Queue start")).to_be_enabled()
     page.get_by_role("button", name="Queue start").click()
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
@@ -2946,7 +3711,9 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     stop_warning = page.get_by_test_id("iiwa-stop-warning")
     expect(stop_warning).to_contain_text("IIWA STOP is not a safety stop")
     expect(stop_warning).to_contain_text("cannot interrupt active motion")
-    expect(stop_warning).to_contain_text("Sunrise must be restarted manually before another START")
+    expect(stop_warning).to_contain_text(
+        "Sunrise must be restarted manually before another START"
+    )
     expect(page.get_by_role("button", name="Queue stop")).to_be_disabled()
     expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
     assert [item["command"] for item in commands] == ["start_iiwa"]
@@ -2966,7 +3733,9 @@ def test_robot_controls_validate_and_confirm_start_and_stop(console_server, page
     ]
 
 
-def test_dashboard_quick_robot_controls_use_configured_target(console_server, page) -> None:
+def test_dashboard_quick_robot_controls_use_configured_target(
+    console_server, page
+) -> None:
     commands: list[dict] = []
     install_common_mocks(page)
 
@@ -2994,8 +3763,12 @@ def test_dashboard_quick_robot_controls_use_configured_target(console_server, pa
     expect(dialog.get_by_role("button", name="Queue start")).to_be_disabled()
     expect(dialog.get_by_role("checkbox")).to_have_count(1)
     dialog.get_by_text("I confirm this is the intended lab IIWA target.").click()
-    expect(dialog.get_by_text("I authorize motion of the real lab IIWA for this start.")).to_be_visible()
-    expect(dialog.get_by_text("I confirm the capture cameras and pose receiver are ready.")).to_be_visible()
+    expect(
+        dialog.get_by_text("I authorize motion of the real lab IIWA for this start.")
+    ).to_be_visible()
+    expect(
+        dialog.get_by_text("I confirm the capture cameras and pose receiver are ready.")
+    ).to_be_visible()
     expect(dialog.get_by_role("button", name="Queue start")).to_be_enabled()
     dialog.get_by_role("button", name="Queue start").click()
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
@@ -3004,7 +3777,9 @@ def test_dashboard_quick_robot_controls_use_configured_target(console_server, pa
     stop_warning = dialog.get_by_test_id("iiwa-stop-warning")
     expect(stop_warning).to_contain_text("IIWA STOP is not a safety stop")
     expect(stop_warning).to_contain_text("cannot interrupt active motion")
-    expect(stop_warning).to_contain_text("Sunrise must be restarted manually before another START")
+    expect(stop_warning).to_contain_text(
+        "Sunrise must be restarted manually before another START"
+    )
     expect(dialog.get_by_role("button", name="Queue stop")).to_be_disabled()
     expect(dialog.get_by_role("checkbox")).to_have_count(1)
     dialog.get_by_text("I confirm this is the intended lab IIWA target.").click()
@@ -3027,11 +3802,40 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     install_common_mocks(page)
     canceled: list[str] = []
     job = {
-        "id": "capture-1", "name": "pipeline:sync_run", "command": ["uv"], "cwd": "/repo", "status": "running", "created_at": "2026-07-10T12:00:00Z", "log_path": "/tmp/log", "started_at": "2026-07-10T12:00:01Z", "ended_at": None, "returncode": None, "message": None, "tail": ["working"], "resources": ["disk_io"], "parameters": {"pipeline_stage": "sync_run"},
+        "id": "capture-1",
+        "name": "pipeline:sync_run",
+        "command": ["uv"],
+        "cwd": "/repo",
+        "status": "running",
+        "created_at": "2026-07-10T12:00:00Z",
+        "log_path": "/tmp/log",
+        "started_at": "2026-07-10T12:00:01Z",
+        "ended_at": None,
+        "returncode": None,
+        "message": None,
+        "tail": ["working"],
+        "resources": ["disk_io"],
+        "parameters": {"pipeline_stage": "sync_run"},
     }
-    page.route("**/jobs", lambda route: fulfill_json(route, {"jobs": [job], "resources": {"disk_io": "capture-1"}}))
-    page.route("**/jobs/capture-1/log", lambda route: route.fulfill(status=200, content_type="text/plain", body="line one\nline two\n"))
-    page.route("**/jobs/capture-1/cancel", lambda route: (canceled.append("capture-1"), fulfill_json(route, {"job": {**job, "status": "canceling"}}))[1])
+    page.route(
+        "**/jobs",
+        lambda route: fulfill_json(
+            route, {"jobs": [job], "resources": {"disk_io": "capture-1"}}
+        ),
+    )
+    page.route(
+        "**/jobs/capture-1/log",
+        lambda route: route.fulfill(
+            status=200, content_type="text/plain", body="line one\nline two\n"
+        ),
+    )
+    page.route(
+        "**/jobs/capture-1/cancel",
+        lambda route: (
+            canceled.append("capture-1"),
+            fulfill_json(route, {"job": {**job, "status": "canceling"}}),
+        )[1],
+    )
     page.goto(f"{console_server.url}/#/jobs", wait_until="networkidle")
     page.get_by_role("button", name="Log").click()
     expect(page.locator('[data-testid="job-log"]')).to_contain_text("line two")
@@ -3048,22 +3852,26 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
     history = []
     for index in range(25):
         failed = index == 24
-        history.append({
-            "id": f"history-{index:02d}",
-            "name": "failed_calibration" if failed else f"completed_job_{index:02d}",
-            "command": ["uv"],
-            "cwd": "/repo",
-            "status": "failed" if failed else "succeeded",
-            "created_at": f"2026-07-{index + 1:02d}T12:00:00Z",
-            "log_path": f"/tmp/history-{index:02d}.log",
-            "started_at": f"2026-07-{index + 1:02d}T12:00:01Z",
-            "ended_at": f"2026-07-{index + 1:02d}T12:00:02Z",
-            "returncode": 1 if failed else 0,
-            "message": "solver evidence failed" if failed else "complete",
-            "tail": [],
-            "resources": ["cpu"],
-            "parameters": {"run_root": RUN_ROOT},
-        })
+        history.append(
+            {
+                "id": f"history-{index:02d}",
+                "name": "failed_calibration"
+                if failed
+                else f"completed_job_{index:02d}",
+                "command": ["uv"],
+                "cwd": "/repo",
+                "status": "failed" if failed else "succeeded",
+                "created_at": f"2026-07-{index + 1:02d}T12:00:00Z",
+                "log_path": f"/tmp/history-{index:02d}.log",
+                "started_at": f"2026-07-{index + 1:02d}T12:00:01Z",
+                "ended_at": f"2026-07-{index + 1:02d}T12:00:02Z",
+                "returncode": 1 if failed else 0,
+                "message": "solver evidence failed" if failed else "complete",
+                "tail": [],
+                "resources": ["cpu"],
+                "parameters": {"run_root": RUN_ROOT},
+            }
+        )
     page.route(
         "**/jobs",
         lambda route: fulfill_json(route, {"jobs": history, "resources": {}}),
@@ -3088,18 +3896,26 @@ def test_calibration_target_unavailable_keeps_saved_library_navigation(
     console_server, page
 ) -> None:
     install_common_mocks(page, generator_available=False)
-    page.route("**/calibration-targets/bundles?**", lambda route: fulfill_json(route, {
-        "schema_version": "calibration_target_library.v1",
-        "run_root": RUN_ROOT,
-        "bundles": [],
-    }))
+    page.route(
+        "**/calibration-targets/bundles?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "calibration_target_library.v1",
+                "run_root": RUN_ROOT,
+                "bundles": [],
+            },
+        ),
+    )
     page.goto(console_server.url, wait_until="networkidle")
 
     expect(page.get_by_role("link", name="Calibration Targets")).to_be_visible()
     page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
     expect(page.get_by_text("Target generation is unavailable")).to_be_visible()
     expect(page.get_by_text("Saved target library")).to_be_visible()
-    expect(page.get_by_text("git submodule update --init third_party/PoseGridGen")).to_be_visible()
+    expect(
+        page.get_by_text("git submodule update --init third_party/PoseGridGen")
+    ).to_be_visible()
 
 
 def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
@@ -3112,36 +3928,94 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         "schema_version": "calibration_setup.v1",
         "run_root": RUN_ROOT,
         "cameras": [
-            {"sensor_key": "realsense_d435:wrist-1", "sensor_name": "realsense_wrist-1", "display_name": "Wrist RGB-D", "sensor_type": "realsense_d435", "device_id": "wrist-1", "current_mounting_mode": "eye_in_hand"},
-            {"sensor_key": "oak_d_pro:static-1", "sensor_name": "luxonis_static-1", "display_name": "Auxiliary OAK-D", "sensor_type": "oak_d_pro", "device_id": "static-1", "current_mounting_mode": "eye_in_hand"},
+            {
+                "sensor_key": "realsense_d435:wrist-1",
+                "sensor_name": "realsense_wrist-1",
+                "display_name": "Wrist RGB-D",
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "current_mounting_mode": "eye_in_hand",
+            },
+            {
+                "sensor_key": "oak_d_pro:static-1",
+                "sensor_name": "luxonis_static-1",
+                "display_name": "Auxiliary OAK-D",
+                "sensor_type": "oak_d_pro",
+                "device_id": "static-1",
+                "current_mounting_mode": "eye_in_hand",
+            },
         ],
         "unavailable_cameras": [],
         "saved_targets": [
-            {"target_id": "5f09f41c-dd91-44ef-a048-1f43fc990e17", "display_name": "Lab board", "valid": True, "selected": True},
-            {"target_id": "9ab5ff1c-60f6-46b1-823d-2a912d5d4e3f", "display_name": "Alternate board", "valid": True},
+            {
+                "target_id": "5f09f41c-dd91-44ef-a048-1f43fc990e17",
+                "display_name": "Lab board",
+                "valid": True,
+                "selected": True,
+            },
+            {
+                "target_id": "9ab5ff1c-60f6-46b1-823d-2a912d5d4e3f",
+                "display_name": "Alternate board",
+                "valid": True,
+            },
         ],
         "modes": [
-            {"id": "eye_in_hand", "label": "Robot-mounted camera (eye-in-hand)", "primary_transform": "camera → robot_flange", "target_mounting": "stationary relative to template_base"},
-            {"id": "eye_to_hand", "label": "Static camera (eye-to-hand)", "primary_transform": "camera → template_base", "target_mounting": "rigidly attached to robot_flange"},
+            {
+                "id": "eye_in_hand",
+                "label": "Robot-mounted camera (eye-in-hand)",
+                "primary_transform": "camera → robot_flange",
+                "target_mounting": "stationary relative to template_base",
+            },
+            {
+                "id": "eye_to_hand",
+                "label": "Static camera (eye-to-hand)",
+                "primary_transform": "camera → template_base",
+                "target_mounting": "rigidly attached to robot_flange",
+            },
         ],
         "solver": {
             "default_pnp_methods": ["IPPE", "ITERATIVE", "SQPNP"],
-            "default_extrinsic_methods": ["tsai", "park", "horaud", "andreff", "daniilidis", "shah", "li"],
+            "default_extrinsic_methods": [
+                "tsai",
+                "park",
+                "horaud",
+                "andreff",
+                "daniilidis",
+                "shah",
+                "li",
+            ],
             "intrinsics_policy": "compare_factory_opencv",
             "intrinsics_policies": [
-                {"id": "compare_factory_opencv", "label": "Compare captured factory intrinsics with a gated OpenCV calibration"},
-                {"id": "reuse_compatible_or_factory", "label": "Reuse an exact compatible profile, otherwise captured factory intrinsics"},
+                {
+                    "id": "compare_factory_opencv",
+                    "label": "Compare captured factory intrinsics with a gated OpenCV calibration",
+                },
+                {
+                    "id": "reuse_compatible_or_factory",
+                    "label": "Reuse an exact compatible profile, otherwise captured factory intrinsics",
+                },
             ],
             "synchronization": {
+                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_cv.v2",
                 "default_policy": "auto_offset",
                 "policies": [
-                    {"id": "auto_offset", "label": "Auto-estimate robot-pose offset — recommended", "description": "Estimate effective per-camera latency."},
-                    {"id": "fixed_zero", "label": "Use captured timestamps (0 ms)", "description": "Use the recorded pairing."},
+                    {
+                        "id": "auto_offset",
+                        "label": "Auto-estimate robot-pose offset — recommended",
+                        "description": "Estimate effective per-camera latency.",
+                    },
+                    {
+                        "id": "fixed_zero",
+                        "label": "Use captured timestamps (0 ms)",
+                        "description": "Use the recorded pairing.",
+                    },
                 ],
                 "search": {
                     "minimum_robot_pose_time_offset_ms": -150.0,
                     "maximum_robot_pose_time_offset_ms": 150.0,
                     "step_ms": 5.0,
+                    "minimum_motion_count_per_cross_validation_fold": 4,
+                    "maximum_leave_one_motion_out_search_adjusted_sign_p_value": 0.05,
                 },
             },
             "thresholds": {
@@ -3153,6 +4027,10 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 "min_pnp_grid_columns": 2,
                 "min_accepted_views": 15,
                 "min_coverage_cells": 6,
+                "image_coverage_tail_support_views": 5,
+                "min_image_centroid_x_span_ratio": 0.45,
+                "min_image_centroid_y_span_ratio": 0.35,
+                "min_image_centroid_hull_area_ratio": 0.1,
                 "max_per_view_reprojection_error_px": 3.0,
                 "max_intrinsic_rms_reprojection_error_px": 1.5,
                 "min_motion_poses": 4,
@@ -3167,8 +4045,14 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
 
     def create_handler(route) -> None:
-        requests.append({"path": "/calibration/attempts", "body": route.request.post_data_json})
-        fulfill_json(route, {"attempt_id": "a" * 32, "job_id": "calculation-1", "status": "queued"}, status=202)
+        requests.append(
+            {"path": "/calibration/attempts", "body": route.request.post_data_json}
+        )
+        fulfill_json(
+            route,
+            {"attempt_id": "a" * 32, "job_id": "calculation-1", "status": "queued"},
+            status=202,
+        )
 
     page.route("**/calibration/attempts", create_handler)
     transform = {
@@ -3194,10 +4078,27 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         "outlier_ratio": 0.1,
         "mean_reprojection_error_px": 0.25,
         "primary_transform": transform,
-        "companion_transform": {**transform, "from": "aruco_grid", "to": "template_base"},
-        "held_out_residuals": {"mean_translation_mm": 0.8, "median_translation_mm": 0.7, "mean_rotation_deg": 0.3, "median_rotation_deg": 0.2},
+        "companion_transform": {
+            **transform,
+            "from": "aruco_grid",
+            "to": "template_base",
+        },
+        "held_out_residuals": {
+            "mean_translation_mm": 0.8,
+            "median_translation_mm": 0.7,
+            "mean_rotation_deg": 0.3,
+            "median_rotation_deg": 0.2,
+        },
     }
-    override = {**recommended, "candidate_id": "realsense_d435:wrist-1|SQPNP|tsai", "profile_id": "wrist_sqpnp_tsai", "pnp_method": "SQPNP", "extrinsic_method": "tsai", "recommended": False, "score": 0.2}
+    override = {
+        **recommended,
+        "candidate_id": "realsense_d435:wrist-1|SQPNP|tsai",
+        "profile_id": "wrist_sqpnp_tsai",
+        "pnp_method": "SQPNP",
+        "extrinsic_method": "tsai",
+        "recommended": False,
+        "score": 0.2,
+    }
     static_transform = {
         **transform,
         "to": "robot_flange",
@@ -3218,25 +4119,84 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         },
     }
     failed = {
-        "candidate_id": "oak_d_pro:static-1|ITERATIVE|li", "pnp_method": "ITERATIVE", "extrinsic_method": "li", "algorithms": ["ITERATIVE", "li"], "status": "error", "validation_state": "failed", "score": None, "observation_count": 3, "inlier_count": 0, "outlier_count": 3, "outlier_ratio": 1, "error": "leave-one-pose-out validation requires at least four poses",
+        "candidate_id": "oak_d_pro:static-1|ITERATIVE|li",
+        "pnp_method": "ITERATIVE",
+        "extrinsic_method": "li",
+        "algorithms": ["ITERATIVE", "li"],
+        "status": "error",
+        "validation_state": "failed",
+        "score": None,
+        "observation_count": 3,
+        "inlier_count": 0,
+        "outlier_count": 3,
+        "outlier_ratio": 1,
+        "error": "leave-one-pose-out validation requires at least four poses",
     }
 
     def attempt_payload() -> dict:
         return {
             "schema_version": "calibration_attempt.v1",
             "attempt_id": "a" * 32,
-            "request": {"mode": "eye_in_hand", "sensor_keys": ["realsense_d435:wrist-1", "oak_d_pro:static-1"], "target_id": setup["saved_targets"][0]["target_id"], "solver_policy": "auto_compare", "intrinsics_policy": "compare_factory_opencv", "synchronization_policy": "auto_offset"},
-            "progress": {"status": "complete", "message": "Calibration calculations are complete and awaiting review.", "phases": [
-                {"id": "prepare_data", "label": "Prepare data", "status": "complete"},
-                {"id": "estimate_target_poses", "label": "Estimate target poses", "status": "complete"},
-                {"id": "estimate_time_offsets", "label": "Estimate time alignment", "status": "complete"},
-                {"id": "compare_robot_camera_solutions", "label": "Compare robot-camera solutions", "status": "complete"},
-                {"id": "validate_and_rank", "label": "Validate and rank", "status": "complete"},
-            ]},
-            "results": {"status": "complete", "recommended_camera_count": 2, "failed_camera_count": 0, "results": [
-                {**setup["cameras"][0], "status": "passing", "recommended_candidate_id": recommended["candidate_id"], "recommendation": recommended, "candidates": [recommended, override]},
-                {**setup["cameras"][1], "status": "passing", "recommended_candidate_id": static_recommended["candidate_id"], "recommendation": static_recommended, "candidates": [static_recommended, failed]},
-            ]},
+            "request": {
+                "mode": "eye_in_hand",
+                "sensor_keys": ["realsense_d435:wrist-1", "oak_d_pro:static-1"],
+                "target_id": setup["saved_targets"][0]["target_id"],
+                "solver_policy": "auto_compare",
+                "intrinsics_policy": "compare_factory_opencv",
+                "synchronization_policy": "auto_offset",
+            },
+            "progress": {
+                "status": "complete",
+                "message": "Calibration calculations are complete and awaiting review.",
+                "phases": [
+                    {
+                        "id": "prepare_data",
+                        "label": "Prepare data",
+                        "status": "complete",
+                    },
+                    {
+                        "id": "estimate_target_poses",
+                        "label": "Estimate target poses",
+                        "status": "complete",
+                    },
+                    {
+                        "id": "estimate_time_offsets",
+                        "label": "Estimate time alignment",
+                        "status": "complete",
+                    },
+                    {
+                        "id": "compare_robot_camera_solutions",
+                        "label": "Compare robot-camera solutions",
+                        "status": "complete",
+                    },
+                    {
+                        "id": "validate_and_rank",
+                        "label": "Validate and rank",
+                        "status": "complete",
+                    },
+                ],
+            },
+            "results": {
+                "status": "complete",
+                "recommended_camera_count": 2,
+                "failed_camera_count": 0,
+                "results": [
+                    {
+                        **setup["cameras"][0],
+                        "status": "passing",
+                        "recommended_candidate_id": recommended["candidate_id"],
+                        "recommendation": recommended,
+                        "candidates": [recommended, override],
+                    },
+                    {
+                        **setup["cameras"][1],
+                        "status": "passing",
+                        "recommended_candidate_id": static_recommended["candidate_id"],
+                        "recommendation": static_recommended,
+                        "candidates": [static_recommended, failed],
+                    },
+                ],
+            },
             "intrinsic_comparison": {
                 "policy": "compare_factory_opencv",
                 "sensors": [
@@ -3283,6 +4243,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 ],
             },
             "time_offset_search": {
+                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_cv.v2",
                 "policy": "auto_offset",
                 "status": "complete",
                 "sign_convention": {
@@ -3307,18 +4268,111 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                         "candidate_robot_pose_time_offset_ms": 65.0,
                         "evidence_strength": "strong",
                         "boundary_hit": False,
-                        "split": {"motion_count": 17, "selected_observation_count": 102, "fold_motion_counts": {"0": 6, "1": 6, "2": 5}},
+                        "selection_extrinsic_method": "shah",
+                        "improvement_evidence_strategy": "leave_one_motion_out_consistency",
+                        "split": {
+                            "motion_count": 17,
+                            "selected_observation_count": 102,
+                            "fold_motion_counts": {"0": 6, "1": 6, "2": 5},
+                        },
                         "cross_validation": {
-                            "zero_offset": {"residuals": {"mean_translation_mm": 3.91, "median_translation_mm": 3.8, "max_translation_mm": 6.0, "mean_rotation_deg": 0.42, "median_rotation_deg": 0.4, "max_rotation_deg": 0.8}},
-                            "candidate": {"residuals": {"mean_translation_mm": 2.77, "median_translation_mm": 2.6, "max_translation_mm": 4.8, "mean_rotation_deg": 0.39, "median_rotation_deg": 0.37, "max_rotation_deg": 0.7}},
-                            "improvement": {"absolute_translation_mm": 1.14, "relative_translation": 0.29156, "rotation_change_deg": -0.03},
+                            "zero_offset": {
+                                "residuals": {
+                                    "mean_translation_mm": 3.91,
+                                    "median_translation_mm": 3.8,
+                                    "max_translation_mm": 6.0,
+                                    "mean_rotation_deg": 0.42,
+                                    "median_rotation_deg": 0.4,
+                                    "max_rotation_deg": 0.8,
+                                }
+                            },
+                            "candidate": {
+                                "residuals": {
+                                    "mean_translation_mm": 2.77,
+                                    "median_translation_mm": 2.6,
+                                    "max_translation_mm": 4.8,
+                                    "mean_rotation_deg": 0.39,
+                                    "median_rotation_deg": 0.37,
+                                    "max_rotation_deg": 0.7,
+                                }
+                            },
+                            "improvement": {
+                                "absolute_translation_mm": 1.14,
+                                "relative_translation": 0.29156,
+                                "rotation_change_deg": -0.03,
+                            },
+                        },
+                        "motion_consistency": {
+                            "status": "ok",
+                            "strategy": "leave_one_motion_out_candidate_consistency_bonferroni.v1",
+                            "motion_count": 17,
+                            "candidate_search_adjustment": "bonferroni",
+                            "candidate_search_hypothesis_count": 60,
+                            "methods": {
+                                "shah": {
+                                    "status": "ok",
+                                    "motion_count": 17,
+                                    "positive_motion_count": 17,
+                                    "material_motion_count": 16,
+                                    "positive_sign_p_value": 0.0000076294,
+                                    "candidate_search_adjusted_positive_sign_p_value": 0.000457764,
+                                    "median_improvement": {
+                                        "absolute_translation_mm": 0.811,
+                                        "relative_translation": 0.2864,
+                                        "rotation_change_deg": -0.02,
+                                    },
+                                },
+                                "li": {
+                                    "status": "ok",
+                                    "motion_count": 17,
+                                    "positive_motion_count": 16,
+                                    "material_motion_count": 16,
+                                    "positive_sign_p_value": 0.000137329,
+                                    "candidate_search_adjusted_positive_sign_p_value": 0.00823974,
+                                    "median_improvement": {
+                                        "absolute_translation_mm": 0.792,
+                                        "relative_translation": 0.2941,
+                                        "rotation_change_deg": -0.018,
+                                    },
+                                },
+                            },
+                            "thresholds": {
+                                "minimum_median_absolute_translation_mm": 0.25,
+                                "minimum_median_relative_translation": 0.1,
+                                "maximum_search_adjusted_positive_sign_p_value": 0.05,
+                            },
                         },
                         "checks": [
-                            {"name": "cross_validation_offset_stability", "status": "ok", "actual": 10.0, "threshold": 22.0},
+                            {
+                                "name": "cross_validation_offset_stability",
+                                "status": "ok",
+                                "actual": 10.0,
+                                "threshold": 22.0,
+                            },
                         ],
                         "curve": [
-                            {"robot_pose_time_offset_ms": 0.0, "residuals": {"mean_translation_mm": 3.91, "median_translation_mm": 3.8, "max_translation_mm": 6.0, "mean_rotation_deg": 0.42, "median_rotation_deg": 0.4, "max_rotation_deg": 0.8}},
-                            {"robot_pose_time_offset_ms": 65.0, "residuals": {"mean_translation_mm": 2.77, "median_translation_mm": 2.6, "max_translation_mm": 4.8, "mean_rotation_deg": 0.39, "median_rotation_deg": 0.37, "max_rotation_deg": 0.7}},
+                            {
+                                "robot_pose_time_offset_ms": 0.0,
+                                "residuals": {
+                                    "mean_translation_mm": 3.91,
+                                    "median_translation_mm": 3.8,
+                                    "max_translation_mm": 6.0,
+                                    "mean_rotation_deg": 0.42,
+                                    "median_rotation_deg": 0.4,
+                                    "max_rotation_deg": 0.8,
+                                },
+                            },
+                            {
+                                "robot_pose_time_offset_ms": 65.0,
+                                "residuals": {
+                                    "mean_translation_mm": 2.77,
+                                    "median_translation_mm": 2.6,
+                                    "max_translation_mm": 4.8,
+                                    "mean_rotation_deg": 0.39,
+                                    "median_rotation_deg": 0.37,
+                                    "max_rotation_deg": 0.7,
+                                },
+                            },
                         ],
                     },
                     {
@@ -3332,28 +4386,86 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                         "candidate_robot_pose_time_offset_ms": 85.0,
                         "evidence_strength": "consistent",
                         "boundary_hit": False,
-                        "split": {"motion_count": 15, "selected_observation_count": 90, "fold_motion_counts": {"0": 5, "1": 5, "2": 5}},
-                        "cross_validation": {
-                            "zero_offset": {"residuals": {"mean_translation_mm": 4.7, "median_translation_mm": 4.5, "max_translation_mm": 7.0, "mean_rotation_deg": 0.5, "median_rotation_deg": 0.45, "max_rotation_deg": 0.9}},
-                            "candidate": {"residuals": {"mean_translation_mm": 3.0, "median_translation_mm": 2.8, "max_translation_mm": 5.0, "mean_rotation_deg": 0.4, "median_rotation_deg": 0.38, "max_rotation_deg": 0.8}},
-                            "improvement": {"absolute_translation_mm": 1.7, "relative_translation": 0.3617, "rotation_change_deg": -0.1},
+                        "split": {
+                            "motion_count": 15,
+                            "selected_observation_count": 90,
+                            "fold_motion_counts": {"0": 5, "1": 5, "2": 5},
                         },
-                        "checks": [{"name": "reference_method_sensitivity", "status": "warning", "actual": 28.0, "warning_threshold": 22.0, "failure_threshold": 44.0}],
+                        "cross_validation": {
+                            "zero_offset": {
+                                "residuals": {
+                                    "mean_translation_mm": 4.7,
+                                    "median_translation_mm": 4.5,
+                                    "max_translation_mm": 7.0,
+                                    "mean_rotation_deg": 0.5,
+                                    "median_rotation_deg": 0.45,
+                                    "max_rotation_deg": 0.9,
+                                }
+                            },
+                            "candidate": {
+                                "residuals": {
+                                    "mean_translation_mm": 3.0,
+                                    "median_translation_mm": 2.8,
+                                    "max_translation_mm": 5.0,
+                                    "mean_rotation_deg": 0.4,
+                                    "median_rotation_deg": 0.38,
+                                    "max_rotation_deg": 0.8,
+                                }
+                            },
+                            "improvement": {
+                                "absolute_translation_mm": 1.7,
+                                "relative_translation": 0.3617,
+                                "rotation_change_deg": -0.1,
+                            },
+                        },
+                        "checks": [
+                            {
+                                "name": "reference_method_sensitivity",
+                                "status": "warning",
+                                "actual": 28.0,
+                                "warning_threshold": 22.0,
+                                "failure_threshold": 44.0,
+                            }
+                        ],
                         "curve": [],
                     },
                 ],
             },
-            "promotion": ({"status": "promoted", "promoted_profile_ids": ["wrist_sqpnp_tsai", "static_ippe_park"]} if promoted["value"] else None),
+            "promotion": (
+                {
+                    "status": "promoted",
+                    "promoted_profile_ids": ["wrist_sqpnp_tsai", "static_ippe_park"],
+                }
+                if promoted["value"]
+                else None
+            ),
         }
 
-    page.route("**/calibration/attempts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?**", lambda route: fulfill_json(route, attempt_payload()))
+    page.route(
+        "**/calibration/attempts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?**",
+        lambda route: fulfill_json(route, attempt_payload()),
+    )
 
     def promote_handler(route) -> None:
-        requests.append({"path": "/calibration/promote", "body": route.request.post_data_json})
+        requests.append(
+            {"path": "/calibration/promote", "body": route.request.post_data_json}
+        )
         promoted["value"] = True
-        fulfill_json(route, {"attempt_id": "a" * 32, "job_id": "promotion-1", "status": "queued", "selections": route.request.post_data_json["candidate_ids"]}, status=202)
+        fulfill_json(
+            route,
+            {
+                "attempt_id": "a" * 32,
+                "job_id": "promotion-1",
+                "status": "queued",
+                "selections": route.request.post_data_json["candidate_ids"],
+            },
+            status=202,
+        )
 
-    page.route("**/calibration/attempts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/promote", promote_handler)
+    page.route(
+        "**/calibration/attempts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/promote",
+        promote_handler,
+    )
     page.set_viewport_size({"width": 1440, "height": 1000})
     page.goto(f"{console_server.url}/#/workflow/calibration", wait_until="networkidle")
 
@@ -3379,6 +4491,10 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     expect(page.get_by_test_id("calibration-synchronization-policy")).to_contain_text(
         "It does not synchronize hardware clocks or rewrite raw frame or robot timestamps"
     )
+    page.get_by_text("Time-alignment search limits and acceptance rule").click()
+    expect(page.get_by_test_id("calibration-synchronization-policy")).to_contain_text(
+        "At least 12 eligible motion groups are required"
+    )
     page.get_by_test_id("calibration-synchronization-policy").get_by_role(
         "button", name="About robot-pose time-offset sign"
     ).hover()
@@ -3397,12 +4513,17 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     camera_choices.nth(1).click()
     expect(camera_choices.nth(1)).not_to_be_checked()
     camera_choices.nth(1).click()
-    expect(page.get_by_test_id("calibration-workflow").get_by_text("Lab board", exact=True)).to_be_visible()
+    expect(
+        page.get_by_test_id("calibration-workflow").get_by_text("Lab board", exact=True)
+    ).to_be_visible()
     expect(page.get_by_role("button", name="Analyze recording")).to_be_enabled()
     page.get_by_role("button", name="Analyze recording").click()
     expect(page.get_by_text("Calibration queued")).to_be_visible()
     assert requests[0]["body"]["mode"] == "eye_in_hand"
-    assert requests[0]["body"]["sensor_keys"] == ["realsense_d435:wrist-1", "oak_d_pro:static-1"]
+    assert requests[0]["body"]["sensor_keys"] == [
+        "realsense_d435:wrist-1",
+        "oak_d_pro:static-1",
+    ]
     assert requests[0]["body"]["target_id"] == "5f09f41c-dd91-44ef-a048-1f43fc990e17"
     assert requests[0]["body"]["intrinsics_policy"] == "compare_factory_opencv"
     assert requests[0]["body"]["synchronization_policy"] == "auto_offset"
@@ -3419,7 +4540,9 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     )
     expect(page.get_by_test_id("calibration-results")).to_be_visible()
     alignment = page.get_by_test_id("calibration-time-alignment")
-    expect(alignment).to_contain_text("not evidence that the hardware clocks are synchronized")
+    expect(alignment).to_contain_text(
+        "not evidence that the hardware clocks are synchronized"
+    )
     page.mouse.move(0, 0)
     alignment.get_by_role(
         "button", name="About robot-pose time-offset evidence"
@@ -3427,18 +4550,41 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     expect(page.get_by_role("tooltip")).to_contain_text(
         "positive offset uses a later robot pose"
     )
-    expect(alignment.locator('[data-time-offset-sensor="realsense_d435:wrist-1"]')).to_contain_text("+65.0 ms")
-    expect(alignment.locator('[data-time-offset-sensor="realsense_d435:wrist-1"]')).to_contain_text("3.910 → 2.770 mm")
-    expect(alignment.locator('[data-time-offset-sensor="realsense_d435:wrist-1"]')).to_contain_text("29.2%")
-    oak_alignment = alignment.locator(
-        '[data-time-offset-sensor="oak_d_pro:static-1"]'
-    )
+    expect(
+        alignment.locator('[data-time-offset-sensor="realsense_d435:wrist-1"]')
+    ).to_contain_text("+65.0 ms")
+    expect(
+        alignment.locator('[data-time-offset-sensor="realsense_d435:wrist-1"]')
+    ).to_contain_text("3.910 → 2.770 mm")
+    expect(
+        alignment.locator('[data-time-offset-sensor="realsense_d435:wrist-1"]')
+    ).to_contain_text("29.2%")
+    expect(
+        page.get_by_test_id("timing-motion-summary-realsense_d435:wrist-1")
+    ).to_contain_text("17/17 held-out motions improved")
+    oak_alignment = alignment.locator('[data-time-offset-sensor="oak_d_pro:static-1"]')
     expect(oak_alignment).to_contain_text("Applied with 1 warning")
     expect(oak_alignment).to_contain_text("reference method sensitivity")
     alignment.get_by_text("Advanced offset evidence · Wrist RGB-D").click()
     expect(alignment).to_contain_text("cross validation offset stability")
-    assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
-    expect(page.get_by_test_id("calibration-acceptance-thresholds")).to_contain_text("≥15 accepted views")
+    motion_consistency = page.get_by_test_id(
+        "timing-motion-consistency-realsense_d435:wrist-1"
+    )
+    expect(motion_consistency).to_contain_text("Bonferroni-corrected")
+    expect(motion_consistency).to_contain_text("60 nonzero offset candidates")
+    expect(motion_consistency).to_contain_text("16/17")
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+    expect(page.get_by_test_id("calibration-acceptance-thresholds")).to_contain_text(
+        "≥15 accepted views"
+    )
+    expect(page.get_by_test_id("calibration-acceptance-thresholds")).to_contain_text(
+        "≥45% of image width"
+    )
+    expect(page.get_by_test_id("calibration-acceptance-thresholds")).to_contain_text(
+        "3 × 3 centroid-cell count remains diagnostic"
+    )
     wrist_intrinsics = page.get_by_test_id(
         "intrinsic-comparison-realsense_d435:wrist-1"
     )
@@ -3446,23 +4592,17 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     expect(wrist_intrinsics).to_contain_text(
         "Factory values come from the camera SDK. The OpenCV estimate is fitted from this recording's grid views."
     )
-    expect(wrist_intrinsics).to_contain_text(
-        "OpenCV training views / image coverage"
-    )
+    expect(wrist_intrinsics).to_contain_text("OpenCV training views / image coverage")
     expect(wrist_intrinsics).to_contain_text("18 views · 6 of 9 regions")
-    static_intrinsics = page.get_by_test_id(
-        "intrinsic-comparison-oak_d_pro:static-1"
-    )
+    static_intrinsics = page.get_by_test_id("intrinsic-comparison-oak_d_pro:static-1")
     expect(static_intrinsics).to_contain_text("Using factory SDK values")
-    expect(static_intrinsics).to_contain_text(
-        "The factory SDK values are compatible"
-    )
+    expect(static_intrinsics).to_contain_text("The factory SDK values are compatible")
     expect(static_intrinsics).to_contain_text("coverage 2/9 is below 6/9")
     expect(page.get_by_text("camera → robot_flange").last).to_be_visible()
-    expect(page.get_by_text("All attempted solutions and failures").first).to_be_visible()
-    wrist_result = page.locator(
-        '[data-camera-key="realsense_d435:wrist-1"]'
-    )
+    expect(
+        page.get_by_text("All attempted solutions and failures").first
+    ).to_be_visible()
+    wrist_result = page.locator('[data-camera-key="realsense_d435:wrist-1"]')
     wrist_result.get_by_text("Alternative solution (advanced)", exact=True).click()
     wrist_result.get_by_label("Alternative solution", exact=True).click()
     page.get_by_role("option", name="SQPNP + tsai · score 0.2000").click()
@@ -3480,6 +4620,9 @@ def calibration_time_alignment_setup(
     *,
     latest_attempt_id: str | None,
     latest_status: str = "complete",
+    implementation_revision: str | None = (
+        "constant_latency_nearest_pose_motion_lomo_cv.v2"
+    ),
 ) -> dict:
     latest_attempt = (
         {"attempt_id": latest_attempt_id, "status": latest_status}
@@ -3528,6 +4671,7 @@ def calibration_time_alignment_setup(
             "intrinsics_policy": "compare_factory_opencv",
             "intrinsics_policies": [],
             "synchronization": {
+                "implementation_revision": implementation_revision,
                 "default_policy": "auto_offset",
                 "policies": [
                     {
@@ -3567,6 +4711,118 @@ def calibration_time_alignment_setup(
         },
         "latest_attempt": latest_attempt,
     }
+
+
+def test_calibration_workflow_blocks_stale_backend_timing_revision(
+    console_server,
+    page,
+) -> None:
+    setup = calibration_time_alignment_setup(
+        latest_attempt_id=None,
+        implementation_revision="constant_latency_nearest_pose_motion_cv.v1",
+    )
+    install_common_mocks(page)
+    page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
+
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=calculate",
+        wait_until="networkidle",
+    )
+
+    warning = page.get_by_test_id("calibration-backend-restart-required")
+    expect(warning).to_be_visible()
+    expect(warning).to_contain_text("Backend restart required")
+    expect(warning).to_contain_text("constant_latency_nearest_pose_motion_cv.v1")
+    expect(warning).to_contain_text("constant_latency_nearest_pose_motion_lomo_cv.v2")
+    expect(page.get_by_role("button", name="Analyze recording")).to_be_disabled()
+    expect(
+        page.get_by_text(
+            "Restart the PoseTestBot backend and reload this page to use the "
+            "current Auto time-alignment rule."
+        )
+    ).to_be_visible()
+
+
+def test_calibration_workflow_explains_immutable_legacy_timing_attempt(
+    console_server,
+    page,
+) -> None:
+    attempt_id = "e" * 32
+    setup = calibration_time_alignment_setup(
+        latest_attempt_id=attempt_id,
+        latest_status="failed",
+    )
+    install_common_mocks(page)
+    page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
+    attempt = {
+        "schema_version": "calibration_attempt.v1",
+        "attempt_id": attempt_id,
+        "request": {
+            "mode": "eye_in_hand",
+            "sensor_keys": ["realsense_d435:wrist-1"],
+            "target_id": setup["saved_targets"][0]["target_id"],
+            "solver_policy": "auto_compare",
+            "intrinsics_policy": "compare_factory_opencv",
+            "synchronization_policy": "auto_offset",
+        },
+        "progress": calibration_attempt_progress(
+            status="failed",
+            time_alignment_status="failed",
+            message="ValueError: Auto-sync evidence failed closed",
+        ),
+        "results": None,
+        "intrinsic_comparison": None,
+        "time_offset_search": {
+            "implementation_revision": "constant_latency_nearest_pose_motion_cv.v1",
+            "policy": "auto_offset",
+            "status": "failed",
+            "sign_convention": {
+                "operator_equation": "robot_pose_query_time = frame_time + offset",
+                "positive_operator_value": (
+                    "pair the frame with a robot pose recorded later"
+                ),
+                "conversion": "sync_delta_ms = -robot_pose_time_offset_ms",
+            },
+            "search": {
+                "minimum_robot_pose_time_offset_ms": -150.0,
+                "maximum_robot_pose_time_offset_ms": 150.0,
+                "step_ms": 5.0,
+            },
+            "sensors": [
+                {
+                    "sensor_key": "realsense_d435:wrist-1",
+                    "status": "failed",
+                    "decision_reason": "candidate_failed_safety_or_stability_checks",
+                    "selected_robot_pose_time_offset_ms": 0.0,
+                    "selected_sync_delta_ms": 0.0,
+                    "candidate_robot_pose_time_offset_ms": 45.0,
+                    "evidence_strength": "insufficient",
+                    "boundary_hit": False,
+                    "checks": [],
+                    "curve": [],
+                }
+            ],
+        },
+        "promotion": None,
+    }
+    page.route(
+        f"**/calibration/attempts/{attempt_id}?**",
+        lambda route: fulfill_json(route, attempt),
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=calculate",
+        wait_until="networkidle",
+    )
+
+    expect(page.get_by_test_id("calibration-backend-restart-required")).to_have_count(0)
+    warning = page.get_by_test_id("calibration-attempt-legacy-timing-revision")
+    expect(warning).to_be_visible()
+    expect(warning).to_contain_text("This attempt used an obsolete timing rule")
+    expect(warning).to_contain_text("cannot be upgraded in place")
+    expect(page.get_by_test_id("calibration-time-alignment-failed")).to_contain_text(
+        "decided by the recorded legacy rule"
+    )
 
 
 def calibration_attempt_progress(
@@ -3655,6 +4911,7 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
         "results": None,
         "intrinsic_comparison": None,
         "time_offset_search": {
+            "implementation_revision": "constant_latency_nearest_pose_motion_lomo_cv.v2",
             "policy": "auto_offset",
             "status": "failed",
             "sign_convention": {
@@ -3675,9 +4932,7 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
                     "sensor_name": "realsense_wrist-1",
                     "display_name": "Wrist RGB-D",
                     "status": "failed",
-                    "decision_reason": (
-                        "candidate_failed_safety_or_stability_checks"
-                    ),
+                    "decision_reason": ("candidate_failed_safety_or_stability_checks"),
                     "selected_robot_pose_time_offset_ms": 0.0,
                     "selected_sync_delta_ms": 0.0,
                     "candidate_robot_pose_time_offset_ms": 150.0,
@@ -3775,9 +5030,7 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
     expect(page.get_by_test_id("calibration-time-alignment-failed")).to_contain_text(
         "Auto time alignment stopped this calibration"
     )
-    row = alignment.locator(
-        '[data-time-offset-sensor="realsense_d435:wrist-1"]'
-    )
+    row = alignment.locator('[data-time-offset-sensor="realsense_d435:wrist-1"]')
     expect(row).to_contain_text("Time alignment rejected")
     expect(row).to_contain_text("Applied +0.0 ms")
     expect(row).to_contain_text("Rejected candidate +150.0 ms")
@@ -3788,8 +5041,7 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
         0
     )
     assert page.evaluate(
-        "document.documentElement.scrollWidth <= "
-        "document.documentElement.clientWidth"
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
 
 
@@ -3831,6 +5083,7 @@ def test_fixed_zero_policy_is_submitted_and_reported(
         "results": calibration_failed_results(setup["cameras"][0]),
         "intrinsic_comparison": None,
         "time_offset_search": {
+            "implementation_revision": "constant_latency_nearest_pose_motion_lomo_cv.v2",
             "policy": "fixed_zero",
             "status": "complete",
             "sign_convention": {
@@ -3926,9 +5179,7 @@ def test_historical_calibration_attempt_explains_missing_auto_sync_evidence(
 
     alignment = page.get_by_test_id("calibration-time-alignment")
     expect(alignment).to_contain_text("Legacy timing evidence unavailable")
-    expect(alignment).to_contain_text(
-        "not reusable for a new dataset"
-    )
+    expect(alignment).to_contain_text("not reusable for a new dataset")
     expect(alignment.locator("table")).to_have_count(0)
 
 
@@ -3974,12 +5225,18 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
         },
     }
     install_common_mocks(page, requests=requests, generator_available=True)
-    page.route("**/calibration-targets/capabilities", lambda route: fulfill_json(route, {
-        "schema_version": "posegridgen_capabilities.v1",
-        "paper_sizes_mm": {"A4": [210, 297], "A3": [297, 420]},
-        "dictionaries": {"DICT_5X5_50": 50},
-        "defaults": configuration,
-    }))
+    page.route(
+        "**/calibration-targets/capabilities",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "posegridgen_capabilities.v1",
+                "paper_sizes_mm": {"A4": [210, 297], "A3": [297, 420]},
+                "dictionaries": {"DICT_5X5_50": 50},
+                "defaults": configuration,
+            },
+        ),
+    )
 
     def bundle_payload(run_root: str) -> dict:
         selected = run_root in selected_runs
@@ -3989,22 +5246,26 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
             "replacement_blockers": (
                 ["calibration_observations.json"] if run_root in locked_runs else []
             ),
-            "bundles": [] if deleted["value"] else [{
-                "target_id": target_id,
-                "display_name": "Anisotropic calibration board",
-                "created_at": "2026-07-16T12:00:00Z",
-                "valid": True,
-                "selected": selected,
-                "selected_placement": (
-                    {"mode": "posegridgen_board_to_base"} if selected else None
-                ),
-                "geometry_sha256": "a" * 64,
-                "target": {
-                    "target_bounds": {"width_mm": 111.1, "height_mm": 69.3},
-                    "print_compensation": {"x_percent": 101, "y_percent": 99},
-                    "grid_size": [3, 2],
-                },
-            }],
+            "bundles": []
+            if deleted["value"]
+            else [
+                {
+                    "target_id": target_id,
+                    "display_name": "Anisotropic calibration board",
+                    "created_at": "2026-07-16T12:00:00Z",
+                    "valid": True,
+                    "selected": selected,
+                    "selected_placement": (
+                        {"mode": "posegridgen_board_to_base"} if selected else None
+                    ),
+                    "geometry_sha256": "a" * 64,
+                    "target": {
+                        "target_bounds": {"width_mm": 111.1, "height_mm": 69.3},
+                        "print_compensation": {"x_percent": 101, "y_percent": 99},
+                        "grid_size": [3, 2],
+                    },
+                }
+            ],
         }
 
     def library_handler(route) -> None:
@@ -4017,7 +5278,12 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     png = cv2.imencode(".png", np.full((12, 16, 3), 220, dtype=np.uint8))[1].tobytes()
 
     def preview_handler(route) -> None:
-        requests.append({"path": "/calibration-targets/preview", "body": route.request.post_data_json})
+        requests.append(
+            {
+                "path": "/calibration-targets/preview",
+                "body": route.request.post_data_json,
+            }
+        )
         route.fulfill(status=200, content_type="image/png", body=png)
 
     page.route("**/calibration-targets/preview", preview_handler)
@@ -4035,24 +5301,66 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     def fit_handler(route) -> None:
         body = route.request.post_data_json
         requests.append({"path": "/calibration-targets/fit", "body": body})
-        fulfill_json(route, {"request": body, "adjusted": False, "scale_factor": 1, "changes": []})
+        fulfill_json(
+            route,
+            {"request": body, "adjusted": False, "scale_factor": 1, "changes": []},
+        )
 
     page.route("**/calibration-targets/fit", fit_handler)
 
     def generate_handler(route) -> None:
-        requests.append({"path": "/calibration-targets/generate", "body": route.request.post_data_json})
-        fulfill_json(route, {"job_id": "generate-1", "job": {"id": "generate-1", "status": "queued"}}, status=202)
+        requests.append(
+            {
+                "path": "/calibration-targets/generate",
+                "body": route.request.post_data_json,
+            }
+        )
+        fulfill_json(
+            route,
+            {"job_id": "generate-1", "job": {"id": "generate-1", "status": "queued"}},
+            status=202,
+        )
 
     page.route("**/calibration-targets/generate", generate_handler)
-    page.route("**/jobs/generate-1", lambda route: fulfill_json(route, {"job": {"id": "generate-1", "status": "succeeded", "message": None, "tail": []}}))
-    page.route("**/jobs/select-1", lambda route: fulfill_json(route, {"job": {"id": "select-1", "status": "succeeded", "message": None, "tail": []}}))
+    page.route(
+        "**/jobs/generate-1",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "generate-1",
+                    "status": "succeeded",
+                    "message": None,
+                    "tail": [],
+                }
+            },
+        ),
+    )
+    page.route(
+        "**/jobs/select-1",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "select-1",
+                    "status": "succeeded",
+                    "message": None,
+                    "tail": [],
+                }
+            },
+        ),
+    )
 
     def select_handler(route) -> None:
         body = route.request.post_data_json
         requests.append({"path": "/calibration-targets/select", "body": body})
         selected_runs.add(body["run_root"])
         locked_runs.add(body["run_root"])
-        fulfill_json(route, {"job_id": "select-1", "job": {"id": "select-1", "status": "queued"}}, status=202)
+        fulfill_json(
+            route,
+            {"job_id": "select-1", "job": {"id": "select-1", "status": "queued"}},
+            status=202,
+        )
 
     page.route(f"**/calibration-targets/bundles/{target_id}/select", select_handler)
 
@@ -4060,11 +5368,14 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
         body = route.request.post_data_json
         requests.append({"path": "/calibration-targets/delete", "body": body})
         deleted["value"] = True
-        fulfill_json(route, {
-            "status": "deleted",
-            "target_id": target_id,
-            "display_name": "Anisotropic calibration board",
-        })
+        fulfill_json(
+            route,
+            {
+                "status": "deleted",
+                "target_id": target_id,
+                "display_name": "Anisotropic calibration board",
+            },
+        )
 
     page.route(f"**/calibration-targets/bundles/{target_id}", delete_handler)
     page.route(
@@ -4079,7 +5390,9 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
 
     page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
     expect(page.get_by_role("link", name="Calibration Targets")).to_be_visible()
-    expect(page.get_by_role("img", name="Calibration target preview", exact=True)).to_be_visible()
+    expect(
+        page.get_by_role("img", name="Calibration target preview", exact=True)
+    ).to_be_visible()
     library_preview = page.get_by_role(
         "img",
         name="Anisotropic calibration board calibration target preview",
@@ -4116,9 +5429,16 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     page.get_by_label("Target display name").fill("Printed target 01")
     page.get_by_role("button", name="Generate bundle").click()
     expect(page.get_by_text("Calibration target generated")).to_be_visible()
-    generated = next(item["body"] for item in requests if item["path"] == "/calibration-targets/generate")
+    generated = next(
+        item["body"]
+        for item in requests
+        if item["path"] == "/calibration-targets/generate"
+    )
     assert generated["display_name"] == "Printed target 01"
-    assert generated["configuration"]["print_compensation"] == {"x_percent": 101, "y_percent": 99}
+    assert generated["configuration"]["print_compensation"] == {
+        "x_percent": 101,
+        "y_percent": 99,
+    }
     expect(page.get_by_text("Active for this run", exact=True)).to_have_count(0)
 
     pdf_link = page.get_by_role("link", name="PDF")
@@ -4132,7 +5452,11 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     page.get_by_role("option", name="Use PoseGridGen board pose").click()
     page.get_by_role("button", name="Select target").click()
     expect(page.get_by_text("Calibration target selected")).to_be_visible()
-    selection = [item["body"] for item in requests if item["path"] == "/calibration-targets/select"][-1]
+    selection = [
+        item["body"]
+        for item in requests
+        if item["path"] == "/calibration-targets/select"
+    ][-1]
     assert selection == {"run_root": RUN_ROOT, "placement": "posegridgen_board_to_base"}
     expect(page.get_by_text("Active for this run", exact=True)).to_be_visible()
     reuse_notice = page.get_by_test_id("calibration-target-reuse-notice")
@@ -4145,14 +5469,21 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     )
     page.get_by_role("button", name="Review active target").click()
     expect(page.get_by_role("combobox", name="Target placement")).to_be_disabled()
-    expect(page.get_by_text("Placement is fixed only for this completed run")).to_be_visible()
+    expect(
+        page.get_by_text("Placement is fixed only for this completed run")
+    ).to_be_visible()
     page.get_by_role("dialog").get_by_role(
         "button", name="Close", exact=True
     ).first.click()
-    assert len(
-        [item for item in requests if item["path"] == "/calibration-targets/select"]
-    ) == select_request_count
-    expect(page.get_by_role("button", name="Delete Anisotropic calibration board")).to_be_disabled()
+    assert (
+        len(
+            [item for item in requests if item["path"] == "/calibration-targets/select"]
+        )
+        == select_request_count
+    )
+    expect(
+        page.get_by_role("button", name="Delete Anisotropic calibration board")
+    ).to_be_disabled()
 
     page.get_by_role("combobox", name="Selected run").click()
     page.get_by_role("option", name="old-run · sync_aruco").click()
@@ -4161,17 +5492,30 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     assert any("old-run" in url for url in library_urls)
 
     page.get_by_role("button", name="Delete Anisotropic calibration board").click()
-    expect(page.get_by_role("heading", name="Delete Anisotropic calibration board?")).to_be_visible()
+    expect(
+        page.get_by_role("heading", name="Delete Anisotropic calibration board?")
+    ).to_be_visible()
     assert not any(item["path"] == "/calibration-targets/delete" for item in requests)
     page.get_by_role("button", name="Confirm delete").click()
     expect(page.get_by_text("Calibration target deleted")).to_be_visible()
-    expect(page.get_by_role("heading", name="Anisotropic calibration board")).to_have_count(0)
-    deletion = next(item["body"] for item in requests if item["path"] == "/calibration-targets/delete")
+    expect(
+        page.get_by_role("heading", name="Anisotropic calibration board")
+    ).to_have_count(0)
+    deletion = next(
+        item["body"]
+        for item in requests
+        if item["path"] == "/calibration-targets/delete"
+    )
     assert deletion == {"run_root": old_run, "confirm": True}
 
 
 def cell_scene_payload(*, objectless: bool = False) -> dict:
-    identity = {"semantics": "entity_to_parent", "parent_frame": "template_base", "translation_mm": [0, 0, 0], "rotation_quaternion_wxyz": [1, 0, 0, 0]}
+    identity = {
+        "semantics": "entity_to_parent",
+        "parent_frame": "template_base",
+        "translation_mm": [0, 0, 0],
+        "rotation_quaternion_wxyz": [1, 0, 0, 0],
+    }
     target_frame = {
         "name": "aruco_grid",
         "origin": "compensated_outer_board_top_left",
@@ -4204,17 +5548,50 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
         },
         "run_root": RUN_ROOT,
         "entities": [
-            {"id": "template_base", "type": "reference_frame", "label": "Template base", "status": "planned", "transform": {**identity, "parent_frame": None}, "unresolved_reason": None, "geometry": {"kind": "axes", "size_mm": 100}, "provenance": {"source": "config"}},
-            {"id": "robot_flange", "type": "robot_flange", "label": "Robot flange", "status": "recorded", "transform": identity, "unresolved_reason": None, "geometry": {"kind": "flange_proxy"}, "provenance": {"source": "match_robot_ee_poses.json"}},
+            {
+                "id": "template_base",
+                "type": "reference_frame",
+                "label": "Template base",
+                "status": "planned",
+                "transform": {**identity, "parent_frame": None},
+                "unresolved_reason": None,
+                "geometry": {"kind": "axes", "size_mm": 100},
+                "provenance": {"source": "config"},
+            },
+            {
+                "id": "robot_flange",
+                "type": "robot_flange",
+                "label": "Robot flange",
+                "status": "recorded",
+                "transform": identity,
+                "unresolved_reason": None,
+                "geometry": {"kind": "flange_proxy"},
+                "provenance": {"source": "match_robot_ee_poses.json"},
+            },
             {
                 "id": "camera:realsense_123",
                 "type": "camera",
                 "label": "Wrist D435",
                 "status": "planned",
-                "transform": {**identity, "parent_frame": "robot_flange", "translation_mm": [10, 20, -500]},
+                "transform": {
+                    **identity,
+                    "parent_frame": "robot_flange",
+                    "translation_mm": [10, 20, -500],
+                },
                 "unresolved_reason": None,
-                "geometry": {"kind": "camera_frustum", "width": 1280, "height": 720, "fx": 900, "fy": 900, "cx": 640, "cy": 360},
-                "provenance": {"source": "calibration_profiles.json", "profile_id": "wrist-profile"},
+                "geometry": {
+                    "kind": "camera_frustum",
+                    "width": 1280,
+                    "height": 720,
+                    "fx": 900,
+                    "fy": 900,
+                    "cx": 640,
+                    "cy": 360,
+                },
+                "provenance": {
+                    "source": "calibration_profiles.json",
+                    "profile_id": "wrist-profile",
+                },
                 "calibration": {
                     "profile_id": "wrist-profile",
                     "schema_version": "calibration.v2",
@@ -4224,14 +5601,24 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
                     "extrinsics": {
                         "from": "camera",
                         "to": "robot_flange",
-                        "matrix": [[1, 0, 0, 10], [0, 1, 0, 20], [0, 0, 1, 30], [0, 0, 0, 1]],
+                        "matrix": [
+                            [1, 0, 0, 10],
+                            [0, 1, 0, 20],
+                            [0, 0, 1, 30],
+                            [0, 0, 0, 1],
+                        ],
                         "rotation_quaternion_wxyz": [1, 0, 0, 0],
                         "translation_mm": [10, 20, 30],
                     },
                     "companion_transform": {
                         "from": "aruco_grid",
                         "to": "template_base",
-                        "matrix": [[1, 0, 0, 1], [0, 1, 0, 2], [0, 0, 1, 3], [0, 0, 0, 1]],
+                        "matrix": [
+                            [1, 0, 0, 1],
+                            [0, 1, 0, 2],
+                            [0, 0, 1, 3],
+                            [0, 0, 0, 1],
+                        ],
                         "rotation_quaternion_wxyz": [1, 0, 0, 0],
                         "translation_mm": [1, 2, 3],
                     },
@@ -4263,14 +5650,27 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
                         "promotion_attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "promotion_candidate_id": "realsense_d435:123|IPPE|park",
                         "promotion_multi_camera_bundle_id": "joint:IPPE:park",
-                        "promotion_solver_provenance": {"solver_policy": "auto_compare", "pnp_method": "IPPE", "extrinsic_method": "park"},
+                        "promotion_solver_provenance": {
+                            "solver_policy": "auto_compare",
+                            "pnp_method": "IPPE",
+                            "extrinsic_method": "park",
+                        },
                         "promoted_at": "2026-07-21T12:00:00+00:00",
                         "promoted_by": "operator",
                         "intrinsic_profile_id": "123_1280x720_normal_factory",
                     },
                 },
             },
-            {"id": "camera:missing", "type": "camera", "label": "Uncalibrated camera", "status": "unresolved", "transform": None, "unresolved_reason": "No valid calibration profile", "geometry": {"kind": "camera_frustum"}, "provenance": {"source": "calibration_profiles"}},
+            {
+                "id": "camera:missing",
+                "type": "camera",
+                "label": "Uncalibrated camera",
+                "status": "unresolved",
+                "transform": None,
+                "unresolved_reason": "No valid calibration profile",
+                "geometry": {"kind": "camera_frustum"},
+                "provenance": {"source": "calibration_profiles"},
+            },
             {
                 "id": "calibration_target",
                 "type": "calibration_target",
@@ -4282,34 +5682,102 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
                     "kind": "calibration_target",
                     "placement_known": False,
                     "frame": target_frame,
-                    "target_bounds": {"x_mm": 0, "y_mm": 0, "width_mm": 90, "height_mm": 40},
-                    "markers": [{"id": 0, "corners_mm": [[0, 0, 0], [40, 0, 0], [40, 40, 0], [0, 40, 0]]}],
+                    "target_bounds": {
+                        "x_mm": 0,
+                        "y_mm": 0,
+                        "width_mm": 90,
+                        "height_mm": 40,
+                    },
+                    "markers": [
+                        {
+                            "id": 0,
+                            "corners_mm": [
+                                [0, 0, 0],
+                                [40, 0, 0],
+                                [40, 40, 0],
+                                [0, 40, 0],
+                            ],
+                        }
+                    ],
                     "pdf_url": "/ui/cell-calibration-target-pdf?run_root=test",
                 },
-                "provenance": {"source": "processed/calibration/attempt/target_bundle/calibration_target.json", "placement_known": False},
-            },
-            *([] if objectless else [{
-                "id": "pose_template_footprint",
-                "type": "template",
-                "label": "Exact object footprint",
-                "status": "planned",
-                "transform": identity,
-                "unresolved_reason": None,
-                "geometry": {
-                    "kind": "pose_template_footprint",
-                    "page": {"width_mm": 420, "height_mm": 297},
-                    "page_configuration": {"origin_from_lower_left_mm": [15, 15]},
-                    "contours": [{"instance_uuid": "object-1", "contours": [[{"x_mm": 20, "y_mm": 20}, {"x_mm": 50, "y_mm": 20}, {"x_mm": 35, "y_mm": 50}]]}],
+                "provenance": {
+                    "source": "processed/calibration/attempt/target_bundle/calibration_target.json",
+                    "placement_known": False,
                 },
-                "provenance": {"source": "pose_template_preview.json"},
-            }]),
+            },
+            *(
+                []
+                if objectless
+                else [
+                    {
+                        "id": "pose_template_footprint",
+                        "type": "template",
+                        "label": "Exact object footprint",
+                        "status": "planned",
+                        "transform": identity,
+                        "unresolved_reason": None,
+                        "geometry": {
+                            "kind": "pose_template_footprint",
+                            "page": {"width_mm": 420, "height_mm": 297},
+                            "page_configuration": {
+                                "origin_from_lower_left_mm": [15, 15]
+                            },
+                            "contours": [
+                                {
+                                    "instance_uuid": "object-1",
+                                    "contours": [
+                                        [
+                                            {"x_mm": 20, "y_mm": 20},
+                                            {"x_mm": 50, "y_mm": 20},
+                                            {"x_mm": 35, "y_mm": 50},
+                                        ]
+                                    ],
+                                }
+                            ],
+                        },
+                        "provenance": {"source": "pose_template_preview.json"},
+                    }
+                ]
+            ),
         ],
-        "warnings": [{"code": "missing_calibration_profiles", "message": "No calibration profile collection is available"}],
-        "timelines": [{"id": "sensor:realsense_123", "label": "realsense_123", "kind": "synchronized", "frame_count": 2, "default": True, "exact": True, "interpolation": "none", "page_limit": 2000, "source": "match_robot_ee_poses.json"}],
+        "warnings": [
+            {
+                "code": "missing_calibration_profiles",
+                "message": "No calibration profile collection is available",
+            }
+        ],
+        "timelines": [
+            {
+                "id": "sensor:realsense_123",
+                "label": "realsense_123",
+                "kind": "synchronized",
+                "frame_count": 2,
+                "default": True,
+                "exact": True,
+                "interpolation": "none",
+                "page_limit": 2000,
+                "source": "match_robot_ee_poses.json",
+            }
+        ],
         "default_timeline_id": "sensor:realsense_123",
         "trajectory_preview": [
-            {"index": 0, "frame_index": 0, "frame_id": "000000.png", "timestamp_ns": 1, "motion": "arc", "transform": identity},
-            {"index": 1, "frame_index": 1, "frame_id": "000001.png", "timestamp_ns": 2, "motion": "arc", "transform": {**identity, "translation_mm": [10, 20, 30]}},
+            {
+                "index": 0,
+                "frame_index": 0,
+                "frame_id": "000000.png",
+                "timestamp_ns": 1,
+                "motion": "arc",
+                "transform": identity,
+            },
+            {
+                "index": 1,
+                "frame_index": 1,
+                "frame_id": "000001.png",
+                "timestamp_ns": 2,
+                "motion": "arc",
+                "transform": {**identity, "translation_mm": [10, 20, 30]},
+            },
         ],
         "object_selection": {
             "objectless": objectless,
@@ -4330,7 +5798,22 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     calibration["extrinsics"]["translation_mm"] = ["10", "20", "30"]
     calibration["quality"]["mean_reprojection_error_px"] = "0.321"
     page.route("**/ui/cell-scene?**", lambda route: fulfill_json(route, scene))
-    page.route("**/ui/cell-scene/timeline?**", lambda route: fulfill_json(route, {"schema_version": "cell_timeline.v1", "timeline": scene["timelines"][0], "offset": 0, "limit": 2000, "total": 2, "next_offset": None, "previous_offset": None, "poses": scene["trajectory_preview"]}))
+    page.route(
+        "**/ui/cell-scene/timeline?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "cell_timeline.v1",
+                "timeline": scene["timelines"][0],
+                "offset": 0,
+                "limit": 2000,
+                "total": 2,
+                "next_offset": None,
+                "previous_offset": None,
+                "poses": scene["trajectory_preview"],
+            },
+        ),
+    )
 
     page.goto(f"{console_server.url}/#/cell", wait_until="networkidle")
 
@@ -4348,19 +5831,27 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     expect(page.get_by_text("1 camera is hidden", exact=False)).to_be_visible()
     expect(page.get_by_text("Exact object footprint", exact=True)).to_be_visible()
     page.get_by_text("calib00 (reference placement)", exact=True).click()
-    expect(page.get_by_text("Shown at the reference origin", exact=False)).to_be_visible()
-    expect(page.get_by_role("link", name="Open exact calibration-target PDF")).to_be_visible()
+    expect(
+        page.get_by_text("Shown at the reference origin", exact=False)
+    ).to_be_visible()
+    expect(
+        page.get_by_role("link", name="Open exact calibration-target PDF")
+    ).to_be_visible()
     page.get_by_text("Wrist D435", exact=True).click()
     evidence = page.get_by_test_id("cell-calibration-evidence")
     expect(evidence.get_by_text("Calibration extrinsic", exact=True)).to_be_visible()
-    expect(page.get_by_test_id("cell-calibration-transform-frames")).to_have_text("camera → robot_flange")
+    expect(page.get_by_test_id("cell-calibration-transform-frames")).to_have_text(
+        "camera → robot_flange"
+    )
     expect(
         evidence.get_by_text(
             "1.0000000, 0.0000000, 0.0000000, 0.0000000",
             exact=True,
         ).first
     ).to_be_visible()
-    expect(evidence.get_by_text("10.0000, 20.0000, 30.0000", exact=True)).to_be_visible()
+    expect(
+        evidence.get_by_text("10.0000, 20.0000, 30.0000", exact=True)
+    ).to_be_visible()
     expect(evidence.get_by_text("12 / 10", exact=True)).to_be_visible()
     expect(evidence.get_by_text("0.321 px", exact=True)).to_be_visible()
     expect(evidence.get_by_text("0.800 px", exact=True)).to_be_visible()
@@ -4372,12 +5863,18 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     expect(evidence.get_by_text("IPPE + park", exact=True)).to_be_visible()
     expect(evidence.get_by_text("wrist-profile", exact=True)).to_be_visible()
     expect(page.get_by_test_id("cell-calibration-matrix")).to_contain_text("10.000000")
-    expect(page.get_by_test_id("cell-calibration-companion-frames")).to_have_text("aruco_grid → template_base")
-    expect(page.get_by_test_id("cell-calibration-companion-matrix")).to_contain_text("3.000000")
+    expect(page.get_by_test_id("cell-calibration-companion-frames")).to_have_text(
+        "aruco_grid → template_base"
+    )
+    expect(page.get_by_test_id("cell-calibration-companion-matrix")).to_contain_text(
+        "3.000000"
+    )
     expect(evidence.get_by_text("joint:IPPE:park", exact=True)).to_be_visible()
     page.get_by_text("Raw provenance", exact=True).click()
     raw_provenance = page.get_by_test_id("cell-raw-provenance")
-    expect(raw_provenance).to_contain_text('"calibration_dataset_id": "attempt-dataset"')
+    expect(raw_provenance).to_contain_text(
+        '"calibration_dataset_id": "attempt-dataset"'
+    )
     expect(raw_provenance).to_contain_text('"outlier_ratio": 0.1667')
     expect(raw_provenance).to_contain_text('"sync_delta_ms": 1.2')
     page.get_by_text("Robot flange", exact=True).click()
@@ -4391,8 +5888,26 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
 def test_cell_webgl_fallback_and_objectless_state(console_server, page) -> None:
     install_common_mocks(page)
     page.add_init_script("HTMLCanvasElement.prototype.getContext = () => null")
-    page.route("**/ui/cell-scene?**", lambda route: fulfill_json(route, cell_scene_payload(objectless=True)))
-    page.route("**/ui/cell-scene/timeline?**", lambda route: fulfill_json(route, {"schema_version": "cell_timeline.v1", "timeline": cell_scene_payload()["timelines"][0], "offset": 0, "limit": 2000, "total": 0, "next_offset": None, "previous_offset": None, "poses": []}))
+    page.route(
+        "**/ui/cell-scene?**",
+        lambda route: fulfill_json(route, cell_scene_payload(objectless=True)),
+    )
+    page.route(
+        "**/ui/cell-scene/timeline?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "cell_timeline.v1",
+                "timeline": cell_scene_payload()["timelines"][0],
+                "offset": 0,
+                "limit": 2000,
+                "total": 0,
+                "next_offset": None,
+                "previous_offset": None,
+                "poses": [],
+            },
+        ),
+    )
 
     page.goto(f"{console_server.url}/#/cell", wait_until="networkidle")
 

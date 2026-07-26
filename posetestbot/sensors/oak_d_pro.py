@@ -14,6 +14,7 @@ import numpy as np
 from posetestbot.sensors.contracts import CameraIntrinsics, SensorType
 from posetestbot.sensors.frame_writer import (
     ensure_legacy_rgbd_folders,
+    sync_frame_metadata,
     write_legacy_camera_sidecars,
     write_legacy_rgbd_frame,
 )
@@ -628,6 +629,8 @@ def capture_oak_d_pro_rgbd(
             device.close()
         except Exception:
             pass
+        if record and output is not None:
+            sync_frame_metadata(output)
 
     first_metadata = metadata_records[0] if metadata_records else {}
     last_metadata = metadata_records[-1] if metadata_records else {}

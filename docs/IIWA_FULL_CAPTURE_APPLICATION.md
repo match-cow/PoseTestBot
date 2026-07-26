@@ -80,28 +80,32 @@ joint_velocity_rel = requested_A1_rad_s / 98_deg_s
 The radius is measured from the robot-root Z/A1 axis. KUKA publishes A1 rated
 speeds of 98°/s for the LBR iiwa 7 R800 and 85°/s for the LBR iiwa 14 R820.
 Using the larger value as the denominator makes the requested Cartesian value
-an upper bound on either model. Run-owned acquisition never transmits a numeric
-START value above 0.03, and the candidate application independently caps the
-Cartesian input at 0.03 m/s. It also limits the computed A1 angular velocity to
-3°/s. The final relative joint velocity is therefore the lower result of both
-caps.
+an upper bound on either model. The candidate application accepts the
+Cartesian request without a separate 0.03 m/s clamp, then limits the computed
+A1 angular velocity to 3°/s. Its final relative joint velocity is therefore
+bounded by that A1 limit.
 
-The acquisition cap is deliberate while the deployed application remains
-unconfirmed. The separately acknowledged Dashboard/Devices manual motion-test
-command sends `0.1`, ten times its former request; an older application may
-interpret that as 10% relative joint velocity, while this candidate still
-limits it to 0.03 m/s and 3°/s. The confirmation dialog exposes the requested
-manual value. These ordinary software limits are not safety-rated. Record the
-exact installed model and verify the actual speed in Workbench/T1. The product
-values are available in KUKA's official
+Calibration and legacy ordinary acquisition retain the conservative 0.03 m/s
+host command cap. An object-dataset request above 0.03 m/s uses the structured
+`robot_command.v1` shape and is bounded at 1.00 m/s by the canonical plan and
+receiver. This candidate understands that shape; an older application that
+only looks for the legacy `start` field will not start from it. The separately
+acknowledged Dashboard/Devices manual motion-test command remains a legacy
+`0.1` request, so an older application may interpret it as 10% relative joint
+velocity. The confirmation dialog exposes that requested manual value. These
+ordinary software limits are not safety-rated. Record the exact installed
+model and verify the actual speed in Workbench/T1. The product values are
+available in KUKA's official
 [LBR iiwa 7 R800 data sheet](https://www.kuka.com/-/media/kuka-downloads/imported/8350ff3ca11642998dbdc81dcc2ed44c/0000246832_pl.pdf)
 and
 [LBR iiwa 14 R820 data sheet](https://www.kuka.com/-/media/kuka-downloads/imported/8350ff3ca11642998dbdc81dcc2ed44c/0000246833_en.pdf).
 
-New run configurations default to 0.01 m/s and the workflow permits
-0.01–0.03 m/s. The 720-second supervisor envelope accommodates the slowest
-full A1 sweep while the independent first-packet and inter-packet timeouts
-still detect a receiver that never starts or stops progressing.
+New run configurations default to 0.01 m/s. Calibration setup permits
+0.01–0.03 m/s; object-dataset setup permits 0.01–1.00 m/s and exposes the
+requested value again at physical authorization. The 720-second supervisor
+envelope accommodates the slowest full A1 sweep while the independent
+first-packet and inter-packet timeouts still detect a receiver that never
+starts or stops progressing.
 
 Speed alone cannot guarantee blur-free images. Rolling-shutter skew and motion
 blur also depend on exposure/readout time, illumination, optics, object

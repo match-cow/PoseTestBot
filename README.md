@@ -104,9 +104,19 @@ calibration_profiles.json
 bop/bop_export_manifest.json
 ```
 
-The BOP export includes standard scenes, camera/GT metadata, models, targets,
-and PoseTestBot provenance sidecars. Objectless runs remain valid RGB-D
-datasets with empty object GT.
+The BOP export always includes standard RGB-D scenes, per-image camera
+parameters, the selected object models in `models/`, evaluator-compatible
+geometry in `models_eval/`, and compact PoseTestBot provenance sidecars.
+Annotation-free exports omit `scene_gt.json`,
+`scene_gt_info.json`, masks, and GT instance maps. Pose-template exports retain
+a populated `test_targets_bop19.json` derived from the confirmed object
+inventory because it is needed for target-driven pose estimation and later
+evaluation. They are not evaluation-ready until an explicit BlenderProc
+annotation export adds GT, masks, and instance identity.
+
+Raw capture folders intentionally remain outside `bop/`. They preserve
+pre/post-motion evidence, while the BOP scenes contain only synchronized
+capture-motion frames.
 
 Run the acquisition-only gates with:
 

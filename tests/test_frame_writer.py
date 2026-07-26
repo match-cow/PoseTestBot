@@ -20,7 +20,9 @@ from posetestbot.io.artifacts import (
 )
 from posetestbot.sensors.contracts import AlignedRgbdFrame, CameraIntrinsics, SensorType
 from posetestbot.sensors.frame_writer import (
+    append_frame_metadata,
     frame_stem_from_host_wall_ns,
+    sync_frame_metadata,
     write_aligned_rgbd_frame,
     write_legacy_camera_sidecars,
     write_legacy_rgbd_frame,
@@ -112,6 +114,31 @@ def test_write_aligned_rgbd_frame_uses_contract_fields(tmp_path: Path) -> None:
 
 def test_frame_stem_from_host_wall_ns_uses_legacy_milliseconds() -> None:
     assert frame_stem_from_host_wall_ns(1_234_567_890) == "1235"
+
+
+def test_frame_metadata_defers_fsync_until_capture_shutdown(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fsync_calls: list[int] = []
+    monkeypatch.setattr(
+        frame_writer.os,
+        "fsync",
+        lambda file_descriptor: fsync_calls.append(file_descriptor),
+    )
+
+    metadata_path = append_frame_metadata(tmp_path, {"frame_index": 0})
+
+    assert json.loads(metadata_path.read_text()) == {"frame_index": 0}
+    assert fsync_calls == []
+    assert sync_frame_metadata(tmp_path) == metadata_path
+    assert len(fsync_calls) == 1
+
+
+def test_sync_frame_metadata_is_a_noop_before_the_first_frame(
+    tmp_path: Path,
+) -> None:
+    assert sync_frame_metadata(tmp_path) is None
 
 
 def test_write_legacy_camera_sidecars_writes_numeric_calibration_formats(

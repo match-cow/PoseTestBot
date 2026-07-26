@@ -12,7 +12,11 @@ import numpy as np
 import pytest
 import trimesh
 
-from posetestbot.bop.writer import copy_bop_instance_models, export_sensor_scene_to_bop
+from posetestbot.bop.writer import (
+    copy_bop_instance_models,
+    export_sensor_scene_to_bop,
+    validate_bop_model_ply,
+)
 from posetestbot.pipeline.run_config import (
     SensorRunConfig,
     create_run_config,
@@ -57,7 +61,9 @@ from posetestbot.pose_templates.transforms import matrix_from_xyz_rpy
 
 
 def mesh_file(path: Path, *, extents=(20, 10, 10)) -> Path:
-    path.write_bytes(trimesh.creation.box(extents=extents).export(file_type=path.suffix[1:]))
+    path.write_bytes(
+        trimesh.creation.box(extents=extents).export(file_type=path.suffix[1:])
+    )
     return path
 
 
@@ -122,11 +128,12 @@ def test_source_status_states_and_private_import_isolation(
     monkeypatch.setattr(
         adapter,
         "_git",
-        lambda _root, *arguments: (
-            "wrong" if arguments[0] == "rev-parse" else ""
-        ),
+        lambda _root, *arguments: "wrong" if arguments[0] == "rev-parse" else "",
     )
-    assert adapter.verify_posetemplatecreator_checkout(checkout)["status"] == "revision_mismatch"
+    assert (
+        adapter.verify_posetemplatecreator_checkout(checkout)["status"]
+        == "revision_mismatch"
+    )
     monkeypatch.setattr(
         adapter,
         "_git",
@@ -170,9 +177,15 @@ def test_legacy_full_pose_preview_compensation_and_immutable_bundle(
     )
 
     library = tmp_path / "library"
-    bundle = generate_template_bundle(config, catalog_root=catalog, library_root=library)
+    bundle = generate_template_bundle(
+        config, catalog_root=catalog, library_root=library
+    )
     assert bundle["schema_version"] == "pose_template_bundle.v1"
-    assert (Path(bundle["bundle_path"]) / "pose_template.pdf").read_bytes().startswith(b"%PDF")
+    assert (
+        (Path(bundle["bundle_path"]) / "pose_template.pdf")
+        .read_bytes()
+        .startswith(b"%PDF")
+    )
     thumbnail_path = Path(bundle["bundle_path"]) / "pose_template_thumbnail.json"
     thumbnail_bytes = thumbnail_path.read_bytes()
     thumbnail = json.loads(thumbnail_bytes)
@@ -184,11 +197,27 @@ def test_legacy_full_pose_preview_compensation_and_immutable_bundle(
     with pytest.raises(ValueError, match="thumbnail is missing or was modified"):
         validate_template_bundle(bundle["bundle_path"], library_root=library)
     thumbnail_path.write_bytes(thumbnail_bytes)
-    set_catalog_object_state(record["catalog_uuid"], state="archived", catalog_root=catalog)
-    set_template_archive_state(bundle["template_uuid"], state="archived", library_root=library)
-    assert validate_template_bundle(bundle["bundle_path"], library_root=library)["archive"]["state"] == "archived"
+    set_catalog_object_state(
+        record["catalog_uuid"], state="archived", catalog_root=catalog
+    )
+    set_template_archive_state(
+        bundle["template_uuid"], state="archived", library_root=library
+    )
+    assert (
+        validate_template_bundle(bundle["bundle_path"], library_root=library)[
+            "archive"
+        ]["state"]
+        == "archived"
+    )
     # Historical snapshots stay valid after catalog/template archival.
-    assert len(validate_template_bundle(bundle["bundle_path"], library_root=library)["instances"]) == 2
+    assert (
+        len(
+            validate_template_bundle(bundle["bundle_path"], library_root=library)[
+                "instances"
+            ]
+        )
+        == 2
+    )
 
     manifest = Path(bundle["bundle_path"]) / "pose_template_bundle.json"
     tampered = json.loads(manifest.read_text())
@@ -224,9 +253,7 @@ def test_direct_active_template_delete_preserves_run_snapshot_and_retires_uuid(
         library_root=library,
     )
 
-    deleted = delete_template_bundle(
-        bundle["template_uuid"], library_root=library
-    )
+    deleted = delete_template_bundle(bundle["template_uuid"], library_root=library)
 
     assert deleted["schema_version"] == "pose_template_library_delete.v1"
     assert deleted["status"] == "deleted"
@@ -234,10 +261,10 @@ def test_direct_active_template_delete_preserves_run_snapshot_and_retires_uuid(
     assert not Path(bundle["bundle_path"]).exists()
     tombstone = library / ".deleted" / f"{bundle['template_uuid']}.json"
     assert json.loads(tombstone.read_text())["asset_cleanup"]["status"] == "complete"
-    assert load_pose_template_selection(run)["bundle_sha256"] == selected["bundle_sha256"]
-    repeated = delete_template_bundle(
-        bundle["template_uuid"], library_root=library
+    assert (
+        load_pose_template_selection(run)["bundle_sha256"] == selected["bundle_sha256"]
     )
+    repeated = delete_template_bundle(bundle["template_uuid"], library_root=library)
     assert repeated["already_deleted"] is True
     with pytest.raises(ValueError, match="permanently retired"):
         generate_template_bundle(
@@ -301,7 +328,11 @@ def test_template_thumbnail_is_deterministically_bounded_and_keeps_every_primary
     instances = [
         {
             "instance_uuid": str(uuid.UUID(int=index + 1)),
-            "catalog": {"catalog_uuid": str(uuid.UUID(int=1000 + index)), "name": f"Part {index}", "obj_id": index + 1},
+            "catalog": {
+                "catalog_uuid": str(uuid.UUID(int=1000 + index)),
+                "name": f"Part {index}",
+                "obj_id": index + 1,
+            },
             # Put the exterior second to prove primary selection is area-based.
             "compensated_contours": [contour(2, 73), contour(10, 97), contour(1, 61)],
         }
@@ -341,7 +372,9 @@ def test_template_thumbnail_is_deterministically_bounded_and_keeps_every_primary
     }
 
 
-def test_legacy_bundle_thumbnail_fallback_does_not_mutate_bundle(tmp_path: Path) -> None:
+def test_legacy_bundle_thumbnail_fallback_does_not_mutate_bundle(
+    tmp_path: Path,
+) -> None:
     catalog, record = managed_box(tmp_path)
     library = tmp_path / "library"
     bundle = generate_template_bundle(
@@ -366,9 +399,10 @@ def test_legacy_bundle_thumbnail_fallback_does_not_mutate_bundle(tmp_path: Path)
     assert thumbnail["template_uuid"] == bundle["template_uuid"]
     assert len(thumbnail["instances"]) == 2
     assert not (bundle_root / "pose_template_thumbnail.json").exists()
-    assert "thumbnail" not in validate_template_bundle(
-        bundle_root, library_root=library
-    )["files"]
+    assert (
+        "thumbnail"
+        not in validate_template_bundle(bundle_root, library_root=library)["files"]
+    )
 
 
 def test_page_centred_compensation_rejects_geometry_clipped_by_media_box(
@@ -449,9 +483,7 @@ def test_catalog_preview_preserves_hollow_geometry_above_legacy_limits(
         catalog_root=catalog,
     )
 
-    first = analyze_catalog_orientations(
-        record["catalog_uuid"], catalog_root=catalog
-    )
+    first = analyze_catalog_orientations(record["catalog_uuid"], catalog_root=catalog)
     preview = first["recognition_mesh"]
     rendered = trimesh.Trimesh(
         vertices=preview["vertices"],
@@ -480,9 +512,7 @@ def test_catalog_preview_preserves_hollow_geometry_above_legacy_limits(
     backend = adapter.load_posetemplatecreator_backend()
     second = backend.orientation_artifacts("canonical.ply", canonical.read_bytes())
     assert second["recognition_mesh"] == preview
-    assert (
-        second["provenance"]["dependencies"]["fast-simplification"] != "unavailable"
-    )
+    assert second["provenance"]["dependencies"]["fast-simplification"] != "unavailable"
 
 
 def test_catalog_preview_decimation_is_deterministic_and_bounded() -> None:
@@ -562,8 +592,7 @@ def test_catalog_preview_prefers_better_topology_over_first_bounded_qem() -> Non
     assert approximation is not None
     assert approximation["strategy"] == "spatial_clustering"
     assert abs(
-        approximation["result_euler_number"]
-        - approximation["source_euler_number"]
+        approximation["result_euler_number"] - approximation["source_euler_number"]
     ) < abs(first_qem.euler_number - source.euler_number)
 
 
@@ -677,8 +706,14 @@ def test_stable_orientation_cache_and_planar_pose_compose_ground_truth(
     }
     preview = build_template_preview(configuration, catalog_root=catalog)
     assert preview["valid"] is True
-    assert preview["configuration"]["instances"][0]["placement_mode"] == "stable_orientation"
-    assert preview["instances"][0]["orientation"]["orientation_id"] == selected["orientation_id"]
+    assert (
+        preview["configuration"]["instances"][0]["placement_mode"]
+        == "stable_orientation"
+    )
+    assert (
+        preview["instances"][0]["orientation"]["orientation_id"]
+        == selected["orientation_id"]
+    )
     assert record["canonical_ply_sha256"] in preview["preview_meshes"]
     planar = matrix_from_xyz_rpy(
         x_mm=40,
@@ -705,7 +740,9 @@ def test_stable_orientation_cache_and_planar_pose_compose_ground_truth(
     stale = json.loads(cache_path.read_text())
     stale["source"]["canonical_ply_sha256"] = "0" * 64
     cache_path.write_text(json.dumps(stale))
-    with pytest.raises(OrientationAnalysisStaleError, match="canonical geometry changed"):
+    with pytest.raises(
+        OrientationAnalysisStaleError, match="canonical geometry changed"
+    ):
         load_catalog_orientation_analysis(record["catalog_uuid"], catalog_root=catalog)
 
 
@@ -750,21 +787,13 @@ def test_corrected_geometry_orientation_cache_can_be_regenerated(
     first = load_catalog_orientation_analysis(
         record["catalog_uuid"], catalog_root=catalog
     )
-    second = analyze_catalog_orientations(
-        record["catalog_uuid"], catalog_root=catalog
-    )
+    second = analyze_catalog_orientations(record["catalog_uuid"], catalog_root=catalog)
 
-    assert first["source"]["canonical_ply_sha256"] == corrected[
-        "canonical_ply_sha256"
-    ]
-    assert second["source"]["canonical_ply_sha256"] == corrected[
-        "canonical_ply_sha256"
-    ]
+    assert first["source"]["canonical_ply_sha256"] == corrected["canonical_ply_sha256"]
+    assert second["source"]["canonical_ply_sha256"] == corrected["canonical_ply_sha256"]
     loaded = load_catalog(catalog)
     assert "orientation_analysis" not in loaded["objects"][0]["assets"]
-    assert "orientation_analysis" not in loaded["objects"][0][
-        "geometry_revisions"
-    ][-1]
+    assert "orientation_analysis" not in loaded["objects"][0]["geometry_revisions"][-1]
     set_catalog_object_state(
         record["catalog_uuid"], state="active", catalog_root=catalog
     )
@@ -853,9 +882,9 @@ def test_selection_resolution_blockers_and_object_instances(tmp_path: Path) -> N
         operator="pytest",
         library_root=library,
     )
-    assert selection["instances"][0]["template_base_from_object"]["translation_mm"] == pytest.approx(
-        [50, 60, 30]
-    )
+    assert selection["instances"][0]["template_base_from_object"][
+        "translation_mm"
+    ] == pytest.approx([50, 60, 30])
     loaded_config = load_run_config_for_run_root(run)
     assert loaded_config["schema_version"] == "run_config.v3"
     assert loaded_config["pose_template"]["template_uuid"] == bundle["template_uuid"]
@@ -966,9 +995,7 @@ def test_pose_template_selection_preserves_legacy_sync_inference_warning(
 
     loaded_config = load_run_config_for_run_root(run)
     assert loaded_config["schema_version"] == "run_config.v3"
-    assert loaded_config["capture"]["synchronization"]["mode"] == (
-        "timestamp_aligned"
-    )
+    assert loaded_config["capture"]["synchronization"]["mode"] == ("timestamp_aligned")
     assert any(
         warning.get("code") == "legacy_capture_synchronization_inferred"
         for warning in loaded_config.get("warnings", [])
@@ -979,7 +1006,9 @@ def test_bop_model_export_deduplicates_duplicate_instances(tmp_path: Path) -> No
     catalog, record = managed_box(tmp_path)
     library = tmp_path / "library"
     bundle = generate_template_bundle(
-        template_configuration(record["catalog_uuid"]), catalog_root=catalog, library_root=library
+        template_configuration(record["catalog_uuid"]),
+        catalog_root=catalog,
+        library_root=library,
     )
     run = tmp_path / "run"
     run.mkdir()
@@ -995,7 +1024,21 @@ def test_bop_model_export_deduplicates_duplicate_instances(tmp_path: Path) -> No
     models = copy_bop_instance_models(tmp_path / "bop", run, objects)
     assert len(models) == 1
     assert models[0].obj_id == record["obj_id"]
+    assert not Path(models[0].source_path).is_absolute()
     assert len(list((tmp_path / "bop" / "models").glob("obj_*.ply"))) == 1
+    assert len(list((tmp_path / "bop" / "models_eval").glob("obj_*.ply"))) == 1
+    model_path = tmp_path / "bop" / models[0].bop_path
+    eval_model_path = tmp_path / "bop" / models[0].bop_eval_path
+    compatibility = validate_bop_model_ply(model_path)
+    eval_compatibility = validate_bop_model_ply(eval_model_path)
+    assert compatibility["ascii"] is True
+    assert compatibility["vertex_normals"] is True
+    assert eval_compatibility == compatibility
+    assert json.loads(
+        (tmp_path / "bop" / "models_eval" / "models_info.json").read_text()
+    ) == json.loads((tmp_path / "bop" / "models" / "models_info.json").read_text())
+    header = model_path.read_bytes().split(b"end_header\n", 1)[0]
+    assert b"property ushort stl" not in header
 
 
 def test_bop_export_preserves_duplicate_instance_identity_and_target_count(
@@ -1083,8 +1126,53 @@ def test_bop_export_preserves_duplicate_instance_identity_and_target_count(
         template_instances=instances,
     )
 
-    assert exported.targets == [{"scene_id": 1, "im_id": 0, "obj_id": 7, "inst_count": 2}]
+    assert exported.targets == [
+        {"scene_id": 1, "im_id": 0, "obj_id": 7, "inst_count": 2}
+    ]
     assert [item["instance_uuid"] for item in exported.instance_map] == [
         item["instance_uuid"] for item in instances
     ]
     assert len(list((tmp_path / "bop" / "test" / "000001" / "mask").glob("*.png"))) == 2
+
+
+def test_bop_export_without_annotations_needs_no_blenderproc_identity(
+    tmp_path: Path,
+) -> None:
+    sensor = tmp_path / "realsense_123"
+    (sensor / "rgb").mkdir(parents=True)
+    (sensor / "depth").mkdir()
+    assert cv2.imwrite(
+        (sensor / "rgb" / "000000.png").as_posix(),
+        np.zeros((8, 8, 3), dtype=np.uint8),
+    )
+    assert cv2.imwrite(
+        (sensor / "depth" / "000000.png").as_posix(),
+        np.ones((8, 8), dtype=np.uint16),
+    )
+    (sensor / "cam_K.txt").write_text("100 0 4 0 100 4 0 0 1\n")
+    instance = {
+        "instance_uuid": "11111111-1111-4111-8111-111111111111",
+        "catalog_uuid": "33333333-3333-4333-8333-333333333333",
+        "obj_id": 7,
+        "name": "Clamp",
+        "texture": None,
+    }
+
+    exported = export_sensor_scene_to_bop(
+        sensor,
+        tmp_path / "bop",
+        object_name_to_id={instance["instance_uuid"]: 7},
+        template_instances=[instance],
+        annotation_source="none",
+    )
+
+    assert exported.annotation_source == "none"
+    assert exported.targets == [
+        {"scene_id": 1, "im_id": 0, "obj_id": 7, "inst_count": 1}
+    ]
+    assert exported.instance_map == []
+    scene = tmp_path / "bop" / "test" / "000001"
+    assert not (scene / "scene_gt.json").exists()
+    assert not (scene / "scene_gt_info.json").exists()
+    assert not (scene / "mask").exists()
+    assert not (scene / "mask_visib").exists()

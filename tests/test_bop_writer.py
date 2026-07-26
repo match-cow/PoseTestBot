@@ -5,12 +5,17 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
+import trimesh
 
 from posetestbot.bop.writer import (
     BopSceneExport,
     bop_frame_sets_from_hardware_groups,
     model_geometry_info,
+    validate_bop_model_ply,
+    write_bop_model_ply,
+    write_bop_export_manifest,
 )
 
 
@@ -59,8 +64,6 @@ def _scene_export(sensor_name: str, scene_id: int) -> BopSceneExport:
         artifacts={},
         frame_map={
             "0": {
-                "sensor_name": sensor_name,
-                "scene_id": scene_id,
                 "source_rgb": "rgb/000010.png",
                 "source_depth": "depth/000010.png",
                 "bop_rgb": "rgb/000000.png",
@@ -68,6 +71,91 @@ def _scene_export(sensor_name: str, scene_id: int) -> BopSceneExport:
             }
         },
     )
+
+
+def test_export_manifest_infers_the_scene_annotation_source(tmp_path: Path) -> None:
+    manifest_path = write_bop_export_manifest(
+        tmp_path,
+        [_scene_export("realsense_123", 1)],
+    )
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["annotation_source"] == "none"
+
+
+def test_bop_model_texture_requires_and_preserves_uv_coordinates(
+    tmp_path: Path,
+) -> None:
+    untextured = trimesh.creation.box()
+    untextured_path = tmp_path / "untextured.ply"
+    untextured_path.write_bytes(
+        untextured.export(file_type="ply", encoding="binary_little_endian")
+    )
+    with pytest.raises(ValueError, match="no usable UV coordinates"):
+        write_bop_model_ply(
+            untextured_path,
+            tmp_path / "invalid-textured.ply",
+            texture_filename="obj_000001.png",
+        )
+
+    textured = trimesh.creation.box()
+    uv = np.column_stack(
+        (
+            np.linspace(0.0, 1.0, len(textured.vertices)),
+            np.linspace(1.0, 0.0, len(textured.vertices)),
+        )
+    )
+    textured.visual = trimesh.visual.texture.TextureVisuals(uv=uv)
+    textured_path = tmp_path / "textured.ply"
+    textured_path.write_bytes(
+        textured.export(file_type="ply", encoding="binary_little_endian")
+    )
+    exported_path = tmp_path / "obj_000001.ply"
+
+    write_bop_model_ply(
+        textured_path,
+        exported_path,
+        texture_filename="obj_000001.png",
+    )
+
+    assert validate_bop_model_ply(exported_path)["vertex_normals"] is True
+    header = exported_path.read_bytes().split(b"end_header\n", 1)[0]
+    assert b"comment TextureFile obj_000001.png" in header
+    assert b"property double texture_u" in header
+    assert b"property double texture_v" in header
+
+
+def test_bop_model_validation_rejects_importer_specific_face_properties(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unsupported-face-property.ply"
+    path.write_text(
+        "\n".join(
+            (
+                "ply",
+                "format ascii 1.0",
+                "element vertex 3",
+                "property float x",
+                "property float y",
+                "property float z",
+                "property float nx",
+                "property float ny",
+                "property float nz",
+                "element face 1",
+                "property ushort stl",
+                "property list uchar int vertex_indices",
+                "end_header",
+                "0 0 0 0 0 1",
+                "1 0 0 0 0 1",
+                "0 1 0 0 0 1",
+                "0 3 0 1 2",
+                "",
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="unsupported face properties"):
+        validate_bop_model_ply(path)
 
 
 def _hardware_groups() -> dict:
@@ -143,12 +231,10 @@ def _hardware_groups() -> dict:
                 "mounting_mode": "static",
                 "hardware_sync_role": "master",
                 "frame_metadata_path": (
-                    "processed/synchronized/realsense_master/"
-                    "frame_metadata.jsonl"
+                    "processed/synchronized/realsense_master/frame_metadata.jsonl"
                 ),
                 "matched_robot_poses_path": (
-                    "processed/synchronized/realsense_master/"
-                    "match_robot_ee_poses.json"
+                    "processed/synchronized/realsense_master/match_robot_ee_poses.json"
                 ),
                 "frame_count": 1,
             },
@@ -160,12 +246,10 @@ def _hardware_groups() -> dict:
                 "mounting_mode": "eye_in_hand",
                 "hardware_sync_role": "subordinate",
                 "frame_metadata_path": (
-                    "processed/synchronized/realsense_hand/"
-                    "frame_metadata.jsonl"
+                    "processed/synchronized/realsense_hand/frame_metadata.jsonl"
                 ),
                 "matched_robot_poses_path": (
-                    "processed/synchronized/realsense_hand/"
-                    "match_robot_ee_poses.json"
+                    "processed/synchronized/realsense_hand/match_robot_ee_poses.json"
                 ),
                 "frame_count": 1,
             },

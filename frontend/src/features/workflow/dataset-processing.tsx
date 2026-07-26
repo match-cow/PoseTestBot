@@ -21,7 +21,7 @@ const outcomes = [
   { id: "sync", label: "Match camera frames to robot poses" },
   { id: "quality", label: "Verify timestamp and match quality" },
   { id: "calibration", label: "Validate calibration and rectify RGB-D frames" },
-  { id: "export", label: "Prepare geometry and write the BOP dataset" },
+  { id: "export", label: "Copy models and write the annotation-free BOP dataset" },
 ]
 
 export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplete, syncQualityComplete, calibrationComplete, exportComplete, onReviewReadiness }: DatasetProcessingProps) {
@@ -45,7 +45,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
   return <Card data-testid="dataset-processing" className="border-primary/25">
     <CardHeader>
       <CardTitle className="text-base">Process the recorded dataset</CardTitle>
-      <CardDescription>One queued job runs the required derived-data stages in order. Raw camera frames and robot poses are never renamed or replaced.</CardDescription>
+      <CardDescription>One queued job synchronizes, rectifies, and writes the image/model BOP dataset. It does not run BlenderProc or generate rendered GT/masks. Raw camera frames and robot poses are never renamed or replaced.</CardDescription>
     </CardHeader>
     <CardContent className="space-y-5">
       <ol className="grid gap-2 sm:grid-cols-2" aria-label="Automatic dataset processing">
@@ -58,7 +58,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
         <div className="flex items-start gap-2 text-xs text-muted-foreground"><ShieldCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning-foreground" /><span>{!ready ? "Complete the readiness step before processing this run." : "Record the object dataset before processing it."}</span></div>
         {!ready && <Button type="button" variant="outline" size="sm" onClick={onReviewReadiness}>Review readiness</Button>}
       </div> : <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-xs text-muted-foreground">Calibration validation is automatic here; there is no second operator preflight.</p>
+        <p className="text-xs text-muted-foreground">Calibration validation is automatic here; there is no second operator preflight. Rendered annotations remain a separate optional workflow.</p>
         <div className="flex flex-wrap gap-2">
           {process.isSuccess && <Button asChild variant="outline"><Link to="/jobs">Open job <ArrowRight aria-hidden="true" /></Link></Button>}
           <Button type="button" onClick={() => process.mutate()} disabled={process.isPending}>

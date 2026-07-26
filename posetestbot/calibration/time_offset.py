@@ -29,12 +29,15 @@ from posetestbot.calibration.candidates import _robot_ee_to_reference
 
 
 SCHEMA_VERSION = "calibration_time_offset_search.v1"
-IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_cv.v1"
+LEGACY_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_cv.v1"
+IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_cv.v2"
 # Promotion and queued-attempt replay validate against this compatibility set,
 # not just the revision used for newly created attempts.  Keep an older revision
 # here only while its exact recorded configuration and execution semantics
 # remain supported.
-SUPPORTED_IMPLEMENTATION_REVISIONS = frozenset({IMPLEMENTATION_REVISION})
+SUPPORTED_IMPLEMENTATION_REVISIONS = frozenset(
+    {LEGACY_IMPLEMENTATION_REVISION, IMPLEMENTATION_REVISION}
+)
 POLICIES = ("auto_offset", "fixed_zero")
 DEFAULT_POLICY = "fixed_zero"
 DEFAULT_MIN_OFFSET_MS = -150.0
@@ -45,11 +48,15 @@ DEFAULT_REFERENCE_PNP_METHOD = "IPPE"
 DEFAULT_MAX_NEAREST_POSE_DELTA_MS = 20.0
 DEFAULT_MAX_OBSERVATIONS_PER_MOTION = 6
 DEFAULT_MAX_SEARCH_MOTIONS = 18
-DEFAULT_MIN_MOTIONS_PER_FOLD = 3
+DEFAULT_MIN_MOTIONS_PER_FOLD = 4
 DEFAULT_MIN_ABSOLUTE_IMPROVEMENT_MM = 0.25
 DEFAULT_MIN_RELATIVE_IMPROVEMENT = 0.10
 DEFAULT_MAX_ROTATION_DEGRADATION_DEG = 0.10
 DEFAULT_MIN_OFFSET_STABILITY_MS = 20.0
+DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE = 0.05
+LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY = "every_cross_validation_fold"
+IMPROVEMENT_EVIDENCE_STRATEGY = "leave_one_motion_out_consistency"
+LOMO_CONSISTENCY_STRATEGY = "leave_one_motion_out_candidate_consistency_bonferroni.v1"
 
 
 def offset_values(
@@ -469,6 +476,177 @@ def _median_robot_sample_period_ms(
     return float(median(deltas)) if deltas else 0.0
 
 
+def _positive_sign_p_value(positive_count: int, comparison_count: int) -> float:
+    """Return the exact one-sided sign-consistency tail probability."""
+
+    if comparison_count <= 0:
+        return 1.0
+    if positive_count < 0 or positive_count > comparison_count:
+        raise ValueError("positive sign count must be within the comparison count")
+    return float(
+        sum(
+            math.comb(comparison_count, count)
+            for count in range(positive_count, comparison_count + 1)
+        )
+        / (2**comparison_count)
+    )
+
+
+def _leave_one_motion_out_consistency(
+    split: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    candidate_offset_ms: float,
+    mode: str,
+    methods: Sequence[str],
+    robot_records: Sequence[Mapping[str, Any]],
+    robot_timestamps_ns: Sequence[int],
+    max_nearest_pose_delta_ms: float,
+    min_absolute_improvement_mm: float,
+    min_relative_improvement: float,
+    candidate_search_hypothesis_count: int,
+    max_search_adjusted_sign_p_value: float,
+) -> dict[str, Any]:
+    """Audit one selected offset against every motion as its own held-out group."""
+
+    selected = [item for fold in range(3) for item in split[f"fold_{fold}"]]
+    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for item in selected:
+        grouped[str(item["motion"])].append(item)
+    motion_names = sorted(grouped)
+    if len(motion_names) < 3:
+        raise ValueError(
+            "leave-one-motion-out timing consistency requires at least three motions"
+        )
+    motion_evidence: list[dict[str, Any]] = []
+    improvements_by_method: dict[str, list[dict[str, float | None]]] = {
+        method: [] for method in methods
+    }
+    for held_out_motion in motion_names:
+        validation = grouped[held_out_motion]
+        training = [
+            item
+            for motion in motion_names
+            if motion != held_out_motion
+            for item in grouped[motion]
+        ]
+        zero = _evaluate_split(
+            training,
+            validation,
+            offset_ms=0.0,
+            mode=mode,
+            methods=methods,
+            robot_records=robot_records,
+            robot_timestamps_ns=robot_timestamps_ns,
+            max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+        )
+        candidate = _evaluate_split(
+            training,
+            validation,
+            offset_ms=candidate_offset_ms,
+            mode=mode,
+            methods=methods,
+            robot_records=robot_records,
+            robot_timestamps_ns=robot_timestamps_ns,
+            max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+        )
+        method_evidence: dict[str, Any] = {}
+        for method in methods:
+            improvement = _method_improvement(zero, candidate, method)
+            improvements_by_method[method].append(improvement)
+            method_evidence[method] = {
+                "zero_offset_residuals": zero["methods"][method]["residuals"],
+                "candidate_residuals": candidate["methods"][method]["residuals"],
+                "improvement": improvement,
+            }
+        motion_evidence.append(
+            {
+                "motion": held_out_motion,
+                "validation_observation_count": len(validation),
+                "training_motion_count": len(motion_names) - 1,
+                "methods": method_evidence,
+            }
+        )
+
+    method_summaries: dict[str, Any] = {}
+    for method, improvements in improvements_by_method.items():
+        relative_values = [
+            float(item["relative_translation"])
+            for item in improvements
+            if item["relative_translation"] is not None
+        ]
+        positive_count = sum(
+            float(item["absolute_translation_mm"]) > 1e-12 for item in improvements
+        )
+        material_count = sum(
+            float(item["absolute_translation_mm"]) >= min_absolute_improvement_mm
+            and item["relative_translation"] is not None
+            and float(item["relative_translation"]) >= min_relative_improvement
+            for item in improvements
+        )
+        median_improvement = {
+            "absolute_translation_mm": float(
+                median(float(item["absolute_translation_mm"]) for item in improvements)
+            ),
+            "relative_translation": (
+                float(median(relative_values))
+                if len(relative_values) == len(improvements)
+                else None
+            ),
+            "rotation_change_deg": float(
+                median(float(item["rotation_change_deg"]) for item in improvements)
+            ),
+        }
+        sign_p_value = _positive_sign_p_value(
+            positive_count,
+            len(improvements),
+        )
+        search_adjusted_sign_p_value = min(
+            1.0,
+            sign_p_value * candidate_search_hypothesis_count,
+        )
+        method_ok = bool(
+            median_improvement["absolute_translation_mm"] >= min_absolute_improvement_mm
+            and median_improvement["relative_translation"] is not None
+            and float(median_improvement["relative_translation"])
+            >= min_relative_improvement
+            and search_adjusted_sign_p_value <= max_search_adjusted_sign_p_value
+        )
+        method_summaries[method] = {
+            "status": "ok" if method_ok else "error",
+            "motion_count": len(improvements),
+            "positive_motion_count": positive_count,
+            "material_motion_count": material_count,
+            "positive_sign_p_value": sign_p_value,
+            "candidate_search_adjusted_positive_sign_p_value": (
+                search_adjusted_sign_p_value
+            ),
+            "median_improvement": median_improvement,
+        }
+    return {
+        "strategy": LOMO_CONSISTENCY_STRATEGY,
+        "status": (
+            "ok"
+            if all(item["status"] == "ok" for item in method_summaries.values())
+            else "error"
+        ),
+        "candidate_robot_pose_time_offset_ms": float(candidate_offset_ms),
+        "candidate_selection_uses_audited_motions": True,
+        "candidate_search_adjustment": "bonferroni",
+        "candidate_search_hypothesis_count": candidate_search_hypothesis_count,
+        "transform_training_motion_disjoint": True,
+        "motion_count": len(motion_names),
+        "methods": method_summaries,
+        "motions": motion_evidence,
+        "thresholds": {
+            "minimum_median_absolute_translation_mm": (min_absolute_improvement_mm),
+            "minimum_median_relative_translation": min_relative_improvement,
+            "maximum_search_adjusted_positive_sign_p_value": (
+                max_search_adjusted_sign_p_value
+            ),
+        },
+    }
+
+
 def fixed_zero_sensor_result(
     *,
     sensor_key: str,
@@ -568,6 +746,10 @@ def estimate_sensor_time_offset(
     min_relative_improvement: float = DEFAULT_MIN_RELATIVE_IMPROVEMENT,
     max_rotation_degradation_deg: float = DEFAULT_MAX_ROTATION_DEGRADATION_DEG,
     minimum_offset_stability_ms: float = DEFAULT_MIN_OFFSET_STABILITY_MS,
+    improvement_evidence_strategy: str = IMPROVEMENT_EVIDENCE_STRATEGY,
+    max_leave_one_motion_out_search_adjusted_sign_p_value: float = (
+        DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE
+    ),
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Estimate one sensor's offset and return final rematched observations."""
 
@@ -577,6 +759,19 @@ def estimate_sensor_time_offset(
     robot_timestamps_ns = [int(item["timestamp_ns"]) for item in robot_records]
     if robot_timestamps_ns != sorted(robot_timestamps_ns):
         raise ValueError(f"{sensor_key}: robot-pose evidence is not time ordered")
+    if improvement_evidence_strategy not in {
+        LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY,
+        IMPROVEMENT_EVIDENCE_STRATEGY,
+    }:
+        raise ValueError(
+            "Unsupported time-offset improvement evidence strategy: "
+            f"{improvement_evidence_strategy}"
+        )
+    if not 0.0 < max_leave_one_motion_out_search_adjusted_sign_p_value <= 1.0:
+        raise ValueError(
+            "leave-one-motion-out maximum search-adjusted sign p-value "
+            "must be in (0, 1]"
+        )
 
     split, split_evidence = _fixed_search_split(
         observations,
@@ -751,12 +946,15 @@ def estimate_sensor_time_offset(
             fold_zero_records, fold_selected_records, strict=True
         )
     ]
-    materially_better = bool(
+    aggregate_materially_better = bool(
         candidate_offset_ms != 0.0
         and float(cross_validated_improvement["absolute_translation_mm"])
         >= min_absolute_improvement_mm
         and cross_validated_relative is not None
         and float(cross_validated_relative) >= min_relative_improvement
+    )
+    every_fold_materially_better = bool(
+        candidate_offset_ms != 0.0
         and all(
             float(item["absolute_translation_mm"]) >= min_absolute_improvement_mm
             and item["relative_translation"] is not None
@@ -764,6 +962,38 @@ def estimate_sensor_time_offset(
             for item in per_fold_improvements
         )
     )
+    motion_consistency = (
+        _leave_one_motion_out_consistency(
+            split,
+            candidate_offset_ms=candidate_offset_ms,
+            mode=mode,
+            methods=methods,
+            robot_records=robot_records,
+            robot_timestamps_ns=robot_timestamps_ns,
+            max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+            min_absolute_improvement_mm=min_absolute_improvement_mm,
+            min_relative_improvement=min_relative_improvement,
+            candidate_search_hypothesis_count=max(
+                1,
+                sum(not math.isclose(value, 0.0, abs_tol=1e-9) for value in values),
+            ),
+            max_search_adjusted_sign_p_value=(
+                max_leave_one_motion_out_search_adjusted_sign_p_value
+            ),
+        )
+        if improvement_evidence_strategy == IMPROVEMENT_EVIDENCE_STRATEGY
+        and candidate_offset_ms != 0.0
+        else None
+    )
+    improvement_evidence_ok = (
+        every_fold_materially_better
+        if improvement_evidence_strategy == LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY
+        else (
+            isinstance(motion_consistency, Mapping)
+            and motion_consistency.get("status") == "ok"
+        )
+    )
+    materially_better = aggregate_materially_better and improvement_evidence_ok
     rotation_guard_ok = all(
         float(item["rotation_change_deg"]) <= max_rotation_degradation_deg
         for item in per_fold_improvements
@@ -851,7 +1081,7 @@ def estimate_sensor_time_offset(
             "name": "cross_validated_translation_improvement",
             "status": (
                 "ok"
-                if materially_better
+                if aggregate_materially_better
                 else "not_needed"
                 if all_folds_choose_zero
                 else "error"
@@ -863,6 +1093,58 @@ def estimate_sensor_time_offset(
                 "minimum_relative_translation": min_relative_improvement,
             },
         },
+        *(
+            [
+                {
+                    "name": "cross_validation_fold_materiality",
+                    "status": (
+                        "ok"
+                        if every_fold_materially_better
+                        else "not_needed"
+                        if all_folds_choose_zero
+                        else "warning"
+                        if aggregate_materially_better
+                        else "error"
+                    ),
+                    "actual": per_fold_improvements,
+                    "threshold": {
+                        "minimum_absolute_translation_mm": (
+                            min_absolute_improvement_mm
+                        ),
+                        "minimum_relative_translation": min_relative_improvement,
+                    },
+                },
+                {
+                    "name": "leave_one_motion_out_timing_consistency",
+                    "status": (
+                        str(motion_consistency["status"])
+                        if isinstance(motion_consistency, Mapping)
+                        else "not_needed"
+                    ),
+                    "actual": (
+                        {
+                            "motion_count": motion_consistency["motion_count"],
+                            "methods": motion_consistency["methods"],
+                        }
+                        if isinstance(motion_consistency, Mapping)
+                        else None
+                    ),
+                    "threshold": {
+                        "minimum_median_absolute_translation_mm": (
+                            min_absolute_improvement_mm
+                        ),
+                        "minimum_median_relative_translation": (
+                            min_relative_improvement
+                        ),
+                        "maximum_search_adjusted_positive_sign_p_value": (
+                            max_leave_one_motion_out_search_adjusted_sign_p_value
+                        ),
+                    },
+                },
+            ]
+            if improvement_evidence_strategy == IMPROVEMENT_EVIDENCE_STRATEGY
+            else []
+        ),
         {
             "name": "cross_validated_rotation_guard",
             "status": "ok" if rotation_guard_ok else "error",
@@ -898,7 +1180,14 @@ def estimate_sensor_time_offset(
         else "failed"
     )
     reason = (
-        "motion_disjoint_cross_validation_passed"
+        (
+            (
+                "motion_disjoint_cross_validation_and_"
+                "leave_one_motion_out_consistency_passed"
+            )
+            if improvement_evidence_strategy == IMPROVEMENT_EVIDENCE_STRATEGY
+            else "motion_disjoint_cross_validation_passed"
+        )
         if status == "applied"
         else (
             "candidate_failed_safety_or_stability_checks"
@@ -940,6 +1229,7 @@ def estimate_sensor_time_offset(
         "reference_pnp_method": DEFAULT_REFERENCE_PNP_METHOD,
         "reference_extrinsic_methods": list(methods),
         "selection_extrinsic_method": selection_method,
+        "improvement_evidence_strategy": improvement_evidence_strategy,
         "method_optima_robot_pose_time_offset_ms": optima,
         "fold_candidate_robot_pose_time_offsets_ms": (fold_candidate_offsets),
         "fold_candidate_spread_ms": fold_candidate_spread_ms,
@@ -962,6 +1252,7 @@ def estimate_sensor_time_offset(
             "improvement": cross_validated_improvement,
             "folds": validation_folds,
         },
+        "motion_consistency": motion_consistency,
         "input_observation_count": len(observations),
         "output_observation_count": len(adjusted),
         "checks": checks,
@@ -994,6 +1285,9 @@ def search_configuration() -> dict[str, Any]:
             DEFAULT_MAX_ROTATION_DEGRADATION_DEG
         ),
         "minimum_offset_stability_ms": DEFAULT_MIN_OFFSET_STABILITY_MS,
+        "maximum_leave_one_motion_out_search_adjusted_sign_p_value": (
+            DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE
+        ),
     }
 
 

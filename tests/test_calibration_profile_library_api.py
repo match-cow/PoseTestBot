@@ -299,10 +299,10 @@ def test_library_selection_snapshots_both_files_and_drives_sequence_options(
     assert steps["camera_rectification"]["options"]["intrinsic_profiles"] == (
         intrinsic_relative
     )
-    assert steps["blenderproc_prepare"]["options"]["calibration_profiles"] == (
-        full_relative
-    )
     assert steps["bop_export"]["options"]["calibration_profiles"] == full_relative
+    assert steps["bop_export"]["options"]["annotation_source"] == "none"
+    assert "blenderproc_prepare" not in steps
+    assert "blenderproc_render" not in steps
 
 
 def test_selection_accepts_intended_setup_before_destination_config(

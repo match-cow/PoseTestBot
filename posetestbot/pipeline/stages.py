@@ -1331,7 +1331,10 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         id="bop_export",
         label="BOP Dataset Export",
         script="scripts/run_bop_export_stage.py",
-        description="Export synchronized sensor folders into BOP scene folders.",
+        description=(
+            "Export synchronized sensor folders and canonical models into BOP "
+            "scene folders. Rendered GT/masks are opt-in."
+        ),
         resources=("disk_io",),
         parameters=(
             PipelineParameter(
@@ -1375,6 +1378,16 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 flag="--write-coco-annotations",
                 kind="bool",
                 default=False,
+            ),
+            PipelineParameter(
+                name="annotation_source",
+                flag="--annotation-source",
+                default="none",
+                choices=("none", "blenderproc"),
+                help=(
+                    "Use 'none' for an image/model BOP dataset without rendered "
+                    "GT, or 'blenderproc' to consume optional rendered annotations."
+                ),
             ),
         ),
     ),

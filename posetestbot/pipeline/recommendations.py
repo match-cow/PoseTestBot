@@ -291,6 +291,9 @@ def _bop_export_summary(root: Path) -> dict[str, Any]:
             "export_count": 0,
             "target_count": 0,
             "model_count": 0,
+            "annotation_source": None,
+            "ready_for_pose_estimation": False,
+            "ready_for_bop19_evaluation": False,
         }
     manifest = _json_if_present(path)
     if not isinstance(manifest, Mapping):
@@ -300,6 +303,9 @@ def _bop_export_summary(root: Path) -> dict[str, Any]:
             "export_count": 0,
             "target_count": 0,
             "model_count": 0,
+            "annotation_source": None,
+            "ready_for_pose_estimation": False,
+            "ready_for_bop19_evaluation": False,
         }
     exports = manifest.get("exports")
     export_count = len(exports) if isinstance(exports, list) else 0
@@ -308,18 +314,63 @@ def _bop_export_summary(root: Path) -> dict[str, Any]:
     object_models = manifest.get("object_models")
     model_count = len(object_models) if isinstance(object_models, list) else 0
     objectless = manifest.get("objectless") is True
+    annotation_source = manifest.get("annotation_source")
+    clean_annotation_layout = manifest.get("schema_version") == "bop_export_manifest.v5"
+    targets_present = isinstance(targets, list)
+    declared_targets_path = manifest.get("targets_path")
+    if annotation_source not in {"none", "blenderproc"}:
+        annotation_source = "none" if objectless else "blenderproc"
     if export_count == 0:
         blocker = "empty_bop_export_manifest"
-    elif objectless and (not isinstance(targets, list) or target_count or model_count):
+    elif objectless and (
+        model_count
+        or target_count
+        or (
+            clean_annotation_layout
+            and (targets_present or declared_targets_path is not None)
+        )
+        or (not clean_annotation_layout and not targets_present)
+    ):
         blocker = "inconsistent_objectless_bop_export"
     elif objectless:
         blocker = None
-    elif target_count == 0:
-        blocker = "missing_bop_targets"
     elif model_count == 0:
         blocker = "missing_bop_models"
+    elif (
+        annotation_source == "none"
+        and clean_annotation_layout
+        and (
+            not targets_present
+            or target_count == 0
+            or declared_targets_path != BOP_TARGETS_BOP19
+        )
+    ):
+        blocker = "missing_bop_targets"
+    elif (
+        annotation_source == "none"
+        and not clean_annotation_layout
+        and not targets_present
+    ):
+        blocker = "inconsistent_annotation_free_bop_export"
+    elif annotation_source == "none":
+        blocker = None
+    elif target_count == 0:
+        blocker = "missing_bop_targets"
     else:
         blocker = None
+    capabilities = manifest.get("capabilities")
+    ready_for_pose_estimation = (
+        bool(capabilities.get("pose_estimation_input"))
+        if isinstance(capabilities, Mapping)
+        else not objectless and export_count > 0 and model_count > 0
+    )
+    ready_for_bop19_evaluation = (
+        bool(capabilities.get("bop19_evaluation"))
+        if isinstance(capabilities, Mapping)
+        else (
+            annotation_source == "blenderproc" and target_count > 0 and model_count > 0
+        )
+    )
     return {
         "ready_for_dataset_use": blocker is None,
         "blocker": blocker,
@@ -327,6 +378,9 @@ def _bop_export_summary(root: Path) -> dict[str, Any]:
         "target_count": target_count,
         "model_count": model_count,
         "objectless": objectless,
+        "annotation_source": annotation_source,
+        "ready_for_pose_estimation": ready_for_pose_estimation,
+        "ready_for_bop19_evaluation": ready_for_bop19_evaluation,
     }
 
 
@@ -595,6 +649,9 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
         "bop_export_count": bop_export["export_count"],
         "bop_target_count": bop_export["target_count"],
         "bop_model_count": bop_export["model_count"],
+        "bop_annotation_source": bop_export["annotation_source"],
+        "bop_ready_for_pose_estimation": bop_export["ready_for_pose_estimation"],
+        "bop_ready_for_bop19_evaluation": bop_export["ready_for_bop19_evaluation"],
         "has_rewrite_gate_report": (root / REWRITE_GATE_REPORT).is_file(),
         "has_rewrite_status_report": (root / REWRITE_STATUS_REPORT).is_file(),
         "rewrite_status": rewrite_status["overall_status"],
@@ -840,33 +897,6 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
             )
         )
 
-    if facts["sync_quality_ready_for_bop"] and not facts["has_blenderproc_prepared"]:
-        recommendations.append(
-            _stage_recommendation(
-                recommendation_id="prepare_blenderproc",
-                stage_id="blenderproc_prepare",
-                run_root=root,
-                label="Prepare BlenderProc inputs",
-                description="Prepare object and camera inputs for optional GT rendering.",
-                reason="Sync quality is ready but BlenderProc inputs are missing.",
-                priority=90,
-                expected_artifacts=["blenderproc/objects.json"],
-            )
-        )
-    if facts["has_blenderproc_prepared"] and not facts["has_blenderproc_render_plan"]:
-        recommendations.append(
-            _stage_recommendation(
-                recommendation_id="plan_blenderproc_render",
-                stage_id="blenderproc_render",
-                run_root=root,
-                label="Plan BlenderProc render",
-                description="Write a dry-run render plan for optional GT and masks.",
-                reason=f"{BLENDERPROC_RENDER_PLAN} is missing.",
-                priority=95,
-                expected_artifacts=[BLENDERPROC_RENDER_PLAN],
-                options={"dry_run": True},
-            )
-        )
     if facts["sync_quality_ready_for_bop"] and not bop_export["ready_for_dataset_use"]:
         recommendations.append(
             _stage_recommendation(
@@ -874,13 +904,16 @@ def build_pipeline_recommendations(run_root: str | Path) -> dict[str, Any]:
                 stage_id="bop_export",
                 run_root=root,
                 label="Export BOP dataset",
-                description="Write BOP scene folders, targets, model metadata, and frame maps.",
+                description=(
+                    "Write annotation-free BOP image/model scenes, model metadata, "
+                    "and frame maps without BlenderProc."
+                ),
                 reason=f"{BOP_EXPORT_MANIFEST} is {bop_export['blocker']}.",
                 priority=100,
                 expected_artifacts=[
                     f"{BOP_DIR}/{BOP_EXPORT_MANIFEST}",
-                    f"{BOP_DIR}/{BOP_TARGETS_BOP19}",
                 ],
+                options={"annotation_source": "none", "overwrite": True},
             )
         )
 

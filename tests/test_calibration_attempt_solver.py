@@ -375,6 +375,51 @@ def test_auto_sync_failure_writes_diagnostic_artifact_before_stopping(
     assert report["sensors"][0]["checks"][0]["name"] == ("time_offset_search_execution")
 
 
+def test_legacy_auto_sync_failure_requires_fresh_attempt_after_backend_restart(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    attempt_root = run_root / "processed" / "calibration" / ("a" * 32)
+    attempt_root.mkdir(parents=True)
+    sensor_key = "realsense_d435:1"
+    search = attempt_module.time_offset_search_configuration()
+    search["minimum_motion_count_per_cross_validation_fold"] = 3
+    search.pop("maximum_leave_one_motion_out_search_adjusted_sign_p_value")
+    request_value = {
+        "attempt_id": "a" * 32,
+        "mode": "eye_in_hand",
+        "sensor_keys": [sensor_key],
+        "sensors": [
+            {
+                "sensor_key": sensor_key,
+                "sensor_name": "realsense_1",
+                "sensor_type": "realsense_d435",
+                "device_id": "1",
+                "folder": "realsense_1",
+            }
+        ],
+        "synchronization_policy": "auto_offset",
+        "synchronization_search": search,
+        "synchronization_implementation_revision": (
+            attempt_module.TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
+        ),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "immutable attempt records legacy timing revision.*"
+            "Restart the PoseTestBot backend and create a new attempt"
+        ),
+    ):
+        attempt_module._estimate_and_apply_time_offsets(
+            run_root,
+            attempt_root,
+            request_value,
+            {sensor_key: {"ITERATIVE": []}},
+        )
+
+
 def test_realsense_calibration_timestamp_preflight_requires_global_time(
     tmp_path: Path,
 ) -> None:
@@ -1036,6 +1081,7 @@ def _fixture_observations(
     ]
     observations = []
     for index, robot_pose in enumerate(poses):
+        coverage_row, coverage_column = divmod(index % 9, 3)
         flange_to_base = _robot_ee_to_reference(robot_pose)
         if mode == "eye_in_hand":
             target_to_camera = (
@@ -1061,6 +1107,11 @@ def _fixture_observations(
                 ),
                 "mean_reprojection_error_px": 0.1,
                 "image_coverage_cell": index % 9,
+                "image_centroid_px": [
+                    (coverage_column + 0.5) * 640.0 / 3.0,
+                    (coverage_row + 0.5) * 480.0 / 3.0,
+                ],
+                "image_size": [640, 480],
             }
         )
     return observations, expected_primary, expected_companion
@@ -1266,6 +1317,83 @@ def test_attempt_quality_gates_require_fifteen_views_and_six_coverage_cells() ->
 
     assert poor_coverage["status"] == "error"
     assert "image-centroid coverage 1/9 is below required 6/9" in poor_coverage["error"]
+
+
+def test_continuous_image_coverage_replaces_partition_dependent_cell_veto() -> None:
+    observations, _expected, _companion = _fixture_observations(
+        "eye_in_hand",
+        count=18,
+    )
+    corners = (
+        (200.0, 200.0),
+        (750.0, 200.0),
+        (200.0, 700.0),
+        (750.0, 700.0),
+    )
+    for index, observation in enumerate(observations):
+        observation.update(
+            {
+                "image_coverage_cell": 4,
+                "image_centroid_px": list(corners[index % len(corners)]),
+                "image_size": [1000, 1000],
+            }
+        )
+
+    candidate = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+        min_accepted_views=15,
+        min_coverage_cells=6,
+        image_coverage_tail_support_views=5,
+        min_image_centroid_x_span_ratio=0.45,
+        min_image_centroid_y_span_ratio=0.35,
+        min_image_centroid_hull_area_ratio=0.10,
+    )
+
+    assert candidate["status"] == "passing"
+    checks = {item["name"]: item for item in candidate["checks"]}
+    assert checks["image_centroid_coverage"]["status"] == "warning"
+    assert checks["continuous_image_centroid_coverage"]["status"] == "ok"
+    evidence = candidate["observation_quality"]["continuous_image_coverage"]
+    assert evidence["tail_support_views"] == 5
+    assert evidence["supported_span_ratio_xy"] == pytest.approx([0.55, 0.5])
+    assert evidence["supported_convex_hull_area_ratio"] == pytest.approx(0.275)
+
+
+def test_continuous_image_coverage_rejects_wide_but_collinear_views() -> None:
+    observations, _expected, _companion = _fixture_observations(
+        "eye_in_hand",
+        count=18,
+    )
+    for index, observation in enumerate(observations):
+        coordinate = 200.0 if index % 2 == 0 else 800.0
+        observation.update(
+            {
+                "image_coverage_cell": 4,
+                "image_centroid_px": [coordinate, coordinate],
+                "image_size": [1000, 1000],
+            }
+        )
+
+    candidate = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+        min_accepted_views=15,
+        min_coverage_cells=6,
+        image_coverage_tail_support_views=5,
+        min_image_centroid_x_span_ratio=0.45,
+        min_image_centroid_y_span_ratio=0.35,
+        min_image_centroid_hull_area_ratio=0.10,
+    )
+
+    assert candidate["status"] == "error"
+    assert "hull area 0.000/0.100" in candidate["error"]
 
 
 def test_attempt_quality_gate_requires_distinct_motion_labels() -> None:
@@ -1759,7 +1887,8 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
         ),
     )
 
-    ranking = attempt_module.run_calibration_attempt(run_root, attempt_id)
+    monkeypatch.chdir(tmp_path)
+    ranking = attempt_module.run_calibration_attempt(Path("run"), attempt_id)
 
     assert ranking["status"] == "complete"
     assert ranking["recommended_camera_count"] == 1
@@ -1815,7 +1944,7 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
         ),
     }
     with pytest.raises(ValueError, match="immutable"):
-        attempt_module.run_calibration_attempt(run_root, attempt_id)
+        attempt_module.run_calibration_attempt(Path("run"), attempt_id)
 
 
 def _multi_camera_candidate_variant(

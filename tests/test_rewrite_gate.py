@@ -221,10 +221,7 @@ def populate_hardware_sync_bop_export(
     ):
         raw_sensor = run_root / f"realsense_{device_id}"
         synchronized_sensor = (
-            run_root
-            / "processed"
-            / "synchronized"
-            / f"realsense_{device_id}"
+            run_root / "processed" / "synchronized" / f"realsense_{device_id}"
         )
         for sensor_folder in (raw_sensor, synchronized_sensor):
             (sensor_folder / RGB_DIR).mkdir(parents=True)
@@ -247,9 +244,7 @@ def populate_hardware_sync_bop_export(
             (synchronized_sensor / DEPTH_DIR / "000000.png").as_posix(),
             depth,
         )
-        (synchronized_sensor / CAM_K).write_text(
-            "10 0 3\n0 10 2.5\n0 0 1\n0 0 0 0 0\n"
-        )
+        (synchronized_sensor / CAM_K).write_text("10 0 3\n0 10 2.5\n0 0 1\n0 0 0 0 0\n")
         (synchronized_sensor / DEPTH_SCALE).write_text("1.0\n")
         write_json(
             synchronized_sensor / CAMERA_DATA_JSON,
@@ -393,6 +388,61 @@ def test_bop_export_readiness_accepts_consistent_objectless_dataset(
     assert report["overall_status"] == "ready"
 
 
+def test_bop_export_readiness_accepts_clean_annotation_free_v5_layout(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "clean-objectless-bop"
+    populate_bop_export(run_root)
+    bop = run_root / BOP_DIR
+    scene = bop / "test" / "000001"
+    (scene / "scene_gt.json").unlink()
+    (scene / "scene_gt_info.json").unlink()
+    (bop / BOP_TARGETS_BOP19).unlink()
+    shutil.rmtree(bop / "models")
+    frame_map_path = bop / BOP_FRAME_MAP_JSON
+    frame_map = json.loads(frame_map_path.read_text())
+    frame_map["schema_version"] = "posetestbot_bop_frame_map.v3"
+    frame_map["scenes"]["1"] = {
+        "sensor_name": "realsense_123",
+        "split": "test",
+        "scene_folder": "test/000001",
+        "projection": "native",
+        "input_sensor_folder": "processed/synchronized/realsense_123",
+        "authoritative_source_sensor_folder": ("processed/synchronized/realsense_123"),
+        "frames": {
+            "0": {
+                "source_rgb": "rgb/000000.png",
+                "source_depth": "depth/000000.png",
+                "bop_rgb": "rgb/000000.png",
+                "bop_depth": "depth/000000.png",
+            }
+        },
+    }
+    write_json(frame_map_path, frame_map)
+    manifest_path = bop / BOP_EXPORT_MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    manifest.update(
+        {
+            "schema_version": "bop_export_manifest.v5",
+            "objectless": True,
+            "dataset_mode": "objectless",
+            "annotation_source": "none",
+            "annotation_state": "absent",
+            "targets_path": None,
+            "instance_map_path": None,
+            "object_models": [],
+        }
+    )
+    write_json(manifest_path, manifest)
+
+    report = build_bop_export_readiness_gate_report(run_root)
+
+    assert report["overall_status"] == "ready"
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["bop_targets"]["status"] == "ready"
+    assert checks["bop_scene:realsense_123"]["details"]["annotation_layout_ok"] is True
+
+
 def test_bop_export_readiness_requires_frame_sets_for_hardware_run(
     tmp_path: Path,
 ) -> None:
@@ -502,12 +552,7 @@ def test_bop_hardware_sync_gate_rejects_tampered_provenance(
     bop_root = run_root / BOP_DIR
     frame_sets_path = bop_root / BOP_FRAME_SETS
     frame_map_path = bop_root / BOP_FRAME_MAP_JSON
-    groups_path = (
-        run_root
-        / "processed"
-        / "synchronized"
-        / MULTIVIEW_FRAME_GROUPS
-    )
+    groups_path = run_root / "processed" / "synchronized" / MULTIVIEW_FRAME_GROUPS
     frame_sets = json.loads(frame_sets_path.read_text())
     frame_map = json.loads(frame_map_path.read_text())
     groups = json.loads(groups_path.read_text())
@@ -531,9 +576,7 @@ def test_bop_hardware_sync_gate_rejects_tampered_provenance(
         write_json(frame_map_path, frame_map)
         write_json(frame_sets_path, frame_sets)
     elif tamper == "sensor_order":
-        frame_sets["sensor_order"] = list(
-            reversed(frame_sets["sensor_order"])
-        )
+        frame_sets["sensor_order"] = list(reversed(frame_sets["sensor_order"]))
         write_json(frame_sets_path, frame_sets)
     elif tamper == "frame_set_count":
         frame_sets["frame_set_count"] += 1
@@ -556,9 +599,7 @@ def test_bop_hardware_sync_gate_rejects_tampered_provenance(
         run_config["capture"]["sensors"][1]["mounting_mode"] = "static"
         write_json(config_path, run_config)
     elif tamper == "qualification":
-        frame_sets["hardware_sync_qualification"][
-            "artifact_sha256"
-        ] = "0" * 64
+        frame_sets["hardware_sync_qualification"]["artifact_sha256"] = "0" * 64
         write_json(frame_sets_path, frame_sets)
     elif tamper == "execution_binding":
         frame_sets["hardware_sync_execution_binding"][
@@ -725,6 +766,121 @@ def test_bop_export_readiness_requires_matching_pose_template_instance_evidence(
     write_json(run_root / BOP_DIR / "posetestbot_instance_map.json", instance_map)
     blocked = build_bop_export_readiness_gate_report(run_root)
     assert blocked["overall_status"] == "blocked"
+
+    write_json(
+        run_root / BOP_DIR / "posetestbot_instance_map.json",
+        {
+            "schema_version": "posetestbot_bop_instance_map.v1",
+            "instances": [],
+        },
+    )
+    scene = run_root / BOP_DIR / "test" / "000001"
+    write_json(scene / "scene_gt.json", {"0": []})
+    write_json(scene / "scene_gt_info.json", {"0": []})
+    write_json(run_root / BOP_DIR / BOP_TARGETS_BOP19, [])
+    (
+        run_root
+        / "processed"
+        / "synchronized"
+        / "realsense_123"
+        / "blenderproc"
+        / "output"
+        / "posetestbot_render_instances.json"
+    ).unlink()
+    manifest["annotation_source"] = "none"
+    write_json(manifest_path, manifest)
+
+    annotation_free = build_bop_export_readiness_gate_report(run_root)
+
+    assert annotation_free["overall_status"] == "ready"
+    annotation_free_checks = {
+        check["name"]: check for check in annotation_free["checks"]
+    }
+    evidence = annotation_free_checks["bop_pose_template_evidence_agreement"]
+    assert evidence["status"] == "ready"
+    assert evidence["details"]["annotation_source"] == "none"
+    assert set(evidence["details"]["render_sensors"].values()) == {"not_required"}
+
+    (scene / "scene_gt.json").unlink()
+    (scene / "scene_gt_info.json").unlink()
+    (run_root / BOP_DIR / "posetestbot_instance_map.json").unlink()
+    write_json(
+        run_root / BOP_DIR / BOP_TARGETS_BOP19,
+        [{"scene_id": 1, "im_id": 0, "obj_id": 1, "inst_count": 1}],
+    )
+    valid_bop_model = "\n".join(
+        (
+            "ply",
+            "format ascii 1.0",
+            "element vertex 3",
+            "property float x",
+            "property float y",
+            "property float z",
+            "property float nx",
+            "property float ny",
+            "property float nz",
+            "element face 1",
+            "property list uchar int vertex_indices",
+            "end_header",
+            "0 0 0 0 0 1",
+            "1 0 0 0 0 1",
+            "0 1 0 0 0 1",
+            "3 0 1 2",
+            "",
+        )
+    )
+    (run_root / BOP_DIR / "models" / "obj_000001.ply").write_text(valid_bop_model)
+    write_json(
+        run_root / BOP_DIR / "models_eval" / "models_info.json",
+        models_info,
+    )
+    (run_root / BOP_DIR / "models_eval" / "obj_000001.ply").write_text(valid_bop_model)
+    frame_map_path = run_root / BOP_DIR / BOP_FRAME_MAP_JSON
+    write_json(
+        frame_map_path,
+        {
+            "schema_version": "posetestbot_bop_frame_map.v3",
+            "scenes": {
+                "1": {
+                    "sensor_name": "realsense_123",
+                    "split": "test",
+                    "scene_folder": "test/000001",
+                    "projection": "native",
+                    "input_sensor_folder": "processed/synchronized/realsense_123",
+                    "authoritative_source_sensor_folder": (
+                        "processed/synchronized/realsense_123"
+                    ),
+                    "frames": {
+                        "0": {
+                            "source_rgb": "rgb/000000.png",
+                            "source_depth": "depth/000000.png",
+                            "bop_rgb": "rgb/000000.png",
+                            "bop_depth": "depth/000000.png",
+                        }
+                    },
+                }
+            },
+        },
+    )
+    manifest.update(
+        {
+            "schema_version": "bop_export_manifest.v5",
+            "annotation_source": "none",
+            "annotation_state": "absent",
+            "targets_path": BOP_TARGETS_BOP19,
+            "instance_map_path": None,
+            "frame_map_path": BOP_FRAME_MAP_JSON,
+        }
+    )
+    manifest["object_models"][0]["bop_eval_path"] = "models_eval/obj_000001.ply"
+    write_json(manifest_path, manifest)
+
+    clean_annotation_free = build_bop_export_readiness_gate_report(run_root)
+
+    assert clean_annotation_free["overall_status"] == "ready"
+    clean_checks = {check["name"]: check for check in clean_annotation_free["checks"]}
+    assert clean_checks["bop_targets"]["status"] == "ready"
+    assert clean_checks["bop_targets"]["details"]["target_count"] == 1
 
 
 def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> None:
@@ -1136,15 +1292,12 @@ def test_full_capture_gate_accepts_embedded_pre_start_capture_plan_preflight(
     report = build_full_capture_gate_report(run_root)
 
     preflight = next(
-        check
-        for check in report["checks"]
-        if check["name"] == "capture_plan_preflight"
+        check for check in report["checks"] if check["name"] == "capture_plan_preflight"
     )
     assert preflight["status"] == "ready"
     assert preflight["artifact"].endswith("capture_execution_plan.json")
     assert (
-        preflight["details"]["source"]
-        == "capture_execution_plan.json:preflight_report"
+        preflight["details"]["source"] == "capture_execution_plan.json:preflight_report"
     )
 
 
@@ -1173,9 +1326,7 @@ def test_full_capture_gate_rejects_mismatched_embedded_preflight_status(
     report = build_full_capture_gate_report(run_root)
 
     preflight = next(
-        check
-        for check in report["checks"]
-        if check["name"] == "capture_plan_preflight"
+        check for check in report["checks"] if check["name"] == "capture_plan_preflight"
     )
     assert preflight["status"] == "blocked"
     assert preflight["message"] == "capture_plan_preflight_report.json is missing."

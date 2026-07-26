@@ -450,19 +450,175 @@ def test_report_backed_fixed_zero_time_offset_evidence_is_promotable(
     assert evidence["realsense_d435:1"]["selected_sync_delta_ms"] == 0.0
 
 
+def _passing_motion_consistency_evidence() -> dict:
+    motion_count = 17
+    hypothesis_count = 60
+    raw_p = 1.0 / (2**motion_count)
+    adjusted_p = raw_p * hypothesis_count
+    methods = {
+        method: {
+            "status": "ok",
+            "motion_count": motion_count,
+            "positive_motion_count": motion_count,
+            "material_motion_count": motion_count,
+            "positive_sign_p_value": raw_p,
+            "candidate_search_adjusted_positive_sign_p_value": adjusted_p,
+            "median_improvement": {
+                "absolute_translation_mm": 1.0,
+                "relative_translation": 0.2,
+                "rotation_change_deg": -0.05,
+            },
+        }
+        for method in ("shah", "li")
+    }
+    return {
+        "strategy": attempt_module.LOMO_CONSISTENCY_STRATEGY,
+        "status": "ok",
+        "candidate_robot_pose_time_offset_ms": 75.0,
+        "candidate_selection_uses_audited_motions": True,
+        "candidate_search_adjustment": "bonferroni",
+        "candidate_search_hypothesis_count": hypothesis_count,
+        "transform_training_motion_disjoint": True,
+        "motion_count": motion_count,
+        "methods": methods,
+        "motions": [
+            {
+                "motion": f"motion_{index:02d}",
+                "validation_observation_count": 6,
+                "training_motion_count": motion_count - 1,
+                "methods": {
+                    method: {
+                        "zero_offset_residuals": {
+                            "mean_translation_mm": 5.0,
+                            "mean_rotation_deg": 0.5,
+                        },
+                        "candidate_residuals": {
+                            "mean_translation_mm": 4.0,
+                            "mean_rotation_deg": 0.45,
+                        },
+                        "improvement": {
+                            "absolute_translation_mm": 1.0,
+                            "relative_translation": 0.2,
+                            "rotation_change_deg": -0.05,
+                        },
+                    }
+                    for method in ("shah", "li")
+                },
+            }
+            for index in range(motion_count)
+        ],
+        "thresholds": {
+            "minimum_median_absolute_translation_mm": 0.25,
+            "minimum_median_relative_translation": 0.1,
+            "maximum_search_adjusted_positive_sign_p_value": 0.05,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "tamper_mode",
+    ["adjusted_p", "motion_improvement", "motion_removed", "search_count"],
+)
+def test_v2_motion_consistency_tampering_blocks_promotion(
+    tamper_mode: str,
+) -> None:
+    motion_consistency = _passing_motion_consistency_evidence()
+    if tamper_mode == "adjusted_p":
+        motion_consistency["methods"]["shah"][
+            "candidate_search_adjusted_positive_sign_p_value"
+        ] = 0.0
+    elif tamper_mode == "motion_improvement":
+        motion_consistency["motions"][0]["methods"]["shah"]["improvement"][
+            "absolute_translation_mm"
+        ] = 0.9
+    elif tamper_mode == "motion_removed":
+        motion_consistency["motions"].pop()
+    else:
+        motion_consistency["candidate_search_hypothesis_count"] = 59
+    checks = {
+        "cross_validation_fold_materiality": {
+            "name": "cross_validation_fold_materiality",
+            "status": "warning",
+        },
+        "leave_one_motion_out_timing_consistency": {
+            "name": "leave_one_motion_out_timing_consistency",
+            "status": "ok",
+            "actual": {
+                "motion_count": motion_consistency["motion_count"],
+                "methods": motion_consistency["methods"],
+            },
+        },
+    }
+    search = attempt_module.time_offset_search_configuration()
+
+    with pytest.raises(ValueError, match="Leave-one-motion-out"):
+        attempt_module._validate_promotion_motion_consistency(
+            {
+                "status": "applied",
+                "motion_consistency": motion_consistency,
+            },
+            sensor_key="realsense_d435:1",
+            candidate_offset=75.0,
+            recorded_search=search,
+            search_grid=attempt_module.time_offset_values(
+                search["minimum_robot_pose_time_offset_ms"],
+                search["maximum_robot_pose_time_offset_ms"],
+                search["step_ms"],
+            ),
+            check_by_name=checks,
+        )
+
+
+@pytest.mark.parametrize(
+    "implementation_revision",
+    [
+        attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION,
+        attempt_module.TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION,
+    ],
+)
 def test_report_backed_applied_auto_offset_evidence_is_promotable(
     tmp_path: Path,
+    implementation_revision: str,
 ) -> None:
     attempt, attempt_root = _report_backed_fixed_zero_attempt(tmp_path)
     sensor_key = "realsense_d435:1"
     attempt["request"]["synchronization_policy"] = "auto_offset"
     report = attempt["time_offset_search"]
     report["policy"] = "auto_offset"
+    attempt["request"]["synchronization_implementation_revision"] = (
+        implementation_revision
+    )
+    report["implementation_revision"] = implementation_revision
+    if (
+        implementation_revision
+        == attempt_module.TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
+    ):
+        attempt["request"]["synchronization_search"].pop(
+            "maximum_leave_one_motion_out_search_adjusted_sign_p_value"
+        )
     sensor = report["sensors"][0]
+    extra_checks = (
+        (
+            "cross_validation_fold_materiality",
+            "leave_one_motion_out_timing_consistency",
+        )
+        if implementation_revision == attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+        else ()
+    )
     sensor.update(
         {
             "status": "applied",
             "decision": "auto_offset_applied",
+            **(
+                {
+                    "improvement_evidence_strategy": (
+                        attempt_module.IMPROVEMENT_EVIDENCE_STRATEGY
+                    )
+                }
+                if implementation_revision
+                == attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+                else {}
+            ),
             "selected_robot_pose_time_offset_ms": 75.0,
             "selected_sync_delta_ms": -75.0,
             "candidate_robot_pose_time_offset_ms": 75.0,
@@ -476,12 +632,25 @@ def test_report_backed_applied_auto_offset_evidence_is_promotable(
                     "reference_method_sensitivity",
                     "search_optimum_not_at_boundary",
                     "cross_validated_translation_improvement",
+                    *extra_checks,
                     "cross_validated_rotation_guard",
                     "zero_offset_identifiability",
                 )
             ],
         }
     )
+    if implementation_revision == attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION:
+        motion_consistency = _passing_motion_consistency_evidence()
+        sensor["motion_consistency"] = motion_consistency
+        consistency_check = next(
+            check
+            for check in sensor["checks"]
+            if check["name"] == "leave_one_motion_out_timing_consistency"
+        )
+        consistency_check["actual"] = {
+            "motion_count": motion_consistency["motion_count"],
+            "methods": motion_consistency["methods"],
+        }
 
     quality_path = attempt_root / SYNC_QUALITY_REPORT
     quality = json.loads(quality_path.read_text())

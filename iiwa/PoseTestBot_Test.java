@@ -61,7 +61,6 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 	private static final int END_PACKET_INTERVAL_MS = 50;
 
 	private static final double REPOSITION_JOINT_VEL_REL = 0.08;
-	private static final double MAX_CAPTURE_CARTESIAN_VELOCITY_M_S = 0.03;
 	private static final double MAX_CAPTURE_A1_ANGULAR_VELOCITY_RAD_S =
 			Math.toRadians(3.0);
 	private static final double SMOOTH_MOTION_JOINT_ACCEL_REL = 0.03;
@@ -254,18 +253,8 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 					+ " mm for a stable Cartesian-speed conversion");
 		}
 
-		double boundedCartesianVelocityMps = Math.min(
-				cartesianVelocityMps,
-				MAX_CAPTURE_CARTESIAN_VELOCITY_M_S);
-		if (boundedCartesianVelocityMps < cartesianVelocityMps) {
-			getLogger().warn("Requested Cartesian capture speed "
-					+ cartesianVelocityMps + " m/s exceeds the "
-					+ MAX_CAPTURE_CARTESIAN_VELOCITY_M_S
-					+ " m/s controller cap; applying the cap");
-		}
-
 		double requestedAngularVelocityRadS =
-				boundedCartesianVelocityMps * 1000.0 / orbitRadiusMm;
+				cartesianVelocityMps * 1000.0 / orbitRadiusMm;
 		double appliedAngularVelocityRadS = Math.min(
 				requestedAngularVelocityRadS,
 				MAX_CAPTURE_A1_ANGULAR_VELOCITY_RAD_S);
@@ -282,8 +271,7 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 		}
 		getLogger().info("A1 Cartesian-speed conversion: radius="
 				+ orbitRadiusMm + " mm, requested="
-				+ cartesianVelocityMps + " m/s, bounded Cartesian="
-				+ boundedCartesianVelocityMps + " m/s, applied angular="
+				+ cartesianVelocityMps + " m/s, applied angular="
 				+ Math.toDegrees(appliedAngularVelocityRadS)
 				+ " deg/s, applied joint velocity rel="
 				+ appliedRelativeVelocity);

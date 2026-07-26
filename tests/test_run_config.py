@@ -252,10 +252,14 @@ def test_run_config_v1_remains_loadable_and_v2_pose_template_avoids_legacy_flags
         dataset_mode="pose_template",
     ).to_dict()
     plan = sequence_plan_from_run_config(template)
-    for stage_id in ("blenderproc_prepare", "blenderproc_render", "bop_export"):
-        step = next(item for item in plan.steps if item.stage_id == stage_id)
-        assert step.options.get("objectless") is not True
-        assert "object_name" not in step.options
+    assert all(
+        item.stage_id not in {"blenderproc_prepare", "blenderproc_render"}
+        for item in plan.steps
+    )
+    export = next(item for item in plan.steps if item.stage_id == "bop_export")
+    assert export.options.get("objectless") is not True
+    assert export.options["annotation_source"] == "none"
+    assert "object_name" not in export.options
 
 
 def test_legacy_run_config_defaults_missing_sensor_enabled_to_true(
@@ -482,14 +486,10 @@ def test_run_config_calibration_profiles_flow_to_calibrated_sequence(
     )
 
     plan = sequence_plan_from_run_config(config.to_dict())
-    prepare_step = next(
-        step for step in plan.steps if step.id == "blenderproc_prepare"
-    )
     export_step = next(step for step in plan.steps if step.id == "bop_export")
 
-    assert prepare_step.options["calibration_profiles"] == profiles_path.as_posix()
     assert export_step.options["calibration_profiles"] == profiles_path.as_posix()
-    assert profiles_path.as_posix() in prepare_step.command
+    assert export_step.options["annotation_source"] == "none"
     assert profiles_path.as_posix() in export_step.command
 
 

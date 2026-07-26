@@ -174,6 +174,9 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "reuse_compatible_or_factory",
     ]
     synchronization = payload["solver"]["synchronization"]
+    assert synchronization["implementation_revision"] == (
+        attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+    )
     assert synchronization["default_policy"] == "auto_offset"
     assert [item["id"] for item in synchronization["policies"]] == [
         "auto_offset",
@@ -182,6 +185,15 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
     assert synchronization["search"]["minimum_robot_pose_time_offset_ms"] == -150.0
     assert synchronization["search"]["maximum_robot_pose_time_offset_ms"] == 150.0
     assert synchronization["search"]["step_ms"] == 5.0
+    assert (
+        synchronization["search"]["minimum_motion_count_per_cross_validation_fold"] == 4
+    )
+    assert (
+        synchronization["search"][
+            "maximum_leave_one_motion_out_search_adjusted_sign_p_value"
+        ]
+        == 0.05
+    )
     assert synchronization["sign_convention"]["conversion"] == (
         "sync_delta_ms = -robot_pose_time_offset_ms"
     )
@@ -199,6 +211,10 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "min_target_column_coverage_ratio": 0.6,
         "min_accepted_views": 15,
         "min_coverage_cells": 6,
+        "image_coverage_tail_support_views": 5,
+        "min_image_centroid_x_span_ratio": 0.45,
+        "min_image_centroid_y_span_ratio": 0.35,
+        "min_image_centroid_hull_area_ratio": 0.1,
         "max_per_view_reprojection_error_px": 3.0,
         "max_intrinsic_rms_reprojection_error_px": 1.5,
         "min_motion_poses": 4,

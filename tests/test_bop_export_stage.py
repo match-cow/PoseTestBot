@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 
 from posetestbot.io.artifacts import (
-    BOP_COCO_ANNOTATIONS,
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
     BOP_FRAME_MAP_JSON,
@@ -144,10 +143,7 @@ def create_hardware_sync_fixture(tmp_path: Path) -> Path:
     ):
         raw = run_root / f"realsense_{device_id}"
         synchronized = (
-            run_root
-            / "processed"
-            / "synchronized"
-            / f"realsense_{device_id}"
+            run_root / "processed" / "synchronized" / f"realsense_{device_id}"
         )
         for folder in (raw, synchronized):
             (folder / RGB_DIR).mkdir(parents=True)
@@ -156,15 +152,9 @@ def create_hardware_sync_fixture(tmp_path: Path) -> Path:
         depth = np.full((5, 6), 100, dtype=np.uint16)
         assert cv2.imwrite((raw / RGB_DIR / "1000.png").as_posix(), rgb)
         assert cv2.imwrite((raw / DEPTH_DIR / "1000.png").as_posix(), depth)
-        assert cv2.imwrite(
-            (synchronized / RGB_DIR / "000000.png").as_posix(), rgb
-        )
-        assert cv2.imwrite(
-            (synchronized / DEPTH_DIR / "000000.png").as_posix(), depth
-        )
-        (synchronized / CAM_K).write_text(
-            "10 0 3\n0 10 2.5\n0 0 1\n0 0 0 0 0\n"
-        )
+        assert cv2.imwrite((synchronized / RGB_DIR / "000000.png").as_posix(), rgb)
+        assert cv2.imwrite((synchronized / DEPTH_DIR / "000000.png").as_posix(), depth)
+        (synchronized / CAM_K).write_text("10 0 3\n0 10 2.5\n0 0 1\n0 0 0 0 0\n")
         (synchronized / DEPTH_SCALE).write_text("1.0\n")
         (synchronized / CAMERA_DATA_JSON).write_text(
             json.dumps(
@@ -205,9 +195,7 @@ def create_hardware_sync_fixture(tmp_path: Path) -> Path:
             "motion": "capture",
             "mounting_mode": mounting_mode,
         }
-        (synchronized / FRAME_METADATA_JSONL).write_text(
-            json.dumps(metadata) + "\n"
-        )
+        (synchronized / FRAME_METADATA_JSONL).write_text(json.dumps(metadata) + "\n")
         (synchronized / MATCH_ROBOT_EE_POSES).write_text(
             json.dumps(
                 {
@@ -243,7 +231,7 @@ def test_bop_export_stage_writes_objectless_dataset_and_manifest(
     repo_root = Path(__file__).resolve().parents[1]
 
     result = subprocess.run(
-        [*export_command(run_root), "--write-coco-annotations"],
+        export_command(run_root),
         cwd=repo_root,
         check=True,
         text=True,
@@ -254,28 +242,60 @@ def test_bop_export_stage_writes_objectless_dataset_and_manifest(
     bop = run_root / BOP_DIR
     scene = bop / "test" / "000001"
     manifest = json.loads((bop / BOP_EXPORT_MANIFEST).read_text())
-    assert manifest["schema_version"] == "bop_export_manifest.v4"
+    assert manifest["schema_version"] == "bop_export_manifest.v5"
     assert manifest["dataset_mode"] == "objectless"
     assert manifest["objectless"] is True
+    assert manifest["annotation_source"] == "none"
+    assert manifest["annotation_state"] == "absent"
+    assert manifest["capabilities"]["bop19_evaluation"] is False
+    assert manifest["exports"][0]["input_sensor_folder"] == (
+        "processed/synchronized/realsense_123"
+    )
+    assert str(run_root.resolve()) not in json.dumps(manifest)
     assert manifest["object_models"] == []
     assert manifest["stable_id_mapping"] == {}
-    assert json.loads((bop / BOP_TARGETS_BOP19).read_text()) == []
-    assert (bop / BOP_FRAME_MAP_JSON).is_file()
+    assert manifest["targets_path"] is None
+    assert "targets" not in manifest["exports"][0]
+    assert not (bop / BOP_TARGETS_BOP19).exists()
+    frame_map = json.loads((bop / BOP_FRAME_MAP_JSON).read_text())
+    assert frame_map["schema_version"] == "posetestbot_bop_frame_map.v3"
+    assert all(
+        set(frame) == {"source_rgb", "source_depth", "bop_rgb", "bop_depth"}
+        for frame in frame_map["scenes"]["1"]["frames"].values()
+    )
+    assert "input_fingerprint_sha256" not in frame_map["scenes"]["1"]
     assert len(list((scene / RGB_DIR).glob("*.png"))) == 2
     assert len(list((scene / DEPTH_DIR).glob("*.png"))) == 2
+    scene_camera = json.loads((scene / "scene_camera.json").read_text())
     assert all(
-        rows == []
-        for rows in json.loads((scene / "scene_gt.json").read_text()).values()
+        set(camera) == {"cam_K", "depth_scale"} for camera in scene_camera.values()
     )
-    coco = json.loads((bop / BOP_COCO_ANNOTATIONS).read_text())
-    assert coco["images"]
-    assert coco["categories"] == []
-    assert coco["annotations"] == []
+    assert not (scene / "scene_gt.json").exists()
+    assert not (scene / "scene_gt_info.json").exists()
     run_manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(
         item for item in run_manifest["stages"] if item["name"] == "bop_export"
     )
     assert stage["status"] == "succeeded"
+
+
+def test_annotation_free_bop_export_rejects_annotation_derived_extras(
+    tmp_path: Path,
+) -> None:
+    run_root = create_synchronized_sensor_fixture(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [*export_command(run_root), "--write-coco-annotations"],
+        cwd=repo_root,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "--annotation-source blenderproc" in result.stderr
+    assert not (run_root / BOP_DIR).exists()
 
 
 def test_bop_export_default_ignores_disabled_stale_sensor_folder(
@@ -335,7 +355,7 @@ def test_bop_export_default_ignores_disabled_stale_sensor_folder(
     ]
 
 
-def test_bop_export_objectless_rejects_stale_object_gt(tmp_path: Path) -> None:
+def test_bop_export_default_ignores_stale_rendered_gt(tmp_path: Path) -> None:
     run_root = create_synchronized_sensor_fixture(tmp_path)
     output = (
         run_root
@@ -364,6 +384,51 @@ def test_bop_export_objectless_rejects_stale_object_gt(tmp_path: Path) -> None:
 
     result = subprocess.run(
         export_command(run_root),
+        cwd=repo_root,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    bop = run_root / BOP_DIR
+    manifest = json.loads((bop / BOP_EXPORT_MANIFEST).read_text())
+    assert manifest["annotation_source"] == "none"
+    assert not (bop / "test" / "000001" / "scene_gt.json").exists()
+    assert not (bop / "test" / "000001" / "scene_gt_info.json").exists()
+
+
+def test_bop_export_rendered_annotation_mode_rejects_unknown_object_gt(
+    tmp_path: Path,
+) -> None:
+    run_root = create_synchronized_sensor_fixture(tmp_path)
+    output = (
+        run_root
+        / "processed"
+        / "synchronized"
+        / "realsense_123"
+        / "blenderproc"
+        / "output"
+    )
+    output.mkdir(parents=True)
+    (output / "scene_gt.json").write_text(
+        json.dumps(
+            {
+                "0": [
+                    {
+                        "obj_id": 1,
+                        "cam_R_m2c": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                        "cam_t_m2c": [0, 0, 1],
+                    }
+                ],
+                "1": [],
+            }
+        )
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [*export_command(run_root), "--annotation-source", "blenderproc"],
         cwd=repo_root,
         check=False,
         text=True,
@@ -420,25 +485,32 @@ def test_hardware_bop_export_records_native_authoritative_source_truth(
     frame_map = json.loads((bop / BOP_FRAME_MAP_JSON).read_text())
     for scene in frame_map["scenes"].values():
         assert scene["projection"] == "native"
-        assert scene["input_sensor_folder"] == (
-            scene["authoritative_source_sensor_folder"]
+        assert (
+            scene["input_sensor_folder"]
+            == (scene["authoritative_source_sensor_folder"])
         )
         frame = scene["frames"]["0"]
-        assert frame["projection"] == "native"
-        assert frame["source_rgb"] == frame["authoritative_source_rgb"]
+        assert frame == {
+            "bop_depth": "depth/000000.png",
+            "bop_rgb": "rgb/000000.png",
+            "source_depth": "depth/000000.png",
+            "source_rgb": "rgb/000000.png",
+        }
     frame_sets = json.loads((bop / BOP_FRAME_SETS).read_text())
     assert frame_sets["hardware_sync_qualification"]["status"] == "passed"
-    assert frame_sets["hardware_sync_execution_binding"] == json.loads(
-        (run_root / CAPTURE_EXECUTION_REPORT).read_text()
-    )["hardware_sync_execution_binding"]
+    assert (
+        frame_sets["hardware_sync_execution_binding"]
+        == json.loads((run_root / CAPTURE_EXECUTION_REPORT).read_text())[
+            "hardware_sync_execution_binding"
+        ]
+    )
     for view in frame_sets["frame_sets"][0]["views"]:
         assert view["projection"] == "native"
-        assert view["bop_input_sensor_folder"] == view[
-            "authoritative_source_sensor_folder"
-        ]
-        assert view["bop_input_rgb_path"] == view[
-            "authoritative_source_rgb_path"
-        ]
+        assert (
+            view["bop_input_sensor_folder"]
+            == view["authoritative_source_sensor_folder"]
+        )
+        assert view["bop_input_rgb_path"] == view["authoritative_source_rgb_path"]
 
 
 def test_hardware_bop_export_revalidates_groups_immediately_before_publication(
@@ -484,9 +556,9 @@ def test_hardware_bop_export_revalidates_groups_immediately_before_publication(
 
     groups_path = synchronized_root / MULTIVIEW_FRAME_GROUPS
     groups = json.loads(groups_path.read_text())
-    groups["hardware_sync_execution_binding"][
-        "qualification_artifact_sha256"
-    ] = "0" * 64
+    groups["hardware_sync_execution_binding"]["qualification_artifact_sha256"] = (
+        "0" * 64
+    )
     groups_path.write_text(json.dumps(groups))
 
     stdout, stderr = process.communicate(timeout=30)
@@ -556,15 +628,14 @@ def test_hardware_bop_export_accepts_current_rectification_and_records_projectio
         assert scene["authoritative_source_sensor_folder"].startswith(
             "processed/synchronized/"
         )
-        assert scene["input_fingerprint_sha256"] != (
-            scene["authoritative_source_fingerprint_sha256"]
+        assert (
+            scene["input_fingerprint_sha256"]
+            != (scene["authoritative_source_fingerprint_sha256"])
         )
     frame_sets = json.loads((bop / BOP_FRAME_SETS).read_text())
     for view in frame_sets["frame_sets"][0]["views"]:
         assert view["projection"] == "rectified"
-        assert view["bop_input_sensor_folder"].startswith(
-            "processed/rectified/"
-        )
+        assert view["bop_input_sensor_folder"].startswith("processed/rectified/")
         assert view["sensor_folder"].startswith("processed/synchronized/")
 
 
@@ -579,12 +650,7 @@ def test_hardware_bop_export_rejects_stale_or_mutated_rectification(
     ]
     rectify_run(run_root, profiles)
     mutated = (
-        run_root
-        / "processed"
-        / "rectified"
-        / "realsense_hand"
-        / RGB_DIR
-        / "000000.png"
+        run_root / "processed" / "rectified" / "realsense_hand" / RGB_DIR / "000000.png"
     )
     mutated.write_bytes(mutated.read_bytes() + b"mutated")
     repo_root = Path(__file__).resolve().parents[1]
@@ -647,8 +713,7 @@ def test_hardware_bop_export_binds_groups_to_current_mounting_inventory(
 
     assert result.returncode != 0
     assert (
-        "mounting_mode" in result.stderr
-        or "hardware contract changed" in result.stderr
+        "mounting_mode" in result.stderr or "hardware contract changed" in result.stderr
     )
     assert not (run_root / BOP_DIR).exists()
 
@@ -657,12 +722,7 @@ def test_hardware_bop_export_rejects_group_with_other_qualification_provenance(
     tmp_path: Path,
 ) -> None:
     run_root = create_hardware_sync_fixture(tmp_path)
-    groups_path = (
-        run_root
-        / "processed"
-        / "synchronized"
-        / MULTIVIEW_FRAME_GROUPS
-    )
+    groups_path = run_root / "processed" / "synchronized" / MULTIVIEW_FRAME_GROUPS
     groups = json.loads(groups_path.read_text())
     groups["hardware_sync_qualification"]["artifact_sha256"] = "0" * 64
     groups_path.write_text(json.dumps(groups))

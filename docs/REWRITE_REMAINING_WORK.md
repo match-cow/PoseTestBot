@@ -1,6 +1,6 @@
 # Acquisition Rewrite Remaining Work
 
-Last reviewed: 2026-07-24
+Last reviewed: 2026-07-26
 
 This is the only repository-owned planning document for unfinished rewrite
 work. Completed design plans are retained in Git history, not as live plans.
@@ -34,8 +34,9 @@ The rewrite already provides:
   trigger contract, authoritative complete frame groups, and BOP frame sets;
 - PoseGridGen target bundles, attempt-scoped two-mode calibration, exact
   RealSense timebase/intrinsic compatibility gates, evidence-gated per-camera
-  constant-offset search, deterministic common-bundle multi-camera ranking,
-  explicit validation/promotion, and derived rectification;
+  constant-offset search with search-corrected leave-one-motion-out timing
+  consistency, deterministic common-bundle multi-camera ranking, explicit
+  validation/promotion, and derived rectification;
 - a dedicated JSON-backed Workpiece Catalogue page and `/workpieces` API with
   queued CAD upload, editable labels/tags/groups/attributes, client-side
   previews, tag/group/state filtering, revisioned/locked mutations, guarded
@@ -82,9 +83,11 @@ At campaign completion each passed the full-capture gate at 10/10 and
 calibration-validation gate at 3/3; historical evidence is summarized in
 [EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
 Their obsolete reusable profiles are now retired, so a fresh Auto time-aligned
-promotion remains required alongside the camera-service lifecycle acceptance
-in P1, the five-sensor capture in P2, controller commissioning, and real BOP
-acceptance in P4.
+calculation and promotion has now completed for all three cameras as immutable
+attempt `268c897e1baf49e7bd78a434a4569b99`. Its common `IPPE + Shah` bundle is
+published and the calibration-validation rewrite gate is ready at 3/3. The
+camera-service lifecycle acceptance in P1, the five-sensor capture in P2,
+controller commissioning, and real BOP acceptance in P4 remain open.
 
 ## P0 — Safety and Capture-Contract Hardening
 
@@ -129,11 +132,12 @@ acknowledgements.
   `cartesian_velocity_m_s`. It now converts the requested tangential flange
   speed through the measured A1 orbit radius and a conservative published A1
   speed bound before calling `setJointVelocityRel`. Run-owned acquisition
-  START, candidate Cartesian input, and candidate A1 angular velocity are
-  independently capped at 0.03, 0.03 m/s, and 3°/s respectively. The
-  separately acknowledged manual Dashboard/Devices motion test sends 0.1;
-  reconcile the deployed application before treating that value as Cartesian
-  m/s rather than 10% relative joint speed.
+  retains a 0.03 m/s legacy/calibration cap; object-dataset requests above it
+  use `robot_command.v1` and may pass through up to 1.00 m/s. The candidate
+  accepts that Cartesian request and independently caps A1 at 3°/s. The
+  separately acknowledged manual Dashboard/Devices motion test sends a legacy
+  0.1 request; reconcile the deployed application before treating that value
+  as Cartesian m/s rather than 10% relative joint speed.
 - [x] Align documented receiver fallback/address behavior with the lab receiver
   `172.31.1.169`, while retaining the command-supplied receiver target and an
   explicit wildcard-to-command-sender mode.
@@ -289,6 +293,11 @@ profiles were retired because the 0 ms attempts predate required per-camera
 Auto time-alignment provenance. The 8.642 mm maximum cross-run difference is
 also method-confounded and requires a controlled repeat; see
 [EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
+Retained run `working_data/calib00_test20260724` now has the explicitly
+promoted v2 replacement from attempt
+`268c897e1baf49e7bd78a434a4569b99`. That satisfies the reusable-profile
+dependency for those recordings, but it does not replace the still-open
+post-commissioning supervised capture below.
 
 Status and capture-plan preflight continue to reject an enabled
 SDK-enumerated RealSense whose known `usb_type_descriptor` has a major version
@@ -307,11 +316,18 @@ capture/preflight, calibration, Cell, and rewrite-gate expectations.
   range-dependent scale anomaly; factory depth scale/alignment remains
   explicitly not recalibrated.
 
-## P4 — Real Pose-Template, BlenderProc, and BOP v4 Acceptance
+## P4 — Real Pose-Template, Optional BlenderProc, and BOP v5 Acceptance
 
-No reusable calibration is currently published; the fresh calibration above
-is the first dependency for a real dataset run. Real BlenderProc 2.8.0 and BOP
-acceptance also remain outstanding.
+A reusable three-camera v2 calibration is now published from retained run
+`calib00_test20260724`. A future dataset may select it only when its exact
+sensor, mount, resolution, orientation, target, and timing compatibility gates
+pass. The real annotation-free v4 output from
+`working_data/test20260725_04` proved the capture/synchronization content but
+failed the later official BOP Toolkit model-loader audit. Future exports use
+the clean `bop_export_manifest.v5` contract; regenerating this retained run,
+optional BlenderProc 2.8.0 GT/mask acceptance, and the broader
+physical-template review below remain outstanding.
+
 - [ ] Import/inspect and classify the real CAD and texture assets through
   **Workpiece Catalogue**, exercise name/tag/group filters, verify the compact
   and exact interactive identification previews and millimetre dimensions,
@@ -328,13 +344,24 @@ acceptance also remain outstanding.
   identity evidence to agree for every sensor/frame. Mark robot-intersected
   real views as unsupported for synthetic robot-occlusion truth until approved
   articulated iiwa geometry, joint state, and transforms are recorded.
-- [ ] Export `bop_export_manifest.v4`, standard BOP scenes/models/targets, the
-  frame map, `posetestbot_pose_template.json`, and
-  `posetestbot_instance_map.json` transactionally. For a hardware-trigger run,
-  also require `posetestbot_frame_sets.json` to cover every authoritative
-  complete mixed-mount group.
-- [ ] Inspect representative RGB/depth/GT/masks and repeated-object rows, then
-  pass `rewrite_bop_export_readiness.v1` on the real dataset.
+- [x] Audit the retained real timestamp-aligned run. Confirm that its two
+  811-frame BOP scenes contain only synchronized capture-sweep frames and that
+  pre/post-motion raw evidence remains outside the export. Reproduce the v4
+  canonical-model failure with the official BOP Toolkit PLY loader and replace
+  future byte-for-byte model copying with normalized BOP ASCII PLY output.
+- [ ] Regenerate `working_data/test20260725_04/bop/` through the v5 exporter
+  when the operator wants the retained derived output replaced. Confirm the
+  official loader accepts both model copies, `models_eval/` is present for the
+  metric scripts, absolute run paths and the unused third-camera profile are
+  absent, annotation placeholders are absent, and
+  `rewrite_bop_export_readiness.v1` passes. Do not alter its raw camera or
+  robot evidence.
+- [ ] A future hardware-trigger run must additionally require
+  `posetestbot_frame_sets.json` to cover every authoritative complete
+  mixed-mount group.
+- [ ] After optional rendered annotations exist, inspect representative
+  RGB/depth/GT/masks and repeated-object rows, then rerun
+  `rewrite_bop_export_readiness.v1` on that annotation-bearing real dataset.
 
 ## P5 — Non-Blocking Maintainability Work
 

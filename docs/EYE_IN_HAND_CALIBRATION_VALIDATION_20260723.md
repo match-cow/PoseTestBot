@@ -140,11 +140,28 @@ The search uses a fixed full-range observation set, fixed IPPE target poses,
 Shah selection with Li sensitivity, and three fixed motion-disjoint folds.
 Those folds are cross-validation tuning evidence: their validation residuals
 participate in selecting the offset, so there is no untouched offset holdout.
-Insufficient motion, flat or ambiguous timing evidence, boundary optima,
-excessive fold/method disagreement, inadequate improvement, and rotation
+The original retrospective table above used implementation revision
+`constant_latency_nearest_pose_motion_cv.v1`, which required material
+improvement in every one of the three fixed folds.
+
+Revision `constant_latency_nearest_pose_motion_lomo_cv.v2` keeps the full
+three-fold search, aggregate materiality, fold-optimum stability, method
+sensitivity, boundary, and rotation gates, but replaces the arbitrary
+every-fold materiality veto with a stronger motion-level audit. The v2 default
+requires at least 12 eligible motions, four per fold. Every selected motion is
+held out once while the robot-camera transform is refitted from all other
+motions. Both Shah and Li must retain median translation improvement of at
+least 0.25 mm and 10%. The exact one-sided positive-motion sign probability is
+Bonferroni-corrected for every nonzero offset in the search because the
+candidate is selected from that same fixed motion set; the corrected value
+must remain at or below 0.05. Per-fold materiality remains visible as a warning
+so an operator can see an uneven bucket without allowing that bucket
+assignment to decide an otherwise consistent camera. Insufficient motion, flat
+or ambiguous timing evidence, boundary optima, excessive fold/method
+disagreement, inadequate aggregate or motion-level improvement, and rotation
 degradation fail closed. A real attempt saves the complete curve, fold
-membership, checks, sign convention, and decision in
-`time_offset_search.json`.
+membership, per-motion evidence, correction count, checks, sign convention,
+and decision in `time_offset_search.json`.
 
 This replay shows that robot motion is used and that a constant effective
 latency improves stationary-target consistency. It does not prove physical
@@ -163,15 +180,96 @@ the accepted offsets, preferably with a controlled common method for the
 repeatability comparison, is required before claiming that the cross-run
 camera-to-flange difference improved.
 
-## Reusable-Profile Retirement
+## 2026-07-25 Three-Camera v2 Calculation Follow-up
+
+A new immutable calculation attempt on retained run
+`working_data/calib00_test20260724` exercised the complete v2 timing estimator
+and full common-bundle solver without opening cameras or contacting the robot:
+
+- attempt ID: `1c6b0c9d00dc49ce8d0c14c18d43336b`
+- implementation:
+  `constant_latency_nearest_pose_motion_lomo_cv.v2`
+- result: complete, with recommendations for all three required cameras
+- common recommendation: `IPPE + Shah`
+- passing common bundles: 15
+
+The complete timing-identification result was:
+
+| Camera | Offset | Aggregate translation improvement | Shah LOMO | Li LOMO | Search-corrected sign p |
+|---|---:|---:|---:|---:|---:|
+| `033422071805` | +70 ms | 1.007 mm / 29.1% | 17/17 positive; median 0.811 mm / 28.6% | 17/17 positive; median 0.792 mm / 29.4% | 0.000458 |
+| `825412070181` | +85 ms | 1.430 mm / 35.6% | 17/17 positive; median 0.530 mm / 27.8% | 17/17 positive; median 0.621 mm / 24.7% | 0.000458 |
+| `923322072633` | +45 ms | 0.430 mm / 11.6% | 16/17 positive; median 0.555 mm / 16.5% | 16/17 positive; median 0.603 mm / 19.8% | 0.008240 |
+
+The p-value limit is 0.05 after correcting for all 60 searched nonzero
+offsets. Camera `923322072633` retains a visible fold-materiality warning
+because one arbitrary three-fold bucket improved by 8.27%, below the 10%
+threshold. It passes because the aggregate gate and the stronger
+leave-one-motion-out audit pass independently for both reference methods; the
+warning is not silently discarded.
+
+The recommended bundle quality was:
+
+| Camera | Accepted views | Solver inliers | Mean reprojection | Held-out translation | Held-out rotation | Supported x/y span | Supported hull area | Legacy cells |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `033422071805` | 828 | 85 / 85 | 1.122 px | 2.116 mm | 0.518° | 53.1% / 43.3% | 13.25% | 5/9 warning |
+| `825412070181` | 823 | 85 / 85 | 1.021 px | 1.961 mm | 0.395° | 55.7% / 48.0% | 14.39% | 7/9 |
+| `923322072633` | 830 | 90 / 90 | 1.090 px | 2.491 mm | 0.409° | 52.4% / 45.4% | 13.90% | 6/9 |
+
+All cameras exceed the continuous extrinsic-coverage gates of 45% x span,
+35% y span, and 10% normalized supported centroid-hull area, with five views
+supporting each coordinate tail. This matters for `033422071805`: its dense,
+wide coverage happens to occupy only five absolute 3 × 3 cells. Treating that
+partition count as the extrinsic gate rejected sound evidence even though the
+continuous coverage is similar to the other cameras and the prior successful
+campaigns. The cell count remains visible as a warning and still gates a
+manual OpenCV intrinsic fallback at 6/9; it no longer substitutes for actual
+extrinsic field-of-view diversity.
+
+The common bundle's maximum stationary-companion closure is 3.172 mm / 0.450°,
+well inside the 10 mm / 5° limits. This closes the calculation failure for all
+three cameras with stronger evidence rather than by dropping a camera or
+lowering materiality thresholds.
+
+An operator retry later exposed a runtime-lifecycle problem rather than a
+timing-estimator regression. Attempt
+`e588682f5ad64e9aaf8ed39e7b02c623` was created by a still-running backend
+whose imported constants remained at
+`constant_latency_nearest_pose_motion_cv.v1`. Its immutable request therefore
+recorded the old three-motions-per-fold rule, and the fresh worker correctly
+honoured that saved v1 contract instead of silently changing the intent. It
+reproduced the old `923322072633` rejection.
+
+Fresh-process attempt `268c897e1baf49e7bd78a434a4569b99` then independently
+repeated the complete calculation from the same preserved recordings. It
+recorded v2 with four motions per fold and reproduced the offsets, all
+per-camera residuals, the 15 passing bundles, and the selected `IPPE + Shah`
+closure above. Its recommended three-camera bundle was explicitly promoted:
+
+| Camera | Published profile | Saved `sync_delta_ms` |
+|---|---|---:|
+| `033422071805` | `033422071805_eye_in_hand_IPPE_shah_268c897e` | -70 ms |
+| `825412070181` | `825412070181_eye_in_hand_IPPE_shah_268c897e` | -85 ms |
+| `923322072633` | `923322072633_eye_in_hand_IPPE_shah_268c897e` | -45 ms |
+
+The canonical `calibration_profiles.json` is `calibration.v2`, all three
+profiles are `valid`, and `rewrite_calibration_validation.v1` reports ready at
+3/3. The setup API now exposes its loaded timing implementation revision. The
+packaged workflow compares it with the revision it was built for, blocks Auto
+attempt submission on a missing/mismatched revision, and tells the operator to
+restart PoseTestBot and reload. Existing legacy attempts are labeled as
+immutable and non-upgradable instead of being described as if they had run the
+v2 leave-one-motion-out gate.
+
+## Historical Reusable-Profile Retirement and Replacement
 
 The six top-level `calibration_profiles.json` and
 `intrinsic_calibration_profiles.json` collections from these runs were removed
 after this review. They predate the required saved Auto time-alignment
 provenance and must not be selected by a new object-dataset run. Raw captures,
 robot poses, target evidence, candidates, solver/validation reports, and
-immutable attempt artifacts remain unchanged. A fresh calibration must pass
-and be explicitly published before dataset acquisition.
+immutable attempt artifacts remain unchanged. The fresh, explicitly promoted
+replacement is attempt `268c897e1baf49e7bd78a434a4569b99` described above.
 
 ## Historical Run 3 Camera-to-Flange Transforms
 

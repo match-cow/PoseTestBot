@@ -177,8 +177,8 @@ OPERATOR_WORKFLOWS: dict[str, OperatorWorkflow] = {
             "record the object, then build the synchronized BOP dataset."
         ),
         outcome=(
-            "A non-destructively synchronized, calibrated BOP dataset with immutable "
-            "calibration and pose-template provenance."
+            "A non-destructively synchronized, calibrated BOP image/model dataset "
+            "with immutable calibration and pose-template provenance."
         ),
         recommended_sequence_ids=(
             "real_full_capture_validation",
@@ -262,8 +262,9 @@ OPERATOR_WORKFLOWS: dict[str, OperatorWorkflow] = {
                 label="Export the BOP dataset",
                 description="Validate and write the final BOP dataset artifacts.",
                 help=(
-                    "Optional BlenderProc masks/ground truth can be generated before export. "
-                    "The export records calibration and pose-template identities for downstream use."
+                    "The required export writes calibrated RGB-D scenes, canonical "
+                    "models, and provenance without BlenderProc or rendered GT. "
+                    "Optional masks/ground truth are a separate later action."
                 ),
                 required=True,
                 optional=False,

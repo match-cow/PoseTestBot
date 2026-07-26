@@ -7,7 +7,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from posetestbot.config import robot_profile
+from posetestbot.config import (
+    MAX_CAPTURE_COMMAND_VELOCITY_M_S,
+    robot_profile,
+)
 from posetestbot.robot.pose_receiver import (
     DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
     DEFAULT_RECEIVE_START_TIMEOUT_S,
@@ -34,7 +37,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Requested capture velocity in m/s. Defaults to the selected "
-            "robot profile; the transmitted numeric value is capped at 0.03."
+            "robot profile; the transmitted value is capped at 0.03 by "
+            "default. Canonical object-dataset plans may supply a larger "
+            "versioned command limit."
         ),
     )
     parser.add_argument(
@@ -54,6 +59,16 @@ def parse_args() -> argparse.Namespace:
         choices=("legacy", "v1"),
         default="legacy",
         help="Robot command protocol. Use legacy for the current Sunrise app.",
+    )
+    parser.add_argument(
+        "--maximum-command-velocity-m-s",
+        type=float,
+        default=None,
+        help=(
+            "Maximum transmitted capture request in m/s. Values above the "
+            "conservative 0.03 legacy limit require --protocol v1. The "
+            "canonical object-dataset capture plan supplies this explicitly."
+        ),
     )
     parser.add_argument(
         "--allow-real-robot",
@@ -106,6 +121,11 @@ def main() -> int:
             verbose=args.verbose,
             allow_real_robot=args.allow_real_robot,
             allow_cameras=args.allow_cameras,
+            maximum_command_velocity_m_s=(
+                args.maximum_command_velocity_m_s
+                if args.maximum_command_velocity_m_s is not None
+                else MAX_CAPTURE_COMMAND_VELOCITY_M_S
+            ),
             receive_start_timeout_s=args.receive_start_timeout_s,
             receive_idle_timeout_s=args.receive_idle_timeout_s,
         )

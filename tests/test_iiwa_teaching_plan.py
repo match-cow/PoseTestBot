@@ -178,7 +178,8 @@ def test_printable_checklist_has_one_signoff_row_per_taught_frame() -> None:
     assert "--allow-cameras" in checklist
     assert "UDP stop messages cannot interrupt active motion" in checklist
     assert "requires a manual application restart" in checklist
-    assert "at least 6/9 image-centroid coverage cells" in checklist
+    assert "normalized centroid spans of at least 45% image width and 35%" in checklist
+    assert "at least 6/9 image-centroid cells" in checklist
 
 
 def test_kuka_seed_degrees_and_relative_results_use_known_center_decode() -> None:

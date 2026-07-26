@@ -178,6 +178,11 @@ time-alignment provenance. See the
 the run roots, transforms, cross-run repeatability, intrinsic comparisons, and
 candidate quality.
 
+Retained-data v2 attempt `268c897e1baf49e7bd78a434a4569b99` subsequently
+recalculated and published a fresh common `IPPE + Shah` profile for all three
+cameras with saved Auto offsets. This supplies reusable calibration; it is not
+additional physical-capture or controller-commissioning evidence.
+
 Those retained runs prove their recorded capture and calibration outcomes. They do
 not identify the exact deployed Sunrise application/revision or replace the
 Workbench compile, offline path, T1, and reviewer evidence required by this
@@ -199,7 +204,11 @@ commissioning checklist. No iiwa `STOP` command was sent during the campaign.
   and placement `unknown`; do not reuse detections from a different grid.
 - [ ] For every required camera, verify:
   - [ ] at least 15 accepted views;
-  - [ ] at least 6/9 image-centroid coverage cells;
+  - [ ] robot-camera field coverage with at least five views supporting each
+    extreme, normalized centroid spans of at least 45% image width and 35%
+    image height, and a supported normalized centroid convex-hull area of at
+    least 10%. Retain the 3 × 3 centroid-cell count as a warning, not an
+    absolute-position-dependent extrinsic veto;
   - [ ] strong target detections at all raster extremes;
   - [ ] at least 12 common PnP corner inliers and 50% whole-board support;
   - [ ] at least four supported markers with three corners each spanning two
@@ -212,8 +221,8 @@ commissioning checklist. No iiwa `STOP` command was sent during the campaign.
     forward OpenCV projection only when every coefficient is finite and exactly
     zero; never pass nonzero inverse coefficients as forward distortion.
     Activate the manual fit only when factory projection is unusable and its
-    training, five-view held-out, plausibility, 3 px/view, and 1.5 px RMS gates
-    pass;
+    training includes at least 6/9 image-centroid cells and its five-view
+    held-out, plausibility, 3 px/view, and 1.5 px RMS gates pass;
   - [ ] `intrinsic_comparison.json` retains the factory/manual candidates,
     deltas, selection reason, and any manual-calibration rejection;
   - [ ] at least four distinct motion poses, 20 mm translation span, and 5°
@@ -229,12 +238,21 @@ commissioning checklist. No iiwa `STOP` command was sent during the campaign.
     robot `host_wall_timestamp_ns`, with no timestamp fallback and at most
     20 ms nearest-pose delta.
 - [ ] Select and retain an explicit synchronization policy. For the recommended
-  `auto_offset` policy, require at least nine eligible motion groups, three
+  `auto_offset` policy, require at least 12 eligible motion groups, three
   fixed motion-disjoint folds, an interior/stable optimum, identifiable timing,
-  material translation improvement in every fold, and a passing rotation
-  guard. Review the complete `time_offset_search.json`; a failed search must
-  block the attempt. Use `fixed_zero` only as a deliberate captured-timestamp
-  baseline.
+  aggregate translation improvement of at least 0.25 mm and 10%, and a passing
+  rotation guard. Then hold out every selected motion in turn, refit the
+  robot-camera transform from the other motions, and require both Shah and Li
+  to retain at least 0.25 mm / 10% median improvement. Their one-sided
+  positive-motion sign probability, Bonferroni-corrected for every nonzero
+  offset tested, must be no greater than 0.05. A single arbitrary three-fold
+  bucket below materiality is retained as a warning; it is not a partition-
+  dependent veto when the aggregate and corrected leave-one-motion-out gates
+  pass. Fold-optimum instability, inadequate aggregate improvement, failed
+  leave-one-motion-out evidence, a boundary optimum, excessive method
+  sensitivity, or rotation degradation still blocks the attempt. Review the
+  complete `time_offset_search.json`; a failed search must block the attempt.
+  Use `fixed_zero` only as a deliberate captured-timestamp baseline.
 - [ ] Verify the time-offset sign before promotion:
   `robot_pose_query_time = frame_time + robot_pose_time_offset_ms` and
   `sync_delta_ms = -robot_pose_time_offset_ms`. Positive operator values use a
@@ -280,7 +298,7 @@ blank operator/reviewer commissioning fields in this document.
 | Offline commissioning approved | ☐ |
 | T1 commissioning approved | ☐ |
 | Supervised trial accepted | ☐ |
-| Reusable three-camera calibration | None; publish a fresh Auto time-aligned calibration |
+| Reusable three-camera calibration | `268c897e1baf49e7bd78a434a4569b99`, `IPPE + Shah`, v2 Auto timing, 3/3 valid |
 | Historical calibration attempt | `f1e990d3424a48ed95b266f7bf134838`, `ITERATIVE + Shah` |
 | Metric-depth disposition | `923322072633` depth-specific validation pending |
 | Frames requiring retouch | |

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from posetestbot.bop.writer import (
+    ANNOTATION_SOURCES,
     copy_bop_instance_models,
     export_sensor_scene_to_bop,
     targets_filename,
@@ -49,6 +50,7 @@ from posetestbot.io.artifacts import (
     CALIBRATION_PROFILE_SELECTION,
     DEPTH_DIR,
     MODELS_DIR,
+    MODELS_EVAL_DIR,
     OBJECT_INSTANCES,
     PROCESSED_DIR,
     RGB_DIR,
@@ -98,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--objectless",
         action="store_true",
-        help="Export RGB-D and camera metadata with explicitly empty object data.",
+        help="Export only RGB-D and camera metadata, without object artifacts.",
     )
     parser.add_argument(
         "--no-model-export",
@@ -120,6 +122,17 @@ def parse_args() -> argparse.Namespace:
             "Also write posetestbot_coco_annotations.json, a COCO-style "
             "annotation file derived from exported BOP scene GT, GT info, RGB "
             "files, and masks."
+        ),
+    )
+    parser.add_argument(
+        "--annotation-source",
+        choices=sorted(ANNOTATION_SOURCES),
+        default="none",
+        help=(
+            "Source for BOP scene GT and masks. The acquisition-first default "
+            "'none' omits GT-derived files rather than writing placeholders; "
+            "pose-template object targets remain available for inference. Use "
+            "'blenderproc' only after optional GT/mask rendering has completed."
         ),
     )
     parser.add_argument(
@@ -164,13 +177,10 @@ def _run_input_path(run_root: Path, value: str) -> Path:
     return path if path.is_absolute() else run_root / path
 
 
-def _selected_calibration_configured(
-    run_root: Path, run_config: dict | None
-) -> bool:
-    return (
-        (run_config or {}).get("calibration_profile_selection") is not None
-        or (run_root / CALIBRATION_PROFILE_SELECTION).exists()
-    )
+def _selected_calibration_configured(run_root: Path, run_config: dict | None) -> bool:
+    return (run_config or {}).get("calibration_profile_selection") is not None or (
+        run_root / CALIBRATION_PROFILE_SELECTION
+    ).exists()
 
 
 def _load_required_hardware_frame_groups(
@@ -179,9 +189,7 @@ def _load_required_hardware_frame_groups(
 ) -> dict | None:
     capture = (run_config or {}).get("capture")
     policy = capture_synchronization_from_mapping(
-        capture.get("synchronization")
-        if isinstance(capture, dict)
-        else None
+        capture.get("synchronization") if isinstance(capture, dict) else None
     ).to_dict()
     if policy["mode"] != "hardware_trigger":
         return None
@@ -270,9 +278,7 @@ def _hardware_sensor_inventory(
         raise ValueError("Hardware-sync BOP export requires run_config.capture")
     raw_sensors = capture.get("sensors")
     if not isinstance(raw_sensors, list):
-        raise ValueError(
-            "Hardware-sync BOP export requires run_config.capture.sensors"
-        )
+        raise ValueError("Hardware-sync BOP export requires run_config.capture.sensors")
     master_sensor_key = str(policy["master_sensor_key"])
     inventory: list[dict[str, str]] = []
     for index, raw_sensor in enumerate(raw_sensors):
@@ -299,9 +305,7 @@ def _hardware_sensor_inventory(
                 ),
             }
         )
-    masters = [
-        item for item in inventory if item["sensor_key"] == master_sensor_key
-    ]
+    masters = [item for item in inventory if item["sensor_key"] == master_sensor_key]
     if len(masters) != 1:
         raise ValueError(
             "Hardware-sync BOP export master_sensor_key must identify exactly "
@@ -321,6 +325,15 @@ def _run_relative(path: Path, run_root: Path) -> str:
         ) from exc
 
 
+def _portable_run_path(path: Path, run_root: Path) -> str | None:
+    """Return a portable run-relative path, never an absolute host path."""
+
+    try:
+        return path.resolve().relative_to(run_root.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
 def _validated_hardware_input_evidence(
     *,
     run_root: Path,
@@ -333,9 +346,7 @@ def _validated_hardware_input_evidence(
     synchronized_root = run_root / PROCESSED_DIR / SYNCHRONIZED_DIR
     rectified_root = run_root / PROCESSED_DIR / RECTIFIED_DIR
     if input_folder.is_symlink():
-        raise ValueError(
-            "Hardware-sync BOP input root must not be a symbolic link"
-        )
+        raise ValueError("Hardware-sync BOP input root must not be a symbolic link")
     resolved_input = input_folder.resolve()
     if resolved_input == synchronized_root.resolve():
         projection = "native"
@@ -426,8 +437,7 @@ def _revalidate_hardware_publication_inputs(
     current_run_config = load_run_config_for_run_root(run_root)
     if current_run_config != initial_run_config:
         raise RuntimeError(
-            "Run configuration changed while the hardware-sync BOP export "
-            "was running"
+            "Run configuration changed while the hardware-sync BOP export was running"
         )
     current_hardware_frame_groups = _load_required_hardware_frame_groups(
         run_root,
@@ -492,6 +502,13 @@ def main() -> None:
         f".{output_folder.name}.{uuid.uuid4().hex}.tmp"
     )
     try:
+        if args.annotation_source == "none" and (
+            args.write_multiview_targets or args.write_coco_annotations
+        ):
+            raise ValueError(
+                "Multiview targets and COCO annotations require "
+                "--annotation-source blenderproc"
+            )
         try:
             run_config = load_run_config_for_run_root(run_root)
         except FileNotFoundError:
@@ -548,8 +565,7 @@ def main() -> None:
             input_folder,
             run_root=(
                 run_root
-                if args.input_folder is None
-                or hardware_frame_groups is not None
+                if args.input_folder is None or hardware_frame_groups is not None
                 else None
             ),
         )
@@ -618,6 +634,9 @@ def main() -> None:
                 if calibration_profiles_path is not None
                 else None
             )
+            portable_sensor_folder = (
+                _portable_run_path(sensor_folder, run_root) or sensor_folder.name
+            )
             exports.append(
                 export_sensor_scene_to_bop(
                     sensor_folder,
@@ -640,14 +659,12 @@ def main() -> None:
                     input_sensor_folder=(
                         input_evidence["input_sensor_folder"]
                         if input_evidence is not None
-                        else None
+                        else portable_sensor_folder
                     ),
                     authoritative_source_sensor_folder=(
-                        input_evidence[
-                            "authoritative_source_sensor_folder"
-                        ]
+                        input_evidence["authoritative_source_sensor_folder"]
                         if input_evidence is not None
-                        else None
+                        else portable_sensor_folder
                     ),
                     input_fingerprint_sha256=(
                         input_evidence["input_fingerprint_sha256"]
@@ -655,12 +672,11 @@ def main() -> None:
                         else None
                     ),
                     authoritative_source_fingerprint_sha256=(
-                        input_evidence[
-                            "authoritative_source_fingerprint_sha256"
-                        ]
+                        input_evidence["authoritative_source_fingerprint_sha256"]
                         if input_evidence is not None
                         else None
                     ),
+                    annotation_source=args.annotation_source,
                 )
             )
         if hardware_frame_groups is not None and run_config is not None:
@@ -678,7 +694,11 @@ def main() -> None:
         targets_path = None
         multiview_targets_path = None
         coco_annotations_path = None
-        if (not args.no_model_export or objectless_mode) and args.split == "test":
+        if (
+            args.split == "test"
+            and not args.no_model_export
+            and any(export.targets for export in exports)
+        ):
             targets_path = write_bop_targets(staging_folder, exports, split=args.split)
         if args.write_multiview_targets:
             multiview_targets_path = write_bop_multiview_targets(
@@ -705,7 +725,9 @@ def main() -> None:
             else None
         )
         instance_map_path = (
-            write_bop_instance_map(staging_folder, exports) if template_mode else None
+            write_bop_instance_map(staging_folder, exports)
+            if template_mode and args.annotation_source == "blenderproc"
+            else None
         )
         pose_template_path = (
             write_bop_pose_template(staging_folder, selection)
@@ -728,11 +750,25 @@ def main() -> None:
             frame_sets = json.loads(frame_sets_path.read_text())
             validation["frame_set_count"] = int(frame_sets["frame_set_count"])
             validation["hardware_sync_scope"] = frame_sets["scope"]
+        exported_profile_ids = {
+            export.calibration_profile_id
+            for export in exports
+            if export.calibration_profile_id is not None
+        }
+        exported_calibration_profiles = [
+            profile
+            for profile in calibration_profiles
+            if profile.profile_id in exported_profile_ids
+        ]
         write_bop_export_manifest(
             staging_folder,
             exports,
-            calibration_profiles_path=calibration_profiles_path,
-            calibration_profiles=calibration_profiles,
+            calibration_profiles_path=(
+                _portable_run_path(calibration_profiles_path, run_root)
+                if calibration_profiles_path is not None
+                else None
+            ),
+            calibration_profiles=exported_calibration_profiles,
             object_models=object_models,
             targets_path=targets_path,
             multiview_targets_path=multiview_targets_path,
@@ -762,6 +798,7 @@ def main() -> None:
             ),
             instance_map_path=instance_map_path,
             pose_template_path=pose_template_path,
+            annotation_source=args.annotation_source,
         )
         if hardware_frame_groups is not None and run_config is not None:
             _revalidate_hardware_publication_inputs(
@@ -781,10 +818,12 @@ def main() -> None:
         }
         if object_models:
             artifacts[MODELS_DIR] = output_folder / MODELS_DIR
+            artifacts[MODELS_EVAL_DIR] = output_folder / MODELS_EVAL_DIR
         if object_instances is not None:
             artifacts[OBJECT_INSTANCES] = run_root / OBJECT_INSTANCES
-            artifacts[BOP_INSTANCE_MAP] = output_folder / BOP_INSTANCE_MAP
             artifacts[BOP_POSE_TEMPLATE] = output_folder / BOP_POSE_TEMPLATE
+        if instance_map_path is not None:
+            artifacts[BOP_INSTANCE_MAP] = output_folder / BOP_INSTANCE_MAP
         if calibration_profiles_path is not None:
             artifacts[CALIBRATION_PROFILES] = calibration_profiles_path
         for export in exports:
@@ -803,6 +842,13 @@ def main() -> None:
         if frame_sets_path is not None:
             artifacts[BOP_FRAME_SETS] = output_folder / BOP_FRAME_SETS
         message = f"Exported {len(exports)} synchronized sensor folder(s) to BOP."
+        if validation["capabilities"]["bop19_evaluation"]:
+            message += " Rendered GT and BOP19 evaluation targets are complete."
+        elif validation["capabilities"]["pose_estimation_input"]:
+            message += (
+                " RGB-D scenes, models, and populated targets are "
+                "pose-estimation inputs; rendered GT and masks are not present."
+            )
         if frame_sets_path is not None:
             message += (
                 f" Published {validation['frame_set_count']} authoritative "

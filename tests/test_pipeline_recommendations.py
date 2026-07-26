@@ -140,11 +140,14 @@ def test_recommendations_sync_quality_and_bop_export_path(tmp_path: Path) -> Non
     )
     payload = build_pipeline_recommendations(run_root)
     ids = recommendation_ids(payload)
-    assert "prepare_blenderproc" in ids
+    assert "prepare_blenderproc" not in ids
+    assert "plan_blenderproc_render" not in ids
     assert "export_bop_dataset" in ids
-    assert (
-        recommendation_by_id(payload, "export_bop_dataset")["stage_id"] == "bop_export"
-    )
+    export = recommendation_by_id(payload, "export_bop_dataset")
+    assert export["stage_id"] == "bop_export"
+    annotation_flag = export["command"].index("--annotation-source")
+    assert export["command"][annotation_flag + 1] == "none"
+    assert "--overwrite" in export["command"]
 
 
 def test_recommendations_build_calibration_observations_from_target_outputs(
@@ -237,4 +240,42 @@ def test_recommendations_accept_explicit_objectless_bop_export(tmp_path: Path) -
     payload = build_pipeline_recommendations(run_root)
 
     assert payload["facts"]["bop_export_ready_for_dataset_use"] is True
+    assert "export_bop_dataset" not in recommendation_ids(payload)
+
+
+def test_recommendations_accept_annotation_free_object_bop_export(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    config = write_ready_run_config(run_root)
+    write_preflight(run_root, config)
+    make_synchronized_sensor(run_root)
+    write_json(
+        run_root / SYNC_QUALITY_REPORT,
+        {"schema_version": "sync_quality_report.v1", "overall_status": "ok"},
+    )
+    write_bop_export(run_root)
+    manifest_path = run_root / BOP_DIR / BOP_EXPORT_MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    manifest.update(
+        {
+            "schema_version": "bop_export_manifest.v5",
+            "annotation_source": "none",
+            "targets_path": BOP_TARGETS_BOP19,
+            "capabilities": {
+                "pose_estimation_input": True,
+                "bop19_evaluation": False,
+            },
+        }
+    )
+    write_json(manifest_path, manifest)
+
+    payload = build_pipeline_recommendations(run_root)
+
+    assert payload["facts"]["bop_export_ready_for_dataset_use"] is True
+    assert payload["facts"]["bop_annotation_source"] == "none"
+    assert payload["facts"]["bop_model_count"] == 1
+    assert payload["facts"]["bop_target_count"] == 1
+    assert payload["facts"]["bop_ready_for_pose_estimation"] is True
+    assert payload["facts"]["bop_ready_for_bop19_evaluation"] is False
     assert "export_bop_dataset" not in recommendation_ids(payload)

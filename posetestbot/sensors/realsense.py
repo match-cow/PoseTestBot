@@ -14,6 +14,7 @@ from posetestbot.sensors.contracts import CameraIntrinsics, SensorType
 from posetestbot.sensors.discovery import is_realsense_d435_identity
 from posetestbot.sensors.frame_writer import (
     ensure_legacy_rgbd_folders,
+    sync_frame_metadata,
     write_legacy_camera_sidecars,
     write_legacy_rgbd_frame,
 )
@@ -692,8 +693,12 @@ def capture_realsense_rgbd(
         try:
             pipeline.stop()
         finally:
-            if cv2_preview is not None:
-                cv2_preview.destroyAllWindows()
+            try:
+                if record and output is not None:
+                    sync_frame_metadata(output)
+            finally:
+                if cv2_preview is not None:
+                    cv2_preview.destroyAllWindows()
 
     first_metadata = metadata_records[0] if metadata_records else {}
     last_metadata = metadata_records[-1] if metadata_records else {}

@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-24
+Last updated: 2026-07-26
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -36,6 +36,62 @@ The code rewrite is implemented across:
   v4 export; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
+
+## 2026-07-26 Object-Dataset Research Speed Range
+
+The guided **Record an object-template dataset** setup now accepts requested
+capture speeds from 0.01–1.00 m/s and preserves existing run-owned values in
+that range. Calibration setup remains at 0.01–0.03 m/s. Dataset requests above
+the conservative 0.03 m/s legacy range use `robot_command.v1`; the canonical
+plan and receiver pass them through up to 1.00 m/s and reject an extended cap
+with the legacy protocol.
+
+The ordinary-capture Sunrise candidate no longer adds a Cartesian 0.03 m/s
+clamp, while retaining its independent 3°/s A1 angular-speed cap. Setup and
+physical-authorization copy show the requested value, the structured-app
+requirement, the A1 cap, and the warning that speed alone cannot guarantee
+sharp frames because exposure time and lighting still matter.
+
+Focused validation passed 39 capture-plan, receiver, UDP, and Java conversion
+tests; two desktop Playwright workflow regressions; Ruff; frontend lint and
+type checking; the production Vite build; and diff checks. No camera or robot
+was opened or commanded.
+
+## 2026-07-26 BOP Toolkit Compatibility and Clean Export Contract
+
+The retained object capture `working_data/test20260725_04` was audited against
+official BOP Toolkit commit `cea62d651c7e395b2e1962b9749e4e89693c6ac4`.
+Its two `test/00000x` scene layouts, contiguous RGB/depth names, 16-bit depth,
+per-image intrinsics/depth scale, model ID, and `models_info.json` geometry are
+structurally BOP-scenewise. All 811 exported frames per camera are inside the
+recorded `a1_capture_sweep`; synchronization correctly kept 712 and 667
+pre/post-motion raw frames out of the BOP scenes.
+
+The v4 export was nevertheless not directly consumable: the canonical binary
+PLY had an importer-specific `property ushort stl` face attribute, and the
+official BOP Toolkit `load_ply` reader lost face alignment and rejected it.
+The v5 exporter now derives conservative ASCII triangular PLY files with
+vertex normals, optional supported UV/color fields, and an optional copied PNG
+texture. It writes the estimator model under `models/` and a texture-free
+evaluation copy under `models_eval/`, because the official metric scripts
+request the `_eval` model type. Both preserve source vertices, faces, object
+coordinates, and millimetre units while leaving the immutable catalogue
+geometry untouched.
+
+A temporary one-frame v5 sample built from the retained run's actual rectified
+RGB-D pair and Greifer snapshot was accepted by the official generic scenewise
+reader. It reported RGB/depth present and GT/masks absent, loaded the camera and
+populated target row, and loaded both 3,684-vertex / 1,228-face model copies.
+
+`bop_export_manifest.v5` also makes annotation capability explicit.
+Annotation-free output contains RGB-D scenes, standard `scene_camera.json`,
+selected models, compact portable provenance, and a populated BOP19 target list
+derived from the confirmed pose-template object counts. It omits placeholder
+GT, GT-info, masks, and GT instance maps. BlenderProc mode adds those
+annotation-dependent artifacts and is the only mode marked ready for BOP19
+evaluation. Export metadata no longer embeds absolute run paths, per-frame
+camera JSON no longer repeats PoseTestBot calibration payloads, and the
+manifest retains only calibration profiles used by exported scenes.
 
 The active gates are:
 
@@ -104,6 +160,51 @@ cross-validated stationary-target translation residual by 14–38% versus 0 ms.
 This is effective-latency tuning from robot motion, not hardware-clock proof,
 and it was not promoted back into the historical attempts.
 
+The Auto time-alignment implementation is now revisioned at
+`constant_latency_nearest_pose_motion_lomo_cv.v2`. It keeps the interior
+optimum, aggregate materiality, fold-optimum stability, reference-method
+sensitivity, and rotation gates, then refits the transform with every motion
+held out in turn. The default now requires at least 12 motions, four per fold;
+both Shah and Li must pass 0.25 mm / 10% median materiality and a one-sided
+positive-motion sign test Bonferroni-corrected over the complete nonzero offset
+grid at 0.05. Per-fold materiality remains recorded as a warning rather than
+allowing one arbitrary three-fold partition to veto stronger motion-level
+evidence. Promotion recalculates the saved per-motion improvements, medians,
+sign probability, and search correction instead of trusting saved `ok` labels.
+Immutable v1 attempts retain their original replay and promotion semantics.
+
+Real retained-data attempt `1c6b0c9d00dc49ce8d0c14c18d43336b` completed
+under v2 with all three required D435 cameras. It selected +70 ms, +85 ms, and
++45 ms; both Shah and Li passed the search-corrected leave-one-motion-out
+audit for every camera. The common `IPPE + Shah` recommendation has maximum
+three-camera companion closure of 3.172 mm / 0.450°, and 15 common bundles
+pass.
+
+An operator retry, `e588682f5ad64e9aaf8ed39e7b02c623`, revealed that the
+still-running web backend had not been restarted after the implementation
+change. It created an immutable v1 request and the worker correctly replayed
+that recorded contract, reproducing the old `923322072633` rejection. The
+setup API now reports its loaded timing revision; the packaged workflow blocks
+Auto attempt creation when that value is missing or differs from the revision
+expected by the UI, identifies the required backend restart, and labels
+already-created legacy attempts accurately.
+
+Fresh-process attempt `268c897e1baf49e7bd78a434a4569b99` repeated the exact
+recordings under v2 and reproduced all three offsets, residuals, the common
+`IPPE + Shah` recommendation, and 3.172 mm / 0.450° closure. Its three
+recommended profiles were explicitly promoted with saved sync deltas -70 ms,
+-85 ms, and -45 ms. The run's canonical `calibration_profiles.json` is now
+`calibration.v2`, all three profiles are valid, and
+`rewrite_calibration_validation.v1` is ready at 3/3.
+
+Extrinsic image-coverage acceptance is now partition-independent. It requires
+five-view-supported normalized centroid spans of at least 45% x and 35% y plus
+at least 10% supported convex-hull area. The 3 × 3 cell count remains visible
+as a diagnostic warning and remains the separate manual-intrinsic gate. This
+allowed the real `033422071805` evidence to be judged by its measured 53.1% /
+43.3% spans and 13.25% hull area instead of failing solely because those views
+landed in five arbitrary cells.
+
 Object-dataset synchronization now applies the exact per-camera timing from the
 selected run-owned calibration snapshot and rejects overrides. Sync quality,
 rectification, and BOP export recheck camera coverage, values, profile identity,
@@ -119,6 +220,52 @@ snapshot and preflight artifacts. The calculation card documents the observed
 full-capture gate accepts the immutable pre-START preflight embedded in an
 execution plan when the standalone report is absent, and rejects mismatched
 embedded status.
+
+## 2026-07-25 Object-Dataset Capture Watchdog Validation
+
+The guided physical-capture request and the canonical
+`real_full_capture_validation` sequence now explicitly select the supported
+five-second maximum live camera-metadata pause. The authorization dialog shows
+that value alongside the independent robot packet timeouts. Frame metadata
+still becomes visible to the supervisor after every complete JSONL record, but
+the storage durability barrier is deferred from the per-frame hot path to one
+`fsync` during each adapter's shutdown.
+
+Authorized retry `working_data/test20260725_03` reused the exact verified
+calibration and pose-template snapshots from the failed object-dataset attempt
+in a fresh run root. Its two enabled D435 cameras completed 1,503 and 1,480
+balanced RGB/depth/metadata tuples, with maximum host-receipt gaps of 0.347055
+and 0.339562 seconds. The iiwa receiver committed 12,226 poses, both camera
+processes exited cleanly after the receiver, capture execution succeeded with
+the explicit five-second watchdog, and `rewrite_full_capture.v1` is ready at
+9/9. This validates the current two-camera object-dataset capture path; it does
+not close the separate five-sensor acceptance milestone.
+
+## 2026-07-25 Annotation-Free Real BOP Export (v4 checkpoint)
+
+At this checkpoint, the guided object-dataset processing sequence no longer made required BOP
+export depend on BlenderProc preparation or rendering. Its required path is
+now synchronization, sync quality, calibration preflight, rectification, and
+transactional BOP export. The v4 exporter recorded an explicit
+`annotation_source` contract: `none` wrote explicit empty annotation rows in
+`scene_gt.json` and `scene_gt_info.json`, an empty `test_targets_bop19.json`
+list, and an empty instance map while still exporting calibrated RGB-D scenes,
+canonical models, pose-template provenance, and frame maps. `blenderproc`
+remains an explicit opt-in source for the separate optional GT/mask path.
+Required workflow retries atomically replace only the derived rectification
+and BOP trees.
+
+Retained real run `working_data/test20260725_04` exercised the corrected path
+without camera or robot access. Synchronization reproduced 1,622 matched
+frames across the two enabled D435 cameras, calibration preflight passed 2/2,
+and rectification/export wrote two 811-frame BOP scenes plus canonical
+`Greifer` model `obj_000004.ply`. The export manifest is
+`bop_export_manifest.v4`, declares `dataset_mode=pose_template` and
+`annotation_source=none`, validated 2 scenes / 1,622 frames / 1 model /
+0 rendered targets, and passes `rewrite_bop_export_readiness.v1` at 11/11.
+The original raw folders remain at 1,523 and 1,478 balanced RGB/depth frames.
+The 2026-07-26 compatibility audit above supersedes the v4 empty-placeholder
+and byte-for-byte model-copy contracts.
 
 ## 2026-07-24 Manual IIWA Command Confirmation
 

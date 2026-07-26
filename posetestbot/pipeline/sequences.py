@@ -609,6 +609,7 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                     "startup_wait_s": 15.0,
                     "receive_start_timeout_s": 120.0,
                     "receive_idle_timeout_s": 60.0,
+                    "camera_metadata_idle_timeout_s": 5.0,
                 },
             ),
             PipelineSequenceStepSpec(
@@ -770,10 +771,10 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
     ),
     "sync_to_bop_dry_run": PipelineSequenceSpec(
         id="sync_to_bop_dry_run",
-        label="Synchronize To BOP Dry-Run",
+        label="Synchronize To BOP Dataset",
         description=(
-            "Run non-destructive synchronization, prepare BlenderProc inputs, "
-            "write a BlenderProc render plan, then export the BOP dataset shape."
+            "Run non-destructive synchronization and sync quality checks, then "
+            "write an annotation-free BOP image/model dataset without BlenderProc."
         ),
         steps=(
             PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
@@ -783,31 +784,20 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 depends_on=("sync_run",),
             ),
             PipelineSequenceStepSpec(
-                id="blenderproc_prepare",
-                stage_id="blenderproc_prepare",
-                depends_on=("sync_quality",),
-            ),
-            PipelineSequenceStepSpec(
-                id="blenderproc_render",
-                stage_id="blenderproc_render",
-                depends_on=("blenderproc_prepare",),
-                options={"dry_run": True},
-            ),
-            PipelineSequenceStepSpec(
                 id="bop_export",
                 stage_id="bop_export",
-                depends_on=("blenderproc_render",),
+                depends_on=("sync_quality",),
+                options={"annotation_source": "none", "overwrite": True},
             ),
         ),
     ),
     "sync_to_bop_calibrated_dry_run": PipelineSequenceSpec(
         id="sync_to_bop_calibrated_dry_run",
-        label="Synchronize To Calibrated BOP Dry-Run",
+        label="Synchronize To Calibrated BOP Dataset",
         description=(
             "Run non-destructive synchronization, sync quality checks, "
-            "calibration profile preflight, prepare BlenderProc inputs from "
-            "calibration_profiles.json, write a BlenderProc render plan, then "
-            "export the calibrated BOP dataset shape."
+            "and calibration profile preflight, then write an annotation-free "
+            "calibrated BOP image/model dataset without BlenderProc."
         ),
         steps=(
             PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
@@ -823,40 +813,26 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 options={"require_valid": True},
             ),
             PipelineSequenceStepSpec(
-                id="blenderproc_prepare",
-                stage_id="blenderproc_prepare",
+                id="bop_export",
+                stage_id="bop_export",
                 depends_on=("sync_quality", "calibration_preflight"),
                 options={
                     "calibration_profiles": (
                         "{run_root}/calibration_profiles.json"
                     ),
-                },
-            ),
-            PipelineSequenceStepSpec(
-                id="blenderproc_render",
-                stage_id="blenderproc_render",
-                depends_on=("blenderproc_prepare",),
-                options={"dry_run": True},
-            ),
-            PipelineSequenceStepSpec(
-                id="bop_export",
-                stage_id="bop_export",
-                depends_on=("blenderproc_render",),
-                options={
-                    "calibration_profiles": (
-                        "{run_root}/calibration_profiles.json"
-                    ),
+                    "annotation_source": "none",
+                    "overwrite": True,
                 },
             ),
         ),
     ),
     "capture_to_bop_dataset_dry_run": PipelineSequenceSpec(
         id="capture_to_bop_dataset_dry_run",
-        label="Captured Run To BOP Dataset Dry-Run",
+        label="Captured Run To BOP Dataset",
         description=(
             "For an existing captured run folder, run non-destructive "
-            "synchronization, prepare BlenderProc inputs, write a BlenderProc "
-            "render plan, then export the BOP dataset shape."
+            "synchronization and write an annotation-free BOP image/model "
+            "dataset without BlenderProc."
         ),
         steps=(
             PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
@@ -866,20 +842,10 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 depends_on=("sync_run",),
             ),
             PipelineSequenceStepSpec(
-                id="blenderproc_prepare",
-                stage_id="blenderproc_prepare",
-                depends_on=("sync_quality",),
-            ),
-            PipelineSequenceStepSpec(
-                id="blenderproc_render",
-                stage_id="blenderproc_render",
-                depends_on=("blenderproc_prepare",),
-                options={"dry_run": True},
-            ),
-            PipelineSequenceStepSpec(
                 id="bop_export",
                 stage_id="bop_export",
-                depends_on=("blenderproc_render",),
+                depends_on=("sync_quality",),
+                options={"annotation_source": "none", "overwrite": True},
             ),
         ),
     ),
@@ -946,10 +912,11 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
     ),
     "calibrated_capture_to_bop_dataset_dry_run": PipelineSequenceSpec(
         id="calibrated_capture_to_bop_dataset_dry_run",
-        label="Calibrated Capture To BOP Dataset Dry-Run",
+        label="Calibrated Capture To BOP Dataset",
         description=(
             "Synchronize a captured run, rectify RGB-D with selected intrinsics, "
-            "then prepare and export BOP using promoted calibration.v2 profiles."
+            "then export an annotation-free BOP image/model dataset using "
+            "promoted calibration.v2 profiles without BlenderProc."
         ),
         steps=(
             PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
@@ -968,22 +935,13 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 id="camera_rectification",
                 stage_id="camera_rectification",
                 depends_on=("sync_quality", "calibration_preflight"),
-            ),
-            PipelineSequenceStepSpec(
-                id="blenderproc_prepare",
-                stage_id="blenderproc_prepare",
-                depends_on=("camera_rectification",),
-            ),
-            PipelineSequenceStepSpec(
-                id="blenderproc_render",
-                stage_id="blenderproc_render",
-                depends_on=("blenderproc_prepare",),
-                options={"dry_run": True},
+                options={"overwrite": True},
             ),
             PipelineSequenceStepSpec(
                 id="bop_export",
                 stage_id="bop_export",
-                depends_on=("blenderproc_render",),
+                depends_on=("camera_rectification",),
+                options={"annotation_source": "none", "overwrite": True},
             ),
         ),
     ),

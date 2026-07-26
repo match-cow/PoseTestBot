@@ -38,7 +38,12 @@ def ensure_legacy_rgbd_folders(output_path: str | Path) -> Path:
 
 
 def append_frame_metadata(output_path: str | Path, metadata: Mapping[str, Any]) -> Path:
-    """Append one compact JSONL metadata record for a captured frame."""
+    """Append and expose one compact JSONL metadata record for a captured frame.
+
+    Closing the handle keeps the complete record visible to the live capture
+    supervisor without imposing a storage durability barrier on every frame.
+    Capture adapters call :func:`sync_frame_metadata` once during shutdown.
+    """
 
     output = Path(output_path)
     metadata_path = output / FRAME_METADATA_JSONL
@@ -50,13 +55,24 @@ def append_frame_metadata(output_path: str | Path, metadata: Mapping[str, Any]) 
         with open(metadata_path, "a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
-            os.fsync(handle.fileno())
     # Preserve the last complete JSONL record even when capture is interrupted.
     except BaseException:
         if metadata_path.exists():
             with open(metadata_path, "r+b") as handle:
                 handle.truncate(previous_size)
         raise
+    return metadata_path
+
+
+def sync_frame_metadata(output_path: str | Path) -> Path | None:
+    """Apply the deferred durability barrier to committed frame metadata."""
+
+    metadata_path = Path(output_path) / FRAME_METADATA_JSONL
+    if not metadata_path.is_file():
+        return None
+    with open(metadata_path, "a", encoding="utf-8") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
     return metadata_path
 
 

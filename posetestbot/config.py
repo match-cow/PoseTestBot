@@ -15,6 +15,7 @@ DEFAULT_ROBOT_PORT = 30300
 DEFAULT_RECEIVER_PORT = 8080
 DEFAULT_CAPTURE_VELOCITY_M_S = 0.01
 MAX_CAPTURE_COMMAND_VELOCITY_M_S = 0.03
+MAX_OBJECT_DATASET_COMMAND_VELOCITY_M_S = 1.0
 MANUAL_TEST_COMMAND_VELOCITY_M_S = 0.1
 
 
@@ -25,8 +26,9 @@ def bounded_capture_velocity_m_s(
 ) -> float:
     """Return a finite positive command bounded by the selected command path.
 
-    Acquisition uses the conservative 0.03 default. Explicit manual motion
-    tests may supply their separately acknowledged command limit.
+    Legacy and calibration acquisition use the conservative 0.03 default.
+    Versioned object-dataset acquisition and explicit manual motion tests may
+    supply their separately bounded command limits.
     """
 
     if isinstance(requested_velocity_m_s, bool):

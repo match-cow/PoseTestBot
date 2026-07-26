@@ -63,6 +63,10 @@ DEFAULT_MIN_PNP_GRID_COLUMNS = 2
 DEFAULT_MIN_ROTATION_AXIS_ANGLE_DEG = 2.0
 DEFAULT_MIN_ROTATION_AXIS_SINGULAR_RATIO = 0.15
 DEFAULT_MAX_OBSERVATIONS_PER_MOTION = 5
+DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS = 5
+DEFAULT_MIN_IMAGE_CENTROID_X_SPAN_RATIO = 0.45
+DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO = 0.35
+DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO = 0.10
 
 
 def _finite_transform(value: np.ndarray) -> bool:
@@ -195,20 +199,14 @@ def _motion_balanced_validation(
         "per_motion": per_motion,
         "motion_balanced_mean_translation_mm": float(
             mean(
-                item["residuals"]["mean_translation_mm"]
-                for item in per_motion.values()
+                item["residuals"]["mean_translation_mm"] for item in per_motion.values()
             )
         ),
         "motion_balanced_mean_rotation_deg": float(
-            mean(
-                item["residuals"]["mean_rotation_deg"]
-                for item in per_motion.values()
-            )
+            mean(item["residuals"]["mean_rotation_deg"] for item in per_motion.values())
         ),
         "motion_balanced_outlier_ratio": balanced_outlier_ratio,
-        "max_repeated_motion_outlier_ratio": max(
-            repeated_motion_ratios, default=0.0
-        ),
+        "max_repeated_motion_outlier_ratio": max(repeated_motion_ratios, default=0.0),
     }
 
 
@@ -281,9 +279,7 @@ def solve_planar_pnp_candidates(
     methods: Sequence[str] = PNP_METHOD_ORDER,
     min_common_inliers: int = DEFAULT_MIN_PNP_COMMON_INLIERS,
     min_common_inlier_ratio: float = DEFAULT_MIN_PNP_COMMON_INLIER_RATIO,
-    max_all_point_mean_error_px: float = (
-        DEFAULT_MAX_PNP_ALL_POINT_MEAN_ERROR_PX
-    ),
+    max_all_point_mean_error_px: float = (DEFAULT_MAX_PNP_ALL_POINT_MEAN_ERROR_PX),
     point_marker_ids: Any | None = None,
     point_grid_indices: Any | None = None,
     min_supported_markers: int = DEFAULT_MIN_PNP_SUPPORTED_MARKERS,
@@ -310,16 +306,12 @@ def solve_planar_pnp_candidates(
     if max_all_point_mean_error_px <= 0.0:
         raise ValueError("PnP whole-board reprojection threshold must be positive")
     if (point_marker_ids is None) != (point_grid_indices is None):
-        raise ValueError(
-            "PnP marker IDs and grid indices must be provided together"
-        )
+        raise ValueError("PnP marker IDs and grid indices must be provided together")
     marker_ids: np.ndarray | None = None
     grid_indices: np.ndarray | None = None
     if point_marker_ids is not None:
         marker_ids = np.asarray(point_marker_ids, dtype=np.int64).reshape(-1)
-        grid_indices = np.asarray(point_grid_indices, dtype=np.int64).reshape(
-            -1, 2
-        )
+        grid_indices = np.asarray(point_grid_indices, dtype=np.int64).reshape(-1, 2)
         if len(marker_ids) != len(object_array) or len(grid_indices) != len(
             object_array
         ):
@@ -354,13 +346,10 @@ def solve_planar_pnp_candidates(
         supported_grid_columns = sorted(
             {int(value) for value in grid_indices[supported_mask, 1]}
         )
-    spatial_support_ok = (
-        not spatial_support_available
-        or (
-            len(supported_marker_ids) >= min_supported_markers
-            and len(supported_grid_rows) >= min_grid_rows
-            and len(supported_grid_columns) >= min_grid_columns
-        )
+    spatial_support_ok = not spatial_support_available or (
+        len(supported_marker_ids) >= min_supported_markers
+        and len(supported_grid_rows) >= min_grid_rows
+        and len(supported_grid_columns) >= min_grid_columns
     )
     support_evidence = {
         "correspondence_count": int(len(object_array)),
@@ -379,9 +368,7 @@ def solve_planar_pnp_candidates(
                 max_all_point_mean_error_px
             ),
             "min_supported_markers": int(min_supported_markers),
-            "min_supported_corners_per_marker": int(
-                min_supported_corners_per_marker
-            ),
+            "min_supported_corners_per_marker": int(min_supported_corners_per_marker),
             "min_grid_rows": int(min_grid_rows),
             "min_grid_columns": int(min_grid_columns),
         },
@@ -479,9 +466,7 @@ def solve_planar_pnp_candidates(
                     "mean_reprojection_error_px": float(
                         np.mean(errors[common_indices])
                     ),
-                    "max_reprojection_error_px": float(
-                        np.max(errors[common_indices])
-                    ),
+                    "max_reprojection_error_px": float(np.max(errors[common_indices])),
                     "all_point_mean_reprojection_error_px": float(np.mean(errors)),
                     "all_point_max_reprojection_error_px": float(np.max(errors)),
                     "transform": transform_record(
@@ -531,9 +516,7 @@ def solve_planar_pnp_candidates(
             failures.append({"method": method, "reason": str(exc)})
 
     selected = {
-        item["method"]: item
-        for item in candidates
-        if item["selected_for_method"]
+        item["method"]: item for item in candidates if item["selected_for_method"]
     }
     return {
         "common_inlier_indices": common_indices.astype(int).tolist(),
@@ -699,8 +682,7 @@ def _consensus_companion(
 
     def medoid_key(index: int) -> tuple[float, float, int]:
         residuals = [
-            transform_residual(estimates[index], candidate)
-            for candidate in estimates
+            transform_residual(estimates[index], candidate) for candidate in estimates
         ]
         normalized = [
             item["translation_mm"] / max_translation_mm
@@ -809,9 +791,7 @@ def _robust_extrinsic_seed(
 ) -> tuple[np.ndarray, np.ndarray, list[bool]]:
     seeds = []
     for pose_subset in _pose_training_sets(observations):
-        training = [
-            item for item in observations if _pose_key(item) in pose_subset
-        ]
+        training = [item for item in observations if _pose_key(item) in pose_subset]
         try:
             primary, _unused_companion = solve_extrinsic(
                 training,
@@ -866,6 +846,75 @@ def _pose_key(observation: Mapping[str, Any]) -> str:
     return str(value) if value not in {None, ""} else str(observation.get("frame_id"))
 
 
+def continuous_image_coverage_evidence(
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    tail_support_views: int = DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS,
+) -> dict[str, Any]:
+    """Measure partition-independent, repeatedly supported centroid coverage."""
+
+    if tail_support_views < 1:
+        raise ValueError("image-coverage tail support must be positive")
+    normalized_points: list[np.ndarray] = []
+    image_size: tuple[float, float] | None = None
+    for observation in observations:
+        centroid = observation.get("image_centroid_px")
+        size = observation.get("image_size")
+        if (
+            not isinstance(centroid, Sequence)
+            or isinstance(centroid, (str, bytes))
+            or len(centroid) != 2
+            or not isinstance(size, Sequence)
+            or isinstance(size, (str, bytes))
+            or len(size) != 2
+        ):
+            raise ValueError(
+                "continuous image-centroid coverage requires centroid and image size"
+            )
+        point = np.asarray(centroid, dtype=float).reshape(2)
+        dimensions = np.asarray(size, dtype=float).reshape(2)
+        if (
+            not np.all(np.isfinite(point))
+            or not np.all(np.isfinite(dimensions))
+            or np.any(dimensions <= 0.0)
+            or np.any(point < 0.0)
+            or np.any(point > dimensions)
+        ):
+            raise ValueError("continuous image-centroid coverage is non-finite")
+        current_size = (float(dimensions[0]), float(dimensions[1]))
+        if image_size is None:
+            image_size = current_size
+        elif not all(
+            math.isclose(left, right, rel_tol=0.0, abs_tol=1e-9)
+            for left, right in zip(image_size, current_size, strict=True)
+        ):
+            raise ValueError("continuous image-centroid coverage mixes image sizes")
+        normalized_points.append(point / dimensions)
+    minimum_view_count = 2 * tail_support_views
+    if len(normalized_points) < minimum_view_count:
+        raise ValueError(
+            "continuous image-centroid coverage requires at least "
+            f"{minimum_view_count} views"
+        )
+    points = np.asarray(normalized_points, dtype=float)
+    ordered = np.sort(points, axis=0)
+    supported_minimum = ordered[tail_support_views - 1]
+    supported_maximum = ordered[-tail_support_views]
+    supported_span = supported_maximum - supported_minimum
+    clipped = np.clip(points, supported_minimum, supported_maximum)
+    hull_area_ratio = float(cv2.contourArea(cv2.convexHull(clipped.astype(np.float32))))
+    return {
+        "strategy": "supported_normalized_centroid_hull.v1",
+        "observation_count": len(normalized_points),
+        "image_size": list(image_size or ()),
+        "tail_support_views": tail_support_views,
+        "supported_minimum_normalized_xy": supported_minimum.astype(float).tolist(),
+        "supported_maximum_normalized_xy": supported_maximum.astype(float).tolist(),
+        "supported_span_ratio_xy": supported_span.astype(float).tolist(),
+        "supported_convex_hull_area_ratio": hull_area_ratio,
+    }
+
+
 def _balanced_motion_observations(
     observations: Sequence[Mapping[str, Any]],
     *,
@@ -875,9 +924,7 @@ def _balanced_motion_observations(
         raise ValueError("maximum observations per motion must be positive")
     grouped: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
     for index, observation in enumerate(observations):
-        grouped.setdefault(_pose_key(observation), []).append(
-            (index, observation)
-        )
+        grouped.setdefault(_pose_key(observation), []).append((index, observation))
     selected: list[tuple[int, Mapping[str, Any]]] = []
     per_motion: dict[str, dict[str, int]] = {}
     for pose_key, values in grouped.items():
@@ -984,9 +1031,7 @@ def _observability_check(
         "rotation_axis_singular_values": singular_values.astype(float).tolist(),
         "rotation_axis_second_to_first_ratio": singular_ratio,
         "rotation_axis_minimum_angle_deg": float(min_rotation_axis_angle_deg),
-        "rotation_axis_minimum_singular_ratio": float(
-            min_rotation_axis_singular_ratio
-        ),
+        "rotation_axis_minimum_singular_ratio": float(min_rotation_axis_singular_ratio),
     }
 
 
@@ -1003,6 +1048,12 @@ def evaluate_extrinsic_candidate(
     max_outlier_ratio: float = DEFAULT_MAX_OUTLIER_RATIO,
     min_accepted_views: int = 0,
     min_coverage_cells: int = 0,
+    image_coverage_tail_support_views: int = (
+        DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS
+    ),
+    min_image_centroid_x_span_ratio: float = 0.0,
+    min_image_centroid_y_span_ratio: float = 0.0,
+    min_image_centroid_hull_area_ratio: float = 0.0,
     min_motion_poses: int = 4,
     min_translation_span_mm: float = 1e-3,
     min_rotation_span_deg: float = 1e-3,
@@ -1013,11 +1064,23 @@ def evaluate_extrinsic_candidate(
     input_observations = list(observations)
     input_observation_count = len(input_observations)
     balance_evidence: dict[str, Any] | None = None
+    continuous_coverage: dict[str, Any] | None = None
     try:
         if max_mean_translation_mm <= 0 or max_mean_rotation_deg <= 0:
             raise ValueError("residual thresholds must be greater than zero")
         if not 0 <= max_outlier_ratio <= 1:
             raise ValueError("max_outlier_ratio must be between zero and one")
+        if any(
+            not 0.0 <= value <= 1.0
+            for value in (
+                min_image_centroid_x_span_ratio,
+                min_image_centroid_y_span_ratio,
+                min_image_centroid_hull_area_ratio,
+            )
+        ):
+            raise ValueError(
+                "continuous image-centroid coverage thresholds must be in [0, 1]"
+            )
         accepted_views = {
             str(item.get("frame_id"))
             for item in observations
@@ -1033,7 +1096,40 @@ def evaluate_extrinsic_candidate(
             for item in observations
             if item.get("image_coverage_cell") is not None
         }
-        if len(coverage_cells) < min_coverage_cells:
+        continuous_coverage_required = any(
+            value > 0.0
+            for value in (
+                min_image_centroid_x_span_ratio,
+                min_image_centroid_y_span_ratio,
+                min_image_centroid_hull_area_ratio,
+            )
+        )
+        if continuous_coverage_required:
+            continuous_coverage = continuous_image_coverage_evidence(
+                input_observations,
+                tail_support_views=image_coverage_tail_support_views,
+            )
+            span_x, span_y = (
+                float(value) for value in continuous_coverage["supported_span_ratio_xy"]
+            )
+            hull_area_ratio = float(
+                continuous_coverage["supported_convex_hull_area_ratio"]
+            )
+            if (
+                span_x < min_image_centroid_x_span_ratio
+                or span_y < min_image_centroid_y_span_ratio
+                or hull_area_ratio < min_image_centroid_hull_area_ratio
+            ):
+                raise ValueError(
+                    "continuous image-centroid coverage is below required "
+                    "field-of-view diversity: "
+                    f"x span {span_x:.3f}/{min_image_centroid_x_span_ratio:.3f}, "
+                    f"y span {span_y:.3f}/{min_image_centroid_y_span_ratio:.3f}, "
+                    "hull area "
+                    f"{hull_area_ratio:.3f}/"
+                    f"{min_image_centroid_hull_area_ratio:.3f}"
+                )
+        elif len(coverage_cells) < min_coverage_cells:
             raise ValueError(
                 f"image-centroid coverage {len(coverage_cells)}/9 is below "
                 f"required {min_coverage_cells}/9"
@@ -1088,9 +1184,7 @@ def evaluate_extrinsic_candidate(
             inlier_mask = next_mask
 
         inlier_observations = [
-            item
-            for item, keep in zip(observations, inlier_mask, strict=True)
-            if keep
+            item for item, keep in zip(observations, inlier_mask, strict=True) if keep
         ]
         post_pruning_observability = _observability_check(
             inlier_observations,
@@ -1102,14 +1196,10 @@ def evaluate_extrinsic_candidate(
         held_out_records: list[dict[str, Any]] = []
         for pose_key in inlier_pose_keys:
             train = [
-                item
-                for item in inlier_observations
-                if _pose_key(item) != pose_key
+                item for item in inlier_observations if _pose_key(item) != pose_key
             ]
             holdout = [
-                item
-                for item in inlier_observations
-                if _pose_key(item) == pose_key
+                item for item in inlier_observations if _pose_key(item) == pose_key
             ]
             fold_primary, fold_companion = solve_extrinsic(
                 train,
@@ -1117,9 +1207,7 @@ def evaluate_extrinsic_candidate(
                 method=extrinsic_method,
             )
             for observation in holdout:
-                estimate = _companion_estimate(
-                    observation, fold_primary, mode=mode
-                )
+                estimate = _companion_estimate(observation, fold_primary, mode=mode)
                 residual = transform_residual(estimate, fold_companion)
                 held_out_records.append(
                     {
@@ -1209,11 +1297,32 @@ def evaluate_extrinsic_candidate(
             },
             {
                 "name": "image_centroid_coverage",
-                "status": "ok",
+                "status": (
+                    "ok" if len(coverage_cells) >= min_coverage_cells else "warning"
+                ),
                 "actual": len(coverage_cells),
                 "threshold": min_coverage_cells,
                 "cells": sorted(coverage_cells),
             },
+            *(
+                [
+                    {
+                        "name": "continuous_image_centroid_coverage",
+                        "status": "ok",
+                        "actual": continuous_coverage,
+                        "threshold": {
+                            "minimum_x_span_ratio": (min_image_centroid_x_span_ratio),
+                            "minimum_y_span_ratio": (min_image_centroid_y_span_ratio),
+                            "minimum_convex_hull_area_ratio": (
+                                min_image_centroid_hull_area_ratio
+                            ),
+                            "tail_support_views": (image_coverage_tail_support_views),
+                        },
+                    }
+                ]
+                if continuous_coverage is not None
+                else []
+            ),
             {
                 "name": "motion_pose_diversity",
                 "status": "ok",
@@ -1237,19 +1346,13 @@ def evaluate_extrinsic_candidate(
             {
                 "name": "rotation_axis_observability",
                 "status": "ok",
-                "actual": observability[
-                    "rotation_axis_second_to_first_ratio"
-                ],
-                "threshold": observability[
-                    "rotation_axis_minimum_singular_ratio"
-                ],
+                "actual": observability["rotation_axis_second_to_first_ratio"],
+                "threshold": observability["rotation_axis_minimum_singular_ratio"],
             },
             {
                 "name": "post_pruning_motion_pose_diversity",
                 "status": "ok",
-                "actual": post_pruning_observability[
-                    "distinct_motion_pose_count"
-                ],
+                "actual": post_pruning_observability["distinct_motion_pose_count"],
                 "threshold": min_motion_poses,
             },
             {
@@ -1264,9 +1367,7 @@ def evaluate_extrinsic_candidate(
             },
             {
                 "name": "minimum_inliers",
-                "status": (
-                    "ok" if solver_inlier_count >= min_inliers else "error"
-                ),
+                "status": ("ok" if solver_inlier_count >= min_inliers else "error"),
                 "actual": solver_inlier_count,
                 "threshold": min_inliers,
             },
@@ -1303,15 +1404,11 @@ def evaluate_extrinsic_candidate(
                 "name": "full_input_motion_balanced_translation_residual",
                 "status": (
                     "ok"
-                    if input_validation[
-                        "motion_balanced_mean_translation_mm"
-                    ]
+                    if input_validation["motion_balanced_mean_translation_mm"]
                     <= max_mean_translation_mm
                     else "error"
                 ),
-                "actual": input_validation[
-                    "motion_balanced_mean_translation_mm"
-                ],
+                "actual": input_validation["motion_balanced_mean_translation_mm"],
                 "threshold": max_mean_translation_mm,
                 "unit": "mm",
             },
@@ -1323,9 +1420,7 @@ def evaluate_extrinsic_candidate(
                     <= max_mean_rotation_deg
                     else "error"
                 ),
-                "actual": input_validation[
-                    "motion_balanced_mean_rotation_deg"
-                ],
+                "actual": input_validation["motion_balanced_mean_rotation_deg"],
                 "threshold": max_mean_rotation_deg,
                 "unit": "deg",
             },
@@ -1333,15 +1428,11 @@ def evaluate_extrinsic_candidate(
                 "name": "full_input_repeated_motion_outlier_ratio",
                 "status": (
                     "ok"
-                    if input_validation[
-                        "max_repeated_motion_outlier_ratio"
-                    ]
+                    if input_validation["max_repeated_motion_outlier_ratio"]
                     <= max_outlier_ratio
                     else "error"
                 ),
-                "actual": input_validation[
-                    "max_repeated_motion_outlier_ratio"
-                ],
+                "actual": input_validation["max_repeated_motion_outlier_ratio"],
                 "threshold": max_outlier_ratio,
             },
         ]
@@ -1369,6 +1460,7 @@ def evaluate_extrinsic_candidate(
             "observation_quality": {
                 "accepted_view_count": len(accepted_views),
                 "coverage_cells": sorted(coverage_cells),
+                "continuous_image_coverage": continuous_coverage,
                 "pre_pruning_observability": observability,
                 "post_pruning_observability": post_pruning_observability,
                 "motion_balancing": balance_evidence,
@@ -1416,6 +1508,14 @@ def evaluate_extrinsic_candidate(
             "acceptance_thresholds": {
                 "min_accepted_views": min_accepted_views,
                 "min_coverage_cells": min_coverage_cells,
+                "image_coverage_tail_support_views": (
+                    image_coverage_tail_support_views
+                ),
+                "min_image_centroid_x_span_ratio": (min_image_centroid_x_span_ratio),
+                "min_image_centroid_y_span_ratio": (min_image_centroid_y_span_ratio),
+                "min_image_centroid_hull_area_ratio": (
+                    min_image_centroid_hull_area_ratio
+                ),
                 "min_motion_poses": min_motion_poses,
                 "min_translation_span_mm": min_translation_span_mm,
                 "min_rotation_span_deg": min_rotation_span_deg,
@@ -1434,9 +1534,7 @@ def rank_candidates(candidates: Sequence[Mapping[str, Any]]) -> list[dict[str, A
     """Rank passing candidates, followed by deterministic failed evidence."""
 
     pnp_order = {name: index for index, name in enumerate(PNP_METHOD_ORDER)}
-    extrinsic_order = {
-        name: index for index, name in enumerate(EXTRINSIC_METHOD_ORDER)
-    }
+    extrinsic_order = {name: index for index, name in enumerate(EXTRINSIC_METHOD_ORDER)}
 
     def key(item: Mapping[str, Any]) -> tuple[Any, ...]:
         passing = item.get("status") == "passing"

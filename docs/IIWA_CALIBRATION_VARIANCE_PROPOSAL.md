@@ -17,6 +17,10 @@ required Auto time-alignment provenance. The retained runs document historical
 acquisition and attempt evidence, but do not establish which Sunrise
 application/revision was deployed or supply the Workbench, offline-path, T1,
 and reviewer evidence required to commission this source candidate.
+Retained-data attempt `268c897e1baf49e7bd78a434a4569b99` has since published
+a v2 Auto-aligned three-camera replacement. It supplies reusable calibration
+for its compatible recording contract, but adds no controller-commissioning or
+physical-capture evidence.
 
 The six A/B/C orientation variants are no longer Workbench frames. Sunrise
 generates their nine motion legs with zero-translation `linRel` transformations
@@ -185,11 +189,14 @@ and capture are operator-run work. Repository tests never access the robot or
 cameras.
 
 For every required camera, a future supervised trial must demonstrate at least
-15 accepted views, 6/9 coverage cells, strong extreme detections, per-view
-reprojection no greater than 3 px, sufficient motion diversity, and passing
-synchronization quality. A manual OpenCV intrinsic fallback additionally
-requires no greater than 1.5 px training RMS plus its held-out and plausibility
-gates; that RMS is not a factory-profile requirement.
+15 accepted views, five-view-supported normalized centroid spans of at least
+45% image width and 35% image height, at least 10% supported centroid-hull
+area, strong extreme detections, per-view reprojection no greater than 3 px,
+sufficient motion diversity, and passing synchronization quality. The 3 × 3
+cell count remains diagnostic for extrinsics. A manual OpenCV intrinsic
+fallback separately requires 6/9 training coverage cells, no greater than
+1.5 px training RMS, and its held-out and plausibility gates; that RMS is not a
+factory-profile requirement.
 
 The retained three-camera repeat met the applicable RGB calibration gates and
 did not reproduce the earlier high-error result for RealSense `825412070181`:

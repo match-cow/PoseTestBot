@@ -254,7 +254,13 @@ def test_receiver_success_uses_start_then_idle_timeout_and_writes_canonical_raw(
     )
     starts: list[tuple[RobotProfile, str]] = []
 
-    def fake_start(robot: RobotProfile, *, protocol: str):
+    def fake_start(
+        robot: RobotProfile,
+        *,
+        protocol: str,
+        maximum_velocity_m_s: float,
+    ):
+        assert maximum_velocity_m_s == 0.03
         starts.append((robot, protocol))
         return {"start": robot.cartesian_velocity_m_s}
 
@@ -303,8 +309,14 @@ def test_receiver_caps_start_velocity_and_records_requested_value(
     )
     starts: list[RobotProfile] = []
 
-    def fake_start(robot: RobotProfile, *, protocol: str):
+    def fake_start(
+        robot: RobotProfile,
+        *,
+        protocol: str,
+        maximum_velocity_m_s: float,
+    ):
         assert protocol == "legacy"
+        assert maximum_velocity_m_s == 0.03
         starts.append(robot)
         return {"start": robot.cartesian_velocity_m_s}
 
@@ -326,6 +338,67 @@ def test_receiver_caps_start_velocity_and_records_requested_value(
         == 0.2
     )
     assert manifest["capture_config"]["command_velocity_cap_m_s"] == 0.03
+
+
+def test_receiver_passes_extended_speed_only_over_versioned_protocol(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "versioned-extended-start"
+    fake_socket = FakeDatagramSocket(
+        [
+            (packet(), ("192.0.2.10", 40001)),
+            (end_packet(), ("192.0.2.10", 40001)),
+        ]
+    )
+    requested_profile = profile().with_overrides(cartesian_velocity_m_s=0.2)
+    starts: list[tuple[RobotProfile, str, float]] = []
+
+    def fake_start(
+        robot: RobotProfile,
+        *,
+        protocol: str,
+        maximum_velocity_m_s: float,
+    ):
+        starts.append((robot, protocol, maximum_velocity_m_s))
+        return {
+            "schema_version": "robot_command.v1",
+            "cartesian_velocity_m_s": robot.cartesian_velocity_m_s,
+        }
+
+    run_pose_receiver(
+        run_root,
+        profile=requested_profile,
+        protocol="v1",
+        maximum_command_velocity_m_s=1.0,
+        allow_real_robot=True,
+        allow_cameras=True,
+        socket_factory=FakeSocketFactory(fake_socket),
+        send_start_command=fake_start,
+        install_signal_handlers=False,
+    )
+
+    assert starts == [(requested_profile, "v1", 1.0)]
+    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
+    assert manifest["capture_config"]["cartesian_velocity_m_s"] == 0.2
+    assert manifest["capture_config"]["command_velocity_cap_m_s"] == 1.0
+    assert manifest["capture_config"]["protocol"] == "v1"
+
+
+def test_receiver_rejects_extended_limit_on_legacy_protocol(tmp_path: Path) -> None:
+    socket_factory = FakeSocketFactory(FakeDatagramSocket([]))
+
+    with pytest.raises(ValueError, match="require protocol='v1'"):
+        run_pose_receiver(
+            tmp_path / "legacy-extended-start",
+            profile=profile(),
+            maximum_command_velocity_m_s=1.0,
+            allow_real_robot=True,
+            allow_cameras=True,
+            socket_factory=socket_factory,
+            install_signal_handlers=False,
+        )
+
+    assert socket_factory.calls == []
 
 
 def test_receiver_retains_v1_frame_identity_and_packet_loss_evidence(

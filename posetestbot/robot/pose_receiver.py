@@ -470,6 +470,7 @@ def run_pose_receiver(
     verbose: bool = False,
     allow_real_robot: bool = False,
     allow_cameras: bool = False,
+    maximum_command_velocity_m_s: float = MAX_CAPTURE_COMMAND_VELOCITY_M_S,
     receive_start_timeout_s: float = DEFAULT_RECEIVE_START_TIMEOUT_S,
     receive_idle_timeout_s: float = DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
     socket_factory: Callable[..., Any] = socket.socket,
@@ -487,8 +488,17 @@ def run_pose_receiver(
     )
     requested_velocity_m_s = profile.cartesian_velocity_m_s
     commanded_velocity_m_s = bounded_capture_velocity_m_s(
-        requested_velocity_m_s
+        requested_velocity_m_s,
+        maximum_velocity_m_s=maximum_command_velocity_m_s,
     )
+    if (
+        maximum_command_velocity_m_s > MAX_CAPTURE_COMMAND_VELOCITY_M_S
+        and protocol != "v1"
+    ):
+        raise ValueError(
+            "Capture command limits above "
+            f"{MAX_CAPTURE_COMMAND_VELOCITY_M_S:g} m/s require protocol='v1'"
+        )
     command_profile = profile.with_overrides(
         cartesian_velocity_m_s=commanded_velocity_m_s
     )
@@ -524,9 +534,7 @@ def run_pose_receiver(
             capture_config={
                 "cartesian_velocity_m_s": commanded_velocity_m_s,
                 "requested_cartesian_velocity_m_s": requested_velocity_m_s,
-                "command_velocity_cap_m_s": (
-                    MAX_CAPTURE_COMMAND_VELOCITY_M_S
-                ),
+                "command_velocity_cap_m_s": maximum_command_velocity_m_s,
                 "protocol": protocol,
                 "mode": "real",
             },
@@ -542,6 +550,7 @@ def run_pose_receiver(
                 start_message = send_start_command(
                     command_profile,
                     protocol=protocol,
+                    maximum_velocity_m_s=maximum_command_velocity_m_s,
                 )
                 print(
                     "Sent start message to "

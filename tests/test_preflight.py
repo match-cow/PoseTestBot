@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from posetestbot.pipeline.preflight import (
     STAGE_RUNTIME_REQUIREMENTS,
     build_run_preflight,
@@ -128,44 +130,27 @@ def test_preflight_warns_for_optional_missing_runtime_without_required_stage(
     assert report["overall_status"] == "warning"
 
 
-def test_preflight_errors_when_non_dry_run_blenderproc_is_missing(tmp_path: Path) -> None:
-    run_root = tmp_path / "run"
-    write_config(
-        run_root,
-        plan_only=False,
-        options={"blenderproc_render": {"dry_run": False}},
-        dataset_mode="pose_template",
-    )
-
-    report = build_run_preflight(
-        run_root,
-        include_sensor_status=False,
-        collect_robot=fake_robot_status,
-        collect_sensors=fake_sensor_status,
-        collect_runtimes=lambda: runtime_status(blenderproc_available=False),
-    )
-
-    checks = {check["name"]: check for check in report["checks"]}
-    assert checks["runtime_status"]["status"] == "error"
-    assert checks["runtime_status"]["details"]["missing_required_runtime_ids"] == [
-        "blenderproc"
-    ]
-    assert checks["runtime_requirements"]["status"] == "error"
-    assert checks["runtime_requirements"]["details"]["missing_runtime_ids"] == [
-        "blenderproc"
-    ]
-    assert report["overall_status"] == "error"
-
-
-def test_preflight_does_not_require_blenderproc_for_objectless_render(
+def test_annotation_free_bop_sequence_rejects_blenderproc_render_options(
     tmp_path: Path,
 ) -> None:
     run_root = tmp_path / "run"
-    write_config(
-        run_root,
-        plan_only=False,
-        options={"blenderproc_render": {"dry_run": False}},
-    )
+    with pytest.raises(
+        ValueError,
+        match="Unknown pipeline sequence option group.*blenderproc_render",
+    ):
+        write_config(
+            run_root,
+            plan_only=False,
+            options={"blenderproc_render": {"dry_run": False}},
+            dataset_mode="pose_template",
+        )
+
+
+def test_preflight_does_not_require_blenderproc_for_annotation_free_bop_export(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    write_config(run_root, plan_only=False)
 
     report = build_run_preflight(
         run_root,
@@ -180,6 +165,11 @@ def test_preflight_does_not_require_blenderproc_for_objectless_render(
     assert checks["runtime_status"]["details"]["missing_required_runtime_ids"] == []
     assert checks["runtime_requirements"]["status"] == "ok"
     assert checks["runtime_requirements"]["details"]["requirement_count"] == 0
+    assert checks["sequence_plan"]["details"]["steps"] == [
+        "sync_run",
+        "sync_quality",
+        "bop_export",
+    ]
     assert report["overall_status"] == "warning"
 
 
@@ -205,7 +195,7 @@ def test_preflight_blocks_pose_template_gt_without_confirmed_selection(
 
     check = next(item for item in report["checks"] if item["name"] == "pose_template_selection")
     assert check["status"] == "error"
-    assert "requires a valid confirmed pose template" in check["message"]
+    assert "dataset export requires a valid confirmed pose template" in check["message"]
 
 
 def test_run_preflight_queue_summary_tracks_missing_ready_and_stale(tmp_path: Path) -> None:

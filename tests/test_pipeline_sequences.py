@@ -30,12 +30,15 @@ def test_capture_to_bop_dataset_sequence_uses_sync_quality_gate(tmp_path: Path) 
     assert step_ids(plan) == [
         "sync_run",
         "sync_quality",
-        "blenderproc_prepare",
-        "blenderproc_render",
         "bop_export",
     ]
     assert plan.steps[2].depends_on == ["sync_quality"]
-    assert plan.steps[3].options["dry_run"] is True
+    assert plan.steps[2].options["annotation_source"] == "none"
+    assert plan.steps[2].options["overwrite"] is True
+    assert "--annotation-source" in plan.steps[2].command
+    assert "blenderproc" not in " ".join(
+        part for step in plan.steps for part in step.command
+    ).lower()
 
 
 def test_calibrated_bop_sequence_passes_profiles_to_export(tmp_path: Path) -> None:
@@ -92,7 +95,9 @@ def test_real_full_capture_plan_never_persists_execution_acknowledgements(
     assert capture_execution.options["startup_wait_s"] == 15.0
     assert capture_execution.options["receive_start_timeout_s"] == 120.0
     assert capture_execution.options["receive_idle_timeout_s"] == 60.0
+    assert capture_execution.options["camera_metadata_idle_timeout_s"] == 5.0
     assert "--startup-wait" in capture_execution.command
+    assert "--camera-metadata-idle-timeout-s" in capture_execution.command
     for step in plan.steps:
         assert step.options.get("allow_cameras") is not True
         assert step.options.get("allow_real_robot") is not True
@@ -318,8 +323,9 @@ def test_calibrated_capture_to_bop_rectifies_before_consumers(tmp_path: Path) ->
         "sync_quality",
         "calibration_preflight",
         "camera_rectification",
-        "blenderproc_prepare",
-        "blenderproc_render",
         "bop_export",
     ]
     assert plan.steps[4].depends_on == ["camera_rectification"]
+    assert plan.steps[4].options["annotation_source"] == "none"
+    assert plan.steps[3].options["overwrite"] is True
+    assert plan.steps[4].options["overwrite"] is True

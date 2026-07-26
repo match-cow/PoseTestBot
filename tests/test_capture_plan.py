@@ -111,6 +111,33 @@ def test_capture_plan_builds_sensor_commands_then_one_receiver(tmp_path: Path) -
     assert receiver["command"][velocity_index + 1] == "0.03"
 
 
+def test_object_dataset_plan_passes_extended_speed_over_structured_protocol(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-extended-dataset-speed"
+    config = create_run_config(
+        run_root=run_root,
+        dataset_mode="pose_template",
+        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        velocity_m_s=0.15,
+    ).to_dict()
+
+    plan = build_capture_plan(config).to_dict()
+
+    assert plan["capture"]["requested_velocity_m_s"] == 0.15
+    assert plan["capture"]["velocity_m_s"] == 0.15
+    assert plan["capture"]["command_velocity_cap_m_s"] == 1.0
+    assert plan["capture"]["command_protocol"] == "v1"
+    assert not any("reduced to the host command cap" in note for note in plan["notes"])
+    assert any("structured robot_command.v1 protocol" in note for note in plan["notes"])
+    receiver = plan["commands"][-1]["command"]
+    assert receiver[receiver.index("--capture_vel") + 1] == "0.15"
+    assert receiver[receiver.index("--protocol") + 1] == "v1"
+    assert receiver[
+        receiver.index("--maximum-command-velocity-m-s") + 1
+    ] == "1.0"
+
+
 def test_capture_plan_uses_adapter_resolution_validation(tmp_path: Path) -> None:
     run_root = tmp_path / "run-bad-resolution"
     config = create_run_config(

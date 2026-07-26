@@ -7,9 +7,12 @@ import pytest
 from pytransform3d import rotations as pr
 from pytransform3d import transformations as pt
 
+from posetestbot.calibration import time_offset as time_offset_module
 from posetestbot.calibration.attempt_solver import transform_record
 from posetestbot.calibration.candidates import _robot_ee_to_reference
 from posetestbot.calibration.time_offset import (
+    IMPROVEMENT_EVIDENCE_STRATEGY,
+    LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY,
     apply_sensor_time_offset,
     estimate_sensor_time_offset,
     offset_values,
@@ -32,7 +35,7 @@ def _synthetic_offset_evidence(
     *,
     mode: str,
     planted_offset_ms: int,
-    motion_count: int = 9,
+    motion_count: int = 12,
     stationary_within_motion: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     camera_to_flange = pt.transform_from(
@@ -131,7 +134,7 @@ def test_auto_offset_recovers_planted_latency_with_exact_sign(
         mode=mode,
         offsets_ms=[float(value) for value in range(-40, 41, 10)],
         methods=("shah",),
-        max_search_motions=9,
+        max_search_motions=12,
     )
 
     assert result["status"] == "applied"
@@ -139,9 +142,14 @@ def test_auto_offset_recovers_planted_latency_with_exact_sign(
     assert result["selected_robot_pose_time_offset_ms"] == planted_offset_ms
     assert result["selected_sync_delta_ms"] == -planted_offset_ms
     assert result["boundary_hit"] is False
-    assert result["split"]["motion_count"] == 9
+    assert result["split"]["motion_count"] == 12
     assert set(result["split"]["frame_ids"]) == {"fold_0", "fold_1", "fold_2"}
     assert result["cross_validation"]["improvement"]["relative_translation"] > 0.05
+    assert result["improvement_evidence_strategy"] == IMPROVEMENT_EVIDENCE_STRATEGY
+    assert result["motion_consistency"]["status"] == "ok"
+    method_evidence = result["motion_consistency"]["methods"]["shah"]
+    assert method_evidence["positive_motion_count"] == 12
+    assert method_evidence["candidate_search_adjusted_positive_sign_p_value"] <= 0.05
     assert len(adjusted) == len(observations)
     assert {item["robot_pose_time_offset_ms"] for item in adjusted} == {
         float(planted_offset_ms)
@@ -162,7 +170,7 @@ def test_auto_offset_boundary_optimum_fails_closed() -> None:
         mode="eye_in_hand",
         offsets_ms=[float(value) for value in range(-40, 41, 10)],
         methods=("shah",),
-        max_search_motions=9,
+        max_search_motions=12,
     )
 
     assert result["status"] == "failed"
@@ -175,10 +183,10 @@ def test_auto_offset_requires_three_motion_disjoint_folds() -> None:
     observations, robot_records = _synthetic_offset_evidence(
         mode="eye_in_hand",
         planted_offset_ms=20,
-        motion_count=8,
+        motion_count=11,
     )
 
-    with pytest.raises(ValueError, match="at least 9 motion groups"):
+    with pytest.raises(ValueError, match="at least 12 motion groups"):
         estimate_sensor_time_offset(
             observations,
             sensor_key="realsense_d435:test",
@@ -203,7 +211,7 @@ def test_auto_offset_rejects_a_flat_unobservable_curve() -> None:
         mode="eye_in_hand",
         offsets_ms=[float(value) for value in range(-40, 41, 10)],
         methods=("shah",),
-        max_search_motions=9,
+        max_search_motions=12,
     )
 
     assert result["status"] == "failed"
@@ -217,6 +225,84 @@ def test_auto_offset_rejects_a_flat_unobservable_curve() -> None:
         == "error"
     )
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
+
+
+def test_auto_offset_motion_consistency_is_a_hard_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations, robot_records = _synthetic_offset_evidence(
+        mode="eye_in_hand",
+        planted_offset_ms=20,
+    )
+    monkeypatch.setattr(
+        time_offset_module,
+        "_leave_one_motion_out_consistency",
+        lambda *_args, **_kwargs: {
+            "status": "error",
+            "motion_count": 12,
+            "methods": {"shah": {"status": "error"}},
+        },
+    )
+
+    result, adjusted = estimate_sensor_time_offset(
+        observations,
+        sensor_key="realsense_d435:test",
+        robot_records=robot_records,
+        mode="eye_in_hand",
+        offsets_ms=[float(value) for value in range(-40, 41, 10)],
+        methods=("shah",),
+        max_search_motions=12,
+    )
+
+    assert result["status"] == "failed"
+    assert result["selected_robot_pose_time_offset_ms"] == 0.0
+    assert (
+        next(
+            item
+            for item in result["checks"]
+            if item["name"] == "leave_one_motion_out_timing_consistency"
+        )["status"]
+        == "error"
+    )
+    assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
+
+
+def test_legacy_time_offset_strategy_replays_original_evidence_rule() -> None:
+    observations, robot_records = _synthetic_offset_evidence(
+        mode="eye_in_hand",
+        planted_offset_ms=20,
+        motion_count=9,
+    )
+
+    result, _adjusted = estimate_sensor_time_offset(
+        observations,
+        sensor_key="realsense_d435:test",
+        robot_records=robot_records,
+        mode="eye_in_hand",
+        offsets_ms=[float(value) for value in range(-40, 41, 10)],
+        methods=("shah",),
+        max_search_motions=9,
+        min_motions_per_fold=3,
+        improvement_evidence_strategy=LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY,
+    )
+
+    assert result["status"] == "applied"
+    assert result["motion_consistency"] is None
+    assert result["decision_reason"] == "motion_disjoint_cross_validation_passed"
+    assert {item["name"] for item in result["checks"]}.isdisjoint(
+        {
+            "cross_validation_fold_materiality",
+            "leave_one_motion_out_timing_consistency",
+        }
+    )
+
+
+def test_full_search_correction_requires_16_of_17_positive_motions() -> None:
+    sixteen_positive = time_offset_module._positive_sign_p_value(16, 17)
+    fifteen_positive = time_offset_module._positive_sign_p_value(15, 17)
+
+    assert sixteen_positive * 60 < 0.05
+    assert fifteen_positive * 60 > 0.05
 
 
 def test_time_offset_public_contract_is_explicit_and_deterministic() -> None:

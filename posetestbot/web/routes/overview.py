@@ -252,7 +252,11 @@ def _validated_artifact_status(
         exports = value.get("exports")
         if (
             value.get("schema_version")
-            not in {"bop_export_manifest.v3", "bop_export_manifest.v4"}
+            not in {
+                "bop_export_manifest.v3",
+                "bop_export_manifest.v4",
+                "bop_export_manifest.v5",
+            }
             or not isinstance(exports, list)
             or not exports
             or not all(isinstance(item, Mapping) for item in exports)

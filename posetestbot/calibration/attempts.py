@@ -23,7 +23,11 @@ from posetestbot.calibration.attempt_solver import (
     DEFAULT_MAX_OUTLIER_RATIO,
     DEFAULT_MAX_PNP_ALL_POINT_MEAN_ERROR_PX,
     DEFAULT_MAX_OBSERVATIONS_PER_MOTION,
+    DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS,
     DEFAULT_MIN_INLIERS,
+    DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO,
+    DEFAULT_MIN_IMAGE_CENTROID_X_SPAN_RATIO,
+    DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO,
     DEFAULT_MIN_PNP_COMMON_INLIERS,
     DEFAULT_MIN_PNP_COMMON_INLIER_RATIO,
     DEFAULT_MIN_PNP_GRID_COLUMNS,
@@ -84,9 +88,14 @@ from posetestbot.calibration.targets import (
     validate_target_identity,
 )
 from posetestbot.calibration.time_offset import (
+    DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE,
     DEFAULT_POLICY as DEFAULT_SYNCHRONIZATION_POLICY,
     DEFAULT_REFERENCE_PNP_METHOD,
+    IMPROVEMENT_EVIDENCE_STRATEGY,
     IMPLEMENTATION_REVISION as TIME_OFFSET_IMPLEMENTATION_REVISION,
+    LEGACY_IMPLEMENTATION_REVISION as TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION,
+    LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY,
+    LOMO_CONSISTENCY_STRATEGY,
     POLICIES as SYNCHRONIZATION_POLICIES,
     SCHEMA_VERSION as TIME_OFFSET_SEARCH_SCHEMA_VERSION,
     SUPPORTED_IMPLEMENTATION_REVISIONS as TIME_OFFSET_SUPPORTED_REVISIONS,
@@ -668,6 +677,7 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                 for policy_id, label in INTRINSICS_POLICIES.items()
             ],
             "synchronization": {
+                "implementation_revision": TIME_OFFSET_IMPLEMENTATION_REVISION,
                 "default_policy": "auto_offset",
                 "policies": [
                     {
@@ -675,7 +685,8 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                         "label": "Auto-estimate robot-pose offset — recommended",
                         "description": (
                             "Estimate effective per-camera latency with "
-                            "motion-disjoint cross-validation."
+                            "motion-disjoint cross-validation and "
+                            "search-corrected leave-one-motion-out evidence."
                         ),
                     },
                     {
@@ -725,6 +736,18 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                 ),
                 "max_observations_per_motion": (DEFAULT_MAX_OBSERVATIONS_PER_MOTION),
                 "max_nearest_pose_delta_ms": (ATTEMPT_MAX_NEAREST_POSE_DELTA_MS),
+                "image_coverage_tail_support_views": (
+                    DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS
+                ),
+                "min_image_centroid_x_span_ratio": (
+                    DEFAULT_MIN_IMAGE_CENTROID_X_SPAN_RATIO
+                ),
+                "min_image_centroid_y_span_ratio": (
+                    DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO
+                ),
+                "min_image_centroid_hull_area_ratio": (
+                    DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO
+                ),
                 "max_mean_translation_mm": 10.0,
                 "max_mean_rotation_deg": 5.0,
                 "max_outlier_ratio": 0.25,
@@ -2409,6 +2432,7 @@ def _estimate_target_poses(
                 ),
                 "marker_count": int(detection.get("marker_count", 0)),
                 "image_centroid_px": detection.get("image_centroid_px"),
+                "image_size": detections.get("image_size"),
                 "image_coverage_cell": _coverage_cell(
                     detection.get("image_centroid_px"),
                     detections.get("image_size"),
@@ -2499,6 +2523,7 @@ def _estimate_target_poses(
                             "all_point_mean_reprojection_error_px"
                         ],
                         "image_centroid_px": detection.get("image_centroid_px"),
+                        "image_size": detections.get("image_size"),
                         "image_coverage_cell": _coverage_cell(
                             detection.get("image_centroid_px"),
                             detections.get("image_size"),
@@ -2709,6 +2734,25 @@ def _estimate_and_apply_time_offsets(
             "Unsupported calibration time-offset implementation revision: "
             f"{implementation_revision}"
         )
+    improvement_evidence_strategy = (
+        LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY
+        if implementation_revision == TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
+        else IMPROVEMENT_EVIDENCE_STRATEGY
+    )
+    max_lomo_search_adjusted_sign_p_value = float(
+        search_configuration.get(
+            "maximum_leave_one_motion_out_search_adjusted_sign_p_value",
+            DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE,
+        )
+    )
+    if (
+        not math.isfinite(max_lomo_search_adjusted_sign_p_value)
+        or not 0.0 < max_lomo_search_adjusted_sign_p_value <= 1.0
+    ):
+        raise ValueError(
+            "Calibration time-offset leave-one-motion-out maximum "
+            "search-adjusted sign p-value must be in (0, 1]"
+        )
     max_nearest_pose_delta_ms = float(search_configuration["max_nearest_pose_delta_ms"])
     if not math.isfinite(max_nearest_pose_delta_ms) or max_nearest_pose_delta_ms <= 0.0:
         raise ValueError(
@@ -2801,6 +2845,10 @@ def _estimate_and_apply_time_offsets(
                     minimum_offset_stability_ms=float(
                         search_configuration["minimum_offset_stability_ms"]
                     ),
+                    improvement_evidence_strategy=improvement_evidence_strategy,
+                    max_leave_one_motion_out_search_adjusted_sign_p_value=(
+                        max_lomo_search_adjusted_sign_p_value
+                    ),
                 )
                 selected_offset_ms = float(
                     sensor_result["selected_robot_pose_time_offset_ms"]
@@ -2843,7 +2891,36 @@ def _estimate_and_apply_time_offsets(
     }
     atomic_write_json(attempt_root / TIME_OFFSET_SEARCH, report)
     if failed:
-        raise ValueError("Auto-sync evidence failed closed for: " + ", ".join(failed))
+        failed_details = []
+        for item in sensor_results:
+            sensor_key = str(item.get("sensor_key") or "")
+            if sensor_key not in failed:
+                continue
+            error_checks = [
+                str(check.get("name"))
+                for check in item.get("checks", [])
+                if isinstance(check, Mapping) and check.get("status") == "error"
+            ]
+            if (
+                not error_checks
+                and implementation_revision
+                == TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
+            ):
+                error_checks.append(
+                    "recorded legacy every-fold materiality/safety rule"
+                )
+            failed_details.append(
+                sensor_key + (f" ({', '.join(error_checks)})" if error_checks else "")
+            )
+        message = "Auto-sync evidence failed closed for: " + ", ".join(failed_details)
+        if implementation_revision != TIME_OFFSET_IMPLEMENTATION_REVISION:
+            message += (
+                ". This immutable attempt records legacy timing revision "
+                f"{implementation_revision}; it is not upgraded in place. Restart "
+                "the PoseTestBot backend and create a new attempt to use "
+                f"{TIME_OFFSET_IMPLEMENTATION_REVISION}"
+            )
+        raise ValueError(message)
     return report, adjusted
 
 
@@ -3117,6 +3194,18 @@ def _compare_solutions(
                     sensor_key=sensor_key,
                     min_accepted_views=DEFAULT_MIN_ACCEPTED_VIEWS,
                     min_coverage_cells=DEFAULT_MIN_COVERAGE_CELLS,
+                    image_coverage_tail_support_views=(
+                        DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS
+                    ),
+                    min_image_centroid_x_span_ratio=(
+                        DEFAULT_MIN_IMAGE_CENTROID_X_SPAN_RATIO
+                    ),
+                    min_image_centroid_y_span_ratio=(
+                        DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO
+                    ),
+                    min_image_centroid_hull_area_ratio=(
+                        DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO
+                    ),
                     min_motion_poses=ATTEMPT_MIN_MOTION_POSES,
                     min_translation_span_mm=(ATTEMPT_MIN_TRANSLATION_SPAN_MM),
                     min_rotation_span_deg=ATTEMPT_MIN_ROTATION_SPAN_DEG,
@@ -3859,6 +3948,18 @@ def _validate_and_rank(
             "min_inliers": 6,
             "min_accepted_views": DEFAULT_MIN_ACCEPTED_VIEWS,
             "min_coverage_cells": DEFAULT_MIN_COVERAGE_CELLS,
+            "image_coverage_tail_support_views": (
+                DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS
+            ),
+            "min_image_centroid_x_span_ratio": (
+                DEFAULT_MIN_IMAGE_CENTROID_X_SPAN_RATIO
+            ),
+            "min_image_centroid_y_span_ratio": (
+                DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO
+            ),
+            "min_image_centroid_hull_area_ratio": (
+                DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO
+            ),
             "max_per_view_reprojection_error_px": (DEFAULT_MAX_VIEW_ERROR_PX),
             "max_intrinsic_rms_reprojection_error_px": DEFAULT_MAX_RMS_PX,
             "min_motion_poses": ATTEMPT_MIN_MOTION_POSES,
@@ -3911,7 +4012,10 @@ def _validate_and_rank(
 
 
 def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, Any]:
-    root = Path(run_root)
+    # Downstream synchronization helpers accept both run-relative sensor names
+    # and absolute sensor paths.  Resolve once here so a relative CLI run root
+    # cannot be joined to itself when an absolute sensor path is required.
+    root = Path(run_root).resolve()
     attempt_root = calibration_attempt_root(root, attempt_id)
     request_value = _read_json(attempt_root / REQUEST_FILE)
     initial_progress = _read_json(attempt_root / PROGRESS_FILE)
@@ -4339,6 +4443,312 @@ def _promotion_selections(
     return selected
 
 
+def _validate_promotion_motion_consistency(
+    item: Mapping[str, Any],
+    *,
+    sensor_key: str,
+    candidate_offset: float,
+    recorded_search: Mapping[str, Any],
+    search_grid: Sequence[float],
+    check_by_name: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Recalculate the v2 motion-consistency summary before promotion."""
+
+    status = str(item.get("status") or "")
+    fold_check = check_by_name["cross_validation_fold_materiality"]
+    consistency_check = check_by_name["leave_one_motion_out_timing_consistency"]
+    evidence = item.get("motion_consistency")
+    if status == "kept_zero":
+        if (
+            evidence is not None
+            or fold_check.get("status") != "not_needed"
+            or consistency_check.get("status") != "not_needed"
+        ):
+            raise ValueError(
+                f"Zero-offset motion-consistency evidence is invalid for {sensor_key}"
+            )
+        return
+    if (
+        status != "applied"
+        or not isinstance(evidence, Mapping)
+        or evidence.get("strategy") != LOMO_CONSISTENCY_STRATEGY
+        or evidence.get("status") != "ok"
+        or evidence.get("candidate_search_adjustment") != "bonferroni"
+        or evidence.get("candidate_selection_uses_audited_motions") is not True
+        or evidence.get("transform_training_motion_disjoint") is not True
+        or consistency_check.get("status") != "ok"
+        or fold_check.get("status") not in {"ok", "warning"}
+    ):
+        raise ValueError(
+            f"Leave-one-motion-out timing evidence is invalid for {sensor_key}"
+        )
+
+    try:
+        evidence_candidate = float(evidence["candidate_robot_pose_time_offset_ms"])
+        motion_count = int(evidence["motion_count"])
+        candidate_hypothesis_count = int(evidence["candidate_search_hypothesis_count"])
+        minimum_motion_count = (
+            int(recorded_search["minimum_motion_count_per_cross_validation_fold"]) * 3
+        )
+        maximum_motion_count = int(recorded_search["maximum_search_motion_count"])
+        minimum_absolute = float(
+            recorded_search["minimum_absolute_cross_validated_improvement_mm"]
+        )
+        minimum_relative = float(
+            recorded_search["minimum_relative_cross_validated_improvement"]
+        )
+        maximum_adjusted_p = float(
+            recorded_search["maximum_leave_one_motion_out_search_adjusted_sign_p_value"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Leave-one-motion-out timing thresholds are invalid for {sensor_key}"
+        ) from exc
+    expected_hypothesis_count = sum(
+        not math.isclose(float(value), 0.0, rel_tol=0.0, abs_tol=1e-9)
+        for value in search_grid
+    )
+    if (
+        not math.isclose(
+            evidence_candidate,
+            candidate_offset,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        or not minimum_motion_count <= motion_count <= maximum_motion_count
+        or candidate_hypothesis_count != expected_hypothesis_count
+        or not all(
+            math.isfinite(value)
+            for value in (minimum_absolute, minimum_relative, maximum_adjusted_p)
+        )
+        or minimum_absolute < 0.0
+        or minimum_relative < 0.0
+        or not 0.0 < maximum_adjusted_p <= 1.0
+    ):
+        raise ValueError(
+            f"Leave-one-motion-out timing bounds are invalid for {sensor_key}"
+        )
+
+    thresholds = evidence.get("thresholds")
+    expected_thresholds = {
+        "minimum_median_absolute_translation_mm": minimum_absolute,
+        "minimum_median_relative_translation": minimum_relative,
+        "maximum_search_adjusted_positive_sign_p_value": maximum_adjusted_p,
+    }
+    if not isinstance(thresholds, Mapping) or dict(thresholds) != expected_thresholds:
+        raise ValueError(
+            f"Leave-one-motion-out timing thresholds are inconsistent for {sensor_key}"
+        )
+
+    expected_methods = tuple(
+        str(method) for method in recorded_search["reference_extrinsic_methods"]
+    )
+    summaries = evidence.get("methods")
+    motions = evidence.get("motions")
+    if (
+        not expected_methods
+        or not isinstance(summaries, Mapping)
+        or set(summaries) != set(expected_methods)
+        or not isinstance(motions, list)
+        or len(motions) != motion_count
+    ):
+        raise ValueError(
+            f"Leave-one-motion-out timing coverage is invalid for {sensor_key}"
+        )
+
+    improvements: dict[str, list[dict[str, float]]] = {
+        method: [] for method in expected_methods
+    }
+    motion_names: set[str] = set()
+    for motion in motions:
+        if not isinstance(motion, Mapping):
+            raise ValueError(
+                f"Leave-one-motion-out timing motion is invalid for {sensor_key}"
+            )
+        motion_name = str(motion.get("motion") or "")
+        method_evidence = motion.get("methods")
+        try:
+            validation_observation_count = int(motion["validation_observation_count"])
+            training_motion_count = int(motion["training_motion_count"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Leave-one-motion-out timing motion is invalid for {sensor_key}"
+            ) from exc
+        if (
+            not motion_name
+            or motion_name in motion_names
+            or validation_observation_count <= 0
+            or training_motion_count != motion_count - 1
+            or not isinstance(method_evidence, Mapping)
+            or set(method_evidence) != set(expected_methods)
+        ):
+            raise ValueError(
+                f"Leave-one-motion-out timing motion is invalid for {sensor_key}"
+            )
+        motion_names.add(motion_name)
+        for method in expected_methods:
+            raw_method_evidence = method_evidence[method]
+            if not isinstance(raw_method_evidence, Mapping):
+                raise ValueError(
+                    f"Leave-one-motion-out timing improvement is invalid for {sensor_key}"
+                )
+            raw_improvement = raw_method_evidence.get("improvement")
+            zero_residuals = raw_method_evidence.get("zero_offset_residuals")
+            candidate_residuals = raw_method_evidence.get("candidate_residuals")
+            if (
+                not isinstance(raw_improvement, Mapping)
+                or not isinstance(zero_residuals, Mapping)
+                or not isinstance(candidate_residuals, Mapping)
+            ):
+                raise ValueError(
+                    f"Leave-one-motion-out timing improvement is invalid for {sensor_key}"
+                )
+            try:
+                zero_translation = float(zero_residuals["mean_translation_mm"])
+                zero_rotation = float(zero_residuals["mean_rotation_deg"])
+                candidate_translation = float(
+                    candidate_residuals["mean_translation_mm"]
+                )
+                candidate_rotation = float(candidate_residuals["mean_rotation_deg"])
+                improvement = {
+                    "absolute_translation_mm": float(
+                        raw_improvement["absolute_translation_mm"]
+                    ),
+                    "relative_translation": float(
+                        raw_improvement["relative_translation"]
+                    ),
+                    "rotation_change_deg": float(
+                        raw_improvement["rotation_change_deg"]
+                    ),
+                }
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Leave-one-motion-out timing improvement is invalid for {sensor_key}"
+                ) from exc
+            source_values = (
+                zero_translation,
+                zero_rotation,
+                candidate_translation,
+                candidate_rotation,
+                *improvement.values(),
+            )
+            expected_absolute = zero_translation - candidate_translation
+            expected_relative = (
+                expected_absolute / zero_translation if zero_translation > 0.0 else None
+            )
+            expected_rotation = candidate_rotation - zero_rotation
+            if (
+                not all(math.isfinite(value) for value in source_values)
+                or expected_relative is None
+                or not math.isclose(
+                    improvement["absolute_translation_mm"],
+                    expected_absolute,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                or not math.isclose(
+                    improvement["relative_translation"],
+                    expected_relative,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                or not math.isclose(
+                    improvement["rotation_change_deg"],
+                    expected_rotation,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise ValueError(
+                    f"Leave-one-motion-out timing improvement is invalid for {sensor_key}"
+                )
+            improvements[method].append(improvement)
+
+    for method, values in improvements.items():
+        positive_count = sum(
+            value["absolute_translation_mm"] > 1e-12 for value in values
+        )
+        material_count = sum(
+            value["absolute_translation_mm"] >= minimum_absolute
+            and value["relative_translation"] >= minimum_relative
+            for value in values
+        )
+        raw_p = float(
+            sum(
+                math.comb(motion_count, count)
+                for count in range(positive_count, motion_count + 1)
+            )
+            / (2**motion_count)
+        )
+        adjusted_p = min(1.0, raw_p * candidate_hypothesis_count)
+        medians = {
+            "absolute_translation_mm": float(
+                np.median([value["absolute_translation_mm"] for value in values])
+            ),
+            "relative_translation": float(
+                np.median([value["relative_translation"] for value in values])
+            ),
+            "rotation_change_deg": float(
+                np.median([value["rotation_change_deg"] for value in values])
+            ),
+        }
+        summary = summaries[method]
+        if not isinstance(summary, Mapping):
+            raise ValueError(
+                f"Leave-one-motion-out timing summary is invalid for {sensor_key}"
+            )
+        recorded_medians = summary.get("median_improvement")
+        try:
+            summary_values_match = (
+                summary.get("status") == "ok"
+                and int(summary["motion_count"]) == motion_count
+                and int(summary["positive_motion_count"]) == positive_count
+                and int(summary["material_motion_count"]) == material_count
+                and math.isclose(
+                    float(summary["positive_sign_p_value"]),
+                    raw_p,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                and math.isclose(
+                    float(summary["candidate_search_adjusted_positive_sign_p_value"]),
+                    adjusted_p,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                and isinstance(recorded_medians, Mapping)
+                and all(
+                    math.isclose(
+                        float(recorded_medians[name]),
+                        value,
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                    for name, value in medians.items()
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            summary_values_match = False
+        if (
+            not summary_values_match
+            or medians["absolute_translation_mm"] < minimum_absolute
+            or medians["relative_translation"] < minimum_relative
+            or adjusted_p > maximum_adjusted_p
+        ):
+            raise ValueError(
+                f"Leave-one-motion-out timing summary is inconsistent for {sensor_key}"
+            )
+
+    expected_check_actual = {
+        "motion_count": motion_count,
+        "methods": dict(summaries),
+    }
+    if consistency_check.get("actual") != expected_check_actual:
+        raise ValueError(
+            f"Leave-one-motion-out timing check is inconsistent for {sensor_key}"
+        )
+
+
 def _promotion_time_offset_evidence(
     attempt: Mapping[str, Any],
 ) -> dict[str, Mapping[str, Any]]:
@@ -4403,6 +4813,13 @@ def _promotion_time_offset_evidence(
         "cross_validated_rotation_guard",
         "zero_offset_identifiability",
     }
+    if recorded_revision != TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION:
+        required_auto_checks.update(
+            {
+                "cross_validation_fold_materiality",
+                "leave_one_motion_out_timing_consistency",
+            }
+        )
     for sensor_key, item in sensors.items():
         status = str(item.get("status") or "")
         valid_statuses = (
@@ -4445,11 +4862,29 @@ def _promotion_time_offset_evidence(
             if isinstance(check, Mapping)
         }
         if policy == "auto_offset":
+            if (
+                recorded_revision != TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
+                and item.get("improvement_evidence_strategy")
+                != IMPROVEMENT_EVIDENCE_STRATEGY
+            ):
+                raise ValueError(
+                    "Auto-sync improvement evidence strategy is invalid for "
+                    f"{sensor_key}"
+                )
             if not required_auto_checks.issubset(check_by_name) or any(
                 check.get("status") == "error" for check in check_by_name.values()
             ):
                 raise ValueError(
                     f"Auto-sync checks are not promotable for {sensor_key}"
+                )
+            if recorded_revision != TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION:
+                _validate_promotion_motion_consistency(
+                    item,
+                    sensor_key=sensor_key,
+                    candidate_offset=candidate_offset,
+                    recorded_search=recorded_search,
+                    search_grid=search_grid,
+                    check_by_name=check_by_name,
                 )
             if status == "applied":
                 if (

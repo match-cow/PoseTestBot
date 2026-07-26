@@ -64,12 +64,11 @@ def test_capture_uses_commissioned_start_and_end_ptp_frames() -> None:
 def test_cartesian_command_is_converted_before_joint_velocity_is_applied() -> None:
     java = JAVA_PATH.read_text()
 
-    assert "boundedCartesianVelocityMps * 1000.0 / orbitRadiusMm" in java
+    assert "cartesianVelocityMps * 1000.0 / orbitRadiusMm" in java
     assert "/ A1_FULL_SPEED_UPPER_BOUND_RAD_S" in java
     assert "Math.toRadians(98.0)" in java
-    assert "MAX_CAPTURE_CARTESIAN_VELOCITY_M_S = 0.03" in java
+    assert "MAX_CAPTURE_CARTESIAN_VELOCITY_M_S" not in java
     assert "Math.toRadians(3.0)" in java
-    assert "Math.min(\n\t\t\t\tcartesianVelocityMps" in java
     assert "Math.min(\n\t\t\t\trequestedAngularVelocityRadS" in java
     assert ".setJointVelocityRel(captureJointVelocityRel)" in java
     assert ".setJointVelocityRel(command.cartesianVelocityMps)" not in java
@@ -121,6 +120,8 @@ def test_full_capture_document_explains_frame_and_static_profile_boundary() -> N
         in normalized
     )
     assert "0.03 m/s" in document
+    assert "1.00 m/s" in document
+    assert "`robot_command.v1`" in document
     assert "3°/s" in document
     assert "Speed alone cannot guarantee blur-free images" in normalized
     assert "cannot interrupt the active A1 motion" in document

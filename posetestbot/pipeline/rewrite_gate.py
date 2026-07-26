@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.bop.writer import validate_bop_model_ply
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     BOP_DIR,
@@ -24,6 +25,7 @@ from posetestbot.io.artifacts import (
     FRAME_METADATA_JSONL,
     HARDWARE_STATUS_REPORT,
     MODELS_DIR,
+    MODELS_EVAL_DIR,
     MULTIVIEW_FRAME_GROUPS,
     OBJECT_INSTANCES,
     PIPELINE_SEQUENCE_PLAN,
@@ -369,18 +371,14 @@ def _hardware_sync_bop_checks(
     run_config, _ = _load_json_object(root / RUN_CONFIG)
     capture = run_config.get("capture") if run_config is not None else None
     synchronization = (
-        capture.get("synchronization")
-        if isinstance(capture, Mapping)
-        else None
+        capture.get("synchronization") if isinstance(capture, Mapping) else None
     )
     if (
         not isinstance(synchronization, Mapping)
         or synchronization.get("mode") != "hardware_trigger"
     ):
         return []
-    raw_configured_skew_ms = synchronization.get(
-        "max_depth_timestamp_skew_ms"
-    )
+    raw_configured_skew_ms = synchronization.get("max_depth_timestamp_skew_ms")
     expected_skew_ns: int | None = None
     if (
         not isinstance(raw_configured_skew_ms, bool)
@@ -388,13 +386,9 @@ def _hardware_sync_bop_checks(
         and math.isfinite(float(raw_configured_skew_ms))
         and float(raw_configured_skew_ms) > 0
     ):
-        expected_skew_ns = int(
-            round(float(raw_configured_skew_ms) * 1_000_000)
-        )
+        expected_skew_ns = int(round(float(raw_configured_skew_ms) * 1_000_000))
 
-    source_path = (
-        root / PROCESSED_DIR / "synchronized" / MULTIVIEW_FRAME_GROUPS
-    )
+    source_path = root / PROCESSED_DIR / "synchronized" / MULTIVIEW_FRAME_GROUPS
     frame_sets_path = root / BOP_DIR / BOP_FRAME_SETS
     frame_map_path = root / BOP_DIR / BOP_FRAME_MAP_JSON
     source_groups, source_error = _load_json_object(source_path)
@@ -403,16 +397,13 @@ def _hardware_sync_bop_checks(
     capture_report, capture_report_error = _load_json_object(
         root / CAPTURE_EXECUTION_REPORT
     )
-    mapped_scenes = (
-        frame_map.get("scenes")
-        if isinstance(frame_map, Mapping)
-        else None
+    frame_map_schema = (
+        frame_map.get("schema_version") if isinstance(frame_map, Mapping) else None
     )
+    mapped_scenes = frame_map.get("scenes") if isinstance(frame_map, Mapping) else None
 
     source_rows = (
-        source_groups.get("groups")
-        if isinstance(source_groups, Mapping)
-        else None
+        source_groups.get("groups") if isinstance(source_groups, Mapping) else None
     )
     source_validation_error: str | None = None
     source_valid = False
@@ -436,9 +427,7 @@ def _hardware_sync_bop_checks(
         if isinstance(group, Mapping) and group.get("frame_group_id")
     }
     frame_set_rows = (
-        frame_sets.get("frame_sets")
-        if isinstance(frame_sets, Mapping)
-        else None
+        frame_sets.get("frame_sets") if isinstance(frame_sets, Mapping) else None
     )
     source_ids = {
         str(group.get("frame_group_id"))
@@ -467,11 +456,7 @@ def _hardware_sync_bop_checks(
     projection_truth_errors: list[str] = []
     projection_truth_by_scene: dict[int, dict[str, str]] = {}
     exports_by_scene: dict[int, Mapping[str, Any]] = {}
-    raw_exports = (
-        bop_export.get("exports")
-        if isinstance(bop_export, Mapping)
-        else None
-    )
+    raw_exports = bop_export.get("exports") if isinstance(bop_export, Mapping) else None
     if isinstance(raw_exports, list):
         for export in raw_exports:
             if not isinstance(export, Mapping):
@@ -479,9 +464,7 @@ def _hardware_sync_bop_checks(
                 continue
             try:
                 raw_scene_id = export["scene_id"]
-                if isinstance(raw_scene_id, bool) or not isinstance(
-                    raw_scene_id, int
-                ):
+                if isinstance(raw_scene_id, bool) or not isinstance(raw_scene_id, int):
                     raise TypeError
                 scene_id = raw_scene_id
             except (KeyError, TypeError, ValueError):
@@ -538,9 +521,7 @@ def _hardware_sync_bop_checks(
                     authoritative_path,
                     input_path,
                 )
-                authoritative_fingerprint = rectification[
-                    "source_fingerprint"
-                ]
+                authoritative_fingerprint = rectification["source_fingerprint"]
                 input_fingerprint = rectification["output_fingerprint"]
             else:
                 authoritative_fingerprint = rgbd_camera_artifact_fingerprint(
@@ -566,9 +547,7 @@ def _hardware_sync_bop_checks(
             "input_sensor_folder": expected_input,
             "authoritative_source_sensor_folder": expected_authoritative,
             "input_fingerprint_sha256": input_digest,
-            "authoritative_source_fingerprint_sha256": (
-                authoritative_digest
-            ),
+            "authoritative_source_fingerprint_sha256": (authoritative_digest),
         }
         projection_truth_by_scene[scene_id] = truth
         return truth
@@ -602,9 +581,7 @@ def _hardware_sync_bop_checks(
                     "depth_timestamp_span_ns": source_group.get(
                         "depth_timestamp_span_ns"
                     ),
-                    "matched_robot_pose": source_group.get(
-                        "matched_robot_pose"
-                    ),
+                    "matched_robot_pose": source_group.get("matched_robot_pose"),
                 }
                 if any(
                     frame_set.get(field) != expected
@@ -677,10 +654,9 @@ def _hardware_sync_bop_checks(
                         for field in provenance_fields
                     ):
                         references_ok = False
-                if (
-                    im_id not in scene_images.get(scene_id, set())
-                    or view.get("sensor_name") != scene_sensors.get(scene_id)
-                ):
+                if im_id not in scene_images.get(scene_id, set()) or view.get(
+                    "sensor_name"
+                ) != scene_sensors.get(scene_id):
                     references_ok = False
                 expected_sensor_name = (
                     Path(str(source_frame.get("sensor_folder") or "")).name
@@ -693,9 +669,7 @@ def _hardware_sync_bop_checks(
                     else None
                 )
                 mapped_frames = (
-                    scene_map.get("frames")
-                    if isinstance(scene_map, Mapping)
-                    else None
+                    scene_map.get("frames") if isinstance(scene_map, Mapping) else None
                 )
                 mapped_frame = (
                     mapped_frames.get(str(im_id))
@@ -710,18 +684,14 @@ def _hardware_sync_bop_checks(
                 )
                 expected_bop_rgb = (
                     (
-                        Path(expected_scene_folder)
-                        / RGB_DIR
-                        / f"{im_id:06d}.png"
+                        Path(expected_scene_folder) / RGB_DIR / f"{im_id:06d}.png"
                     ).as_posix()
                     if expected_scene_folder
                     else ""
                 )
                 expected_bop_depth = (
                     (
-                        Path(expected_scene_folder)
-                        / DEPTH_DIR
-                        / f"{im_id:06d}.png"
+                        Path(expected_scene_folder) / DEPTH_DIR / f"{im_id:06d}.png"
                     ).as_posix()
                     if expected_scene_folder
                     else ""
@@ -753,13 +723,42 @@ def _hardware_sync_bop_checks(
                     == truth["authoritative_source_sensor_folder"]
                     and view.get("bop_input_fingerprint_sha256")
                     == truth["input_fingerprint_sha256"]
-                    and view.get(
-                        "authoritative_source_fingerprint_sha256"
-                    )
-                    == truth[
-                        "authoritative_source_fingerprint_sha256"
-                    ]
+                    and view.get("authoritative_source_fingerprint_sha256")
+                    == truth["authoritative_source_fingerprint_sha256"]
                 )
+                mapped_provenance_ok = False
+                if isinstance(mapped_frame, Mapping) and isinstance(
+                    source_frame, Mapping
+                ):
+                    if frame_map_schema == "posetestbot_bop_frame_map.v2":
+                        mapped_provenance_ok = (
+                            mapped_frame.get("sensor_name") == expected_sensor_name
+                            and mapped_frame.get("scene_id") == scene_id
+                            and mapped_frame.get("projection")
+                            == (truth or {}).get("projection")
+                            and mapped_frame.get("input_sensor_folder")
+                            == (truth or {}).get("input_sensor_folder")
+                            and mapped_frame.get("authoritative_source_sensor_folder")
+                            == (truth or {}).get("authoritative_source_sensor_folder")
+                            and mapped_frame.get("authoritative_source_rgb")
+                            == source_frame.get("synchronized_rgb_path")
+                            and mapped_frame.get("authoritative_source_depth")
+                            == source_frame.get("synchronized_depth_path")
+                        )
+                    elif frame_map_schema == "posetestbot_bop_frame_map.v3":
+                        mapped_provenance_ok = (
+                            set(mapped_frame)
+                            == {
+                                "source_rgb",
+                                "source_depth",
+                                "bop_rgb",
+                                "bop_depth",
+                            }
+                            and mapped_frame.get("source_rgb")
+                            == source_frame.get("synchronized_rgb_path")
+                            and mapped_frame.get("source_depth")
+                            == source_frame.get("synchronized_depth_path")
+                        )
                 if (
                     not isinstance(source_frame, Mapping)
                     or not isinstance(scene_map, Mapping)
@@ -769,34 +768,16 @@ def _hardware_sync_bop_checks(
                     or scene_map.get("sensor_name") != expected_sensor_name
                     or scene_map.get("scene_folder") != expected_scene_folder
                     or not truth_fields_match
-                    or mapped_frame.get("sensor_name") != expected_sensor_name
-                    or mapped_frame.get("scene_id") != scene_id
-                    or mapped_frame.get("projection")
-                    != (truth or {}).get("projection")
-                    or mapped_frame.get("input_sensor_folder")
-                    != (truth or {}).get("input_sensor_folder")
-                    or mapped_frame.get(
-                        "authoritative_source_sensor_folder"
-                    )
-                    != (truth or {}).get(
-                        "authoritative_source_sensor_folder"
-                    )
-                    or mapped_frame.get("source_rgb")
-                    != view.get("bop_input_rgb_path")
+                    or not mapped_provenance_ok
+                    or mapped_frame.get("source_rgb") != view.get("bop_input_rgb_path")
                     or mapped_frame.get("source_depth")
                     != view.get("bop_input_depth_path")
-                    or mapped_frame.get("authoritative_source_rgb")
-                    != source_frame.get("synchronized_rgb_path")
-                    or mapped_frame.get("authoritative_source_depth")
-                    != source_frame.get("synchronized_depth_path")
                     or view.get("authoritative_source_rgb_path")
                     != source_frame.get("synchronized_rgb_path")
                     or view.get("authoritative_source_depth_path")
                     != source_frame.get("synchronized_depth_path")
-                    or mapped_frame.get("bop_rgb")
-                    != f"{RGB_DIR}/{im_id:06d}.png"
-                    or mapped_frame.get("bop_depth")
-                    != f"{DEPTH_DIR}/{im_id:06d}.png"
+                    or mapped_frame.get("bop_rgb") != f"{RGB_DIR}/{im_id:06d}.png"
+                    or mapped_frame.get("bop_depth") != f"{DEPTH_DIR}/{im_id:06d}.png"
                     or view.get("bop_rgb") != expected_bop_rgb
                     or view.get("bop_depth") != expected_bop_depth
                 ):
@@ -824,15 +805,12 @@ def _hardware_sync_bop_checks(
                 "master_sensor_key",
             )
         )
-        and source_groups.get("max_depth_timestamp_skew_ns")
-        == expected_skew_ns
+        and source_groups.get("max_depth_timestamp_skew_ns") == expected_skew_ns
         and frame_sets.get("max_depth_timestamp_skew_ns")
         == source_groups.get("max_depth_timestamp_skew_ns")
     )
     source_sensor_inventory = (
-        source_groups.get("sensors")
-        if isinstance(source_groups, Mapping)
-        else None
+        source_groups.get("sensors") if isinstance(source_groups, Mapping) else None
     )
     expected_config_sensors: list[dict[str, Any]] = []
     if isinstance(capture, Mapping):
@@ -860,8 +838,7 @@ def _hardware_sync_bop_checks(
                         "mounting_mode": sensor.get("mounting_mode"),
                         "hardware_sync_role": (
                             "master"
-                            if sensor_key
-                            == synchronization.get("master_sensor_key")
+                            if sensor_key == synchronization.get("master_sensor_key")
                             else "subordinate"
                         ),
                     }
@@ -921,10 +898,10 @@ def _hardware_sync_bop_checks(
     )
     frame_map_matches = (
         isinstance(frame_map, Mapping)
-        and frame_map.get("schema_version") == "posetestbot_bop_frame_map.v2"
+        and frame_map_schema
+        in {"posetestbot_bop_frame_map.v2", "posetestbot_bop_frame_map.v3"}
         and isinstance(mapped_scenes, Mapping)
-        and set(mapped_scenes)
-        == {str(scene_id) for scene_id in scene_images}
+        and set(mapped_scenes) == {str(scene_id) for scene_id in scene_images}
     )
     qualification_matches = False
     qualification_error: str | None = None
@@ -974,21 +951,15 @@ def _hardware_sync_bop_checks(
         for name, error in (
             (
                 "source_groups",
-                _hardware_sync_execution_binding_error(
-                    source_execution_binding
-                ),
+                _hardware_sync_execution_binding_error(source_execution_binding),
             ),
             (
                 "frame_sets",
-                _hardware_sync_execution_binding_error(
-                    frame_set_execution_binding
-                ),
+                _hardware_sync_execution_binding_error(frame_set_execution_binding),
             ),
             (
                 "capture_execution_report",
-                _hardware_sync_execution_binding_error(
-                    capture_execution_binding
-                ),
+                _hardware_sync_execution_binding_error(capture_execution_binding),
             ),
         )
         if error is not None
@@ -1000,15 +971,12 @@ def _hardware_sync_bop_checks(
         and source_execution_binding == capture_execution_binding
     )
     validation = (
-        bop_export.get("validation")
-        if isinstance(bop_export, Mapping)
-        else None
+        bop_export.get("validation") if isinstance(bop_export, Mapping) else None
     )
     ok = (
         isinstance(source_groups, Mapping)
         and source_valid
-        and source_groups.get("schema_version")
-        == "hardware_sync_frame_groups.v1"
+        and source_groups.get("schema_version") == "hardware_sync_frame_groups.v1"
         and isinstance(source_rows, list)
         and bool(source_rows)
         and isinstance(frame_sets, Mapping)
@@ -1032,13 +1000,13 @@ def _hardware_sync_bop_checks(
             "synthetic_robot_occlusion_modeled": False,
         }
         and isinstance(bop_export, Mapping)
-        and bop_export.get("schema_version") == "bop_export_manifest.v4"
+        and bop_export.get("schema_version")
+        in {"bop_export_manifest.v4", "bop_export_manifest.v5"}
         and bop_export.get("frame_map_path") == BOP_FRAME_MAP_JSON
         and bop_export.get("frame_sets_path") == BOP_FRAME_SETS
         and isinstance(validation, Mapping)
         and validation.get("frame_set_count") == len(frame_set_rows)
-        and validation.get("hardware_sync_scope")
-        == synchronization.get("scope")
+        and validation.get("hardware_sync_scope") == synchronization.get("scope")
     )
     return [
         _check(
@@ -1060,9 +1028,7 @@ def _hardware_sync_bop_checks(
                     len(source_rows) if isinstance(source_rows, list) else 0
                 ),
                 "frame_set_count": (
-                    len(frame_set_rows)
-                    if isinstance(frame_set_rows, list)
-                    else 0
+                    len(frame_set_rows) if isinstance(frame_set_rows, list) else 0
                 ),
                 "references_ok": references_ok,
                 "configuration_matches": configuration_matches,
@@ -1077,8 +1043,7 @@ def _hardware_sync_bop_checks(
                 "execution_binding_errors": execution_binding_errors,
                 "capture_execution_report_error": capture_report_error,
                 "projection_truth_errors": projection_truth_errors,
-                "source_group_ids_match_frame_set_ids": source_ids
-                == frame_set_ids,
+                "source_group_ids_match_frame_set_ids": source_ids == frame_set_ids,
             },
         )
     ]
@@ -1100,11 +1065,24 @@ def _bop_export_readiness_checks(
     scene_sensors: dict[int, str] = {}
     seen_scene_ids: set[int] = set()
     objectless = False
+    annotation_source = "blenderproc"
+    annotation_source_ok = True
+    export_schema: str | None = None
+    clean_annotation_layout = False
     template_selection: dict[str, Any] | None = None
     template_object_instances: dict[str, Any] | None = None
     template_instance_map: dict[str, Any] | None = None
     if bop_export is not None:
         objectless = bop_export.get("objectless") is True
+        raw_annotation_source = bop_export.get("annotation_source")
+        if raw_annotation_source is None:
+            # Older objectless exports already represented explicit empty
+            # annotations. Older object-bearing exports required rendered GT.
+            annotation_source = "none" if objectless else "blenderproc"
+        elif raw_annotation_source in {"none", "blenderproc"}:
+            annotation_source = str(raw_annotation_source)
+        else:
+            annotation_source_ok = False
         raw_exports = bop_export.get("exports")
         exports = (
             [export for export in raw_exports if isinstance(export, Mapping)]
@@ -1115,17 +1093,20 @@ def _bop_export_readiness_checks(
         validation_ok = (
             isinstance(validation, Mapping) and validation.get("status") == "ok"
         )
-        export_schema = bop_export.get("schema_version")
+        export_schema = str(bop_export.get("schema_version") or "")
+        clean_annotation_layout = export_schema == "bop_export_manifest.v5"
         ok = (
             export_schema
             in {
                 "bop_export_manifest.v2",
                 "bop_export_manifest.v3",
                 "bop_export_manifest.v4",
+                "bop_export_manifest.v5",
             }
             and bop_export.get("format") == "bop-scenewise"
             and len(exports) > 0
             and validation_ok
+            and annotation_source_ok
         )
         check = _check(
             name="bop_export",
@@ -1135,7 +1116,7 @@ def _bop_export_readiness_checks(
                 f"bop_export_manifest.json is a validated BOP-scenewise {export_schema} export."
                 if ok
                 else (
-                    "bop_export_manifest.json must be v2/v3/v4, BOP-scenewise, contain "
+                    "bop_export_manifest.json must be v2/v3/v4/v5, BOP-scenewise, contain "
                     "scenes, and record successful validation."
                 )
             ),
@@ -1144,6 +1125,8 @@ def _bop_export_readiness_checks(
                 "format": bop_export.get("format"),
                 "export_count": len(exports),
                 "validation_ok": validation_ok,
+                "annotation_source": annotation_source,
+                "annotation_source_ok": annotation_source_ok,
             },
         )
     checks.append(check)
@@ -1152,7 +1135,11 @@ def _bop_export_readiness_checks(
         pose_template_path = bop_root / "posetestbot_pose_template.json"
         instance_map_path = bop_root / "posetestbot_instance_map.json"
         pose_template, pose_error = _load_json_object(pose_template_path)
-        instance_map, instance_error = _load_json_object(instance_map_path)
+        if annotation_source == "none" and clean_annotation_layout:
+            instance_map = None
+            instance_error = None
+        else:
+            instance_map, instance_error = _load_json_object(instance_map_path)
         template_selection, selection_error = _load_json_object(
             root / POSE_TEMPLATE_SELECTION
         )
@@ -1189,9 +1176,15 @@ def _bop_export_readiness_checks(
         )
         instances = instance_map.get("instances") if instance_map is not None else None
         instance_ok = (
-            instance_map is not None
-            and instance_map.get("schema_version") == "posetestbot_bop_instance_map.v1"
-            and isinstance(instances, list)
+            not instance_map_path.exists()
+            and bop_export.get("instance_map_path") is None
+            if annotation_source == "none" and clean_annotation_layout
+            else (
+                instance_map is not None
+                and instance_map.get("schema_version")
+                == "posetestbot_bop_instance_map.v1"
+                and isinstance(instances, list)
+            )
         )
         checks.extend(
             [
@@ -1213,7 +1206,13 @@ def _bop_export_readiness_checks(
                     path=instance_map_path,
                     ok=instance_ok,
                     message=(
-                        "BOP GT instance-map sidecar is present."
+                        "Annotation-free export correctly omits the GT instance map."
+                        if instance_ok
+                        and annotation_source == "none"
+                        and clean_annotation_layout
+                        else "BOP instance-map sidecar is present; rendered GT is intentionally absent."
+                        if instance_ok and annotation_source == "none"
+                        else "BOP GT instance-map sidecar is present."
                         if instance_ok
                         else f"BOP GT instance-map sidecar is invalid: {instance_error}."
                     ),
@@ -1260,15 +1259,27 @@ def _bop_export_readiness_checks(
         scene_camera, camera_error = _load_json_object(
             scene_folder / "scene_camera.json"
         )
-        scene_gt, gt_error = _load_json_object(scene_folder / "scene_gt.json")
-        scene_gt_info, info_error = _load_json_object(
-            scene_folder / "scene_gt_info.json"
-        )
+        scene_gt_path = scene_folder / "scene_gt.json"
+        scene_gt_info_path = scene_folder / "scene_gt_info.json"
+        if annotation_source == "none" and clean_annotation_layout:
+            scene_gt = None
+            scene_gt_info = None
+            gt_error = None
+            info_error = None
+        else:
+            scene_gt, gt_error = _load_json_object(scene_gt_path)
+            scene_gt_info, info_error = _load_json_object(scene_gt_info_path)
         expected_keys = {str(int(Path(name).stem)) for name in rgb_names}
-        json_keys_ok = all(
-            data is not None and set(data) == expected_keys
-            for data in (scene_camera, scene_gt, scene_gt_info)
+        camera_keys_ok = scene_camera is not None and set(scene_camera) == expected_keys
+        annotation_layout_ok = (
+            not scene_gt_path.exists() and not scene_gt_info_path.exists()
+            if annotation_source == "none" and clean_annotation_layout
+            else all(
+                data is not None and set(data) == expected_keys
+                for data in (scene_gt, scene_gt_info)
+            )
         )
+        json_keys_ok = camera_keys_ok and annotation_layout_ok
         ok = (
             scene_folder.is_dir()
             and rgb_count > 0
@@ -1297,6 +1308,9 @@ def _bop_export_readiness_checks(
         image_ids = {int(key) for key in expected_keys}
         scene_images[scene_id] = image_ids
         scene_sensors[scene_id] = scene_label
+        for image_id in image_ids:
+            scene_objects[(scene_id, image_id)] = set()
+            scene_annotation_ids[(scene_id, image_id)] = []
         if scene_gt is not None:
             for image_id, annotations in scene_gt.items():
                 object_ids = set()
@@ -1316,7 +1330,7 @@ def _bop_export_readiness_checks(
                     ok = False
                 scene_objects[(scene_id, int(image_id))] = object_ids
                 scene_annotation_ids[(scene_id, int(image_id))] = annotation_ids
-        if objectless and (
+        if (objectless or annotation_source == "none") and (
             any(
                 scene_objects.get((scene_id, image_id), set()) for image_id in image_ids
             )
@@ -1330,11 +1344,13 @@ def _bop_export_readiness_checks(
                 path=scene_folder,
                 ok=ok,
                 message=(
-                    f"{scene_label} has aligned RGB-D and scene metadata keys."
+                    f"{scene_label} has aligned RGB-D and standard camera metadata."
+                    if ok and annotation_source == "none" and clean_annotation_layout
+                    else f"{scene_label} has aligned RGB-D and scene metadata keys."
                     if ok
                     else (
                         f"{scene_label} must include matching RGB/depth names and "
-                        "camera/GT/GT-info keys for every image."
+                        "the annotation files required by its declared source."
                     )
                 ),
                 details={
@@ -1345,6 +1361,7 @@ def _bop_export_readiness_checks(
                     "gt_error": gt_error,
                     "gt_info_error": info_error,
                     "json_keys_ok": json_keys_ok,
+                    "annotation_layout_ok": annotation_layout_ok,
                     "standard_scene_path": (
                         expected_scene_folder.as_posix()
                         if expected_scene_folder is not None
@@ -1379,9 +1396,13 @@ def _bop_export_readiness_checks(
     frame_map_path = bop_root / "posetestbot_bop_frame_map.json"
     frame_map, frame_map_error = _load_json_object(frame_map_path)
     mapped_scenes = frame_map.get("scenes") if frame_map is not None else None
+    frame_map_schema = (
+        frame_map.get("schema_version") if frame_map is not None else None
+    )
     frame_map_ok = (
         frame_map is not None
-        and frame_map.get("schema_version") == "posetestbot_bop_frame_map.v2"
+        and frame_map_schema
+        in {"posetestbot_bop_frame_map.v2", "posetestbot_bop_frame_map.v3"}
         and isinstance(mapped_scenes, Mapping)
         and set(mapped_scenes) == {str(scene_id) for scene_id in scene_images}
     )
@@ -1397,6 +1418,46 @@ def _bop_export_readiness_checks(
             ):
                 frame_map_ok = False
                 break
+            if frame_map_schema == "posetestbot_bop_frame_map.v3":
+                required_scene_fields = {
+                    "sensor_name",
+                    "split",
+                    "scene_folder",
+                    "projection",
+                    "input_sensor_folder",
+                    "authoritative_source_sensor_folder",
+                    "frames",
+                }
+                allowed_scene_fields = required_scene_fields | {
+                    "input_fingerprint_sha256",
+                    "authoritative_source_fingerprint_sha256",
+                }
+                if (
+                    not required_scene_fields <= set(entry)
+                    or not set(entry) <= allowed_scene_fields
+                ):
+                    frame_map_ok = False
+                    break
+                for image_id in image_ids:
+                    frame = frames[str(image_id)]
+                    if (
+                        not isinstance(frame, Mapping)
+                        or set(frame)
+                        != {
+                            "source_rgb",
+                            "source_depth",
+                            "bop_rgb",
+                            "bop_depth",
+                        }
+                        or frame.get("bop_rgb") != f"{RGB_DIR}/{image_id:06d}.png"
+                        or frame.get("bop_depth") != f"{DEPTH_DIR}/{image_id:06d}.png"
+                        or not isinstance(frame.get("source_rgb"), str)
+                        or not isinstance(frame.get("source_depth"), str)
+                    ):
+                        frame_map_ok = False
+                        break
+                if not frame_map_ok:
+                    break
     checks.append(
         _check(
             name="bop_posetestbot_bop_frame_map",
@@ -1422,66 +1483,137 @@ def _bop_export_readiness_checks(
     )
 
     targets_path = bop_root / BOP_TARGETS_BOP19
-    check, targets = _json_file_check("bop_targets", targets_path)
-    if targets is not None:
+    if annotation_source == "none" and clean_annotation_layout and objectless:
         check = _check(
             name="bop_targets",
             path=targets_path,
-            ok=False,
-            message="test_targets_bop19.json must contain a JSON list.",
+            ok=(
+                not targets_path.exists()
+                and (bop_export is None or bop_export.get("targets_path") is None)
+            ),
+            message=(
+                "Objectless export correctly omits the BOP target file."
+                if not targets_path.exists()
+                else "Objectless export must not publish BOP targets."
+            ),
             details={"target_count": 0},
         )
-    elif targets_path.is_file():
-        try:
-            target_rows = json.loads(targets_path.read_text())
-        except json.JSONDecodeError as exc:
+    else:
+        expected_annotation_free_targets: dict[tuple[int, int, int], int] = {}
+        if annotation_source == "none" and clean_annotation_layout:
+            object_rows = (
+                template_object_instances.get("instances")
+                if isinstance(template_object_instances, Mapping)
+                else None
+            )
+            object_counts: dict[int, int] = {}
+            if isinstance(object_rows, list):
+                for item in object_rows:
+                    if not isinstance(item, Mapping):
+                        continue
+                    try:
+                        obj_id = int(item["obj_id"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    object_counts[obj_id] = object_counts.get(obj_id, 0) + 1
+            test_scene_ids = {
+                int(export["scene_id"])
+                for export in exports
+                if export.get("split") == "test"
+                and isinstance(export.get("scene_id"), int)
+            }
+            expected_annotation_free_targets = {
+                (scene_id, image_id, obj_id): inst_count
+                for scene_id in test_scene_ids
+                for image_id in scene_images.get(scene_id, set())
+                for obj_id, inst_count in object_counts.items()
+            }
+        check, targets = _json_file_check("bop_targets", targets_path)
+        if targets is not None:
             check = _check(
                 name="bop_targets",
                 path=targets_path,
                 ok=False,
-                message=f"test_targets_bop19.json is invalid_json: {exc.msg}.",
+                message="test_targets_bop19.json must contain a JSON list.",
                 details={"target_count": 0},
             )
-        else:
-            target_count = len(target_rows) if isinstance(target_rows, list) else 0
-            references_ok = isinstance(target_rows, list)
-            if isinstance(target_rows, list):
-                for target in target_rows:
-                    if not isinstance(target, Mapping):
-                        references_ok = False
-                        continue
-                    try:
-                        scene_id = int(target["scene_id"])
-                        image_id = int(target["im_id"])
-                        obj_id = int(target["obj_id"])
-                    except (KeyError, TypeError, ValueError):
-                        references_ok = False
-                        continue
-                    if image_id not in scene_images.get(
-                        scene_id, set()
-                    ) or obj_id not in scene_objects.get((scene_id, image_id), set()):
-                        references_ok = False
-            ok = (
-                isinstance(target_rows, list)
-                and references_ok
-                and (target_count > 0 or not require_targets or objectless)
-            )
-            check = _check(
-                name="bop_targets",
-                path=targets_path,
-                ok=ok,
-                message=(
-                    "test_targets_bop19.json contains target rows."
-                    if ok and target_count > 0
-                    else "test_targets_bop19.json exists as an explicit empty target list."
-                    if ok
-                    else "test_targets_bop19.json must contain at least one target row."
-                ),
-                details={
-                    "target_count": target_count,
-                    "references_ok": references_ok,
-                },
-            )
+        elif targets_path.is_file():
+            try:
+                target_rows = json.loads(targets_path.read_text())
+            except json.JSONDecodeError as exc:
+                check = _check(
+                    name="bop_targets",
+                    path=targets_path,
+                    ok=False,
+                    message=f"test_targets_bop19.json is invalid_json: {exc.msg}.",
+                    details={"target_count": 0},
+                )
+            else:
+                target_count = len(target_rows) if isinstance(target_rows, list) else 0
+                references_ok = isinstance(target_rows, list)
+                annotation_free_targets: dict[tuple[int, int, int], int] = {}
+                if isinstance(target_rows, list):
+                    for target in target_rows:
+                        if not isinstance(target, Mapping):
+                            references_ok = False
+                            continue
+                        try:
+                            scene_id = int(target["scene_id"])
+                            image_id = int(target["im_id"])
+                            obj_id = int(target["obj_id"])
+                            inst_count = int(target["inst_count"])
+                        except (KeyError, TypeError, ValueError):
+                            references_ok = False
+                            continue
+                        key = (scene_id, image_id, obj_id)
+                        if (
+                            image_id not in scene_images.get(scene_id, set())
+                            or inst_count <= 0
+                            or key in annotation_free_targets
+                        ):
+                            references_ok = False
+                        if annotation_source == "none" and clean_annotation_layout:
+                            annotation_free_targets[key] = inst_count
+                        elif obj_id not in scene_objects.get(
+                            (scene_id, image_id), set()
+                        ):
+                            references_ok = False
+                if annotation_source == "none" and clean_annotation_layout:
+                    references_ok = (
+                        references_ok
+                        and bool(expected_annotation_free_targets)
+                        and annotation_free_targets == expected_annotation_free_targets
+                        and bop_export is not None
+                        and bop_export.get("targets_path") == BOP_TARGETS_BOP19
+                    )
+                ok = (
+                    isinstance(target_rows, list)
+                    and references_ok
+                    and (
+                        target_count > 0
+                        or not require_targets
+                        or objectless
+                        or annotation_source == "none"
+                    )
+                )
+                check = _check(
+                    name="bop_targets",
+                    path=targets_path,
+                    ok=ok,
+                    message=(
+                        "test_targets_bop19.json contains pose-estimation target rows."
+                        if ok and target_count > 0 and annotation_source == "none"
+                        else "test_targets_bop19.json contains target rows."
+                        if ok and target_count > 0
+                        else "test_targets_bop19.json exists as an explicit empty target list."
+                        if ok
+                        else "test_targets_bop19.json must contain at least one target row."
+                    ),
+                    details={
+                        "target_count": target_count,
+                        "references_ok": references_ok,
+                    },
+                )
     checks.append(check)
 
     models_info_path = bop_root / MODELS_DIR / "models_info.json"
@@ -1494,7 +1626,31 @@ def _bop_export_readiness_checks(
             and float(value["diameter"]) > 0
             for value in models_info.values()
         )
-        ok = model_count > 0 and geometry_ok
+        model_files_ok = True
+        models_eval_info = None
+        if clean_annotation_layout:
+            models_eval_info, _models_eval_error = _load_json_object(
+                bop_root / MODELS_EVAL_DIR / "models_info.json"
+            )
+            if models_eval_info != models_info:
+                model_files_ok = False
+        if clean_annotation_layout and bop_export is not None:
+            object_models = bop_export.get("object_models")
+            if not isinstance(object_models, list) or len(object_models) != model_count:
+                model_files_ok = False
+            else:
+                for model in object_models:
+                    if not isinstance(model, Mapping):
+                        model_files_ok = False
+                        continue
+                    model_path = bop_root / str(model.get("bop_path") or "")
+                    model_eval_path = bop_root / str(model.get("bop_eval_path") or "")
+                    try:
+                        validate_bop_model_ply(model_path)
+                        validate_bop_model_ply(model_eval_path)
+                    except (OSError, ValueError):
+                        model_files_ok = False
+        ok = model_count > 0 and geometry_ok and model_files_ok
         check = _check(
             name="bop_models_info",
             path=models_info_path,
@@ -1504,10 +1660,20 @@ def _bop_export_readiness_checks(
                 if ok
                 else "models_info.json must contain at least one exported model."
             ),
-            details={"model_count": model_count, "geometry_ok": geometry_ok},
+            details={
+                "model_count": model_count,
+                "geometry_ok": geometry_ok,
+                "model_files_ok": model_files_ok,
+                "models_eval_matches": (
+                    models_eval_info == models_info if clean_annotation_layout else None
+                ),
+            },
         )
     elif objectless:
-        models_absent = not (bop_root / MODELS_DIR).exists()
+        models_absent = (
+            not (bop_root / MODELS_DIR).exists()
+            and not (bop_root / MODELS_EVAL_DIR).exists()
+        )
         check = _check(
             name="bop_models_info",
             path=models_info_path,
@@ -1515,7 +1681,7 @@ def _bop_export_readiness_checks(
             message=(
                 "Explicit objectless export contains no model artifacts."
                 if models_absent
-                else "Objectless export must not contain a models directory."
+                else "Objectless export must not contain model directories."
             ),
             details={"objectless": True, "model_count": 0},
         )
@@ -1547,7 +1713,11 @@ def _bop_export_readiness_checks(
             for gt_id in range(len(ids))
         }
         mapped_gt_keys: set[tuple[int, int, int]] = set()
-        mapping_ok = isinstance(map_rows, list) and bool(object_by_uuid)
+        mapping_ok = (
+            not expected_gt_keys and bool(object_by_uuid)
+            if annotation_source == "none" and clean_annotation_layout
+            else isinstance(map_rows, list) and bool(object_by_uuid)
+        )
         if isinstance(map_rows, list):
             for row in map_rows:
                 if not isinstance(row, Mapping):
@@ -1584,7 +1754,9 @@ def _bop_export_readiness_checks(
                 )
             except (KeyError, TypeError, ValueError):
                 render_ok = False
-        for sensor_name in scene_sensors.values():
+        for sensor_name in (
+            scene_sensors.values() if annotation_source == "blenderproc" else ()
+        ):
             candidates = [
                 root
                 / PROCESSED_DIR
@@ -1634,6 +1806,10 @@ def _bop_export_readiness_checks(
             render_details[sensor_name] = (
                 "ok" if sensor_ok else str(sidecar_error or "mismatch")
             )
+        if annotation_source == "none":
+            render_details = {
+                sensor_name: "not_required" for sensor_name in scene_sensors.values()
+            }
 
         geometry_ok = isinstance(models_info, Mapping)
         if isinstance(models_info, Mapping):
@@ -1667,7 +1843,9 @@ def _bop_export_readiness_checks(
                 path=root / OBJECT_INSTANCES,
                 ok=evidence_ok,
                 message=(
-                    "Selection, geometry, rendered identities, BOP GT indices, and instance provenance agree."
+                    "Selection, geometry, and annotation-free instance provenance agree."
+                    if evidence_ok and annotation_source == "none"
+                    else "Selection, geometry, rendered identities, BOP GT indices, and instance provenance agree."
                     if evidence_ok
                     else "Pose-template selection, geometry, rendering, and BOP instance evidence disagree."
                 ),
@@ -1679,6 +1857,7 @@ def _bop_export_readiness_checks(
                     "render_sensors": render_details,
                     "expected_gt_count": len(expected_gt_keys),
                     "mapped_gt_count": len(mapped_gt_keys),
+                    "annotation_source": annotation_source,
                 },
             )
         )
@@ -1836,25 +2015,21 @@ def build_full_capture_gate_report(run_root: str | Path) -> dict[str, Any]:
         )
         if (
             isinstance(embedded_preflight, dict)
-            and embedded_preflight.get("schema_version")
-            == "capture_plan_preflight.v1"
+            and embedded_preflight.get("schema_version") == "capture_plan_preflight.v1"
             and embedded_plan.get("preflight_status")
             == _status_value(embedded_preflight)
         ):
             capture_plan_preflight = embedded_preflight
             capture_plan_preflight_error = None
             capture_plan_preflight_path = root / CAPTURE_EXECUTION_PLAN
-            capture_plan_preflight_source = (
-                f"{CAPTURE_EXECUTION_PLAN}:preflight_report"
-            )
+            capture_plan_preflight_source = f"{CAPTURE_EXECUTION_PLAN}:preflight_report"
     if capture_plan_preflight_error is not None:
         check = _check(
             name="capture_plan_preflight",
             path=capture_plan_preflight_path,
             ok=False,
             message=(
-                f"{CAPTURE_PLAN_PREFLIGHT_REPORT} is "
-                f"{capture_plan_preflight_error}."
+                f"{CAPTURE_PLAN_PREFLIGHT_REPORT} is {capture_plan_preflight_error}."
             ),
         )
     else:

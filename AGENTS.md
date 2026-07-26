@@ -317,6 +317,19 @@ Preserve early and incomplete raw frames, and treat only the complete groups in
 `processed/synchronized/multiview_frame_groups.json` as authoritative combined
 views.
 
+When reporting timestamp-aligned synchronization quality, do not treat
+camera frames recorded before or after a pose-streamed robot motion interval
+as invalid matches, and do not use `matched_frames / total_raw_frames` as a
+quality metric when that denominator includes those intentional lead-in or
+tail frames. They are preserved raw context, not synchronization failures.
+Report useful capture-motion evidence instead: eligible in-motion frames,
+matched eligible frames and coverage, missing/fallback timestamps,
+nearest-pose-threshold rejections, mean/maximum pose delta against the allowed
+limit, pose-packet loss, and any unexplained in-motion exclusion. Mention
+pre/post-motion frame counts only when diagnosing capture lifecycle or when
+the operator explicitly asks for them; never present them as a dataset-quality
+caveat.
+
 ## Pipeline Sequences
 
 Current acquisition sequences include:
