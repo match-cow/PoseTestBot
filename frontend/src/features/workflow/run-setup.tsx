@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Controller, useForm, useWatch } from "react-hook-form"
-import { Camera, CheckCircle2, Gauge, LoaderCircle, Save, ShieldCheck, TriangleAlert } from "lucide-react"
+import { Camera, CheckCircle2, Gauge, LoaderCircle, RefreshCw, Save, ShieldCheck, TriangleAlert } from "lucide-react"
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
 import { z } from "zod"
@@ -13,7 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { api, errorMessage, query } from "@/lib/api"
+import { api, ApiError, errorMessage, query } from "@/lib/api"
 import type { CaptureSynchronization, RunConfig, SensorStatus } from "@/lib/contracts"
 import { loadSelectedSensorKeys } from "@/lib/sensor-selection"
 import { useOperator } from "@/providers/operator-provider"
@@ -160,8 +160,45 @@ function sharedResolutions(status: SensorStatus | undefined, enabledSensors: Run
   return shared?.length ? shared : ["720p"]
 }
 
+function defaultSetupValues(): SetupValues {
+  return {
+    run_name: "",
+    resolution: "720p",
+    fps: 6,
+    velocity: DEFAULT_CAPTURE_SPEED_M_S,
+    synchronization_mode: "timestamp_aligned",
+    hardware_sync_group_id: DEFAULT_HARDWARE_GROUP_ID,
+    hardware_sync_master_sensor_key: "",
+    max_depth_timestamp_skew_ms: DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS,
+  }
+}
+
+function setupValuesFromConfig(config: RunConfig, maximumCaptureSpeedMps: number): SetupValues {
+  const synchronization = config.capture.synchronization ?? TIMESTAMP_SYNCHRONIZATION
+  return {
+    run_name: config.run_name,
+    resolution: config.capture.resolution,
+    fps: config.capture.fps,
+    velocity: Math.min(config.capture.velocity_m_s, maximumCaptureSpeedMps),
+    synchronization_mode: synchronization.mode,
+    hardware_sync_group_id: synchronization.mode === "hardware_trigger"
+      ? synchronization.group_id
+      : DEFAULT_HARDWARE_GROUP_ID,
+    hardware_sync_master_sensor_key: synchronization.mode === "hardware_trigger"
+      ? synchronization.master_sensor_key
+      : "",
+    max_depth_timestamp_skew_ms: synchronization.mode === "hardware_trigger"
+      ? synchronization.max_depth_timestamp_skew_ms
+      : DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS,
+  }
+}
+
 export function RunSetup({ intent = "camera_calibration" }: { intent?: WorkflowIntent }) {
   const { selectedRun } = useOperator()
+  return <RunSetupForContext key={`${intent}:${selectedRun}`} intent={intent} selectedRun={selectedRun} />
+}
+
+function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; selectedRun: string }) {
   const queryClient = useQueryClient()
   const maximumCaptureSpeedMps = intent === "object_dataset"
     ? MAX_DATASET_CAPTURE_SPEED_M_S
@@ -183,20 +220,17 @@ export function RunSetup({ intent = "camera_calibration" }: { intent?: WorkflowI
   const calibrationSources = calibrations.data?.calibrations ?? calibrations.data?.sources ?? []
   const form = useForm<SetupValues>({
     resolver: zodResolver(setupSchema(maximumCaptureSpeedMps)),
-    defaultValues: {
-      run_name: "",
-      resolution: "720p",
-      fps: 6,
-      velocity: DEFAULT_CAPTURE_SPEED_M_S,
-      synchronization_mode: "timestamp_aligned",
-      hardware_sync_group_id: DEFAULT_HARDWARE_GROUP_ID,
-      hardware_sync_master_sensor_key: "",
-      max_depth_timestamp_skew_ms: DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS,
-    },
+    defaultValues: existing.data?.config
+      ? setupValuesFromConfig(existing.data.config, maximumCaptureSpeedMps)
+      : defaultSetupValues(),
   })
   const [enabledOverrides, setEnabledOverrides] = useState<Record<string, Record<string, boolean>>>({})
   const [sourceSelection, setSourceSelection] = useState<{ runRoot: string; sourceRunRoot: string } | null>(null)
   const [confirmReplacement, setConfirmReplacement] = useState(false)
+  const setupLookupPending = existing.isPending
+  const setupNotFound = existing.isError && existing.error instanceof ApiError && existing.error.status === 404
+  const setupLookupFailed = existing.isError && !setupNotFound
+  const setupControlsDisabled = setupLookupPending || setupLookupFailed
 
   const detectedByKey = useMemo(() => new Map(
     (sensors.data?.families.flatMap((family) => family.devices) ?? []).map((device) => [sensorKey(device), device]),
@@ -288,26 +322,7 @@ export function RunSetup({ intent = "camera_calibration" }: { intent?: WorkflowI
   useEffect(() => {
     const config = existing.data?.config
     if (!config) return
-    const synchronization = config.capture.synchronization ?? TIMESTAMP_SYNCHRONIZATION
-    form.reset({
-      run_name: config.run_name,
-      resolution: config.capture.resolution,
-      fps: config.capture.fps,
-      velocity: Math.min(
-        config.capture.velocity_m_s,
-        maximumCaptureSpeedMps,
-      ),
-      synchronization_mode: synchronization.mode,
-      hardware_sync_group_id: synchronization.mode === "hardware_trigger"
-        ? synchronization.group_id
-        : DEFAULT_HARDWARE_GROUP_ID,
-      hardware_sync_master_sensor_key: synchronization.mode === "hardware_trigger"
-        ? synchronization.master_sensor_key
-        : "",
-      max_depth_timestamp_skew_ms: synchronization.mode === "hardware_trigger"
-        ? synchronization.max_depth_timestamp_skew_ms
-        : DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS,
-    })
+    form.reset(setupValuesFromConfig(config, maximumCaptureSpeedMps))
   }, [existing.data, form, maximumCaptureSpeedMps])
 
   const save = useMutation({
@@ -430,7 +445,10 @@ export function RunSetup({ intent = "camera_calibration" }: { intent?: WorkflowI
   return <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]" data-testid={`${intent}-run-setup`}>
     <Card>
       <CardHeader><CardTitle>{intent === "camera_calibration" ? "Calibration recording setup" : "Object dataset recording setup"}</CardTitle><CardDescription>{intent === "camera_calibration" ? "Choose the cameras and capture settings used to record the printed grid." : "Choose the cameras, capture settings, and a previously saved calibration that covers every enabled camera."}</CardDescription></CardHeader>
-      <CardContent><form className="space-y-6" onSubmit={form.handleSubmit((values) => save.mutate(values))}>
+      <CardContent><form className="space-y-6" aria-busy={setupLookupPending} onSubmit={form.handleSubmit((values) => {
+        if (!setupControlsDisabled) save.mutate(values)
+      })}>
+        <fieldset className="space-y-6" disabled={setupControlsDisabled}>
         <div className="grid gap-4 sm:grid-cols-2"><Field id="run-name" label="Run name" error={form.formState.errors.run_name?.message}><Input id="run-name" {...form.register("run_name")} placeholder="Defaults to folder name" /></Field><Field id="resolution" label="Image resolution" hint="Only modes shared by every enabled camera are offered."><Controller control={form.control} name="resolution" render={({ field }) => <Select value={field.value} onValueChange={field.onChange}><SelectTrigger id="resolution"><SelectValue /></SelectTrigger><SelectContent>{resolutionOptions.map((resolution) => <SelectItem value={resolution} key={resolution}>{resolution === "720p" ? "1280 × 720" : resolution === "360p" ? "672 × 376" : resolution}</SelectItem>)}</SelectContent></Select>} /></Field></div>
         <div className="grid gap-4 sm:grid-cols-2"><Field id="fps" label={<span className="inline-flex items-center gap-1">Frames per second <HelpTip label="frames per second">The requested RGB-D frame rate for each enabled camera. Higher rates create more data and may exceed a camera or USB connection's supported mode.</HelpTip></span>} hint="How many RGB-D frames each camera should request per second." error={form.formState.errors.fps?.message}><Input id="fps" type="number" min={1} max={60} {...form.register("fps", { valueAsNumber: true })} /></Field><Field id="velocity" label={<span className="inline-flex items-center gap-1">{intent === "object_dataset" ? "Requested robot capture speed (m/s)" : "Robot capture speed limit (m/s)"} <HelpTip label="robot capture speed">{captureSpeedHelp}</HelpTip></span>} hint={captureSpeedHint} error={form.formState.errors.velocity?.message}><Input id="velocity" type="number" min="0.01" max={maximumCaptureSpeedMps} step="0.01" {...form.register("velocity", { valueAsNumber: true })} /></Field></div>
 
@@ -486,7 +504,15 @@ export function RunSetup({ intent = "camera_calibration" }: { intent?: WorkflowI
         </section>}
 
         <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">Advanced pipeline details</summary><div className="border-t px-3 py-3 text-xs text-muted-foreground"><div>Preset: <code>{sequenceFor(intent)}</code></div><div className="mt-1">{intent === "camera_calibration" ? "The reusable preset is stored in prepare-only mode. Physical recording is always a separate, freshly authorized action." : "After recording, this preset synchronizes, rectifies, and prepares a BOP dataset using the selected calibration."}</div></div></details>
-        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-muted-foreground">Saving setup never authorizes a camera or robot action.</p><Button type="submit" disabled={save.isPending || sensors.isPending || !calibrationReady || hardwareBlockers.length > 0}>{save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (activeSource ? "Validating and saving…" : "Saving…") : (activeSource ? "Validate and save setup" : "Save setup")}</Button></div>
+        </fieldset>
+        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+          {setupLookupPending
+            ? <p className="inline-flex items-center gap-2 text-xs text-warning" role="status"><LoaderCircle className="size-3.5 animate-spin" />Loading the active run’s saved setup. Save is disabled until this lookup finishes.</p>
+            : setupLookupFailed
+              ? <div className="flex min-w-0 items-start gap-2 text-xs" role="alert"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">The active run’s setup could not be loaded</div><p className="mt-1 text-muted-foreground">{errorMessage(existing.error)} Existing setup may still be present, so saving remains disabled.</p><Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => existing.refetch()} disabled={existing.isFetching}><RefreshCw className={existing.isFetching ? "animate-spin" : undefined} />Retry setup lookup</Button></div></div>
+              : <p className="text-xs text-muted-foreground">Saving setup never authorizes a camera or robot action.</p>}
+          <Button type="submit" disabled={setupControlsDisabled || save.isPending || sensors.isPending || !calibrationReady || hardwareBlockers.length > 0}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (activeSource ? "Validating and saving…" : "Saving…") : (activeSource ? "Validate and save setup" : "Save setup")}</Button>
+        </div>
       </form></CardContent>
     </Card>
 

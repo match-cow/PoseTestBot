@@ -108,6 +108,8 @@ def test_start_queues_dedicated_webrtc_worker(client, monkeypatch, tmp_path: Pat
     assert response.status_code == 202
     submission = runner.submitted[0]
     assert submission["resources"] == ["monitoring_camera:0c45:2283"]
+    assert submission["scope_kind"] == "global"
+    assert submission.get("run_root") is None
     assert submission["parameters"]["monitor_webcam"] is True
     assert submission["parameters"]["monitor_webrtc"] is True
     assert submission["parameters"]["transport"] == "webrtc"

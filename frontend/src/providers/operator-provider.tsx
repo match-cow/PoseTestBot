@@ -25,6 +25,17 @@ interface OperatorContextValue {
 
 const OperatorContext = createContext<OperatorContextValue | null>(null)
 const WORKFLOW_SESSION_STORAGE_KEY = "posetestbot.workflowSessions.v1"
+const CUSTOM_RUN_STORAGE_KEY = "posetestbot.customRunFolders.v1"
+
+function loadCustomRunFolders() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(CUSTOM_RUN_STORAGE_KEY) ?? "[]") as unknown
+    if (!Array.isArray(stored)) return new Set<string>()
+    return new Set(stored.filter((value): value is string => typeof value === "string").slice(-20))
+  } catch {
+    return new Set<string>()
+  }
+}
 
 function loadWorkflowSessions() {
   try {
@@ -76,6 +87,7 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     restored: true,
     epoch: 0,
   }))
+  const [customRunFolders, setCustomRunFolders] = useState(loadCustomRunFolders)
   const [robotOverride, setRobotOverride] = useState<RobotTarget | null>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem("posetestbot.robotTarget") ?? "null") as Partial<RobotTarget> | null
@@ -92,6 +104,7 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     && Boolean(selectedOverride.path)
     && Boolean(runsQuery.data)
     && !runs.some((run) => run.path === selectedOverride.path)
+    && !customRunFolders.has(selectedOverride.path)
   useEffect(() => {
     if (!restoredSelectionIsStale) return
     localStorage.removeItem("posetestbot.selectedRun")
@@ -130,6 +143,17 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
 
   const selectRun = (path: string) => {
     if (!isContained(path, bootstrap.allowed_run_roots)) return false
+    if (!runs.some((run) => run.path === path)) {
+      setCustomRunFolders((current) => {
+        const next = [...current].filter((item) => item !== path).concat(path).slice(-20)
+        try {
+          localStorage.setItem(CUSTOM_RUN_STORAGE_KEY, JSON.stringify(next))
+        } catch {
+          // A denied browser-local write must not block run selection.
+        }
+        return new Set(next)
+      })
+    }
     setSelectedOverride((current) => ({ path, restored: false, epoch: current.epoch + 1 }))
     localStorage.setItem("posetestbot.selectedRun", path)
     return true

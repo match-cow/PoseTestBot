@@ -34,8 +34,8 @@ from posetestbot.calibration.target_preview import render_target_preview_png
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.jobs.runner import ResourceBusyError
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
-from posetestbot.web.legacy import job_runner
 from posetestbot.web.paths import APP_ROOT
+from posetestbot.web.runtime import job_runner
 
 
 calibration_targets_bp = Blueprint("calibration_targets", __name__)
@@ -197,6 +197,7 @@ def calibration_target_generate():
             ],
             cwd=APP_ROOT,
             resources=["cpu", "disk_io"],
+            scope_kind="library",
             parameters={"display_name": display_name, "request_id": request_id},
         )
     except ValidationError as exc:
@@ -274,6 +275,8 @@ def calibration_target_select(target_id: str):
             ],
             cwd=APP_ROOT,
             resources=["disk_io"],
+            scope_kind="run",
+            run_root=run_root,
             parameters={
                 "run_root": str(run_root),
                 "target_id": bundle["target_id"],

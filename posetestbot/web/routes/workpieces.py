@@ -39,7 +39,7 @@ from posetestbot.pose_templates.catalog import (
     update_catalog_object_metadata,
 )
 from posetestbot.pose_templates.library import list_template_bundle_summaries
-from posetestbot.web.legacy import job_runner
+from posetestbot.web.runtime import job_runner
 from posetestbot.web.paths import APP_ROOT
 
 
@@ -310,6 +310,7 @@ def workpiece_catalog_upload():
             ],
             cwd=APP_ROOT,
             resources=["cpu", "disk_io", "workpiece_catalog"],
+            scope_kind="library",
             parameters={
                 "request_id": request_id,
                 "request_path": request_path.as_posix(),
@@ -385,6 +386,7 @@ def workpiece_catalog_unit_correction(catalog_uuid: str):
             ],
             cwd=APP_ROOT,
             resources=["cpu", "disk_io", "workpiece_catalog"],
+            scope_kind="library",
             parameters={
                 "request_id": request_id,
                 "request_path": request_path.as_posix(),

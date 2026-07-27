@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { Children, isValidElement, useEffect, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { ArrowLeft, ArrowRight, Boxes, Camera, Database, Grid3X3, ListTree, RefreshCw, Settings2, Sparkles } from "lucide-react"
@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, query } from "@/lib/api"
-import type { Overview, PipelineStage, PreflightSummary, RunConfig } from "@/lib/contracts"
+import type { BopAnnotationSetup, Overview, PipelineStage, PreflightSummary, RunConfig } from "@/lib/contracts"
 import { workflowJourneyMetadata } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
 import { AdvancedStageTools } from "@/features/workflow/advanced-stage-tools"
@@ -40,7 +40,7 @@ const datasetOutline = workflowJourneyMetadata.dataset.steps.map((step) => step.
 
 function stepStatuses(completed: boolean[]): Array<WorkflowStepDefinition["status"]> {
   const firstIncomplete = completed.findIndex((value) => !value)
-  return completed.map((value, index) => value ? "complete" : index === firstIncomplete ? "current" : "blocked")
+  return completed.map((value, index) => value ? "complete" : index === firstIncomplete ? "current" : "not_started")
 }
 
 function WorkflowChoice({ to, icon: Icon, title, description, steps, output }: { to: string; icon: typeof Camera; title: string; description: string; steps: string[]; output: string }) {
@@ -78,8 +78,8 @@ function JourneyShell({ journey, steps, selectedStep, onSelectStep, children }: 
     description: "Record a known printed ArUco grid, compare camera and robot-camera solutions, then explicitly publish reusable calibration profiles.",
   } : {
     eyebrow: "Guided workflow · acquisition dataset",
-    title: "Record an object-template dataset",
-    description: "Use a previously published calibration and a confirmed physical object template to record, synchronize, and export a BOP dataset.",
+    title: "Record an object dataset",
+    description: "Use a previously published calibration and a confirmed physical pose template to record, synchronize, and export a BOP dataset.",
   }
   const fallbackStep = steps.find((step) => step.status === "current" || step.status === "running")?.id
     ?? steps.find((step) => step.status !== "complete")?.id
@@ -88,6 +88,11 @@ function JourneyShell({ journey, steps, selectedStep, onSelectStep, children }: 
   const effectiveStepDefinition = steps.find((step) => step.id === effectiveStep)
   const effectiveStepId = effectiveStepDefinition?.id
   const effectiveStepStatus = effectiveStepDefinition?.status
+  const stepContent = Children.map(children, (child) => {
+    if (!isValidElement<{ id?: string }>(child)) return child
+    const stepId = child.props.id
+    return <div key={stepId} hidden={stepId !== effectiveStep}>{child}</div>
+  })
   useEffect(() => {
     if (!effectiveStep || selectedStep === effectiveStep) return
     onSelectStep(effectiveStep, false)
@@ -102,7 +107,7 @@ function JourneyShell({ journey, steps, selectedStep, onSelectStep, children }: 
     <JourneyNavigation current={journey} />
     <div className="grid items-start gap-6 xl:grid-cols-[270px_minmax(0,1fr)]">
       <WorkflowStepper steps={steps} selectedStep={effectiveStep} onSelect={onSelectStep} />
-      <div className="min-w-0 space-y-9" data-selected-step={effectiveStep ?? ""}>{children}</div>
+      <div className="min-w-0" data-selected-step={effectiveStep ?? ""}>{stepContent}</div>
     </div>
   </div>
 }
@@ -136,7 +141,7 @@ function CalibrationSyncPolicy({ configured, calibrationSync }: { configured: bo
         <div>
           <CardTitle className="flex flex-wrap items-center gap-2 text-base">
             Automatic calibration timing
-            <StatusBadge status={ready ? "ready" : failure ? "error" : "not_configured"}>{ready ? "ready" : failure ? "blocked" : "not configured"}</StatusBadge>
+            <StatusBadge status={ready ? "ready" : failure ? "error" : "not_configured"} tone={ready ? "success" : failure ? "destructive" : "neutral"}>{ready ? "ready" : failure ? "blocked" : "not configured"}</StatusBadge>
           </CardTitle>
           <CardDescription className="mt-1 max-w-4xl leading-relaxed">
             {ready
@@ -201,6 +206,13 @@ export function WorkflowPage() {
     refetchInterval: (state) => state.state.data?.preflight.queue_blocker ? 2_000 : false,
   })
   const stages = useQuery({ queryKey: ["pipeline", "stages"], queryFn: () => api<{ stages: PipelineStage[] }>("/pipeline/stages"), enabled: page === "advanced" })
+  const annotationSetup = useQuery({
+    queryKey: ["bop-annotations", "setup", selectedRun],
+    queryFn: () => api<BopAnnotationSetup>(query("/bop/annotations/setup", { run_root: selectedRun })),
+    enabled: page === "dataset",
+    retry: false,
+    refetchInterval: page === "dataset" ? 2_000 : false,
+  })
 
   useEffect(() => {
     if (!selectedStep || !["calibration", "dataset"].includes(page)) return
@@ -214,7 +226,7 @@ export function WorkflowPage() {
     setSearchParams({ step: stepId }, { replace: true })
     if (scroll) window.requestAnimationFrame(() => document.getElementById(`workflow-step-${stepId}`)?.scrollIntoView({ behavior: "smooth", block: "start" }))
   }
-  const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "run-config", "calibration", "pose-template-run"].includes(String(item.queryKey[0])) })
+  const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "run-config", "calibration", "pose-template-run", "bop-annotations"].includes(String(item.queryKey[0])) })
 
   if (phase && legacyAliases[phase]) return <Navigate to={`/workflow/${legacyAliases[phase].page}?step=${legacyAliases[phase].step}`} replace />
   if (!["setup", "calibration", "dataset", "advanced"].includes(page)) return <Navigate to="/workflow/setup" replace />
@@ -262,6 +274,7 @@ export function WorkflowPage() {
         ? `The selected calibration timing contract is invalid: ${calibrationSync.error ?? "verification failed without an error message."}`
         : "The calibration snapshot is selected, but its saved automatic timing policy is not configured."
   const bopComplete = artifactComplete(overview.data, "bop/bop_export_manifest.json")
+  const annotationComplete = Boolean(annotationSetup.data?.current_output?.verified)
 
   const calibrationRequirements: WorkflowRequirement[] = [
     { id: "config", label: "Run configuration", description: configSaved ? "The run configuration is saved." : "Save the run and camera configuration first.", status: configSaved ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Open step 1" },
@@ -278,15 +291,18 @@ export function WorkflowPage() {
     { id: "config", label: "Run configuration", description: configSaved ? "The dataset run configuration is saved." : "Save the dataset run and camera configuration first.", status: configSaved ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Open step 1" },
     { id: "cameras", label: "At least one enabled camera", description: enabledCameras.length ? `${enabledCameras.length} camera${enabledCameras.length === 1 ? " is" : "s are"} enabled for this dataset.` : "No camera is enabled for capture.", status: enabledCameras.length ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Choose cameras" },
     { id: "calibration", label: "Calibration geometry and automatic timing verified", description: calibrationRequirementDescription, status: datasetCalibrationSelected ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Review calibration" },
-    { id: "template", label: "Object placement confirmed", description: templateSelected ? "The immutable object template and measured placement are confirmed." : "Select an immutable pose template and confirm its measured physical placement.", status: templateSelected ? "met" : "missing", onFix: () => selectStep("template"), fixLabel: "Choose object template" },
+    { id: "template", label: "Pose-template placement confirmed", description: templateSelected ? "The immutable pose template and measured placement are confirmed." : "Select an immutable pose template and confirm its measured physical placement.", status: templateSelected ? "met" : "missing", onFix: () => selectStep("template"), fixLabel: "Choose pose template" },
   ]
   const datasetReady = readinessSatisfied(preflight, datasetRequirements)
   const datasetConfigured = configSaved && datasetCalibrationSelected
-  const datasetStatuses = stepStatuses([datasetConfigured, templateSelected, datasetReady, captureComplete, syncComplete && syncQualityComplete && rectificationComplete && bopComplete, bopComplete])
+  const datasetStatuses = [
+    ...stepStatuses([datasetConfigured, templateSelected, datasetReady, captureComplete, syncComplete && syncQualityComplete && rectificationComplete && bopComplete]),
+    annotationComplete ? "complete" : bopComplete ? "ready" : "not_started",
+  ] satisfies Array<WorkflowStepDefinition["status"]>
   if (["queued", "running", "canceling"].includes(datasetProcessingJobStatus ?? "")) datasetStatuses[4] = "running"
   if (["failed", "canceled", "cancelled"].includes(datasetProcessingJobStatus ?? "") && !bopComplete) datasetStatuses[4] = "blocked"
   const datasetSteps: WorkflowStepDefinition[] = datasetOutline.map((title, index) => ({
-    id: ["configure", "template", "readiness", "capture", "sync", "export"][index], number: index + 1, title, summary: ["Reuse calibration that matches the selected cameras.", "Bind known object poses to the physical scene.", "Resolve all blockers in one place.", "Open cameras and authorize supervised robot motion.", "Create derived synchronized frames and check their quality.", "Write the acquisition result in BOP dataset form."][index], status: datasetStatuses[index], required: true,
+    id: ["configure", "template", "readiness", "capture", "sync", "export"][index], number: index + 1, title, summary: ["Reuse calibration that matches the selected cameras.", "Bind known object poses to the physical scene.", "Resolve all blockers in one place.", "Open cameras and authorize supervised robot motion.", "Synchronize, verify, rectify, and write the base BOP dataset.", "Optionally add pose or pose-and-mask annotations."][index], status: datasetStatuses[index], required: index < 5,
   }))
 
   if (page === "calibration") return <JourneyShell journey="calibration" steps={calibrationSteps} selectedStep={selectedStep} onSelectStep={selectStep}>
@@ -316,12 +332,12 @@ export function WorkflowPage() {
   if (page === "dataset") {
     return <JourneyShell journey="dataset" steps={datasetSteps} selectedStep={selectedStep} onSelectStep={selectStep}>
       <WorkflowStepCard id="configure" number={1} title="Configure cameras and select calibration" description="Choose the cameras for this recording and select a published calibration made for those exact camera identities and acquisition settings." status={datasetStatuses[0]} help="A calibration profile maps camera pixels into the shared robot/template coordinate system. It is required for an object dataset.">
-        <Card className={datasetCalibrationSnapshotConfigured ? "border-success/30" : "border-destructive/30"}><CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2 font-semibold">Selected calibration snapshot <StatusBadge status={datasetCalibrationSnapshotConfigured ? "configured" : "missing"} /></div><p className="mt-1 text-xs text-muted-foreground">{datasetCalibrationSnapshotConfigured ? `Bundle ${runConfig?.calibration_profile_selection?.bundle_sha256.slice(0, 16)}… is copied into this run. Geometry and timing are revalidated before capture and export.` : "Required: select and validate a previously published calibration below."}</p></div><HelpTip label="selected calibration snapshot">PoseTestBot copies both profile files into this run and records their hashes, so later source-run changes cannot alter the dataset. Readiness rechecks every enabled camera and its saved time-alignment policy.</HelpTip></CardContent></Card>
+        <Card className={datasetCalibrationSnapshotConfigured ? "border-success/30" : "border-destructive/30"}><CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2 font-semibold">Selected calibration snapshot <StatusBadge status={datasetCalibrationSnapshotConfigured ? "configured" : "missing"} tone={datasetCalibrationSnapshotConfigured ? "informational" : "destructive"} /></div><p className="mt-1 text-xs text-muted-foreground">{datasetCalibrationSnapshotConfigured ? `Bundle ${runConfig?.calibration_profile_selection?.bundle_sha256.slice(0, 16)}… is copied into this run. Geometry and timing are revalidated before capture and export.` : "Required: select and validate a previously published calibration below."}</p></div><HelpTip label="selected calibration snapshot">PoseTestBot copies both profile files into this run and records their hashes, so later source-run changes cannot alter the dataset. Readiness rechecks every enabled camera and its saved time-alignment policy.</HelpTip></CardContent></Card>
         <CalibrationSyncPolicy configured={datasetCalibrationSnapshotConfigured} calibrationSync={calibrationSync} />
         <RunSetup intent="object_dataset" />
       </WorkflowStepCard>
 
-      <WorkflowStepCard id="template" number={2} title="Choose the object template and placement" description="Select the immutable object arrangement that is physically present, enter its measured transform into template base, and confirm it." status={datasetStatuses[1]} help="The object template fixes object identities and relative poses. The measured placement locates the printed template in the robot's dataset reference frame.">
+      <WorkflowStepCard id="template" number={2} title="Choose the pose template and placement" description="Select the immutable printed pose template that is physically present, enter its measured transform into template base, and confirm it." status={datasetStatuses[1]} help="The pose template fixes object identities and relative poses. The measured placement locates the printed template in the robot's dataset reference frame.">
         <GroundTruthWorkflow />
         <div className="grid gap-3 md:grid-cols-2"><OptionalAction icon={Boxes} title="Add or edit workpieces" description="Manage source CAD, canonical geometry, names, tags, and lifecycle before making a new template." to="/workpieces" action="Open catalogue" /><OptionalAction icon={Grid3X3} title="Create a pose template" description="Lay out stable object orientations and publish a new immutable printable version." to="/pose-templates" action="Open templates" /></div>
       </WorkflowStepCard>
@@ -334,13 +350,13 @@ export function WorkflowPage() {
         <CaptureGate intent="dataset" readiness={{ ready: datasetReady, onReview: () => selectStep("readiness") }} />
       </WorkflowStepCard>
 
-      <WorkflowStepCard id="sync" number={5} title="Synchronize and verify frames" description="Create derived frame-to-pose matches with the selected calibration timing, then verify their quality. Raw captures remain unchanged." status={datasetStatuses[4]} help="The quality gate rejects missing matches, excessive pose gaps, incompatible timestamps, and calibration-provenance mismatches.">
-        <Card data-testid="dataset-sync-timing-contract" className={datasetCalibrationSelected ? "border-primary/30 bg-primary/5" : "border-destructive/30 bg-destructive/5"}><CardContent className="flex items-start gap-3 py-4"><Database aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-primary-strong" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2 text-sm font-semibold">Calibration timing <StatusBadge status={datasetCalibrationSelected ? "ready" : "blocked"} /><HelpTip label="automatic calibration timing">Processing uses the per-camera offset, timestamp fields, clock-domain rule, and pose-gap limit shown in Step 1. Manual values and generic defaults cannot override them, and export rechecks the evidence.</HelpTip></div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{datasetCalibrationSelected ? "The selected per-camera timing policy will be applied and verified automatically." : "Return to Step 1 and select a calibration with valid timing for every enabled camera."}</p></div></CardContent></Card>
+      <WorkflowStepCard id="sync" number={5} title="Process frames and create the base BOP export" description="Synchronize frames to robot poses, verify match quality, validate calibration, rectify RGB-D data, and write the base image/model BOP dataset. Raw captures remain unchanged." status={datasetStatuses[4]} help="The processing job rejects missing matches, excessive pose gaps, incompatible timestamps, calibration-provenance mismatches, and invalid exports.">
+        <Card data-testid="dataset-sync-timing-contract" className={datasetCalibrationSelected ? "border-primary/30 bg-primary/5" : "border-destructive/30 bg-destructive/5"}><CardContent className="flex items-start gap-3 py-4"><Database aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-primary-strong" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2 text-sm font-semibold">Calibration timing <StatusBadge status={datasetCalibrationSelected ? "ready" : "blocked"} tone={datasetCalibrationSelected ? "success" : "destructive"} /><HelpTip label="automatic calibration timing">Processing uses the per-camera offset, timestamp fields, clock-domain rule, and pose-gap limit shown in Step 1. Manual values and generic defaults cannot override them, and export rechecks the evidence.</HelpTip></div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{datasetCalibrationSelected ? "The selected per-camera timing policy will be applied and verified automatically." : "Return to Step 1 and select a calibration with valid timing for every enabled camera."}</p></div></CardContent></Card>
         <DatasetProcessing runRoot={selectedRun} ready={datasetReady} captureComplete={captureComplete} syncComplete={syncComplete} syncQualityComplete={syncQualityComplete} calibrationComplete={rectificationComplete} exportComplete={bopComplete} onReviewReadiness={() => selectStep("readiness")} onJobStatusChange={setDatasetProcessingJobStatus} />
       </WorkflowStepCard>
 
-      <WorkflowStepCard id="export" number={6} title="Export the BOP dataset" description="Verify the base image/model export, then choose pose-only or rendered pose-and-mask ground truth for this run." status={datasetStatuses[5]} help="BOP is the portable dataset format produced by PoseTestBot. Estimators and result conversion remain outside this repository; the Inspect page can evaluate an annotation-bearing export against an already compatible BOP19 result CSV.">
-        <Card className={bopComplete ? "border-success/35 bg-success/5" : "border-dashed"}><CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{bopComplete ? "BOP image/model export is ready" : "BOP export has not completed"}</div><p className="mt-1 text-xs text-muted-foreground">{bopComplete ? "The base export has populated calibrated scenes, models, and object targets. Choose the required ground-truth evidence below; pose + masks is required for Inspect metrics." : "Use Process and export dataset in step 5. It validates calibration, rectifies frames, copies models, and writes the base BOP scenes before ground-truth generation."}</p></div>{bopComplete ? <Button asChild variant="outline"><Link to="/cell">Review dataset in Cell View<ArrowRight aria-hidden="true" /></Link></Button> : <Button type="button" variant="outline" onClick={() => selectStep("sync")}>Open processing step</Button>}</CardContent></Card>
+      <WorkflowStepCard id="export" number={6} title="Add optional BOP ground-truth evidence" description="After the base image/model export is verified, optionally add pose-only or rendered pose-and-mask annotations for this run." status={datasetStatuses[5]} required={false} help="The base BOP export is already a portable pose-estimation input. Pose + masks is optional and enables the Inspect page to evaluate an already compatible BOP19 result CSV.">
+        <Card className={bopComplete ? "border-success/35 bg-success/5" : "border-dashed"}><CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{bopComplete ? "BOP image/model export is ready" : "BOP export has not completed"}</div><p className="mt-1 text-xs text-muted-foreground">{bopComplete ? "The base export has populated calibrated scenes, models, and object targets. You can finish here, add pose-only ground truth, or add rendered poses and masks for Inspect metrics." : "Use the processing job in step 5. It validates calibration, rectifies frames, copies models, and writes the base BOP scenes before optional ground-truth generation."}</p></div>{bopComplete ? <Button asChild variant="outline"><Link to="/cell">Review dataset in Cell View<ArrowRight aria-hidden="true" /></Link></Button> : <Button type="button" variant="outline" onClick={() => selectStep("sync")}>Open processing step</Button>}</CardContent></Card>
         <BopGroundTruthGeneration runRoot={selectedRun} bopExportComplete={bopComplete} />
       </WorkflowStepCard>
     </JourneyShell>

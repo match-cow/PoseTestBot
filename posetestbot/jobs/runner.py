@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import signal
 import shlex
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -35,6 +38,15 @@ DEFAULT_MAX_TAIL_LINE_CHARS = 16 * 1024
 DEFAULT_MAX_TAIL_CHARS = 256 * 1024
 OUTPUT_READ_CHARS = 64 * 1024
 TAIL_PERSIST_INTERVAL_SECONDS = 0.25
+RUN_SCOPE = "run"
+LIBRARY_SCOPE = "library"
+GLOBAL_SCOPE = "global"
+UNKNOWN_SCOPE = "unknown"
+JOB_SCOPE_KINDS = {RUN_SCOPE, LIBRARY_SCOPE, GLOBAL_SCOPE, UNKNOWN_SCOPE}
+DEFAULT_JOB_PAGE_LIMIT = 50
+MAX_JOB_PAGE_LIMIT = 100
+JOB_INDEX_FILENAME = "index.sqlite3"
+JOB_INDEX_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -62,9 +74,19 @@ class JobRecord:
     supervisor_process_group_id: int | None = None
     supervisor_start_time: int | None = None
     visibility: str = OPERATOR_VISIBILITY
+    scope_kind: str = UNKNOWN_SCOPE
+    run_root: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class JobPage:
+    jobs: list[JobRecord]
+    total: int
+    status_counts: dict[str, int]
+    next_cursor: str | None
 
 
 class LocalJobRunner:
@@ -88,6 +110,7 @@ class LocalJobRunner:
         if max_tail_chars < 64:
             raise ValueError("max_tail_chars must be at least 64")
         self.job_root = Path(job_root)
+        self.index_path = self.job_root / JOB_INDEX_FILENAME
         self.tail_limit = tail_limit
         self.max_log_bytes = max_log_bytes
         self.max_tail_line_chars = max_tail_line_chars
@@ -100,6 +123,7 @@ class LocalJobRunner:
         self._local_job_ids: set[str] = set()
         self._runner_pid = os.getpid()
         self._runner_start_time = self._read_process_start_time(self._runner_pid)
+        self._ensure_index()
         self._load_persisted_jobs()
 
     def submit(
@@ -111,6 +135,8 @@ class LocalJobRunner:
         env: Mapping[str, str] | None = None,
         resources: list[str] | None = None,
         parameters: Mapping[str, object] | None = None,
+        scope_kind: str,
+        run_root: str | Path | None = None,
         visibility: str = OPERATOR_VISIBILITY,
     ) -> JobRecord:
         if not command:
@@ -119,6 +145,7 @@ class LocalJobRunner:
             raise ValueError(
                 f"visibility must be one of: {', '.join(sorted(JOB_VISIBILITIES))}"
             )
+        normalized_run_root = self._validate_scope(scope_kind, run_root)
 
         requested_resources = sorted(set(resources or []))
         with self._lock:
@@ -139,6 +166,8 @@ class LocalJobRunner:
                 runner_pid=self._runner_pid,
                 runner_start_time=self._runner_start_time,
                 visibility=visibility,
+                scope_kind=scope_kind,
+                run_root=normalized_run_root,
             )
             self._jobs[job_id] = job
             self._local_job_ids.add(job_id)
@@ -161,25 +190,164 @@ class LocalJobRunner:
 
     def get(self, job_id: str) -> JobRecord:
         with self._lock:
-            try:
-                return JobRecord(**self._jobs[job_id].to_dict())
-            except KeyError as exc:
-                raise KeyError(f"Unknown job: {job_id}") from exc
+            job = self._jobs.get(job_id)
+            if job is None:
+                job = self._load_indexed_job(job_id)
+            return JobRecord(**job.to_dict())
 
     def list(self, *, include_services: bool = True) -> list[JobRecord]:
+        records: list[JobRecord] = []
+        cursor = None
+        while True:
+            page = self.list_page(
+                limit=MAX_JOB_PAGE_LIMIT,
+                cursor=cursor,
+                include_services=include_services,
+            )
+            records.extend(page.jobs)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        return records
+
+    def list_page(
+        self,
+        *,
+        limit: int = DEFAULT_JOB_PAGE_LIMIT,
+        cursor: str | None = None,
+        search: str | None = None,
+        statuses: list[str] | tuple[str, ...] | set[str] | None = None,
+        scope_kinds: list[str] | tuple[str, ...] | set[str] | None = None,
+        run_root: str | Path | None = None,
+        include_services: bool = True,
+    ) -> JobPage:
+        """Return active work plus one stable keyset page of terminal history."""
+
+        if isinstance(limit, bool) or not 1 <= int(limit) <= MAX_JOB_PAGE_LIMIT:
+            raise ValueError(
+                f"limit must be an integer from 1 to {MAX_JOB_PAGE_LIMIT}"
+            )
+        limit = int(limit)
+        normalized_statuses = self._normalize_filter_values(statuses)
+        normalized_scopes = self._normalize_filter_values(scope_kinds)
+        invalid_scopes = set(normalized_scopes) - JOB_SCOPE_KINDS
+        if invalid_scopes:
+            raise ValueError(
+                "scope_kind must contain only: "
+                + ", ".join(sorted(JOB_SCOPE_KINDS))
+            )
+        normalized_run_root = (
+            Path(run_root).resolve().as_posix() if run_root is not None else None
+        )
+        normalized_search = (search or "").strip().lower()
+        filter_signature = self._page_filter_signature(
+            search=normalized_search,
+            statuses=normalized_statuses,
+            scope_kinds=normalized_scopes,
+            run_root=normalized_run_root,
+            include_services=include_services,
+        )
+        after = self._decode_cursor(cursor, filter_signature) if cursor else None
+
         with self._lock:
-            return [
-                JobRecord(**job.to_dict())
-                for job in sorted(
+            self._ensure_index()
+            base_where, base_parameters = self._index_filters(
+                search=normalized_search,
+                scope_kinds=normalized_scopes,
+                run_root=normalized_run_root,
+                include_services=include_services,
+            )
+            where = list(base_where)
+            parameters = list(base_parameters)
+            if normalized_statuses:
+                placeholders = ", ".join("?" for _ in normalized_statuses)
+                where.append(f"status IN ({placeholders})")
+                parameters.extend(normalized_statuses)
+            where_sql = " AND ".join(where) if where else "1 = 1"
+
+            with self._index_connection() as connection:
+                total = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM jobs WHERE {where_sql}",
+                        parameters,
+                    ).fetchone()[0]
+                )
+                counts_where_sql = (
+                    " AND ".join(base_where) if base_where else "1 = 1"
+                )
+                status_counts = {
+                    str(row[0]): int(row[1])
+                    for row in connection.execute(
+                        "SELECT status, COUNT(*) FROM jobs "
+                        f"WHERE {counts_where_sql} GROUP BY status",
+                        base_parameters,
+                    )
+                }
+
+                terminal_where = [
+                    *where,
+                    "status IN (?, ?, ?)",
+                ]
+                terminal_parameters = [
+                    *parameters,
+                    SUCCEEDED,
+                    FAILED,
+                    CANCELED,
+                ]
+                if after is not None:
+                    terminal_where.append(
+                        "(created_at < ? OR (created_at = ? AND id < ?))"
+                    )
+                    terminal_parameters.extend(
+                        [after[0], after[0], after[1]]
+                    )
+                terminal_rows = connection.execute(
+                    "SELECT id, created_at FROM jobs WHERE "
+                    + " AND ".join(terminal_where)
+                    + " ORDER BY created_at DESC, id DESC LIMIT ?",
+                    [*terminal_parameters, limit + 1],
+                ).fetchall()
+
+            active_jobs: list[JobRecord] = []
+            if cursor is None:
+                active_jobs = sorted(
                     (
-                        job
+                        JobRecord(**job.to_dict())
                         for job in self._jobs.values()
-                        if include_services or job.visibility == OPERATOR_VISIBILITY
+                        if job.status not in TERMINAL_STATUSES
+                        and self._record_matches_filters(
+                            job,
+                            search=normalized_search,
+                            statuses=normalized_statuses,
+                            scope_kinds=normalized_scopes,
+                            run_root=normalized_run_root,
+                            include_services=include_services,
+                        )
                     ),
-                    key=lambda item: item.created_at,
+                    key=lambda item: (item.created_at, item.id),
                     reverse=True,
                 )
+
+            has_more = len(terminal_rows) > limit
+            page_rows = terminal_rows[:limit]
+            terminal_jobs = [
+                JobRecord(**self._load_indexed_job(str(row[0])).to_dict())
+                for row in page_rows
             ]
+            next_cursor = None
+            if has_more and page_rows:
+                last = page_rows[-1]
+                next_cursor = self._encode_cursor(
+                    created_at=str(last[1]),
+                    job_id=str(last[0]),
+                    filter_signature=filter_signature,
+                )
+            return JobPage(
+                jobs=[*active_jobs, *terminal_jobs],
+                total=total,
+                status_counts=status_counts,
+                next_cursor=next_cursor,
+            )
 
     def wait(self, job_id: str, timeout: float | None = None) -> JobRecord:
         with self._lock:
@@ -192,7 +360,9 @@ class LocalJobRunner:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
-                raise KeyError(f"Unknown job: {job_id}")
+                job = self._load_indexed_job(job_id)
+                if job.status not in TERMINAL_STATUSES:
+                    self._jobs[job_id] = job
             if job.status in TERMINAL_STATUSES:
                 return JobRecord(**job.to_dict())
             process = self._processes.get(job_id)
@@ -206,8 +376,12 @@ class LocalJobRunner:
         if process is not None and process.poll() is None:
             self._terminate_process_group(process)
             with self._lock:
-                job = self._jobs[job_id]
-                if job.status == CANCELING and process.poll() is not None:
+                job = self._jobs.get(job_id)
+                if (
+                    job is not None
+                    and job.status == CANCELING
+                    and process.poll() is not None
+                ):
                     job.status = CANCELED
                     job.ended_at = utc_now_iso()
                     job.returncode = process.returncode
@@ -272,6 +446,8 @@ class LocalJobRunner:
                     job.status = CANCELED
                     job.ended_at = utc_now_iso()
                     self._persist_job(job)
+                self._jobs.pop(job_id, None)
+                self._threads.pop(job_id, None)
                 return
             job.status = RUNNING
             job.started_at = utc_now_iso()
@@ -343,6 +519,8 @@ class LocalJobRunner:
                     job.message = f"{type(exc).__name__}: {exc}"
                     self._append_tail(job, job.message)
                     self._persist_job(job)
+                    self._jobs.pop(job_id, None)
+                    self._threads.pop(job_id, None)
                 return
 
             with self._lock:
@@ -422,6 +600,7 @@ class LocalJobRunner:
                 self._persist_job(job)
                 self._processes.pop(job_id, None)
                 self._threads.pop(job_id, None)
+                self._jobs.pop(job_id, None)
 
     def _append_tail(self, job: JobRecord, line: str) -> None:
         job.tail.append(self._bounded_tail_line(line))
@@ -574,15 +753,27 @@ class LocalJobRunner:
             time.sleep(0.01)
 
     def _load_persisted_jobs(self) -> None:
-        for path in sorted(self.job_root.glob("*/job.json")):
+        try:
+            with self._index_connection() as connection:
+                paths = [
+                    self.job_root / str(row[0])
+                    for row in connection.execute(
+                        "SELECT source_path FROM jobs "
+                        "WHERE status NOT IN (?, ?, ?) "
+                        "ORDER BY created_at, id",
+                        (SUCCEEDED, FAILED, CANCELED),
+                    )
+                ]
+        except sqlite3.DatabaseError:
+            self._rebuild_index()
+            return self._load_persisted_jobs()
+
+        for path in paths:
             try:
                 with open(path, "r") as f:
                     data = json.load(f)
                 job = self._job_from_dict(data)
-                persisted_tail = job.tail[-self.tail_limit :]
-                job.tail = []
-                for line in persisted_tail:
-                    self._append_tail(job, str(line))
+                self._normalize_loaded_tail(job)
                 self._merge_supervisor_identity(job, path.parent / "supervisor.json")
             except Exception:
                 continue
@@ -605,14 +796,6 @@ class LocalJobRunner:
                     job.message += " Its orphaned process group was stopped."
                 self._append_tail(job, job.message)
                 self._persist_job(job)
-            elif orphan_stopped:
-                self._append_tail(
-                    job,
-                    "A verified orphaned process group left by this terminal job "
-                    "was stopped.",
-                )
-                self._persist_job(job)
-            self._jobs[job.id] = job
 
     @staticmethod
     def _job_from_dict(data: Mapping[str, object]) -> JobRecord:
@@ -629,6 +812,13 @@ class LocalJobRunner:
         job_data.setdefault("supervisor_process_group_id", None)
         job_data.setdefault("supervisor_start_time", None)
         job_data.setdefault("visibility", OPERATOR_VISIBILITY)
+        job_data.setdefault("scope_kind", UNKNOWN_SCOPE)
+        job_data.setdefault("run_root", None)
+        if job_data["scope_kind"] not in JOB_SCOPE_KINDS:
+            job_data["scope_kind"] = UNKNOWN_SCOPE
+            job_data["run_root"] = None
+        if job_data["scope_kind"] != RUN_SCOPE:
+            job_data["run_root"] = None
         return JobRecord(**job_data)
 
     @staticmethod
@@ -741,6 +931,331 @@ class LocalJobRunner:
     def _persist_job(self, job: JobRecord) -> None:
         path = Path(job.log_path).parent / "job.json"
         atomic_write_json(path, job.to_dict())
+        self._upsert_index(path, job)
+
+    @staticmethod
+    def _validate_scope(
+        scope_kind: str,
+        run_root: str | Path | None,
+    ) -> str | None:
+        if scope_kind not in JOB_SCOPE_KINDS - {UNKNOWN_SCOPE}:
+            raise ValueError(
+                "scope_kind for a new job must be one of: "
+                + ", ".join(sorted(JOB_SCOPE_KINDS - {UNKNOWN_SCOPE}))
+            )
+        if scope_kind == RUN_SCOPE:
+            if run_root is None or not str(run_root).strip():
+                raise ValueError("run_root is required when scope_kind='run'")
+            return Path(run_root).resolve().as_posix()
+        if run_root is not None:
+            raise ValueError(
+                "run_root is only valid when scope_kind='run'"
+            )
+        return None
+
+    @staticmethod
+    def _normalize_filter_values(
+        values: list[str] | tuple[str, ...] | set[str] | None,
+    ) -> tuple[str, ...]:
+        if not values:
+            return ()
+        return tuple(
+            sorted(
+                {
+                    str(value).strip().lower()
+                    for value in values
+                    if str(value).strip()
+                }
+            )
+        )
+
+    @staticmethod
+    def _page_filter_signature(
+        *,
+        search: str,
+        statuses: tuple[str, ...],
+        scope_kinds: tuple[str, ...],
+        run_root: str | None,
+        include_services: bool,
+    ) -> str:
+        value = json.dumps(
+            {
+                "search": search,
+                "statuses": statuses,
+                "scope_kinds": scope_kinds,
+                "run_root": run_root,
+                "include_services": include_services,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _encode_cursor(
+        *,
+        created_at: str,
+        job_id: str,
+        filter_signature: str,
+    ) -> str:
+        raw = json.dumps(
+            {
+                "v": 1,
+                "created_at": created_at,
+                "job_id": job_id,
+                "filters": filter_signature,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(
+        cursor: str,
+        filter_signature: str,
+    ) -> tuple[str, str]:
+        try:
+            padding = "=" * (-len(cursor) % 4)
+            value = json.loads(
+                base64.urlsafe_b64decode(cursor + padding).decode("utf-8")
+            )
+            if (
+                not isinstance(value, dict)
+                or value.get("v") != 1
+                or value.get("filters") != filter_signature
+                or not isinstance(value.get("created_at"), str)
+                or not isinstance(value.get("job_id"), str)
+            ):
+                raise ValueError
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "cursor is invalid or does not match the current filters"
+            ) from exc
+        return value["created_at"], value["job_id"]
+
+    @staticmethod
+    def _index_filters(
+        *,
+        search: str,
+        scope_kinds: tuple[str, ...],
+        run_root: str | None,
+        include_services: bool,
+    ) -> tuple[list[str], list[object]]:
+        where: list[str] = []
+        parameters: list[object] = []
+        if not include_services:
+            where.append("visibility = ?")
+            parameters.append(OPERATOR_VISIBILITY)
+        if search:
+            where.append("search_text LIKE ?")
+            parameters.append(f"%{search}%")
+        if scope_kinds:
+            placeholders = ", ".join("?" for _ in scope_kinds)
+            where.append(f"scope_kind IN ({placeholders})")
+            parameters.extend(scope_kinds)
+        if run_root is not None:
+            where.append("run_root = ?")
+            parameters.append(run_root)
+        return where, parameters
+
+    @staticmethod
+    def _record_matches_filters(
+        job: JobRecord,
+        *,
+        search: str,
+        statuses: tuple[str, ...],
+        scope_kinds: tuple[str, ...],
+        run_root: str | None,
+        include_services: bool,
+    ) -> bool:
+        if not include_services and job.visibility != OPERATOR_VISIBILITY:
+            return False
+        if statuses and job.status not in statuses:
+            return False
+        if scope_kinds and job.scope_kind not in scope_kinds:
+            return False
+        if run_root is not None and job.run_root != run_root:
+            return False
+        if not search:
+            return True
+        return search in LocalJobRunner._search_text(job)
+
+    @staticmethod
+    def _search_text(job: JobRecord) -> str:
+        return " ".join(
+            (
+                job.id,
+                job.name,
+                job.status,
+                job.message or "",
+                " ".join(job.resources),
+                job.scope_kind,
+                job.run_root or "",
+                json.dumps(job.parameters, sort_keys=True, default=str),
+            )
+        ).lower()
+
+    def _index_connection(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.index_path, timeout=10.0)
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    @staticmethod
+    def _create_index_schema(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                source_path TEXT NOT NULL UNIQUE,
+                source_mtime_ns INTEGER NOT NULL,
+                source_size INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                scope_kind TEXT NOT NULL,
+                run_root TEXT,
+                search_text TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX jobs_history_order "
+            "ON jobs(status, created_at DESC, id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX jobs_scope_run "
+            "ON jobs(scope_kind, run_root, created_at DESC, id DESC)"
+        )
+        connection.execute(f"PRAGMA user_version = {JOB_INDEX_SCHEMA_VERSION}")
+
+    def _ensure_index(self) -> None:
+        if not self.index_path.exists():
+            self._rebuild_index()
+            return
+        try:
+            sources = {
+                path.relative_to(self.job_root).as_posix(): (
+                    path.stat().st_mtime_ns,
+                    path.stat().st_size,
+                )
+                for path in self.job_root.glob("*/job.json")
+                if path.is_file()
+            }
+            with self._index_connection() as connection:
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                if version != JOB_INDEX_SCHEMA_VERSION:
+                    raise sqlite3.DatabaseError("unsupported job index schema")
+                check = connection.execute("PRAGMA quick_check").fetchone()
+                if check is None or check[0] != "ok":
+                    raise sqlite3.DatabaseError("job index integrity check failed")
+                indexed = {
+                    str(row[0]): (int(row[1]), int(row[2]))
+                    for row in connection.execute(
+                        "SELECT source_path, source_mtime_ns, source_size FROM jobs"
+                    )
+                }
+            if indexed != sources:
+                self._rebuild_index()
+        except (OSError, sqlite3.DatabaseError):
+            self._rebuild_index()
+
+    def _rebuild_index(self) -> None:
+        temporary = self.job_root / f".{JOB_INDEX_FILENAME}.{uuid.uuid4().hex}.tmp"
+        try:
+            with sqlite3.connect(temporary) as connection:
+                self._create_index_schema(connection)
+                for path in sorted(self.job_root.glob("*/job.json")):
+                    try:
+                        with open(path, encoding="utf-8") as handle:
+                            job = self._job_from_dict(json.load(handle))
+                        self._insert_index_record(connection, path, job)
+                    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                connection.commit()
+            os.replace(temporary, self.index_path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _upsert_index(self, path: Path, job: JobRecord) -> None:
+        try:
+            with self._index_connection() as connection:
+                self._insert_index_record(
+                    connection,
+                    path,
+                    job,
+                    replace_existing=True,
+                )
+                connection.commit()
+        except sqlite3.DatabaseError:
+            self._rebuild_index()
+
+    def _insert_index_record(
+        self,
+        connection: sqlite3.Connection,
+        path: Path,
+        job: JobRecord,
+        *,
+        replace_existing: bool = False,
+    ) -> None:
+        stat = path.stat()
+        relative = path.relative_to(self.job_root).as_posix()
+        verb = "INSERT OR REPLACE" if replace_existing else "INSERT"
+        connection.execute(
+            f"""
+            {verb} INTO jobs (
+                id, source_path, source_mtime_ns, source_size, name, status,
+                created_at, visibility, scope_kind, run_root, search_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job.id,
+                relative,
+                stat.st_mtime_ns,
+                stat.st_size,
+                job.name,
+                job.status,
+                job.created_at,
+                job.visibility,
+                job.scope_kind,
+                job.run_root,
+                self._search_text(job),
+            ),
+        )
+
+    def _load_indexed_job(self, job_id: str) -> JobRecord:
+        try:
+            with self._index_connection() as connection:
+                row = connection.execute(
+                    "SELECT source_path FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+        except sqlite3.DatabaseError:
+            self._rebuild_index()
+            return self._load_indexed_job(job_id)
+        if row is None:
+            raise KeyError(f"Unknown job: {job_id}")
+        path = (self.job_root / str(row[0])).resolve()
+        try:
+            path.relative_to(self.job_root.resolve())
+            with open(path, encoding="utf-8") as handle:
+                job = self._job_from_dict(json.load(handle))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise KeyError(f"Unknown job: {job_id}") from exc
+        if job.id != job_id:
+            raise KeyError(f"Unknown job: {job_id}")
+        self._normalize_loaded_tail(job)
+        return job
+
+    def _normalize_loaded_tail(self, job: JobRecord) -> None:
+        persisted_tail = job.tail[-self.tail_limit :]
+        job.tail = []
+        for line in persisted_tail:
+            self._append_tail(job, str(line))
 
     @staticmethod
     def _format_command(command: list[str]) -> str:

@@ -11,8 +11,8 @@ from posetestbot.bop.annotations import (
     validate_annotation_mode,
 )
 from posetestbot.jobs.runner import ResourceBusyError
-from posetestbot.web.legacy import job_runner
 from posetestbot.web.paths import APP_ROOT
+from posetestbot.web.runtime import job_runner
 from posetestbot.web.security import resolve_web_run_root
 
 
@@ -67,6 +67,8 @@ def queue_bop_annotations():
             ],
             cwd=APP_ROOT,
             resources=["cpu", "render", "disk_io"],
+            scope_kind="run",
+            run_root=run_root,
             parameters={
                 "run_root": run_root.as_posix(),
                 "bop_annotations": True,

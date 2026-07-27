@@ -17,6 +17,13 @@ import { useOperator } from "@/providers/operator-provider"
 const HIDDEN_SAFETY_PARAMETERS = new Set(["allow_cameras", "allow_real_robot"])
 const UI_NOISE_PARAMETERS = new Set(["json"])
 
+function artifactTone(status: string | undefined) {
+  if (status === "complete" || status === "succeeded" || status === "ready" || status === "verified") return "success" as const
+  if (status === "failed" || status === "blocked" || status === "error" || status === "missing") return "destructive" as const
+  if (status === "queued" || status === "running" || status === "pending") return "warning" as const
+  return "informational" as const
+}
+
 function initialValue(parameter: PipelineParameter): JsonValue {
   if (parameter.default !== null && parameter.default !== undefined) return parameter.default
   return parameter.kind === "bool" ? false : ""
@@ -70,7 +77,7 @@ export function StageForm({ stage, artifactStatus }: { stage: PipelineStage; art
       return api<{ job_id: string }>("/pipeline/run", { method: "POST", body: JSON.stringify({ stage: stage.id, run_root: selectedRun, options: normalizedOptions(stage.parameters, values) }) })
     },
     onSuccess: (data) => {
-      toast.success(`${stage.label} queued`, { description: `Job ${data.job_id}` })
+      toast.success(`${stage.label} queued`, { description: `Job ${data.job_id} continues after navigation; status and logs are available in Jobs.` })
       queryClient.invalidateQueries({ queryKey: ["jobs"] })
       queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] })
     },
@@ -79,11 +86,11 @@ export function StageForm({ stage, artifactStatus }: { stage: PipelineStage; art
 
   return (
     <Card data-stage-id={stage.id}>
-      <CardHeader><div className="flex items-start justify-between gap-3"><div><CardTitle className="text-base">{stage.label}</CardTitle><CardDescription className="mt-1 leading-relaxed">{stage.description}</CardDescription></div><StatusBadge status={artifactStatus ?? "available"} /></div></CardHeader>
+      <CardHeader><div className="flex items-start justify-between gap-3"><div><CardTitle className="text-base">{stage.label}</CardTitle><CardDescription className="mt-1 leading-relaxed">{stage.description}</CardDescription></div><StatusBadge status={artifactStatus ?? "available"} tone={artifactTone(artifactStatus)} /></div></CardHeader>
       <CardContent className="space-y-4">
         {common.length > 0 && <div className="grid grid-cols-2 gap-3">{common.map((parameter) => <ParameterField key={parameter.name} parameter={parameter} value={values[parameter.name]} setValue={(value) => setValues((current) => ({ ...current, [parameter.name]: value }))} />)}</div>}
         {uncommon.length > 0 && <div><Button type="button" variant="ghost" size="sm" aria-expanded={advanced} aria-controls={`advanced-${stage.id}`} onClick={() => setAdvanced((value) => !value)}><ChevronDown className={advanced ? "rotate-180 transition" : "transition"} />Advanced · {uncommon.length} options</Button>{advanced && <div id={`advanced-${stage.id}`} className="mt-3 grid grid-cols-2 gap-3 rounded-lg border border-border bg-muted/20 p-4">{uncommon.map((parameter) => <ParameterField key={parameter.name} parameter={parameter} value={values[parameter.name]} setValue={(value) => setValues((current) => ({ ...current, [parameter.name]: value }))} />)}</div>}</div>}
-        <div className="flex items-center justify-between border-t border-border pt-4"><div><div className="flex flex-wrap gap-1">{stage.resources.map((resource) => <StatusBadge status="available" key={resource}>{resource}</StatusBadge>)}</div>{missing.length > 0 && <p className="mt-2 text-xs text-destructive">Required: {missing.map((parameter) => titleCase(parameter.name)).join(", ")}</p>}</div><Button onClick={() => run.mutate()} disabled={run.isPending || missing.length > 0}>{run.isPending ? null : <Play />}{run.isPending ? "Queueing…" : "Queue stage"}</Button></div>
+        <div className="flex items-center justify-between border-t border-border pt-4"><div><div className="flex flex-wrap gap-1">{stage.resources.map((resource) => <StatusBadge status="available" tone="informational" key={resource}>{resource}</StatusBadge>)}</div>{missing.length > 0 && <p className="mt-2 text-xs text-destructive">Required: {missing.map((parameter) => titleCase(parameter.name)).join(", ")}</p>}</div><Button onClick={() => run.mutate()} disabled={run.isPending || missing.length > 0}>{run.isPending ? null : <Play />}{run.isPending ? "Queueing…" : "Queue stage"}</Button></div>
       </CardContent>
     </Card>
   )

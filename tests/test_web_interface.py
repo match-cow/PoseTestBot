@@ -20,7 +20,7 @@ from posetestbot.pipeline.run_config import (
     create_run_config,
     write_run_config,
 )
-from posetestbot.web import legacy as web_legacy
+from posetestbot.web import route_support as web_route_support
 from posetestbot.web.app import _PreviewPollLogFilter
 from posetestbot.web.routes import sensors as web_sensors
 
@@ -95,7 +95,7 @@ def test_capture_jobs_tolerates_runner_without_resource_lock_reporting(
         def list(self):
             return []
 
-    monkeypatch.setattr(web_legacy, "job_runner", MinimalRunner())
+    monkeypatch.setattr(web_route_support, "job_runner", MinimalRunner())
 
     response = app.test_client().get("/capture/jobs")
 
@@ -169,7 +169,7 @@ def test_start_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
             return FakeJob()
 
     fake_runner = FakeRunner()
-    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    monkeypatch.setattr(web_route_support, "job_runner", fake_runner)
     client = app.test_client()
 
     response = client.post(
@@ -187,6 +187,8 @@ def test_start_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
     assert response.status_code == 202
     assert payload["job_id"] == "robotjob1"
     assert fake_runner.submitted[0]["resources"] == ["robot_command"]
+    assert fake_runner.submitted[0]["scope_kind"] == "global"
+    assert fake_runner.submitted[0].get("run_root") is None
     assert fake_runner.submitted[0]["command"] == [
         "uv",
         "run",
@@ -217,7 +219,7 @@ def test_start_iiwa_command_requires_both_execution_gates(monkeypatch) -> None:
             raise AssertionError("ungated robot start should not queue a job")
 
     fake_runner = FakeRunner()
-    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    monkeypatch.setattr(web_route_support, "job_runner", fake_runner)
     client = app.test_client()
 
     missing_both = client.post(
@@ -275,7 +277,7 @@ def test_stop_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
             return FakeJob()
 
     fake_runner = FakeRunner()
-    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    monkeypatch.setattr(web_route_support, "job_runner", fake_runner)
     client = app.test_client()
 
     response = client.post(
@@ -289,6 +291,8 @@ def test_stop_iiwa_command_queues_real_robot_target(monkeypatch) -> None:
 
     assert response.status_code == 202
     assert fake_runner.submitted[0]["resources"] == ["robot_command"]
+    assert fake_runner.submitted[0]["scope_kind"] == "global"
+    assert fake_runner.submitted[0].get("run_root") is None
     assert fake_runner.submitted[0]["command"] == [
         "uv",
         "run",
@@ -312,7 +316,7 @@ def test_iiwa_command_rejects_invalid_robot_target(monkeypatch) -> None:
             raise AssertionError("invalid robot target should not queue a job")
 
     fake_runner = FakeRunner()
-    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    monkeypatch.setattr(web_route_support, "job_runner", fake_runner)
     client = app.test_client()
 
     invalid_ip = client.post(
@@ -681,7 +685,7 @@ def test_run_config_explicit_redetection_replaces_preserved_sensors(
         ),
     )
     monkeypatch.setattr(
-        "posetestbot.web.legacy.collect_sensor_status",
+        "posetestbot.web.route_support.collect_sensor_status",
         lambda: {
             "families": [
                 {
@@ -785,7 +789,7 @@ def test_pipeline_and_sequence_web_boundaries_reject_string_gates(
             raise AssertionError("string acknowledgements must not queue a job")
 
     fake_runner = FakeRunner()
-    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    monkeypatch.setattr(web_route_support, "job_runner", fake_runner)
     client = app.test_client()
     string_options = {
         "capture_plan_preflight": {"allow_real_robot": "true"},
@@ -841,7 +845,7 @@ def test_real_sequence_web_submission_passes_ephemeral_gates_only_in_environment
             return FakeJob()
 
     fake_runner = FakeRunner()
-    monkeypatch.setattr(web_legacy, "job_runner", fake_runner)
+    monkeypatch.setattr(web_route_support, "job_runner", fake_runner)
     client = app.test_client()
     options = {
         "capture_plan_preflight": {"allow_real_robot": True},
@@ -872,6 +876,8 @@ def test_real_sequence_web_submission_passes_ephemeral_gates_only_in_environment
     assert "allow_cameras" not in serialized
     assert "allow_real_robot" not in serialized
     assert "POSETESTBOT_SEQUENCE_EXECUTION_ACKNOWLEDGEMENTS" in submission["env"]
+    assert submission["scope_kind"] == "run"
+    assert submission["run_root"] == (tmp_path / "ephemeral-sequence").as_posix()
 
 
 def test_sensor_alias_endpoint_round_trips_lab_local_file(
@@ -1196,6 +1202,8 @@ def test_sensor_snapshot_submission_queues_camera_job(
         "camera:realsense_d435:123",
         "disk_io",
     ]
+    assert fake_runner.submitted["scope_kind"] == "global"
+    assert fake_runner.submitted.get("run_root") is None
     assert fake_runner.submitted["command"][:4] == [
         "uv",
         "run",
@@ -1285,6 +1293,8 @@ def test_sensor_preview_submission_queues_one_job_per_selected_sensor(
         ["camera:realsense_d435:825412070181"],
         ["camera:realsense_d435:923322072633"],
     ]
+    assert {item["scope_kind"] for item in fake_runner.submitted} == {"global"}
+    assert all(item.get("run_root") is None for item in fake_runner.submitted)
     assert fake_runner.submitted[0]["command"][:4] == [
         "uv",
         "run",

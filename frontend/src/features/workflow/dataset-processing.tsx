@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { api, errorMessage } from "@/lib/api"
 import type { Job } from "@/lib/contracts"
+import { jobStatusTone } from "@/lib/jobs"
 import { cn, formatDate } from "@/lib/utils"
 
 interface DatasetProcessingProps {
@@ -35,14 +36,15 @@ const FAILED_JOB_STATUSES = new Set(["failed", "canceled", "cancelled"])
 const TERMINAL_JOB_STATUSES = new Set(["succeeded", ...FAILED_JOB_STATUSES])
 
 function isDatasetProcessingJob(job: Job, runRoot: string) {
-  return job.parameters.run_root === runRoot
+  return job.scope_kind === "run"
+    && job.run_root === runRoot
     && (job.parameters.pipeline_sequence === PROCESSING_SEQUENCE || job.name === `pipeline-run-config:${PROCESSING_SEQUENCE}`)
 }
 
 type OutcomeState = "complete" | "queued" | "running" | "verifying" | "failed" | "waiting"
 
 const outcomePresentation: Record<OutcomeState, { label: string; className: string }> = {
-  complete: { label: "Complete", className: "bg-success text-white" },
+  complete: { label: "Complete", className: "bg-success text-success-foreground" },
   queued: { label: "Queued", className: "bg-warning/15 text-warning-foreground" },
   running: { label: "Running", className: "bg-warning/15 text-warning-foreground" },
   verifying: { label: "Verifying", className: "bg-primary/10 text-primary-strong" },
@@ -143,7 +145,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
   return <Card data-testid="dataset-processing" className="border-primary/25">
     <CardHeader>
       <CardTitle className="text-base">Process the recorded dataset</CardTitle>
-      <CardDescription>One queued job runs five backend stages grouped into the four operator outcomes below. It synchronizes, validates, rectifies, and writes the base image/model BOP dataset. Ground-truth generation is chosen separately in the export step. Raw camera frames and robot poses are never renamed or replaced.</CardDescription>
+      <CardDescription>One queued job runs five backend stages grouped into the four operator outcomes below. It synchronizes, validates, rectifies, and writes the base image/model BOP dataset. Ground-truth generation is chosen separately in optional step 6. Raw camera frames and robot poses are never renamed or replaced.</CardDescription>
     </CardHeader>
     <CardContent className="space-y-5">
       <ol className="grid gap-2 sm:grid-cols-2" aria-label="Automatic dataset processing">
@@ -171,7 +173,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
           <div className="flex min-w-0 items-start gap-3">
             <StatusIcon aria-hidden="true" className={cn("mt-0.5 size-5 shrink-0", active && "animate-spin", failed ? "text-destructive" : verified ? "text-success" : "text-primary-strong")} />
             <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{statusTitle}</span><StatusBadge status={statusBadgeStatus}>{verified ? "verified" : currentJobStatus ?? "unavailable"}</StatusBadge></div>
+              <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{statusTitle}</span><StatusBadge status={statusBadgeStatus} tone={verified ? "success" : jobStatusTone(currentJobStatus)}>{verified ? "verified" : currentJobStatus ?? "unavailable"}</StatusBadge></div>
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{statusDescription}</p>
               {currentJob?.message && failed && <p className="mt-2 font-mono text-[10px] text-destructive">{currentJob.message}</p>}
             </div>
@@ -186,7 +188,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
         <div className="flex items-start gap-2 text-xs text-muted-foreground"><ShieldCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning-foreground" /><span>{!ready ? "Complete the readiness step before processing this run." : "Record the object dataset before processing it."}</span></div>
         {!ready && <Button type="button" variant="outline" size="sm" onClick={onReviewReadiness}>Review readiness</Button>}
       </div> : <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-xs text-muted-foreground">Calibration validation is automatic here; there is no second operator preflight. The queued job continues after navigation and is recovered from persistent job history when you return. After the base export is verified, choose pose-only or pose-and-mask ground truth in step 6.</p>
+        <p className="text-xs text-muted-foreground">Calibration validation is automatic here; there is no second operator preflight. The queued job continues after navigation and is recovered from persistent job history when you return. After the base export is verified, step 6 offers optional pose-only or pose-and-mask ground truth.</p>
         <div className="flex flex-wrap gap-2">
           <Button type="button" onClick={() => process.mutate()} disabled={process.isPending || active}>
             {process.isPending || active ? <LoaderCircle aria-hidden="true" className="animate-spin" /> : <Play aria-hidden="true" />}

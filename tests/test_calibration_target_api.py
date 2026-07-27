@@ -128,6 +128,8 @@ def test_generate_and_select_use_exact_queued_resources(target_client) -> None:
     assert generated.status_code == 202
     assert runner.submissions[0]["name"] == "calibration_target_generate"
     assert runner.submissions[0]["resources"] == ["cpu", "disk_io"]
+    assert runner.submissions[0]["scope_kind"] == "library"
+    assert runner.submissions[0].get("run_root") is None
     assert runner.submissions[0]["command"][:4] == [
         "uv",
         "run",
@@ -142,6 +144,8 @@ def test_generate_and_select_use_exact_queued_resources(target_client) -> None:
     assert selected.status_code == 202
     assert runner.submissions[1]["name"] == "calibration_target_select"
     assert runner.submissions[1]["resources"] == ["disk_io"]
+    assert runner.submissions[1]["scope_kind"] == "run"
+    assert runner.submissions[1]["run_root"] == run.as_posix()
     assert runner.submissions[1]["command"] == [
         "uv",
         "run",

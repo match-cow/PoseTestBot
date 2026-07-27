@@ -442,6 +442,20 @@ def install_common_mocks(
         "**/jobs", lambda route: fulfill_json(route, {"jobs": [], "resources": {}})
     )
     page.route(
+        "**/jobs?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "jobs": [],
+                "resources": {},
+                "total": 0,
+                "status_counts": {},
+                "next_cursor": None,
+                "limit": 20,
+            },
+        ),
+    )
+    page.route(
         "**/monitoring/webcam",
         lambda route: fulfill_json(
             route,
@@ -575,21 +589,59 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     ).to_have_attribute("href", "#/workflow/calibration?step=configure")
     assert page.evaluate("localStorage.getItem('posetestbot.theme')") is None
     assert page.evaluate("localStorage.getItem('posetestbot.selectedRun')") is None
-    expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("new-run")
-    page.get_by_role("combobox", name="Selected run").click()
+    active_run_context = page.get_by_test_id("active-run-context")
+    expect(active_run_context).to_contain_text("Active run folder")
+    expect(active_run_context).to_contain_text(
+        "All run-owned pages and actions use this folder"
+    )
+    expect(
+        page.get_by_role("combobox", name="Active run folder").get_by_text("Change")
+    ).to_be_visible()
+    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
+        "new-run"
+    )
+    page.get_by_role("combobox", name="Active run folder").click()
     page.get_by_role("option", name="old-run · sync_aruco").click()
-    expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("old-run")
+    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
+        "old-run"
+    )
     page.get_by_role("complementary", name="Application sidebar").get_by_role(
         "link", name="Devices"
     ).click()
     expect(page).to_have_url(f"{console_server.url}/#/devices")
     page.reload(wait_until="networkidle")
-    expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("old-run")
-    page.get_by_role("button", name="Choose run path").click()
+    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
+        "old-run"
+    )
+    page.get_by_role("combobox", name="Active run folder").click()
+    page.get_by_role("option", name="Enter a new or unlisted folder…").click()
+    expect(
+        page.get_by_role("heading", name="Change the active run folder")
+    ).to_be_visible()
+    expect(
+        page.get_by_text(
+            "This is the context for the entire operator workflow",
+            exact=False,
+        )
+    ).to_be_visible()
+    expect(
+        page.get_by_text("Confirm the acquisition run before continuing.")
+    ).to_be_visible()
     expect(page.locator("#new-run-path")).to_have_value(
         "/tmp/posetestbot-console/old-run"
     )
-    page.keyboard.press("Escape")
+    custom_run = "/tmp/posetestbot-console/unlisted-run"
+    page.locator("#new-run-path").fill(custom_run)
+    page.get_by_role("button", name="Switch active folder", exact=True).click()
+    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
+        custom_run
+    )
+    assert page.evaluate("localStorage.getItem('posetestbot.selectedRun')") == custom_run
+    page.reload(wait_until="networkidle")
+    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
+        custom_run
+    )
+    assert page.evaluate("localStorage.getItem('posetestbot.selectedRun')") == custom_run
     page.get_by_role("button", name="Open operator console guide").click()
     expect(page.get_by_role("heading", name="Operator console guide")).to_be_visible()
     expect(
@@ -748,6 +800,8 @@ def test_bop_evaluation_queues_result_recovers_job_and_shows_metrics(
                 "evaluation_id": "evaluation-bbbbbbbbbbbb",
                 "result_id": result["result_id"],
             },
+            "scope_kind": "run",
+            "run_root": RUN_ROOT,
             "log_path": "/tmp/bopeval1.log",
             "visibility": "operator",
         }
@@ -867,7 +921,7 @@ def test_bop_evaluation_queues_result_recovers_job_and_shows_metrics(
     expect(page.locator("#simulation-score")).to_have_value("1")
 
 
-def test_workflow_chooser_distinguishes_numbered_required_journeys(
+def test_workflow_chooser_distinguishes_numbered_guided_journeys(
     console_server,
     page,
 ) -> None:
@@ -893,11 +947,11 @@ def test_workflow_chooser_distinguishes_numbered_required_journeys(
     ]
     assert outlines.nth(1).locator("li").all_inner_texts() == [
         "01Configure cameras and select calibration",
-        "02Choose the object template and placement",
+        "02Choose the pose template and placement",
         "03Check readiness",
         "04Record the object dataset",
-        "05Synchronize and verify frames",
-        "06Export the BOP dataset",
+        "05Process frames and create the base BOP export",
+        "06Add optional BOP ground-truth evidence",
     ]
 
     workflow_links = page.get_by_role("link", name="Start this workflow")
@@ -914,7 +968,7 @@ def test_workflow_stepper_connectors_follow_numbered_steps(
 
     page.goto(f"{console_server.url}/#/workflow/calibration", wait_until="networkidle")
 
-    stepper = page.get_by_role("navigation", name="Required workflow steps")
+    stepper = page.get_by_role("navigation", name="Workflow steps")
     expect(stepper).to_be_visible()
     expect(page).to_have_url(f"{console_server.url}/#/workflow/calibration?step=target")
     expect(page.get_by_role("heading", name="Calibrate cameras")).to_be_in_viewport()
@@ -1067,9 +1121,9 @@ def test_sidebar_preserves_current_workflow_step_and_fast_return(
 
     sidebar = page.get_by_role("complementary", name="Application sidebar")
     current = sidebar.get_by_test_id("current-workflow-card")
-    expect(current).to_contain_text("Current workflow")
+    expect(current).to_contain_text("Resume position")
     expect(current).to_contain_text("Object dataset")
-    expect(current).to_contain_text("Selected run · Step 4 of 6")
+    expect(current).to_contain_text("Active run · Viewed step 4 of 6")
     expect(current).to_contain_text("Record the object dataset")
     expect(current).to_contain_text("Current step")
     resume = current.get_by_role(
@@ -1091,6 +1145,24 @@ def test_sidebar_preserves_current_workflow_step_and_fast_return(
     assert stored[RUN_ROOT]["stepId"] == "capture"
     assert stored[RUN_ROOT]["status"] == "current"
 
+    sidebar.get_by_role("link", name="Devices").click()
+    expect(page).to_have_url(f"{console_server.url}/#/devices")
+    device_handoff = page.get_by_role(
+        "complementary", name="Where this page fits in the operator workflow"
+    )
+    expect(
+        device_handoff.get_by_role("link", name="Open workflow step 1")
+    ).to_have_attribute("href", "#/workflow/dataset?step=configure")
+
+    sidebar.get_by_role("link", name="Jobs").click()
+    expect(page).to_have_url(f"{console_server.url}/#/jobs")
+    jobs_handoff = page.get_by_role(
+        "complementary", name="Where this page fits in the operator workflow"
+    )
+    expect(jobs_handoff.get_by_role("link", name="Open workflow")).to_have_attribute(
+        "href", "#/workflow/dataset?step=capture"
+    )
+
     sidebar.get_by_role("link", name="Dashboard").click()
     expect(page).to_have_url(f"{console_server.url}/#/dashboard")
     capture_runtime["status"] = "running"
@@ -1098,9 +1170,9 @@ def test_sidebar_preserves_current_workflow_step_and_fast_return(
     current = page.get_by_role(
         "complementary", name="Application sidebar"
     ).get_by_test_id("current-workflow-card")
-    expect(current).to_contain_text("Selected run · Step 4 of 6")
+    expect(current).to_contain_text("Active run · Viewed step 4 of 6")
     expect(current.get_by_role("status")).to_have_text("Recording running")
-    page.get_by_role("combobox", name="Selected run").click()
+    page.get_by_role("combobox", name="Active run folder").click()
     page.get_by_role("option", name="old-run · sync_aruco").click()
     sidebar = page.get_by_role("complementary", name="Application sidebar")
     expect(sidebar.get_by_test_id("current-workflow-card")).to_have_count(0)
@@ -1109,12 +1181,12 @@ def test_sidebar_preserves_current_workflow_step_and_fast_return(
             "link", name="Workflow"
         )
     ).to_have_attribute("href", "#/workflow/setup")
-    page.get_by_role("combobox", name="Selected run").click()
+    page.get_by_role("combobox", name="Active run folder").click()
     page.get_by_role(
         "option", name="new-run · real_full_capture_validation"
     ).click()
     current = sidebar.get_by_test_id("current-workflow-card")
-    expect(current).to_contain_text("Selected run · Step 4 of 6")
+    expect(current).to_contain_text("Active run · Viewed step 4 of 6")
     current.get_by_role(
         "link",
         name="Resume object dataset at step 4: Record the object dataset",
@@ -1123,10 +1195,22 @@ def test_sidebar_preserves_current_workflow_step_and_fast_return(
         f"{console_server.url}/#/workflow/dataset?step=capture"
     )
     expect(
-        page.get_by_role("navigation", name="Required workflow steps").locator(
+        page.get_by_role("navigation", name="Workflow steps").locator(
             '[aria-current="step"]'
         )
     ).to_contain_text("Record the object dataset")
+    active_capture = page.get_by_test_id("capture-active-job")
+    expect(active_capture).to_contain_text("Dataset capture is running")
+    expect(active_capture).to_contain_text("continues after navigation")
+    expect(active_capture).to_contain_text(
+        "Another capture cannot be submitted while this job is active."
+    )
+    expect(
+        active_capture.get_by_role("link", name="Open capture in Jobs")
+    ).to_have_attribute("href", "#/jobs")
+    expect(
+        page.get_by_role("button", name="Review and start capture", exact=True)
+    ).to_have_count(0)
 
 
 def test_new_run_path_renders_guided_setup_when_run_config_is_missing(
@@ -1169,9 +1253,10 @@ def test_new_run_path_renders_guided_setup_when_run_config_is_missing(
     fresh_run = "/tmp/posetestbot-console/fresh-calibration-run"
 
     page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
-    page.get_by_role("button", name="Choose run path").click()
+    page.get_by_role("combobox", name="Active run folder").click()
+    page.get_by_role("option", name="Enter a new or unlisted folder…").click()
     page.locator("#new-run-path").fill(fresh_run)
-    page.get_by_role("button", name="Use run", exact=True).click()
+    page.get_by_role("button", name="Switch active folder", exact=True).click()
     page.goto(
         f"{console_server.url}/#/workflow/calibration?step=configure",
         wait_until="networkidle",
@@ -1183,15 +1268,133 @@ def test_new_run_path_renders_guided_setup_when_run_config_is_missing(
     expect(setup.get_by_test_id("run-camera-row")).to_have_count(2)
     expect(setup.get_by_role("button", name="Save setup")).to_be_enabled()
     expect(
-        page.get_by_role("navigation", name="Required workflow steps")
+        page.get_by_role("navigation", name="Workflow steps")
     ).to_be_visible()
-    expect(page.get_by_role("combobox", name="Selected run")).to_contain_text(fresh_run)
+    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
+        fresh_run
+    )
+
+
+def test_switching_active_run_clears_setup_draft_before_unconfigured_save(
+    console_server,
+    page,
+) -> None:
+    configured = run_config(
+        sensors=[
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "display_name": "Wrist RGB-D",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+            }
+        ]
+    )
+    install_common_mocks(page, config_payload=configured)
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status())
+    )
+    fresh_run = "/tmp/posetestbot-console/empty-new-run"
+    unavailable_run = "/tmp/posetestbot-console/unavailable-run"
+    writes: list[dict] = []
+
+    def config_handler(route) -> None:
+        run_root = parse_qs(urlparse(route.request.url).query).get(
+            "run_root", [RUN_ROOT]
+        )[0]
+        if route.request.method == "POST":
+            writes.append(route.request.post_data_json)
+            fulfill_json(route, {"config": configured}, status=201)
+        elif run_root == fresh_run:
+            fulfill_json(
+                route,
+                {"output": "run_config.json does not exist"},
+                status=404,
+            )
+        elif run_root == unavailable_run:
+            fulfill_json(
+                route,
+                {"output": "run configuration storage is temporarily unavailable"},
+                status=503,
+            )
+        else:
+            fulfill_json(
+                route,
+                {
+                    "config": configured,
+                    "preflight": {"queue_blocker": "missing_preflight"},
+                },
+            )
+
+    page.unroute("**/run-config**")
+    page.route("**/run-config**", config_handler)
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=configure",
+        wait_until="networkidle",
+    )
+
+    page.get_by_label("Run name").fill("unsaved values from the previous run")
+    page.locator("#fps").fill("41")
+    page.get_by_role("combobox", name="Active run folder").click()
+    page.get_by_role("option", name="Enter a new or unlisted folder…").click()
+    page.locator("#new-run-path").fill(fresh_run)
+    page.get_by_role("button", name="Switch active folder", exact=True).click()
+
+    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
+        fresh_run
+    )
+    setup = page.get_by_test_id("camera_calibration-run-setup")
+    expect(setup.get_by_label("Run name")).to_have_value("")
+    expect(setup.locator("#fps")).to_have_value("6")
+    expect(setup.locator("#velocity")).to_have_value("0.01")
+    expect(setup.get_by_role("button", name="Save setup")).to_be_enabled()
+
+    page.get_by_role("combobox", name="Active run folder").click()
+    page.get_by_role("option", name="Enter a new or unlisted folder…").click()
+    page.locator("#new-run-path").fill(unavailable_run)
+    page.get_by_role("button", name="Switch active folder", exact=True).click()
+    setup = page.get_by_test_id("camera_calibration-run-setup")
+    expect(
+        setup.get_by_text("The active run’s setup could not be loaded")
+    ).to_be_visible()
+    expect(setup).to_contain_text(
+        "Existing setup may still be present, so saving remains disabled."
+    )
+    expect(setup.get_by_role("button", name="Retry setup lookup")).to_be_visible()
+    expect(setup.get_by_role("button", name="Save setup")).to_be_disabled()
+    expect(setup.get_by_label("Run name")).to_be_disabled()
+    assert writes == []
 
 
 def test_responsive_shell_and_dataset_workflow_links(console_server, page) -> None:
-    config = run_config()
+    config = run_config(plan_only=False)
     config["dataset_mode"] = "pose_template"
+    config["calibration_profiles"] = (
+        "processed/calibration_inputs/current/calibration_profiles.json"
+    )
+    config["intrinsic_calibration_profiles"] = (
+        "processed/calibration_inputs/current/intrinsic_calibration_profiles.json"
+    )
+    config["calibration_profile_selection"] = {
+        "selection_artifact": "calibration_profile_selection.json",
+        "bundle_sha256": "a" * 64,
+        "selected_at": "2026-07-27T12:00:00+00:00",
+    }
+    config["pose_template"] = {
+        "template_uuid": "22222222-2222-4222-8222-222222222222",
+        "placement_confirmed": True,
+    }
+    overview = overview_payload(config)
+    for section_id in ("preflight", "capture", "sync"):
+        next(
+            section for section in overview["sidebar"] if section["id"] == section_id
+        )["status"] = "complete"
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "status"
+    ] = "blocked"
     install_common_mocks(page, config_payload=config)
+    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
     page.set_viewport_size({"width": 900, "height": 900})
 
     page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
@@ -1217,17 +1420,29 @@ def test_responsive_shell_and_dataset_workflow_links(console_server, page) -> No
     expect(
         workflow_overview.get_by_role("heading", name="Object dataset workflow")
     ).to_be_visible()
-    expect(workflow_overview).to_contain_text("6 required steps")
+    expect(workflow_overview).to_contain_text(
+        "5 required steps plus 1 optional ground-truth step"
+    )
     expect(workflow_overview).to_contain_text(
         "a saved camera calibration is an input to step 1"
     )
     expect(workflow_overview.locator("[data-workflow-step]")).to_have_count(6)
     expect(
         workflow_overview.locator('[data-workflow-step="template"]')
-    ).to_contain_text("Choose the object template and placement")
+    ).to_contain_text("Choose the pose template and placement")
     expect(
         workflow_overview.locator('[data-workflow-step="export"]')
-    ).to_contain_text("Export the BOP dataset")
+    ).to_contain_text("Add optional BOP ground-truth evidence")
+    expect(
+        workflow_overview.locator('[data-workflow-step="export"]')
+    ).to_contain_text("Optional")
+    expect(
+        workflow_overview.locator('[data-workflow-step="sync"]')
+    ).to_contain_text("Blocked")
+    expect(
+        workflow_overview.locator('[data-workflow-step="export"]')
+    ).not_to_contain_text("Blocked")
+    expect(workflow_overview.get_by_text("Needs attention")).to_have_count(0)
     assert page.evaluate("getComputedStyle(document.body).minWidth") == "0px"
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
@@ -1654,6 +1869,7 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(
     preview_posts = {"count": 0}
     availability = {"available": True}
     orientation_ready = {"value": False}
+    library_job_status = {"generate": "queued", "clone": "queued"}
     library_payload = pose_template_library()
     page.route(
         "**/pose-templates/status",
@@ -1718,7 +1934,7 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(
             {
                 "job": {
                     "id": "generate-job",
-                    "status": "succeeded",
+                    "status": library_job_status["generate"],
                     "message": None,
                     "tail": [],
                 }
@@ -1732,12 +1948,20 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(
             {
                 "job": {
                     "id": "clone-job",
-                    "status": "failed",
-                    "message": "Command exited with status 1",
-                    "tail": [
-                        "Canonical geometry changed; analyze stable orientations again.",
-                        "Command exited with code 1",
-                    ],
+                    "status": library_job_status["clone"],
+                    "message": (
+                        "Command exited with status 1"
+                        if library_job_status["clone"] == "failed"
+                        else None
+                    ),
+                    "tail": (
+                        [
+                            "Canonical geometry changed; analyze stable orientations again.",
+                            "Command exited with code 1",
+                        ]
+                        if library_job_status["clone"] == "failed"
+                        else []
+                    ),
                 }
             },
         ),
@@ -1845,6 +2069,15 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(
     manage = page.get_by_role("link", name="Manage catalogue")
     expect(manage).to_be_visible()
     expect(manage).to_have_attribute("href", "#/workpieces")
+    for authoring_step in (
+        "Template authoring · 1 of 3",
+        "Template authoring · 2 of 3",
+        "Template authoring · 3 of 3",
+    ):
+        expect(page.get_by_text(authoring_step, exact=True)).to_be_visible()
+    expect(page.get_by_role("link", name="PDF")).to_have_class(
+        re.compile(r"\bborder\b.*\bbg-card\b")
+    )
     expect(page.get_by_role("button", name="Upload CAD")).to_have_count(0)
     library_thumbnail = page.get_by_test_id(
         "template-thumbnail-22222222-2222-4222-8222-222222222222"
@@ -1917,6 +2150,11 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(
     assert preview_posts["count"] >= 2
     page.get_by_role("button", name="Generate immutable version").click()
     expect(page.get_by_text("Immutable template generation queued")).to_be_visible()
+    library_job = page.get_by_test_id("pose-template-library-job")
+    expect(library_job).to_contain_text("continues after navigation")
+    expect(library_job.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
     assert (
         requests[-1]["body"]["configuration"]["instances"][0]["orientation_id"]
         == "stable-side"
@@ -1925,8 +2163,16 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(
         requests[-1]["body"]["configuration"]["instances"][0]["pose"]["rotation_deg"]
         == 27.5
     )
+    library_job_status["generate"] = "succeeded"
+    expect(library_job).to_have_count(0, timeout=5_000)
     expect(page.get_by_role("button", name="Clone")).to_be_enabled(timeout=15_000)
     page.get_by_role("button", name="Clone").click()
+    library_job = page.get_by_test_id("pose-template-library-job")
+    expect(library_job).to_contain_text("continues after navigation")
+    expect(library_job.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
+    library_job_status["clone"] = "failed"
     expect(
         page.get_by_text(
             "Canonical geometry changed; analyze stable orientations again."
@@ -1970,7 +2216,12 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(
 
     availability["available"] = False
     page.reload(wait_until="networkidle")
-    expect(page.get_by_text("PoseTemplateCreator checkout is missing")).to_be_visible()
+    expect(page.get_by_test_id("pose-template-disabled-action-reason")).to_have_text(
+        "PoseTemplateCreator checkout is missing"
+    )
+    expect(page.get_by_test_id("pose-template-generation-disabled-reason")).to_have_text(
+        "PoseTemplateCreator checkout is missing"
+    )
     expect(
         page.get_by_text("bash scripts/install.sh --with-posetemplatecreator")
     ).to_be_visible()
@@ -1988,6 +2239,7 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     catalogue = workpiece_catalog()
     catalog_requests = {"count": 0}
     delete_requests = {"count": 0}
+    background_job_status = {"upload": "queued", "correction": "queued"}
     requests: list[dict] = []
 
     def item(catalog_uuid: str) -> dict:
@@ -2196,7 +2448,7 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
             {
                 "job": {
                     "id": "workpiece-upload-job",
-                    "status": "succeeded",
+                    "status": background_job_status["upload"],
                     "message": None,
                     "tail": [],
                 }
@@ -2210,7 +2462,7 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
             {
                 "job": {
                     "id": "unit-correction-job",
-                    "status": "succeeded",
+                    "status": background_job_status["correction"],
                     "message": None,
                     "tail": [],
                 }
@@ -2222,9 +2474,15 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
 
     expect(page.get_by_test_id("workpieces-page")).to_be_visible()
     expect(page.get_by_role("link", name="Workpiece Catalogue")).to_be_visible()
+    expect(page.get_by_text("This is a global reusable library", exact=False)).to_be_visible()
+    expect(page.get_by_text("do not mutate the active run", exact=False)).to_be_visible()
     expect(page.get_by_test_id("workpiece-preview-fallback")).to_be_visible()
     expect(page.get_by_text("3D preview is unavailable")).to_be_visible()
     expect(page.get_by_role("heading", name="3D preview")).to_be_visible()
+    expect(
+        page.get_by_text("Archive this workpiece to enable unit correction.")
+    ).to_be_visible()
+    expect(page.get_by_role("button", name="Correct model units")).to_be_disabled()
     expect(page.get_by_test_id("workpiece-previews")).to_have_count(0)
     expect(page.get_by_role("button", name="Select Clamp")).to_be_visible()
     expect(
@@ -2278,6 +2536,12 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     correction.get_by_label("Unit correction operator").fill("qa-operator")
     correction.get_by_label("Confirm unit correction").click()
     correction.get_by_role("button", name="Queue unit correction").click()
+    unit_progress = page.get_by_test_id("workpiece-unit-correction-progress")
+    expect(unit_progress).to_contain_text("continues after navigation")
+    expect(unit_progress.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
+    background_job_status["correction"] = "succeeded"
     expect(page.get_by_text("Workpiece units corrected")).to_be_visible()
     unit_request = next(
         value for value in requests if value["path"].endswith("/unit-corrections")
@@ -2353,6 +2617,12 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     page.get_by_test_id("workpiece-upload-groups").fill("incoming")
     page.get_by_role("button", name="Upload and inspect").click()
     expect(page.get_by_text("Workpiece inspection queued")).to_be_visible()
+    upload_progress = page.get_by_test_id("workpiece-upload-progress")
+    expect(upload_progress).to_contain_text("continues after navigation")
+    expect(upload_progress.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
+    background_job_status["upload"] = "succeeded"
     expect(page.get_by_text("Workpiece added to the catalogue")).to_be_visible()
     upload_request = next(
         value for value in requests if value["path"].endswith("/upload")
@@ -2415,6 +2685,7 @@ def test_workpiece_selected_detail_renders_exact_canonical_mesh(
     install_common_mocks(page)
     page_errors: list[str] = []
     canonical_mesh_requests: list[str] = []
+    preview_job_status = {"value": "queued"}
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     page.on(
         "request",
@@ -2450,7 +2721,7 @@ def test_workpiece_selected_detail_renders_exact_canonical_mesh(
             {
                 "job": {
                     "id": "recognition-preview-job",
-                    "status": "succeeded",
+                    "status": preview_job_status["value"],
                     "message": None,
                     "tail": [],
                 }
@@ -2541,6 +2812,12 @@ def test_workpiece_selected_detail_renders_exact_canonical_mesh(
         f"revision={record['canonical_ply_sha256']}"
     )
     page.get_by_role("button", name="Refresh card preview").click()
+    preview_progress = page.get_by_test_id("workpiece-preview-progress")
+    expect(preview_progress).to_contain_text("continues after navigation")
+    expect(preview_progress.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
+    preview_job_status["value"] = "succeeded"
     expect(page.get_by_text("Recognition preview refreshed")).to_be_visible()
     assert page_errors == []
 
@@ -2816,8 +3093,10 @@ def test_pose_templates_add_instance_with_real_catalog_and_preview(
 def test_ground_truth_workflow_selection_and_full_placement(
     console_server, page
 ) -> None:
+    page.set_viewport_size({"width": 1440, "height": 900})
     install_common_mocks(page)
     submitted: list[dict] = []
+    selection_saved = {"value": False}
     exact_asset_requests: list[str] = []
     library_payload = pose_template_library()
     second_instance = {
@@ -2941,10 +3220,34 @@ def test_ground_truth_workflow_selection_and_full_placement(
     def selection_handler(route) -> None:
         if route.request.method == "POST":
             submitted.append(route.request.post_data_json)
+            selection_saved["value"] = True
             fulfill_json(route, {"job_id": "selection-job"}, status=202)
         else:
+            selection = (
+                {
+                    "template_uuid": "22222222-2222-4222-8222-222222222222",
+                    "placement_confirmed": True,
+                    "instances": [
+                        {
+                            "instance_uuid": "33333333-3333-4333-8333-333333333333",
+                            "name": "Clamp",
+                            "obj_id": 7,
+                            "template_base_from_object": {
+                                "translation_mm": [0, 0, 0]
+                            },
+                        }
+                    ],
+                }
+                if selection_saved["value"]
+                else None
+            )
             fulfill_json(
-                route, {"selection": None, "replacement_blockers": [], "ready": False}
+                route,
+                {
+                    "selection": selection,
+                    "replacement_blockers": [],
+                    "ready": selection is not None,
+                },
             )
 
     page.route("**/pose-templates/runs/selection**", selection_handler)
@@ -2953,6 +3256,20 @@ def test_ground_truth_workflow_selection_and_full_placement(
         wait_until="networkidle",
     )
     expect(page.get_by_test_id("ground-truth-workflow")).to_be_visible()
+    placement_boxes = [
+        page.get_by_label(f"Template placement {label}").bounding_box()
+        for label in ("X mm", "Y mm", "Z mm", "Roll °", "Pitch °", "Yaw °")
+    ]
+    assert all(box is not None for box in placement_boxes)
+    boxes = [box for box in placement_boxes if box is not None]
+    assert max(box["y"] for box in boxes[:3]) - min(
+        box["y"] for box in boxes[:3]
+    ) < 2
+    assert max(box["y"] for box in boxes[3:]) - min(
+        box["y"] for box in boxes[3:]
+    ) < 2
+    assert boxes[3]["y"] > boxes[0]["y"] + boxes[0]["height"]
+    assert min(box["width"] for box in boxes) >= 75
     template_thumbnail = page.get_by_test_id(
         "template-thumbnail-22222222-2222-4222-8222-222222222222"
     )
@@ -2996,10 +3313,10 @@ def test_ground_truth_workflow_selection_and_full_placement(
     confirmation = page.get_by_label("I confirm this measured physical placement")
     confirmation.click()
     expect(confirmation).to_be_checked()
-    page.get_by_role("combobox", name="Selected run").click()
+    page.get_by_role("combobox", name="Active run folder").click()
     page.get_by_role("option", name="old-run · sync_aruco").click()
     expect(confirmation).not_to_be_checked()
-    page.get_by_role("combobox", name="Selected run").click()
+    page.get_by_role("combobox", name="Active run folder").click()
     page.get_by_role("option", name="new-run · real_full_capture_validation").click()
     expect(confirmation).not_to_be_checked()
     confirmation.click()
@@ -3012,12 +3329,33 @@ def test_ground_truth_workflow_selection_and_full_placement(
     page.get_by_label("Template placement Z mm").fill("34")
     page.get_by_label("Template placement Yaw °").fill("90")
     confirmation.click()
+    workflow_steps = page.get_by_role("navigation", name="Workflow steps")
+    workflow_steps.get_by_role("button").filter(has_text="Check readiness").click()
+    expect(page.get_by_test_id("ground-truth-workflow")).not_to_be_visible()
+    workflow_steps.get_by_role("button").filter(
+        has_text="Choose the pose template and placement"
+    ).click()
+    expect(page.get_by_label("Template placement X mm")).to_have_value("12")
+    expect(page.get_by_label("Template placement Z mm")).to_have_value("34")
+    expect(page.get_by_label("Template placement Yaw °")).to_have_value("90")
+    expect(confirmation).to_be_checked()
     page.get_by_role("button", name="Select for run").click()
-    expect(page.get_by_text("Object layout selection queued")).to_be_visible()
+    expect(page.get_by_text("Pose template selection queued")).to_be_visible()
     assert submitted[0]["confirmed"] is True
     assert submitted[0]["template_uuid"] == "22222222-2222-4222-8222-222222222222"
     assert submitted[0]["placement"]["matrix"][0][3] == 12
     assert submitted[0]["placement"]["matrix"][2][3] == 34
+    saved_selection = page.get_by_test_id("saved-pose-template-selection")
+    draft = page.get_by_test_id("pose-template-selection-draft")
+    expect(saved_selection.get_by_test_id("saved-pose-template-ready")).to_be_visible()
+    expect(
+        draft.get_by_role("heading", name="Replacement selection draft")
+    ).to_be_visible()
+    expect(draft).to_contain_text("The saved pose template at left remains active")
+    expect(draft.get_by_text("Required", exact=True)).to_have_count(0)
+    expect(
+        draft.get_by_role("button", name="Replace run selection")
+    ).to_be_visible()
 
 
 def test_run_config_preflight_blocker_and_fresh_capture_gates(
@@ -3058,7 +3396,60 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     page.route(
         "**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status())
     )
-    capture_setup = {"queued": False, "post_queue_reads": 0}
+    capture_setup = {
+        "queued": False,
+        "post_queue_reads": 0,
+        "job_id": None,
+        "status": None,
+    }
+    readiness_job_status: dict[str, str | None] = {"value": None}
+
+    def readiness_job_payload(status: str) -> dict:
+        return {
+            "id": "readiness-1",
+            "name": "pipeline:run_preflight",
+            "command": ["uv", "run", "python", "scripts/run_pipeline_stage.py"],
+            "cwd": "/repo",
+            "status": status,
+            "created_at": "2026-07-27T11:00:00Z",
+            "started_at": (
+                "2026-07-27T11:00:01Z" if status != "queued" else None
+            ),
+            "ended_at": (
+                "2026-07-27T11:00:03Z" if status == "succeeded" else None
+            ),
+            "returncode": 0 if status == "succeeded" else None,
+            "message": None,
+            "tail": [],
+            "resources": ["disk_io"],
+            "parameters": {
+                "run_root": RUN_ROOT,
+                "pipeline_stage": "run_preflight",
+            },
+            "scope_kind": "run",
+            "run_root": RUN_ROOT,
+            "log_path": "/tmp/readiness-1.log",
+        }
+
+    def readiness_submit_handler(route) -> None:
+        requests.append(
+            {"path": "/pipeline/run", "body": route.request.post_data_json}
+        )
+        readiness_job_status["value"] = "queued"
+        fulfill_json(route, {"job_id": "readiness-1", "status": "queued"}, status=202)
+
+    def jobs_handler(route) -> None:
+        status = readiness_job_status["value"]
+        fulfill_json(
+            route,
+            {
+                "jobs": [] if status is None else [readiness_job_payload(status)],
+                "resources": {},
+            },
+        )
+
+    page.route("**/pipeline/run", readiness_submit_handler)
+    page.route("**/jobs", jobs_handler)
 
     def calibration_setup_handler(route) -> None:
         cameras = []
@@ -3131,17 +3522,57 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
             },
         )
 
+    def capture_jobs_handler(route) -> None:
+        status = capture_setup["status"]
+        job_id = capture_setup["job_id"]
+        fulfill_json(
+            route,
+            {
+                "run_root": RUN_ROOT,
+                "jobs": (
+                    []
+                    if status is None or job_id is None
+                    else [
+                        {
+                            "id": job_id,
+                            "name": "Calibration capture",
+                            "status": status,
+                            "kind": "pipeline_sequence",
+                            "stage": None,
+                            "sequence": "real_full_capture_validation",
+                            "run_root": RUN_ROOT,
+                            "resources": ["cameras", "robot", "disk_io"],
+                            "message": None,
+                            "created_at": "2026-07-27T12:00:00Z",
+                            "started_at": None,
+                            "ended_at": None,
+                            "active": True,
+                            "tail": [],
+                            "log_endpoint": f"/capture/jobs/{job_id}/log",
+                            "stop_endpoint": f"/capture/jobs/{job_id}/stop",
+                        }
+                    ]
+                ),
+                "active_count": 0 if status is None else 1,
+                "resources": {},
+                "status_artifact": None,
+            },
+        )
+
     def pipeline_sequence_handler(route) -> None:
         body = route.request.post_data_json
         requests.append({"path": "/pipeline/run-sequence", "body": body})
         capture_setup["queued"] = True
+        capture_setup["job_id"] = f"job-{len(requests)}"
+        capture_setup["status"] = "queued"
         fulfill_json(
             route,
-            {"job_id": f"job-{len(requests)}", "status": "queued"},
+            {"job_id": capture_setup["job_id"], "status": "queued"},
             status=202,
         )
 
     page.route("**/calibration/setup?**", calibration_setup_handler)
+    page.route("**/capture/jobs**", capture_jobs_handler)
     page.route("**/pipeline/run-sequence", pipeline_sequence_handler)
     page.add_init_script(
         "localStorage.setItem('posetestbot.selectedSensors', "
@@ -3185,9 +3616,33 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     )
     assert preflight_request["stage"] == "run_preflight"
     assert "allow_cameras" not in json.dumps(preflight_request)
+    readiness_job = readiness.get_by_test_id("calibration-readiness-job-status")
+    expect(readiness_job).to_contain_text(
+        "Readiness check is queued", timeout=5_000
+    )
+    expect(readiness_job).to_contain_text("continues after navigation")
+    expect(
+        readiness_job.get_by_role("link", name="Open live status in Jobs")
+    ).to_have_attribute("href", "#/jobs")
+    expect(
+        readiness.get_by_role("button", name="Check in progress…")
+    ).to_be_disabled()
 
+    readiness_job_status["value"] = "running"
+    page.reload(wait_until="networkidle")
+    readiness = page.get_by_test_id("calibration-readiness-check")
+    expect(
+        readiness.get_by_test_id("calibration-readiness-job-status")
+    ).to_contain_text("Readiness check is running", timeout=5_000)
+    expect(
+        readiness.get_by_role("button", name="Check in progress…")
+    ).to_be_disabled()
+    readiness_job_status["value"] = "succeeded"
     preflight_state["blocker"] = None
     page.reload(wait_until="networkidle")
+    page.get_by_role("navigation", name="Workflow steps").get_by_role(
+        "button"
+    ).filter(has_text="Record calibration images").click()
     page.get_by_role("button", name="Review and start capture", exact=True).click()
     expect(page.get_by_test_id("capture-timeout-envelope")).to_contain_text(
         "720 s total · 15 s sustained camera readiness (3 frames each) · 5 s maximum live camera-metadata pause · 120 s to first robot packet · 60 s between robot packets"
@@ -3227,6 +3682,21 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
         },
     }
     assert any(item["path"] == "/sensors/previews/stop" for item in requests)
+    capture_job = page.get_by_test_id("capture-active-job")
+    expect(capture_job).to_contain_text("Calibration capture is queued")
+    expect(capture_job).to_contain_text("continues after navigation")
+    expect(
+        capture_job.get_by_role("link", name="Open capture in Jobs")
+    ).to_have_attribute("href", "#/jobs")
+    expect(
+        page.get_by_role("button", name="Review and start capture", exact=True)
+    ).to_have_count(0)
+    assert len(
+        [item for item in requests if item["path"] == "/pipeline/run-sequence"]
+    ) == 1
+    page.get_by_role("navigation", name="Workflow steps").get_by_role(
+        "button"
+    ).filter(has_text="Calculate, review, and publish").click()
     expect(page.locator('input[value="eye_in_hand"]')).to_be_checked(timeout=6_000)
     expect(
         page.get_by_test_id("calibration-workflow").get_by_text(
@@ -3464,7 +3934,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     )
 
     expect(
-        page.get_by_role("heading", name="Record an object-template dataset")
+        page.get_by_role("heading", name="Record an object dataset")
     ).to_be_visible()
     speed = page.get_by_label("Requested robot capture speed (m/s)")
     expect(speed).to_have_value("0.2")
@@ -3490,8 +3960,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     save_setup = page.get_by_role("button", name="Save setup")
     expect(save_setup).to_be_disabled()
     readiness_action = page.get_by_role("button", name="Check readiness", exact=True)
-    expect(readiness_action).to_have_count(1)
-    expect(readiness_action).to_be_visible()
+    expect(readiness_action).to_have_count(0)
 
     source_choice = page.get_by_role("radio").filter(has_text="Calibration run July 21")
     expect(source_choice).to_have_count(1)
@@ -3525,6 +3994,19 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         page.get_by_test_id("hardware-sync-qualification-requirement")
     ).to_contain_text("hardware_sync_qualification.json")
     page.get_by_label("Trigger group ID").fill("research-mixed-rig")
+    workflow_steps = page.get_by_role("navigation", name="Workflow steps")
+    workflow_steps.get_by_role("button").filter(
+        has_text="Choose the pose template and placement"
+    ).click()
+    expect(page.get_by_test_id("object_dataset-run-setup")).not_to_be_visible()
+    workflow_steps.get_by_role("button").filter(
+        has_text="Configure cameras and select calibration"
+    ).click()
+    expect(speed).to_have_value("0.15")
+    expect(source_choice).to_have_attribute("aria-checked", "true")
+    expect(page.get_by_label("Trigger group ID")).to_have_value(
+        "research-mixed-rig"
+    )
     validate_and_save = page.get_by_role(
         "button", name="Validate and save setup", exact=True
     )
@@ -3578,6 +4060,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         "max_depth_timestamp_skew_ms": 2,
     }
 
+    workflow_steps.get_by_role("button").filter(has_text="Check readiness").click()
     readiness_steps = page.locator('[data-workflow-step="readiness"]')
     expect(readiness_steps).to_have_count(1)
     expect(readiness_steps).to_be_visible()
@@ -3847,6 +4330,8 @@ def test_dataset_workflow_blocks_an_invalid_saved_timing_contract(
     expect(timing_policy.get_by_role("alert")).to_contain_text(
         "Profile profile-wrist-1 has no verified robot pose time offset."
     )
+    workflow_steps = page.get_by_role("navigation", name="Workflow steps")
+    workflow_steps.get_by_role("button").filter(has_text="Check readiness").click()
     readiness = page.get_by_test_id("dataset-readiness-check")
     expect(readiness).to_contain_text(
         "Calibration geometry and automatic timing verified"
@@ -3854,6 +4339,9 @@ def test_dataset_workflow_blocks_an_invalid_saved_timing_contract(
     expect(readiness).to_contain_text(
         "The selected calibration timing contract is invalid"
     )
+    workflow_steps.get_by_role("button").filter(
+        has_text="Process frames and create the base BOP export"
+    ).click()
     expect(page.get_by_test_id("dataset-sync-timing-contract")).to_contain_text(
         "Return to Step 1 and select a calibration with valid timing"
     )
@@ -4004,6 +4492,8 @@ def test_dataset_processing_is_one_ordered_operator_action(
                         "pipeline_sequence": "calibrated_capture_to_bop_dataset_dry_run",
                         "run_root": RUN_ROOT,
                     },
+                    "scope_kind": "run",
+                    "run_root": RUN_ROOT,
                     "log_path": "/tmp/dataset-processing-1.log",
                     "visibility": "operator",
                 }
@@ -4018,6 +4508,17 @@ def test_dataset_processing_is_one_ordered_operator_action(
         wait_until="networkidle",
     )
 
+    stepper = page.get_by_role("navigation", name="Workflow steps")
+    configure_step_button = stepper.get_by_role("button").filter(
+        has_text="Configure cameras and select calibration"
+    )
+    sync_step_button = stepper.get_by_role("button").filter(
+        has_text="Process frames and create the base BOP export"
+    )
+    export_step_button = stepper.get_by_role("button").filter(
+        has_text="Add optional BOP ground-truth evidence"
+    )
+    configure_step_button.click()
     timing_policy = page.get_by_test_id("calibration-sync-policy")
     expect(timing_policy).to_contain_text("Automatic calibration timing")
     expect(timing_policy).to_contain_text("ready")
@@ -4045,6 +4546,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
         "frame is excluded when its nearest robot pose is farther away"
     )
     page.keyboard.press("Escape")
+    sync_step_button.click()
     timing_contract = page.get_by_test_id("dataset-sync-timing-contract")
     expect(timing_contract).to_contain_text(
         "selected per-camera timing policy will be applied and verified automatically"
@@ -4071,7 +4573,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
         "One queued job runs five backend stages grouped into the four operator outcomes below"
     )
     expect(processing).to_contain_text(
-        "Ground-truth generation is chosen separately in the export step"
+        "Ground-truth generation is chosen separately in optional step 6"
     )
     expect(processing).to_contain_text(
         "Calibration validation is automatic here; there is no second operator preflight."
@@ -4094,11 +4596,15 @@ def test_dataset_processing_is_one_ordered_operator_action(
             0
         )
 
+    export_step_button.click()
     export_outcome = page.locator('[data-workflow-step="export"]')
     expect(export_outcome).to_contain_text("BOP export has not completed")
-    expect(export_outcome).to_contain_text("Use Process and export dataset in step 5")
-    expect(export_outcome).to_contain_text("before ground-truth generation")
+    expect(export_outcome).to_contain_text("Use the processing job in step 5")
+    expect(export_outcome).to_contain_text(
+        "before optional ground-truth generation"
+    )
 
+    sync_step_button.click()
     process_action.click()
     expect(page.get_by_text("Dataset processing queued")).to_be_visible()
     assert processing_requests == [{"run_root": RUN_ROOT}]
@@ -4111,10 +4617,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
         job_status.get_by_role("link", name="Open live log in Jobs")
     ).to_have_attribute("href", "#/jobs")
     expect(page.get_by_role("button", name="Processing…")).to_be_disabled()
-    stepper = page.get_by_role("navigation", name="Required workflow steps")
-    expect(
-        stepper.get_by_role("button").filter(has_text="Synchronize and verify frames")
-    ).to_contain_text("Running")
+    expect(sync_step_button).to_contain_text("Running")
 
     processing_job_status["value"] = "succeeded"
     expect(job_status).to_contain_text(
@@ -4140,18 +4643,18 @@ def test_dataset_processing_is_one_ordered_operator_action(
         },
     ]
     job_status.get_by_role("button", name="Refresh evidence").click()
-    expect(page.get_by_text("BOP image/model export is ready")).to_be_visible(
-        timeout=5_000
-    )
     expect(job_status).to_contain_text(
         "Dataset processing finished and BOP export is verified"
+    )
+    expect(sync_step_button).to_contain_text("Complete")
+    export_step_button.click()
+    export_outcome = page.locator('[data-workflow-step="export"]')
+    expect(export_outcome.get_by_text("BOP image/model export is ready")).to_be_visible(
+        timeout=5_000
     )
     expect(export_outcome).to_contain_text(
         "base export has populated calibrated scenes, models, and object targets"
     )
-    expect(
-        stepper.get_by_role("button").filter(has_text="Synchronize and verify frames")
-    ).to_contain_text("Complete")
 
 
 def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
@@ -4256,6 +4759,8 @@ def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
                 "bop_annotations": True,
                 "annotation_mode": "pose_and_masks",
             },
+            "scope_kind": "run",
+            "run_root": RUN_ROOT,
             "log_path": "/tmp/bop-annotations-1.log",
             "visibility": "operator",
         }
@@ -4295,6 +4800,13 @@ def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
         wait_until="networkidle",
     )
 
+    export_step_button = page.get_by_role(
+        "navigation", name="Workflow steps"
+    ).get_by_role("button").filter(
+        has_text="Add optional BOP ground-truth evidence"
+    )
+    expect(export_step_button).to_contain_text("Optional")
+    expect(export_step_button).to_contain_text("Ready")
     generator = page.get_by_test_id("bop-ground-truth-generation")
     expect(generator).to_be_visible()
     expect(generator).to_contain_text("Choose the BOP ground-truth evidence")
@@ -4396,6 +4908,7 @@ def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
     expect(
         evidence.get_by_role("link", name="Inspect BOP metrics")
     ).to_have_attribute("href", "#/bop-evaluation")
+    expect(export_step_button).to_contain_text("Complete", timeout=5_000)
 
 
 def test_run_setup_disables_camera_without_deleting_identity_or_profile(
@@ -4480,6 +4993,72 @@ def test_run_setup_disables_camera_without_deleting_identity_or_profile(
     assert {
         sensor["device_id"] for sensor in written["sensors"] if sensor["enabled"]
     } == {"wrist-1", "static-1"}
+
+
+def test_devices_show_typed_connection_state_and_visible_disabled_reasons(
+    console_server,
+    page,
+) -> None:
+    install_common_mocks(page)
+    page.route(
+        "**/sensors/status",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "sensor_status.v1",
+                "families": [
+                    {
+                        "sensor_type": "zed_2i",
+                        "display_name": "Stereolabs ZED 2i",
+                        "devices": [
+                            {
+                                "sensor_type": "zed_2i",
+                                "device_id": "zed-lab",
+                                "display_name": "ZED lab",
+                                "effective_display_name": "ZED lab",
+                                "connected": True,
+                                "capture_ready": True,
+                                "live_rgb_preview_supported": False,
+                                "mounting_mode": "static",
+                                "inverted": False,
+                            }
+                        ],
+                    }
+                ],
+                "total_connected": 1,
+                "all_expected_connected": True,
+            },
+        ),
+    )
+    page.route(
+        "**/sensors/aliases",
+        lambda route: fulfill_json(route, {"aliases": {}}),
+    )
+    page.route(
+        "**/sensors/previews?**",
+        lambda route: fulfill_json(route, {"jobs": []}),
+    )
+
+    page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
+
+    card = page.locator(
+        '[data-testid="sensor-card"][data-sensor-key="zed_2i:zed-lab"]'
+    )
+    expect(
+        card.locator('[data-status-tone="informational"]').first
+    ).to_contain_text("Capture-ready")
+    preview = card.get_by_test_id("sensor-preview-toggle")
+    expect(preview).to_be_disabled()
+    reason = card.get_by_test_id("sensor-disabled-action-reason")
+    expect(reason).to_contain_text(
+        "Image-orientation override is available only for RealSense D435 cameras."
+    )
+    expect(reason).to_contain_text(
+        "Live RGB preview is unavailable for this sensor family"
+    )
+    reason_id = reason.get_attribute("id")
+    assert reason_id
+    expect(preview).to_have_attribute("aria-describedby", reason_id)
 
 
 def test_robot_controls_validate_and_confirm_start_and_stop(
@@ -4619,6 +5198,14 @@ def test_dashboard_prioritizes_monitor_storage_and_job_activity(
     page,
 ) -> None:
     install_common_mocks(page)
+    monitor_start_requests: list[dict] = []
+
+    def monitor_handler(route) -> None:
+        if route.request.method == "POST":
+            monitor_start_requests.append(route.request.post_data_json)
+        route.fallback()
+
+    page.route("**/monitoring/webcam", monitor_handler)
 
     def job(
         job_id: str,
@@ -4626,8 +5213,11 @@ def test_dashboard_prioritizes_monitor_storage_and_job_activity(
         status: str,
         *,
         message: str | None = None,
+        run_root: str | None = RUN_ROOT,
+        scope_kind: str | None = None,
     ) -> dict:
         active = status in {"queued", "running", "canceling"}
+        resolved_scope = scope_kind or ("unknown" if run_root is None else "run")
         return {
             "id": job_id,
             "name": name,
@@ -4641,11 +5231,14 @@ def test_dashboard_prioritizes_monitor_storage_and_job_activity(
             "message": message,
             "tail": [],
             "resources": ["disk_io"] if status != "queued" else ["cpu"],
-            "parameters": {"run_root": RUN_ROOT},
+            "parameters": {} if run_root is None else {"run_root": run_root},
+            "scope_kind": resolved_scope,
+            "run_root": run_root if resolved_scope == "run" else None,
             "log_path": f"/tmp/{job_id}.log",
             "visibility": "operator",
         }
 
+    other_run = "/tmp/posetestbot-console/other-run"
     page.route(
         "**/jobs",
         lambda route: fulfill_json(
@@ -4653,12 +5246,18 @@ def test_dashboard_prioritizes_monitor_storage_and_job_activity(
             {
                 "jobs": [
                     job("running-1", "Synchronize selected run", "running"),
-                    job("queued-1", "Generate BOP annotations", "queued"),
+                    job(
+                        "queued-1",
+                        "Generate BOP annotations",
+                        "queued",
+                        run_root=other_run,
+                    ),
                     job(
                         "failed-1",
                         "Calibration validation",
                         "failed",
                         message="Residual threshold exceeded for wrist camera.",
+                        run_root=None,
                     ),
                     job("succeeded-1", "Old completed export", "succeeded"),
                 ],
@@ -4682,6 +5281,13 @@ def test_dashboard_prioritizes_monitor_storage_and_job_activity(
     activity = page.get_by_test_id("dashboard-job-activity")
     expect(monitor).to_be_visible()
     expect(activity).to_be_visible()
+    assert monitor_start_requests == []
+    with page.expect_response(
+        lambda response: response.request.method == "POST"
+        and response.url.endswith("/monitoring/webcam")
+    ):
+        monitor.get_by_role("button", name="Start monitor").click()
+    assert monitor_start_requests == [{}]
     monitor_box = monitor.bounding_box()
     activity_box = activity.bounding_box()
     assert monitor_box is not None
@@ -4700,6 +5306,20 @@ def test_dashboard_prioritizes_monitor_storage_and_job_activity(
     expect(activity).to_contain_text(
         "Residual threshold exceeded for wrist camera."
     )
+    selected_run_job = activity.get_by_role(
+        "link", name="Open Synchronize selected run in Jobs"
+    )
+    expect(selected_run_job).to_contain_text("Active run")
+    expect(selected_run_job).to_contain_text(RUN_ROOT)
+    other_run_job = activity.get_by_role(
+        "link", name="Open Generate BOP annotations in Jobs"
+    )
+    expect(other_run_job).to_contain_text("Other run")
+    expect(other_run_job).to_contain_text(other_run)
+    unscoped_job = activity.get_by_role(
+        "link", name="Open Calibration validation in Jobs"
+    )
+    expect(unscoped_job).to_contain_text("Legacy unknown scope")
     expect(activity.get_by_text("Old completed export", exact=True)).to_have_count(0)
     expect(activity.get_by_role("link", name="Open Jobs")).to_have_attribute(
         "href", "#/jobs"
@@ -4739,12 +5359,22 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
         "message": None,
         "tail": ["working"],
         "resources": ["disk_io"],
-        "parameters": {"pipeline_stage": "sync_run"},
+        "parameters": {"pipeline_stage": "sync_run", "run_root": RUN_ROOT},
+        "scope_kind": "run",
+        "run_root": RUN_ROOT,
     }
     page.route(
-        "**/jobs",
+        "**/jobs?**",
         lambda route: fulfill_json(
-            route, {"jobs": [job], "resources": {"disk_io": "capture-1"}}
+            route,
+            {
+                "jobs": [job],
+                "resources": {"disk_io": "capture-1"},
+                "total": 1,
+                "status_counts": {"running": 1},
+                "next_cursor": None,
+                "limit": 20,
+            },
         ),
     )
     page.route(
@@ -4772,7 +5402,12 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     context = json.loads(copied[1])
     assert context["schema_version"] == "posetestbot_job_debug_context.v1"
     assert context["job"]["id"] == "capture-1"
-    assert context["job"]["parameters"] == {"pipeline_stage": "sync_run"}
+    assert context["job"]["parameters"] == {
+        "pipeline_stage": "sync_run",
+        "run_root": RUN_ROOT,
+    }
+    assert context["job"]["scope_kind"] == "run"
+    assert context["job"]["run_root"] == RUN_ROOT
     assert "tail" not in context["job"]
     page.get_by_role("button", name="Cancel job").click()
     assert canceled == ["capture-1"]
@@ -4784,9 +5419,42 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
 
 def test_jobs_filters_and_progressively_reveals_history(console_server, page) -> None:
     install_common_mocks(page)
-    history = []
+    other_run = "/tmp/posetestbot-console/other-run"
+    history = [
+        {
+            "id": "active-1",
+            "name": "active_capture_monitor",
+            "command": ["uv"],
+            "cwd": "/repo",
+            "status": "running",
+            "created_at": "2026-07-27T12:00:00Z",
+            "log_path": "/tmp/active-1.log",
+            "started_at": "2026-07-27T12:00:01Z",
+            "ended_at": None,
+            "returncode": None,
+            "message": "monitoring",
+            "tail": [],
+            "resources": ["camera:test"],
+            "parameters": {"run_root": RUN_ROOT},
+            "scope_kind": "run",
+            "run_root": RUN_ROOT,
+        }
+    ]
     for index in range(25):
         failed = index == 24
+        status = "canceled" if index == 19 else "failed" if failed else "succeeded"
+        if index == 24:
+            scope_kind, run_root = "unknown", None
+        elif index == 23:
+            scope_kind, run_root = "run", other_run
+        elif index == 22:
+            scope_kind, run_root = "run", RUN_ROOT
+        elif index == 21:
+            scope_kind, run_root = "library", None
+        elif index == 20:
+            scope_kind, run_root = "global", None
+        else:
+            scope_kind, run_root = "run", RUN_ROOT
         history.append(
             {
                 "id": f"history-{index:02d}",
@@ -4795,7 +5463,7 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
                 else f"completed_job_{index:02d}",
                 "command": ["uv"],
                 "cwd": "/repo",
-                "status": "failed" if failed else "succeeded",
+                "status": status,
                 "created_at": f"2026-07-{index + 1:02d}T12:00:00Z",
                 "log_path": f"/tmp/history-{index:02d}.log",
                 "started_at": f"2026-07-{index + 1:02d}T12:00:01Z",
@@ -4804,19 +5472,147 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
                 "message": "solver evidence failed" if failed else "complete",
                 "tail": [],
                 "resources": ["cpu"],
-                "parameters": {"run_root": RUN_ROOT},
+                "parameters": {} if run_root is None else {"run_root": run_root},
+                "scope_kind": scope_kind,
+                "run_root": run_root,
             }
         )
-    page.route(
-        "**/jobs",
-        lambda route: fulfill_json(route, {"jobs": history, "resources": {}}),
-    )
+
+    requests: list[dict[str, list[str]]] = []
+
+    def jobs_handler(route) -> None:
+        parameters = parse_qs(urlparse(route.request.url).query)
+        requests.append(parameters)
+        matching = list(history)
+        status_filter = parameters.get("status", ["all"])[0]
+        if status_filter == "active":
+            matching = [
+                job
+                for job in matching
+                if job["status"] in {"queued", "running", "canceling"}
+            ]
+        elif status_filter == "failed":
+            matching = [job for job in matching if job["status"] == "failed"]
+        elif status_filter == "finished":
+            matching = [
+                job
+                for job in matching
+                if job["status"] not in {"queued", "running", "canceling"}
+            ]
+        scope_filter = parameters.get("scope_kind", [None])[0]
+        if scope_filter:
+            matching = [job for job in matching if job["scope_kind"] == scope_filter]
+        run_filter = parameters.get("run_root", [None])[0]
+        if run_filter:
+            matching = [job for job in matching if job["run_root"] == run_filter]
+        search = parameters.get("search", [""])[0].lower()
+        if search:
+            matching = [
+                job
+                for job in matching
+                if search
+                in " ".join(
+                    [
+                        str(job["id"]),
+                        str(job["name"]),
+                        str(job["run_root"] or ""),
+                        " ".join(job["resources"]),
+                    ]
+                ).lower()
+            ]
+        matching.sort(
+            key=lambda job: (
+                job["status"] in {"queued", "running", "canceling"},
+                job["created_at"],
+            ),
+            reverse=True,
+        )
+        counts: dict[str, int] = {}
+        for job in matching:
+            counts[job["status"]] = counts.get(job["status"], 0) + 1
+        terminal = [
+            job
+            for job in matching
+            if job["status"] not in {"queued", "running", "canceling"}
+        ]
+        active = [
+            job
+            for job in matching
+            if job["status"] in {"queued", "running", "canceling"}
+        ]
+        cursor = parameters.get("cursor", [None])[0]
+        page_jobs = terminal[20:40] if cursor else [*active, *terminal[:20]]
+        next_cursor = (
+            "opaque-terminal-page-2"
+            if cursor is None and len(terminal) > 20
+            else None
+        )
+        fulfill_json(
+            route,
+            {
+                "jobs": page_jobs,
+                "resources": {"camera:test": "active-1"} if active else {},
+                "total": len(matching),
+                "status_counts": counts,
+                "next_cursor": next_cursor,
+                "limit": 20,
+            },
+        )
+
+    page.route("**/jobs?**", jobs_handler)
 
     page.goto(f"{console_server.url}/#/jobs", wait_until="networkidle")
 
-    expect(page.get_by_role("button", name="Log")).to_have_count(20)
-    page.get_by_role("button", name="Show 5 older jobs").click()
-    expect(page.get_by_role("button", name="Log")).to_have_count(25)
+    expect(page.get_by_text("Lab-wide job runner", exact=True)).to_be_visible()
+    unscoped_entry = page.get_by_test_id("job-card-history-24")
+    expect(
+        unscoped_entry.get_by_text("Legacy unknown scope", exact=True)
+    ).to_be_visible()
+    other_entry = page.get_by_test_id("job-card-history-23")
+    expect(other_entry.get_by_text("Other run", exact=True)).to_be_visible()
+    expect(other_entry).to_contain_text(other_run)
+    selected_entry = page.get_by_test_id("job-card-history-22")
+    expect(selected_entry.get_by_text("Active run", exact=True)).to_be_visible()
+    expect(selected_entry).to_contain_text(RUN_ROOT)
+    expect(
+        page.get_by_test_id("job-card-history-21").get_by_text(
+            "Reusable library", exact=True
+        )
+    ).to_be_visible()
+    expect(
+        page.get_by_test_id("job-card-history-20").get_by_text(
+            "Lab-wide", exact=True
+        )
+    ).to_be_visible()
+    expect(page.get_by_role("button", name="Log")).to_have_count(21)
+    expect(
+        page.get_by_test_id("job-card-active-1").locator(
+            '[data-status-tone="warning"]'
+        ).first
+    ).to_contain_text("running")
+    expect(
+        page.get_by_test_id("job-card-history-22").locator(
+            '[data-status-tone="success"]'
+        ).first
+    ).to_contain_text("succeeded")
+    expect(
+        unscoped_entry.locator('[data-status-tone="destructive"]').first
+    ).to_contain_text("failed")
+    page.get_by_role("button", name="Load older jobs").click()
+    expect(page.get_by_role("button", name="Log")).to_have_count(26)
+    expect(
+        page.get_by_test_id("job-card-history-19").locator(
+            '[data-status-tone="neutral"]'
+        ).first
+    ).to_contain_text("canceled")
+
+    page.get_by_role("combobox", name="Filter jobs by scope").click()
+    page.get_by_role("option", name="Reusable library").click()
+    expect(page.get_by_role("button", name="Log")).to_have_count(1)
+    expect(page.get_by_text("completed_job_21", exact=True)).to_be_visible()
+
+    page.get_by_role("combobox", name="Filter jobs by scope").click()
+    page.get_by_role("option", name="All scopes").click()
     page.get_by_role("combobox", name="Filter jobs by status").click()
     page.get_by_role("option", name="Failed (1)").click()
     expect(page.get_by_text("failed_calibration", exact=True)).to_be_visible()
@@ -4824,7 +5620,10 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
     page.get_by_label("Search jobs").fill("no such job")
     expect(page.get_by_role("heading", name="No matching jobs")).to_be_visible()
     page.get_by_role("button", name="Clear filters").click()
-    expect(page.get_by_role("button", name="Log")).to_have_count(20)
+    expect(page.get_by_role("button", name="Log")).to_have_count(26)
+    assert any(request.get("cursor") == ["opaque-terminal-page-2"] for request in requests)
+    assert any(request.get("scope_kind") == ["library"] for request in requests)
+    assert any(request.get("status") == ["failed"] for request in requests)
 
 
 def test_calibration_target_unavailable_keeps_saved_library_navigation(
@@ -4857,7 +5656,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     console_server, page
 ) -> None:
     requests: list[dict] = []
-    promoted = {"value": False}
+    promotion_status: dict[str, str | None] = {"value": None}
     install_common_mocks(page)
     setup = {
         "schema_version": "calibration_setup.v1",
@@ -5371,7 +6170,12 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                     "status": "promoted",
                     "promoted_profile_ids": ["wrist_sqpnp_tsai", "static_ippe_park"],
                 }
-                if promoted["value"]
+                if promotion_status["value"] == "promoted"
+                else {
+                    "status": promotion_status["value"],
+                    "job_id": "promotion-1",
+                }
+                if promotion_status["value"] in {"queued", "running"}
                 else None
             ),
         }
@@ -5385,7 +6189,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         requests.append(
             {"path": "/calibration/promote", "body": route.request.post_data_json}
         )
-        promoted["value"] = True
+        promotion_status["value"] = "queued"
         fulfill_json(
             route,
             {
@@ -5402,7 +6206,10 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         promote_handler,
     )
     page.set_viewport_size({"width": 1440, "height": 1000})
-    page.goto(f"{console_server.url}/#/workflow/calibration", wait_until="networkidle")
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=calculate",
+        wait_until="networkidle",
+    )
 
     expect(page.get_by_test_id("calibration-workflow")).to_be_visible()
     expect(page.locator('input[name="calibration-mode"]')).to_have_count(2)
@@ -5467,11 +6274,15 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     expect(page.locator('[data-phase-id="estimate_time_offsets"]')).to_contain_text(
         "Estimate time alignment"
     )
-    expect(page.get_by_test_id("calibration-duration-guidance")).to_contain_text(
+    attempt_job = page.get_by_test_id("calibration-attempt-job-status")
+    expect(attempt_job.get_by_test_id("calibration-duration-guidance")).to_contain_text(
         "three-camera comparison usually takes 10–20 minutes"
     )
-    expect(page.get_by_test_id("calibration-duration-guidance")).to_contain_text(
-        "background job continues"
+    expect(attempt_job).to_contain_text(
+        "background work continues after navigation"
+    )
+    expect(attempt_job.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
     )
     expect(page.get_by_test_id("calibration-results")).to_be_visible()
     alignment = page.get_by_test_id("calibration-time-alignment")
@@ -5543,10 +6354,16 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     page.get_by_role("option", name="SQPNP + tsai · score 0.2000").click()
     page.get_by_role("button", name="Save selected calibrations").click()
     expect(page.get_by_text("Calibration acceptance queued")).to_be_visible()
+    promotion_job = page.get_by_test_id("calibration-promotion-job-status")
+    expect(promotion_job).to_contain_text("continues after navigation")
+    expect(promotion_job.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
     assert requests[-1]["body"]["candidate_ids"] == {
         "realsense_d435:wrist-1": override["candidate_id"],
         "oak_d_pro:static-1": static_recommended["candidate_id"],
     }
+    promotion_status["value"] = "promoted"
     expect(page.get_by_role("button", name="Calibrations saved")).to_be_visible()
     expect(page.get_by_text("Saved 2 camera profile(s).")).to_be_visible()
 
@@ -6420,7 +7237,7 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
         page.get_by_role("button", name="Delete Anisotropic calibration board")
     ).to_be_disabled()
 
-    page.get_by_role("combobox", name="Selected run").click()
+    page.get_by_role("combobox", name="Active run folder").click()
     page.get_by_role("option", name="old-run · sync_aruco").click()
     expect(page.get_by_text("Active for this run", exact=True)).to_have_count(0)
     expect(page.get_by_role("button", name="Select for run")).to_be_visible()
@@ -6772,6 +7589,18 @@ def cell_scene_payload(
 
 def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -> None:
     install_common_mocks(page)
+    workflow_sessions = json.dumps(
+        {
+            RUN_ROOT: {
+                "journey": "dataset",
+                "stepId": "capture",
+                "status": "current",
+            }
+        }
+    )
+    page.add_init_script(
+        f"localStorage.setItem('posetestbot.workflowSessions.v1', {json.dumps(workflow_sessions)})"
+    )
     page.set_viewport_size({"width": 1920, "height": 1080})
     scene = cell_scene_payload(camera_frames_available=True)
     static_timeline = {
@@ -6872,6 +7701,13 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
 
     page.goto(f"{console_server.url}/#/cell", wait_until="networkidle")
 
+    expect(page.get_by_role("heading", name="Cell View")).to_be_visible()
+    cell_handoff = page.get_by_role(
+        "complementary", name="Where this page fits in the operator workflow"
+    )
+    expect(cell_handoff.get_by_role("link", name="Open workflow")).to_have_attribute(
+        "href", "#/workflow/dataset?step=capture"
+    )
     expect(page.get_by_test_id("cell-webgl-canvas")).to_be_visible()
     expect(page.get_by_test_id("cell-webgl-canvas")).to_have_attribute(
         "data-presentation-mode", "calibration_target_front"

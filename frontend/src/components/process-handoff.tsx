@@ -17,14 +17,14 @@ export function ProcessHandoff({ title, description, to, action, className }: Pr
   return (
     <aside
       aria-label="Where this page fits in the operator workflow"
-      className={cn("flex flex-col gap-3 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between", className)}
+      className={cn("flex flex-col gap-3 rounded-xl border bg-muted/35 px-4 py-3 sm:flex-row sm:items-center sm:justify-between", className)}
     >
       <div className="flex min-w-0 items-start gap-3">
-        <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary-strong">
+        <span className="grid size-8 shrink-0 place-items-center rounded-lg border bg-card text-primary-strong">
           <Route aria-hidden="true" className="size-4" />
         </span>
         <div className="min-w-0">
-          <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-primary-strong">Workflow handoff</div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-muted-foreground">Workflow handoff</div>
           <div className="mt-0.5 text-sm font-semibold">{title}</div>
           <p className="mt-0.5 max-w-4xl text-xs leading-relaxed text-muted-foreground">{description}</p>
         </div>

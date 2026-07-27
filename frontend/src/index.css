@@ -22,6 +22,7 @@
   --accent-foreground: #20241f;
   --destructive: #a54f4f;
   --success: #667600;
+  --success-foreground: #ffffff;
   --warning: #c48922;
   --warning-foreground: #704b0d;
   --border: #dfe2dc;
@@ -54,6 +55,7 @@
   --accent-foreground: #f1f3ee;
   --destructive: #d17a7a;
   --success: #b1cb21;
+  --success-foreground: #252c05;
   --warning: #d6a340;
   --warning-foreground: #e8bd65;
   --border: #353b34;
@@ -87,6 +89,7 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
   --color-border: var(--border);

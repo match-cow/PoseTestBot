@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useDeferredValue, useMemo, useState } from "react"
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Ban, ChevronDown, Clock3, Copy, FileText, LockKeyhole, RefreshCw, Search, Square, Terminal, X } from "lucide-react"
 import { toast } from "sonner"
 
@@ -15,14 +15,17 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
-import { api, errorMessage } from "@/lib/api"
-import type { Job } from "@/lib/contracts"
+import { api, errorMessage, query } from "@/lib/api"
+import type { Job, JobPage } from "@/lib/contracts"
+import { jobStatusTone } from "@/lib/jobs"
 import { formatDate } from "@/lib/utils"
+import { activeWorkflowHref } from "@/lib/workflow-session"
+import { useOperator } from "@/providers/operator-provider"
 
 const ACTIVE = new Set(["queued", "running", "canceling"])
-const FAILED = new Set(["failed"])
 const PAGE_SIZE = 20
 type StatusFilter = "all" | "active" | "failed" | "finished"
+type ScopeFilter = "all" | "active_run" | "run" | "library" | "global" | "unknown"
 
 function isCaptureJob(job: Job) {
   return job.parameters.pipeline_stage === "capture_execution" || job.resources.includes("camera")
@@ -33,6 +36,25 @@ function timing(job: Job) {
   if (job.ended_at) return `Finished ${formatDate(job.ended_at)}`
   if (job.started_at) return `Started ${formatDate(job.started_at)}`
   return "Not started"
+}
+
+function jobRunRoot(job: Job) {
+  return job.run_root
+}
+
+function jobScopeLabel(job: Job, selectedRun: string) {
+  switch (job.scope_kind) {
+    case "run":
+      return job.run_root === selectedRun ? "Active run" : "Other run"
+    case "library":
+      return "Reusable library"
+    case "global":
+      return "Lab-wide"
+    case "unknown":
+      return "Legacy unknown scope"
+    default:
+      return "Legacy unknown scope"
+  }
 }
 
 async function writeClipboard(text: string) {
@@ -72,39 +94,37 @@ function jobContext(job: Job) {
 
 export function JobsPage() {
   const queryClient = useQueryClient()
+  const { currentWorkflow, selectedRun } = useOperator()
   const [detail, setDetail] = useState<Job | null>(null)
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all")
-  const [visibleLimit, setVisibleLimit] = useState(PAGE_SIZE)
-  const jobs = useQuery({
-    queryKey: ["jobs"],
-    queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>("/jobs"),
-    refetchInterval: (queryState) => (queryState.state.data?.jobs.some((job) => ACTIVE.has(job.status)) ? 1_000 : 5_000),
+  const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all")
+  const deferredSearch = useDeferredValue(search.trim())
+  const jobs = useInfiniteQuery({
+    queryKey: ["jobs", "history", deferredSearch, statusFilter, scopeFilter, selectedRun],
+    queryFn: ({ pageParam }) => api<JobPage>(query("/jobs", {
+      limit: PAGE_SIZE,
+      cursor: pageParam,
+      search: deferredSearch,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      scope_kind: scopeFilter === "all" ? undefined : scopeFilter === "active_run" ? "run" : scopeFilter,
+      run_root: scopeFilter === "active_run" ? selectedRun : undefined,
+    })),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    refetchInterval: (queryState) => (queryState.state.data?.pages.some((page) => page.jobs.some((job) => ACTIVE.has(job.status))) ? 1_000 : 5_000),
   })
   const ordered = useMemo(
-    () => [...(jobs.data?.jobs ?? [])].sort((left, right) => Number(ACTIVE.has(right.status)) - Number(ACTIVE.has(left.status)) || right.created_at.localeCompare(left.created_at)),
+    () => {
+      const byId = new Map<string, Job>()
+      for (const page of jobs.data?.pages ?? []) {
+        for (const job of page.jobs) byId.set(job.id, job)
+      }
+      return [...byId.values()].sort((left, right) => Number(ACTIVE.has(right.status)) - Number(ACTIVE.has(left.status)) || right.created_at.localeCompare(left.created_at))
+    },
     [jobs.data],
   )
-  const filtered = useMemo(() => {
-    const needle = search.trim().toLocaleLowerCase()
-    return ordered.filter((job) => {
-      const matchesStatus = statusFilter === "all"
-        || (statusFilter === "active" && ACTIVE.has(job.status))
-        || (statusFilter === "failed" && FAILED.has(job.status))
-        || (statusFilter === "finished" && !ACTIVE.has(job.status))
-      if (!matchesStatus) return false
-      if (!needle) return true
-      return [
-        job.name,
-        job.id,
-        job.status,
-        job.message ?? "",
-        job.resources.join(" "),
-        String(job.parameters.run_root ?? ""),
-      ].join(" ").toLocaleLowerCase().includes(needle)
-    })
-  }, [ordered, search, statusFilter])
-  const visible = filtered.slice(0, visibleLimit)
+  const firstPage = jobs.data?.pages[0]
   const currentDetail = detail ? ordered.find((job) => job.id === detail.id) ?? detail : null
   const log = useQuery({
     queryKey: ["job-log", currentDetail?.id],
@@ -125,37 +145,38 @@ export function JobsPage() {
 
   const setFilter = (value: StatusFilter) => {
     setStatusFilter(value)
-    setVisibleLimit(PAGE_SIZE)
   }
   const setSearchValue = (value: string) => {
     setSearch(value)
-    setVisibleLimit(PAGE_SIZE)
   }
   const clearFilters = () => {
     setSearch("")
     setStatusFilter("all")
-    setVisibleLimit(PAGE_SIZE)
+    setScopeFilter("all")
   }
-  const activeCount = ordered.filter((job) => ACTIVE.has(job.status)).length
-  const failedCount = ordered.filter((job) => FAILED.has(job.status)).length
-  const filtersActive = Boolean(search || statusFilter !== "all")
+  const activeCount = [...ACTIVE].reduce((count, status) => count + (firstPage?.status_counts?.[status] ?? 0), 0)
+  const failedCount = firstPage?.status_counts?.failed ?? 0
+  const total = firstPage?.total ?? ordered.length
+  const filtersActive = Boolean(search || statusFilter !== "all" || scopeFilter !== "all")
+  const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
 
   return <div className="space-y-6">
-    <PageHeader eyebrow="Local job runner" title="Jobs & resource locks" description="Monitor background work, inspect live logs, and stop camera or capture jobs from one place." actions={<Button variant="outline" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh</Button>} />
+    <PageHeader eyebrow="Lab-wide job runner" title="Jobs & resource locks" description="Monitor background work across every run folder, inspect live logs, and stop camera or capture jobs from one place. Each job shows whether it belongs to the active run." actions={<Button variant="outline" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh</Button>} />
     <ProcessHandoff
       title="Jobs continue when you leave their originating page"
       description="Use this page for status, resource ownership, logs, and cancellation. When a job finishes, return to the guided workflow to review its durable evidence and continue."
-      to="/workflow/setup"
+      to={workflowHref}
       action="Open workflow"
     />
 
-    {jobs.data && Object.keys(jobs.data.resources).length > 0 && <Card><CardContent className="flex flex-wrap items-center gap-3 py-4"><span className="flex items-center gap-1 text-xs font-semibold"><LockKeyhole className="size-4 text-warning-foreground" />Held resources <HelpTip label="resource locks">A lock prevents two local jobs from opening the same camera, commanding the robot, or mutating the same managed catalogue at once. It is released when the owning job exits.</HelpTip></span>{Object.entries(jobs.data.resources).map(([resource, id]) => <StatusBadge key={resource} status="warning">{resource} · {id}</StatusBadge>)}</CardContent></Card>}
+    {firstPage && Object.keys(firstPage.resources).length > 0 && <Card><CardContent className="flex flex-wrap items-center gap-3 py-4"><span className="flex items-center gap-1 text-xs font-semibold"><LockKeyhole className="size-4 text-warning-foreground" />Held resources <HelpTip label="resource locks">A lock prevents two local jobs from opening the same camera, commanding the robot, or mutating the same managed catalogue at once. It is released when the owning job exits.</HelpTip></span>{Object.entries(firstPage.resources).map(([resource, id]) => <StatusBadge key={resource} status="warning" tone="warning">{resource} · {id}</StatusBadge>)}</CardContent></Card>}
 
     {!jobs.isPending && !jobs.isError && ordered.length > 0 && <Card>
-      <CardContent className="grid items-end gap-3 py-4 lg:grid-cols-[minmax(260px,1fr)_220px_auto]">
+      <CardContent className="grid items-end gap-3 py-4 xl:grid-cols-[minmax(260px,1fr)_190px_190px_auto]">
         <div className="space-y-1.5"><Label htmlFor="job-search">Search jobs</Label><div className="relative"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input id="job-search" className="pl-9" value={search} onChange={(event) => setSearchValue(event.target.value)} placeholder="Name, ID, resource, run…" /></div></div>
         <div className="space-y-1.5"><Label htmlFor="job-status-filter">Status</Label><Select value={statusFilter} onValueChange={(value: StatusFilter) => setFilter(value)}><SelectTrigger id="job-status-filter" aria-label="Filter jobs by status"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All jobs</SelectItem><SelectItem value="active">Active ({activeCount})</SelectItem><SelectItem value="failed">Failed ({failedCount})</SelectItem><SelectItem value="finished">Finished</SelectItem></SelectContent></Select></div>
-        <div className="flex items-center justify-between gap-3 lg:justify-end"><span className="text-xs tabular-nums text-muted-foreground">Showing {visible.length} of {filtered.length}</span><Button variant="ghost" onClick={clearFilters} disabled={!filtersActive}><X />Clear</Button></div>
+        <div className="space-y-1.5"><Label htmlFor="job-scope-filter">Scope</Label><Select value={scopeFilter} onValueChange={(value: ScopeFilter) => setScopeFilter(value)}><SelectTrigger id="job-scope-filter" aria-label="Filter jobs by scope"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All scopes</SelectItem><SelectItem value="active_run">Active run</SelectItem><SelectItem value="run">All run-owned</SelectItem><SelectItem value="library">Reusable library</SelectItem><SelectItem value="global">Lab-wide</SelectItem><SelectItem value="unknown">Legacy unknown</SelectItem></SelectContent></Select></div>
+        <div className="flex items-center justify-between gap-3 xl:justify-end"><span className="text-xs tabular-nums text-muted-foreground">Loaded {ordered.length} of {total}</span><Button variant="ghost" onClick={clearFilters} disabled={!filtersActive}><X />Clear</Button></div>
       </CardContent>
     </Card>}
 
@@ -163,34 +184,36 @@ export function JobsPage() {
       ? <div className="space-y-2">{Array.from({ length: 6 }).map((_, index) => <Skeleton className="h-24" key={index} />)}</div>
       : jobs.isError
         ? <Card className="border-destructive/40"><CardHeader><CardTitle>Jobs unavailable</CardTitle><CardDescription>{errorMessage(jobs.error)}</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={() => jobs.refetch()}><RefreshCw />Try again</Button></CardContent></Card>
-        : ordered.length === 0
+          : ordered.length === 0 && !filtersActive
           ? <EmptyState icon={Terminal} title="No jobs yet" description="Queue a readiness check, workflow action, snapshot, or plan-only sequence to see it here." />
-          : filtered.length === 0
+          : ordered.length === 0
             ? <EmptyState icon={Search} title="No matching jobs" description="Change or clear the search and status filter." action={<Button variant="outline" onClick={clearFilters}><X />Clear filters</Button>} />
             : <div className="space-y-2">
-              {visible.map((job) => {
+              {ordered.map((job) => {
                 const cancelPending = job.status === "canceling" || (cancel.isPending && cancel.variables?.id === job.id)
-                return <Card key={job.id} className={ACTIVE.has(job.status) ? "border-primary/35" : undefined}>
+                const runRoot = jobRunRoot(job)
+                return <Card key={job.id} data-testid={`job-card-${job.id}`} data-job-id={job.id} role="group" aria-label={`${job.name} job ${job.id}`} className={ACTIVE.has(job.status) ? "border-primary/35" : undefined}>
                   <CardContent className="grid items-center gap-4 py-4 xl:grid-cols-[minmax(0,1fr)_180px_260px_auto]">
                     <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2"><span className="min-w-0 truncate font-semibold">{job.name}</span><StatusBadge status={job.status} /></div>
+                      <div className="flex flex-wrap items-start gap-2"><span className="min-w-0 break-words font-semibold">{job.name}</span><StatusBadge status={job.status} tone={jobStatusTone(job.status)} /></div>
                       <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"><span className="max-w-full truncate font-mono" title={job.id}>{job.id}</span><span className="flex items-center gap-1"><Clock3 className="size-3" />Queued {formatDate(job.created_at)}</span></div>
+                      <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground"><span className="shrink-0 font-semibold uppercase tracking-wider">{jobScopeLabel(job, selectedRun)}</span>{runRoot && <span className="truncate font-mono" title={runRoot}>{runRoot}</span>}</div>
                       {job.message && <p className="mt-2 line-clamp-2 text-xs text-muted-foreground" title={job.message}>{job.message}</p>}
                     </div>
                     <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Timing</div><div className="mt-1 text-xs">{timing(job)}</div></div>
-                    <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Resources</div><div className="mt-1 flex flex-wrap gap-1">{job.resources.length ? job.resources.map((resource) => <StatusBadge status={ACTIVE.has(job.status) ? "warning" : "available"} key={resource}>{resource}</StatusBadge>) : <span className="text-xs text-muted-foreground">none</span>}</div></div>
+                    <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Resources</div><div className="mt-1 flex flex-wrap gap-1">{job.resources.length ? job.resources.map((resource) => <StatusBadge status={ACTIVE.has(job.status) ? "warning" : "available"} tone={ACTIVE.has(job.status) ? "warning" : "neutral"} key={resource}>{resource}</StatusBadge>) : <span className="text-xs text-muted-foreground">none</span>}</div></div>
                     <div className="flex flex-wrap gap-2 xl:justify-end"><Button variant="outline" size="sm" onClick={() => setDetail(job)}><FileText />Log</Button>{ACTIVE.has(job.status) && <Button variant="destructive" size="sm" onClick={() => cancel.mutate(job)} disabled={cancelPending}>{isCaptureJob(job) ? <><Square />{cancelPending ? "Stopping…" : "Stop capture"}</> : <><Ban />{cancelPending ? "Canceling…" : "Cancel"}</>}</Button>}</div>
                   </CardContent>
                 </Card>
               })}
-              {visible.length < filtered.length && <div className="flex justify-center pt-3"><Button variant="outline" onClick={() => setVisibleLimit((value) => value + PAGE_SIZE)}><ChevronDown />Show {Math.min(PAGE_SIZE, filtered.length - visible.length)} older jobs</Button></div>}
+              {jobs.hasNextPage && <div className="flex justify-center pt-3"><Button variant="outline" onClick={() => void jobs.fetchNextPage()} disabled={jobs.isFetchingNextPage}><ChevronDown />{jobs.isFetchingNextPage ? "Loading older jobs…" : "Load older jobs"}</Button></div>}
             </div>}
 
     <Sheet open={Boolean(detail)} onOpenChange={(open) => !open && setDetail(null)}>
       <SheetContent>
-        <SheetHeader><SheetTitle className="font-display text-xl font-semibold">{currentDetail?.name}</SheetTitle><SheetDescription>{currentDetail?.id} · {ACTIVE.has(currentDetail?.status ?? "") ? "live process log" : "completed process log"}</SheetDescription></SheetHeader>
+        <SheetHeader><SheetTitle>{currentDetail?.name}</SheetTitle><SheetDescription>{currentDetail?.id} · {ACTIVE.has(currentDetail?.status ?? "") ? "live process log" : "completed process log"} · {currentDetail ? jobScopeLabel(currentDetail, selectedRun) : "Unknown scope"}{currentDetail && jobRunRoot(currentDetail) ? ` · ${jobRunRoot(currentDetail)}` : ""}</SheetDescription></SheetHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3"><StatusBadge status={currentDetail?.status} /><span className="text-xs text-muted-foreground">Return code {currentDetail?.returncode ?? "—"}</span></div>
+          <div className="flex items-center gap-3"><StatusBadge status={currentDetail?.status} tone={jobStatusTone(currentDetail?.status)} /><span className="text-xs text-muted-foreground">Return code {currentDetail?.returncode ?? "—"}</span></div>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm" disabled={!outputText || log.isPending} onClick={() => void copyDebugText("Job output", outputText)} title="Copy the complete process output"><Copy />Copy output</Button>
             <Button variant="outline" size="sm" disabled={!currentDetail} onClick={() => currentDetail && void copyDebugText("Job context", jobContext(currentDetail))} title="Copy job context and metadata"><Copy />Copy context</Button>

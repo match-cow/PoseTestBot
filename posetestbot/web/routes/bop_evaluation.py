@@ -25,7 +25,7 @@ from posetestbot.bop.evaluation import (
     toolkit_status,
 )
 from posetestbot.jobs.runner import ResourceBusyError
-from posetestbot.web.legacy import job_runner
+from posetestbot.web.runtime import job_runner
 from posetestbot.web.paths import APP_ROOT
 from posetestbot.web.security import resolve_web_run_root
 
@@ -174,6 +174,8 @@ def queue_bop_evaluation():
                 ],
                 cwd=APP_ROOT,
                 resources=["cpu", "disk_io"],
+                scope_kind="run",
+                run_root=run_root,
                 parameters={
                     "run_root": run_root.as_posix(),
                     "evaluation_id": evaluation["evaluation_id"],

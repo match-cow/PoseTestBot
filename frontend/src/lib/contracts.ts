@@ -136,12 +136,23 @@ export interface Job {
   parameters: Record<string, JsonValue>
   log_path: string
   visibility: "operator" | "service"
+  scope_kind: "run" | "library" | "global" | "unknown"
+  run_root: string | null
   process_pid?: number | null
   process_group_id?: number | null
   process_start_time?: number | null
   supervisor_pid?: number | null
   supervisor_process_group_id?: number | null
   supervisor_start_time?: number | null
+}
+
+export interface JobPage {
+  jobs: Job[]
+  resources: Record<string, string>
+  total: number
+  status_counts: Record<string, number>
+  next_cursor: string | null
+  limit: number
 }
 
 export interface PreviewJob {

@@ -5,7 +5,7 @@ import { AlertTriangle, ArrowRight, Bot, Camera, CheckCircle2, CircleDot, Clock3
 import { toast } from "sonner"
 import { HelpTip } from "@/components/help-tip"
 import { PageHeader } from "@/components/page-header"
-import { StatusBadge } from "@/components/status-badge"
+import { StatusBadge, type StatusTone } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -13,17 +13,18 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, query } from "@/lib/api"
-import type { CaptureState, Job, Overview, RunStorage, SensorStatus } from "@/lib/contracts"
+import type { BopAnnotationSetup, CaptureState, Job, Overview, RunStorage, SensorStatus } from "@/lib/contracts"
+import { jobStatusTone } from "@/lib/jobs"
 import { formatDate, titleCase } from "@/lib/utils"
 import { workflowJourneyMetadata, type WorkflowJourneyId, type WorkflowProgressStatus } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
 import { RoomMonitor } from "@/features/dashboard/room-monitor"
 
-function SummaryCard({ icon: Icon, label, value, status, detail }: { icon: typeof Bot; label: string; value: string; status?: string; detail: string }) {
+function SummaryCard({ icon: Icon, label, value, status, tone, detail }: { icon: typeof Bot; label: string; value: string; status?: string; tone: StatusTone; detail: string }) {
   return (
     <Card>
       <CardContent className="pt-5">
-        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Icon className="size-4 text-primary-strong" /></div><StatusBadge status={status ?? value} /></div>
+        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Icon className="size-4 text-primary-strong" /></div><StatusBadge status={status ?? value} tone={tone} /></div>
         <div className="mt-5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>
         <div className="mt-1 font-display text-lg font-semibold">{value}</div>
         <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{detail}</p>
@@ -41,6 +42,7 @@ interface DashboardWorkflowStep {
   title: string
   status: WorkflowProgressStatus
   evidenceBlocked: boolean
+  required: boolean
 }
 
 interface DashboardWorkflowEvidence {
@@ -58,10 +60,10 @@ function artifactComplete(overview: Overview, path: string, fallbackSectionId: s
 
 function workflowStatuses(completed: boolean[]): WorkflowProgressStatus[] {
   const firstIncomplete = completed.findIndex((value) => !value)
-  return completed.map((value, index) => value ? "complete" : index === firstIncomplete ? "current" : "blocked")
+  return completed.map((value, index) => value ? "complete" : index === firstIncomplete ? "current" : "not_started")
 }
 
-function dashboardWorkflowEvidence(overview: Overview | undefined): DashboardWorkflowEvidence | null {
+function dashboardWorkflowEvidence(overview: Overview | undefined, annotationComplete = false): DashboardWorkflowEvidence | null {
   const config = overview?.config
   if (!overview || !config) return null
 
@@ -80,14 +82,13 @@ function dashboardWorkflowEvidence(overview: Overview | undefined): DashboardWor
     && overview.calibration_sync.status === "ready",
   )
 
-  const completed = journey === "dataset"
+  const requiredCompleted = journey === "dataset"
     ? [
         datasetCalibrationConfigured,
         Boolean(config.pose_template?.placement_confirmed),
         readinessComplete,
         captureComplete,
-        syncComplete && rectificationComplete,
-        bopComplete,
+        syncComplete && rectificationComplete && bopComplete,
       ]
     : [
         true,
@@ -96,23 +97,30 @@ function dashboardWorkflowEvidence(overview: Overview | undefined): DashboardWor
         captureComplete,
         calibrationComplete,
       ]
-  const statuses = workflowStatuses(completed)
+  const requiredStatuses = workflowStatuses(requiredCompleted)
+  const statuses: WorkflowProgressStatus[] = journey === "dataset"
+    ? [...requiredStatuses, annotationComplete ? "complete" : bopComplete ? "ready" : "not_started"]
+    : requiredStatuses
   const evidenceSections = journey === "dataset"
-    ? ["run_setup", "run_setup", "preflight", "capture", "sync", "bop"]
-    : ["run_setup", "run_setup", "preflight", "capture", "calibration"]
+    ? [["run_setup"], ["run_setup"], ["preflight"], ["capture"], ["sync", "calibration", "bop"], []]
+    : [["run_setup"], ["run_setup"], ["preflight"], ["capture"], ["calibration"]]
 
   return {
     journey,
     label: metadata.title,
     description: journey === "dataset"
-      ? `${metadata.steps.length} required steps. This run records an object dataset; a saved camera calibration is an input to step 1.`
+      ? "5 required steps plus 1 optional ground-truth step. This run records an object dataset; a saved camera calibration is an input to step 1."
       : `${metadata.steps.length} required steps. This run records a printed grid and publishes reusable camera calibration.`,
     steps: metadata.steps.map((step, index) => {
-      const evidenceBlocked = overview.sidebar.find((section) => section.id === evidenceSections[index])?.status === "blocked"
+      const evidenceBlocked = evidenceSections[index].some(
+        (sectionId) => overview.sidebar.find((section) => section.id === sectionId)?.status === "blocked",
+      )
+      const evidenceCanBlockNow = ["current", "ready", "running"].includes(statuses[index])
       return {
         ...step,
-        status: evidenceBlocked && statuses[index] !== "complete" ? "blocked" : statuses[index],
-        evidenceBlocked,
+        status: evidenceBlocked && evidenceCanBlockNow ? "blocked" : statuses[index],
+        evidenceBlocked: Boolean(evidenceBlocked && evidenceCanBlockNow),
+        required: step.required !== false,
       }
     }),
   }
@@ -122,6 +130,8 @@ function workflowStatusLabel(step: DashboardWorkflowStep) {
   if (step.status === "complete") return "Complete"
   if (step.evidenceBlocked) return "Blocked"
   if (step.status === "current") return "Current step"
+  if (step.status === "ready") return step.required ? "Ready" : "Optional · ready"
+  if (!step.required) return "Optional"
   return "Waiting"
 }
 
@@ -153,7 +163,7 @@ function StorageSummaryCard({ storage }: { storage?: RunStorage }) {
     <CardContent className="pt-5">
       <div className="flex items-start justify-between">
         <div className="grid size-9 place-items-center rounded-lg bg-muted"><HardDrive className="size-4 text-primary-strong" /></div>
-        <StatusBadge status={storage?.status}>{statusLabel}</StatusBadge>
+        <StatusBadge status={storage?.status} tone={storage?.status === "ready" ? "success" : storage?.status === "warning" ? "warning" : storage?.status === "error" ? "destructive" : "neutral"}>{statusLabel}</StatusBadge>
       </div>
       <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Run storage
@@ -172,26 +182,42 @@ function jobTimestamp(job: Job) {
   return job.ended_at ?? job.started_at ?? job.created_at
 }
 
-function DashboardJobRow({ job }: { job: Job }) {
+function jobRunRoot(job: Job) {
+  return job.run_root
+}
+
+function jobScopeLabel(job: Job, selectedRun: string) {
+  if (job.scope_kind === "run") return job.run_root === selectedRun ? "Active run" : "Other run"
+  if (job.scope_kind === "library") return "Reusable library"
+  if (job.scope_kind === "global") return "Lab-wide"
+  return "Legacy unknown scope"
+}
+
+function DashboardJobRow({ job, selectedRun }: { job: Job; selectedRun: string }) {
   const timingLabel = job.status === "queued"
     ? `Queued ${formatDate(job.created_at)}`
     : job.status === "failed"
       ? `Failed ${formatDate(job.ended_at ?? job.created_at)}`
       : `Started ${formatDate(job.started_at ?? job.created_at)}`
-  return <Link to="/jobs" aria-label={`Open ${job.name} in Jobs`} className="block rounded-lg border border-border p-3 transition-colors hover:border-primary/55 hover:bg-primary/5">
+  const runRoot = jobRunRoot(job)
+  return <Link to="/jobs" data-testid={`dashboard-job-${job.id}`} data-job-id={job.id} aria-label={`Open ${job.name} in Jobs`} className="block rounded-lg border border-border p-3 transition-colors hover:border-primary/55 hover:bg-primary/5">
     <div className="flex min-w-0 items-start justify-between gap-3">
       <div className="min-w-0">
         <div className="truncate text-sm font-semibold" title={job.name}>{job.name}</div>
         <div className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground"><Clock3 className="size-3 shrink-0" />{timingLabel}</div>
       </div>
-      <StatusBadge status={job.status} />
+      <StatusBadge status={job.status} tone={jobStatusTone(job.status)} />
+    </div>
+    <div className="mt-2 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
+      <span className="shrink-0 font-semibold uppercase tracking-wider">{jobScopeLabel(job, selectedRun)}</span>
+      {runRoot && <span className="truncate font-mono" title={runRoot}>{runRoot}</span>}
     </div>
     {job.message && <p className="mt-2 line-clamp-2 text-xs text-muted-foreground" title={job.message}>{job.message}</p>}
     {job.resources.length > 0 && <div className="mt-2 truncate text-[10px] font-semibold uppercase tracking-wider text-muted-foreground" title={job.resources.join(", ")}>{job.resources.join(" · ")}</div>}
   </Link>
 }
 
-function DashboardJobActivity({ jobs, pending, failed }: { jobs?: Job[]; pending: boolean; failed: boolean }) {
+function DashboardJobActivity({ jobs, pending, failed, selectedRun }: { jobs?: Job[]; pending: boolean; failed: boolean; selectedRun: string }) {
   const activeJobs = [...(jobs ?? [])]
     .filter((job) => ACTIVE_JOB_STATUSES.has(job.status))
     .sort((left, right) => jobTimestamp(right).localeCompare(jobTimestamp(left)))
@@ -203,22 +229,22 @@ function DashboardJobActivity({ jobs, pending, failed }: { jobs?: Job[]; pending
   return <Card data-testid="dashboard-job-activity" className="col-span-12 h-full overflow-hidden xl:col-span-5">
     <CardHeader className="border-b border-border bg-muted/20">
       <div className="flex items-start justify-between gap-3">
-        <div><CardTitle className="flex items-center gap-2"><ListChecks className="size-4 text-primary-strong" />Job activity</CardTitle><CardDescription className="mt-1">All queued or running work, plus the latest failures.</CardDescription></div>
+        <div><CardTitle className="flex items-center gap-2"><ListChecks className="size-4 text-primary-strong" />Job activity</CardTitle><CardDescription className="mt-1">Lab-wide: all queued or running work, plus the latest failures. Each entry names its run scope.</CardDescription></div>
         <Button asChild size="sm" variant="outline"><Link to="/jobs">Open Jobs <ArrowRight /></Link></Button>
       </div>
     </CardHeader>
     <CardContent className="space-y-5 pt-4">
       {pending ? <div className="space-y-2"><Skeleton className="h-16" /><Skeleton className="h-16" /><Skeleton className="h-16" /></div> : failed ? <div role="alert" className="rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs text-destructive">Job status is unavailable. Open Jobs or refresh before starting acquisition work.</div> : <>
         <section aria-labelledby="active-jobs-heading">
-          <div className="mb-2 flex items-center justify-between gap-3"><h4 id="active-jobs-heading" className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Active jobs</h4><StatusBadge status={activeJobs.length ? "running" : "available"}>{activeJobs.length}</StatusBadge></div>
+          <div className="mb-2 flex items-center justify-between gap-3"><h4 id="active-jobs-heading" className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Active jobs</h4><StatusBadge status={activeJobs.length ? "running" : "available"} tone={activeJobs.length ? "warning" : "neutral"}>{activeJobs.length}</StatusBadge></div>
           {activeJobs.length > 0
-            ? <div className="max-h-48 space-y-2 overflow-y-auto pr-1">{activeJobs.map((job) => <DashboardJobRow key={job.id} job={job} />)}</div>
+            ? <div className="max-h-48 space-y-2 overflow-y-auto pr-1">{activeJobs.map((job) => <DashboardJobRow key={job.id} job={job} selectedRun={selectedRun} />)}</div>
             : <p className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">No queued or running jobs.</p>}
         </section>
         <section aria-labelledby="recent-failures-heading">
-          <div className="mb-2 flex items-center justify-between gap-3"><h4 id="recent-failures-heading" className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Recent failures</h4><StatusBadge status={recentFailures.length ? "failed" : "available"}>{recentFailures.length}</StatusBadge></div>
+          <div className="mb-2 flex items-center justify-between gap-3"><h4 id="recent-failures-heading" className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Recent failures</h4><StatusBadge status={recentFailures.length ? "failed" : "available"} tone={recentFailures.length ? "destructive" : "neutral"}>{recentFailures.length}</StatusBadge></div>
           {recentFailures.length > 0
-            ? <div className="space-y-2">{recentFailures.map((job) => <DashboardJobRow key={job.id} job={job} />)}</div>
+            ? <div className="space-y-2">{recentFailures.map((job) => <DashboardJobRow key={job.id} job={job} selectedRun={selectedRun} />)}</div>
             : <p className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">No failed jobs in retained history.</p>}
         </section>
       </>}
@@ -259,10 +285,10 @@ function IiwaQuickControls({ profileStatus }: { profileStatus: "checking" | "con
   return (
     <Card data-testid="iiwa-quick-controls">
       <CardContent className="pt-5">
-        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Bot className="size-4 text-primary-strong" /></div><StatusBadge status={profileStatus}>{profileStatus}</StatusBadge></div>
-        <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Robot control <HelpTip label="robot control status">Configured means the fixed lab profile loaded. It does not contact the robot or prove that the Sunrise application is running.</HelpTip></div>
+        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Bot className="size-4 text-primary-strong" /></div><StatusBadge status={profileStatus} tone={profileStatus === "configured" ? "informational" : profileStatus === "error" ? "destructive" : "neutral"}>{profileStatus}</StatusBadge></div>
+        <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Manual robot control <HelpTip label="robot control status">Configured means the fixed lab profile loaded. The command target is the browser-local manual target shown in Devices; this status does not contact the robot or prove that Sunrise is running.</HelpTip></div>
         <div className="mt-1 font-display text-lg font-semibold">Lab IIWA</div>
-        <p className="mt-1 text-xs text-muted-foreground">Quick commands use the configured lab target and require confirmation.</p>
+        <p className="mt-1 text-xs text-muted-foreground">Quick commands use this browser's manual target and require confirmation.</p>
         <div className="mt-4 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start_iiwa")} disabled={robotCommand.isPending}><Power />Start IIWA</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop_iiwa")} disabled={robotCommand.isPending}><Square />Stop IIWA</Button></div>
       </CardContent>
       <Dialog open={command !== null} onOpenChange={setDialogOpen}>
@@ -288,6 +314,12 @@ export function DashboardPage() {
   const runtime = useQuery({ queryKey: ["runtime", "status"], queryFn: () => api<Record<string, unknown>>("/runtime/status"), staleTime: 10_000 })
   const capture = useQuery({ queryKey: ["capture-jobs", selectedRun], queryFn: () => api<CaptureState>(query("/capture/jobs", { run_root: selectedRun })), refetchInterval: (state) => state.state.data?.active_count ? 1_000 : 5_000 })
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>("/jobs"), refetchInterval: 1_000 })
+  const annotationSetup = useQuery({
+    queryKey: ["bop-annotations", "setup", selectedRun],
+    queryFn: () => api<BopAnnotationSetup>(query("/bop/annotations/setup", { run_root: selectedRun })),
+    enabled: overview.data?.config?.dataset_mode === "pose_template",
+    retry: false,
+  })
   const stopCapture = useMutation({
     mutationFn: (jobId: string) => api(`/capture/jobs/${jobId}/stop`, { method: "POST", body: "{}" }),
     onSuccess: () => { toast.success("Capture stop requested"); queryClient.invalidateQueries({ queryKey: ["capture-jobs", selectedRun] }); queryClient.invalidateQueries({ queryKey: ["jobs"] }) },
@@ -299,9 +331,9 @@ export function DashboardPage() {
   const preflight = sections.find((item) => item.id === "preflight")
   const runtimeItems = Array.isArray(runtime.data?.runtimes) ? runtime.data.runtimes as Array<{ available?: boolean }> : []
   const availableRuntimes = runtimeItems.filter((item) => item.available).length
-  const workflowEvidence = dashboardWorkflowEvidence(overview.data)
+  const workflowEvidence = dashboardWorkflowEvidence(overview.data, Boolean(annotationSetup.data?.current_output?.verified))
 
-  const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "storage", "sensors", "robot", "runtime", "capture-jobs", "jobs"].includes(String(item.queryKey[0])) })
+  const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "storage", "sensors", "robot", "runtime", "capture-jobs", "jobs", "bop-annotations"].includes(String(item.queryKey[0])) })
   const statusErrors = [
     overview.isError && "run evidence",
     storage.isError && "run storage",
@@ -318,20 +350,20 @@ export function DashboardPage() {
       <PageHeader eyebrow="Current run" title="Acquisition readiness" description="Live workcell visibility, background work, storage capacity, and artifact-backed readiness for the selected run." actions={<Button variant="outline" onClick={refresh}><RefreshCw />Refresh</Button>} />
 
       {statusErrors.length > 0 && <div role="alert" className="flex flex-col gap-3 rounded-xl border border-destructive/35 bg-destructive/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="text-sm font-semibold">Some dashboard status is unavailable</div><p className="mt-1 text-xs text-muted-foreground">Could not load {statusErrors.join(", ")}. Missing responses are not treated as ready; refresh before relying on this overview.</p></div></div><Button variant="outline" size="sm" onClick={refresh}><RefreshCw />Refresh status</Button></div>}
-      {activeCapture && <div className="flex flex-col items-start justify-between gap-4 rounded-xl border border-primary/35 bg-primary/10 px-5 py-4 sm:flex-row sm:items-center"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Capture is {activeCapture.status}</div><div className="text-xs text-muted-foreground">{activeCapture.name} · keep the operator console visible</div></div></div><div className="flex flex-wrap gap-2"><Button variant="destructive" size="sm" onClick={() => stopCapture.mutate(activeCapture.id)} disabled={stopCapture.isPending || activeCapture.status === "canceling"}><Square />{stopCapture.isPending || activeCapture.status === "canceling" ? "Stopping…" : "Stop capture"}</Button><Button asChild size="sm"><Link to="/jobs">Open controls <ArrowRight /></Link></Button></div></div>}
+      {activeCapture && <div className="flex flex-col items-start justify-between gap-4 rounded-xl border border-primary/35 bg-primary/10 px-5 py-4 sm:flex-row sm:items-center"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Capture is {activeCapture.status}</div><div className="text-xs text-muted-foreground">{activeCapture.name} · continues after navigation; use Jobs for live logs and stop controls</div></div></div><div className="flex flex-wrap gap-2"><Button variant="destructive" size="sm" onClick={() => stopCapture.mutate(activeCapture.id)} disabled={stopCapture.isPending || activeCapture.status === "canceling"}><Square />{stopCapture.isPending || activeCapture.status === "canceling" ? "Stopping…" : "Stop capture"}</Button><Button asChild size="sm"><Link to="/jobs">Open controls <ArrowRight /></Link></Button></div></div>}
 
       <div className="operator-grid">
         <RoomMonitor />
-        <DashboardJobActivity jobs={jobs.data?.jobs} pending={jobs.isPending} failed={jobs.isError} />
+        <DashboardJobActivity jobs={jobs.data?.jobs} pending={jobs.isPending} failed={jobs.isError} selectedRun={selectedRun} />
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
         {overview.isPending || storage.isPending || sensors.isPending ? Array.from({ length: 5 }).map((_, index) => <Skeleton className="h-40" key={index} />) : <>
           <StorageSummaryCard storage={storage.data} />
-          <SummaryCard icon={ShieldCheck} label="Readiness check" value={titleCase(preflight?.status ?? "pending")} status={preflight?.status} detail={preflight?.status === "complete" ? "Artifact-backed readiness evidence is present." : "Check or refresh readiness before recording."} />
-          <SummaryCard icon={Camera} label="Sensors" value={`${sensors.data?.total_connected ?? 0} connected`} status={sensors.data?.all_expected_connected ? "connected" : "warning"} detail="RealSense, OAK-D Pro, and ZED discovery." />
+          <SummaryCard icon={ShieldCheck} label="Readiness check" value={titleCase(preflight?.status ?? "pending")} status={preflight?.status} tone={preflight?.status === "complete" ? "success" : preflight?.status === "blocked" ? "destructive" : "neutral"} detail={preflight?.status === "complete" ? "Artifact-backed readiness evidence is present." : "Check or refresh readiness before recording."} />
+          <SummaryCard icon={Camera} label="Sensors" value={`${sensors.data?.total_connected ?? 0} connected`} status={sensors.data?.all_expected_connected ? "connected" : "warning"} tone={sensors.data?.all_expected_connected ? "informational" : "warning"} detail="RealSense, OAK-D Pro, and ZED discovery." />
           <IiwaQuickControls profileStatus={robotProfileStatus} />
-          <SummaryCard icon={Cpu} label="Optional runtimes" value={`${availableRuntimes}/${runtimeItems.length} available`} status={availableRuntimes === runtimeItems.length ? "ready" : "warning"} detail="BlenderProc and Stereolabs SDK visibility." />
+          <SummaryCard icon={Cpu} label="Optional runtimes" value={`${availableRuntimes}/${runtimeItems.length} available`} status={availableRuntimes === runtimeItems.length ? "ready" : "warning"} tone={availableRuntimes === runtimeItems.length ? "success" : "warning"} detail="BlenderProc and Stereolabs SDK visibility." />
         </>}
       </div>
 
@@ -349,7 +381,7 @@ export function DashboardPage() {
                   ? <CheckCircle2 className="size-4 text-success" aria-label="Complete" />
                   : step.evidenceBlocked
                     ? <AlertTriangle className="size-4 text-destructive" aria-label="Blocked" />
-                    : <CircleDot className={step.status === "current" ? "size-4 text-primary-strong" : "size-4 text-muted-foreground"} aria-label={step.status === "current" ? "Current step" : "Waiting"} />}
+                    : <CircleDot className={step.status === "current" || step.status === "ready" ? "size-4 text-primary-strong" : "size-4 text-muted-foreground"} aria-label={step.status === "current" ? "Current step" : step.status === "ready" ? "Ready" : "Waiting"} />}
               </div>
               <div className="text-sm font-semibold">{step.title}</div>
               <div className="mt-1 text-xs text-muted-foreground">{workflowStatusLabel(step)}</div>

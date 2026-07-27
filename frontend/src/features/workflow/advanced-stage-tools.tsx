@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { ChevronDown, Play, TriangleAlert } from "lucide-react"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 import { HelpTip } from "@/components/help-tip"
 import { Button } from "@/components/ui/button"
@@ -45,8 +46,8 @@ export function AdvancedStageTools({ runRoot, stages, artifactStatus, configured
     <Card className="border-warning/35 bg-warning/5">
       <CardHeader><CardTitle className="flex items-center gap-2 text-base"><TriangleAlert aria-hidden="true" className="size-4 text-warning" />Expert controls</CardTitle><CardDescription>These are individual implementation stages. They do not enforce the guided workflow order and may produce incomplete evidence when run out of sequence.</CardDescription></CardHeader>
       <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-xs text-muted-foreground">Physical capture is intentionally absent here; use a guided journey for its fresh safety gate.</div>
-        {configuredSequence && <div className="flex items-center gap-2"><span className="font-mono text-[10px] text-muted-foreground">{configuredSequence.id}</span><HelpTip label="configured plan">A configured plan is the low-level sequence saved in run_config.json. Guided journeys present its operator-facing purpose instead.</HelpTip><Button size="sm" variant="outline" disabled={!configuredSequence.planOnly || queueConfig.isPending} onClick={() => queueConfig.mutate()}><Play aria-hidden="true" />{queueConfig.isPending ? "Queueing…" : "Queue configured plan"}</Button></div>}
+        <div className="text-xs leading-relaxed text-muted-foreground">Physical capture is intentionally absent here; use a guided journey for its fresh safety gate. Every queued stage continues after navigation; monitor its status, log, and cancellation in <Link className="font-semibold text-primary-strong underline-offset-4 hover:underline" to="/jobs">Jobs</Link>.</div>
+        {configuredSequence && <div className="flex shrink-0 flex-col items-end gap-1.5"><div className="flex items-center gap-2"><span className="font-mono text-[10px] text-muted-foreground">{configuredSequence.id}</span><HelpTip label="configured plan">A configured plan is the low-level sequence saved in run_config.json. Guided journeys present its operator-facing purpose instead.</HelpTip><Button size="sm" variant="outline" disabled={!configuredSequence.planOnly || queueConfig.isPending} onClick={() => queueConfig.mutate()}><Play aria-hidden="true" />{queueConfig.isPending ? "Queueing…" : "Queue configured plan"}</Button></div>{!configuredSequence.planOnly && <p className="max-w-xs text-right text-[10px] text-muted-foreground">This saved sequence is an execution plan. Run it through the guided workflow so physical safety gates remain visible.</p>}</div>}
       </CardContent>
     </Card>
     {groups.map((group, index) => <details key={group.id} open={index === 0} className="group rounded-xl border bg-card">

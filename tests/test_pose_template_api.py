@@ -138,6 +138,8 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
     )
     assert orientation_job.status_code == 202
     assert runner.submissions[-1]["name"] == "pose_template_orientation_analysis"
+    assert runner.submissions[-1]["scope_kind"] == "library"
+    assert runner.submissions[-1].get("run_root") is None
     assert runner.submissions[-1]["command"][3] == (
         "scripts/run_pose_template_orientation_analysis.py"
     )
@@ -165,6 +167,8 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
     )
     assert upload.status_code == 202
     assert runner.submissions[-1]["resources"] == ["cpu", "disk_io"]
+    assert runner.submissions[-1]["scope_kind"] == "library"
+    assert runner.submissions[-1].get("run_root") is None
     assert runner.submissions[-1]["command"][3] == "scripts/run_object_catalog_import.py"
     assert client.post("/pose-templates/catalog/legacy-import", json={}).status_code == 405
 
@@ -174,6 +178,8 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
     assert preview.status_code == 202
     assert runner.submissions[-1]["name"] == "pose_template_preview"
     assert runner.submissions[-1]["resources"] == ["cpu", "disk_io"]
+    assert runner.submissions[-1]["scope_kind"] == "global"
+    assert runner.submissions[-1].get("run_root") is None
     preview_result = Path(runner.submissions[-1]["parameters"]["result"])
     preview_result.write_text('{"schema_version":"pose_template_preview.v1"}')
     consumed = client.get(
@@ -191,18 +197,24 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
     )
     assert validation.status_code == 202
     assert runner.submissions[-1]["name"] == "pose_template_validation"
+    assert runner.submissions[-1]["scope_kind"] == "global"
+    assert runner.submissions[-1].get("run_root") is None
 
     generated = client.post(
         "/pose-templates/generate", json={"configuration": configuration}
     )
     assert generated.status_code == 202
     assert runner.submissions[-1]["name"] == "pose_template_generate"
+    assert runner.submissions[-1]["scope_kind"] == "library"
+    assert runner.submissions[-1].get("run_root") is None
 
     cloned = client.post(
         f"/pose-templates/library/{bundle['template_uuid']}/clone", json={}
     )
     assert cloned.status_code == 202
     assert runner.submissions[-1]["name"] == "pose_template_clone"
+    assert runner.submissions[-1]["scope_kind"] == "library"
+    assert runner.submissions[-1].get("run_root") is None
 
     selected = client.post(
         "/pose-templates/runs/selection",
@@ -216,6 +228,8 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
     )
     assert selected.status_code == 202
     assert runner.submissions[-1]["resources"] == ["disk_io"]
+    assert runner.submissions[-1]["scope_kind"] == "run"
+    assert runner.submissions[-1]["run_root"] == run
     assert runner.submissions[-1]["command"][3] == "scripts/run_pose_template_select.py"
 
     library_endpoint = f"/pose-templates/library/{bundle['template_uuid']}"
@@ -228,6 +242,8 @@ def test_pose_template_api_queues_heavy_work_and_serves_immutable_assets(
     assert deleted.get_json()["status"] == "deleted_cleanup_pending"
     assert deleted.get_json()["job_id"] == "posejob8"
     assert runner.submissions[-1]["name"] == "pose_template_delete_cleanup"
+    assert runner.submissions[-1]["scope_kind"] == "library"
+    assert runner.submissions[-1].get("run_root") is None
     assert runner.submissions[-1]["command"][3:] == [
         "scripts/run_pose_template_delete_cleanup.py",
         "--template-uuid",

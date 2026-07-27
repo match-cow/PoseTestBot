@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Radio, RefreshCw, SunMedium } from "lucide-react"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 
-import { StatusBadge } from "@/components/status-badge"
+import { StatusBadge, type StatusTone } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { api, errorMessage } from "@/lib/api"
@@ -52,9 +53,16 @@ interface SessionDescriptionPayload {
   sdp: string
 }
 
-const TERMINAL_JOB_STATUSES = new Set(["failed", "canceled", "succeeded"])
+const TERMINAL_JOB_STATUSES = new Set(["failed", "canceled", "cancelled", "succeeded"])
 const AUTOMATIC_RETRY_DELAYS_MS = [1_000, 3_000, 10_000]
 const FIRST_VIDEO_FRAME_TIMEOUT_MS = 5_000
+
+function monitorStatusTone(status: string): StatusTone {
+  if (status === "connected") return "informational"
+  if (status === "failed") return "destructive"
+  if (status === "canceled" || status === "cancelled" || status === "succeeded") return "neutral"
+  return "warning"
+}
 
 function waitForIceGatheringComplete(peer: RTCPeerConnection): Promise<void> {
   if (peer.iceGatheringState === "complete") return Promise.resolve()
@@ -93,7 +101,6 @@ export function RoomMonitor() {
   const queryClient = useQueryClient()
   const videoRef = useRef<HTMLVideoElement>(null)
   const peerRef = useRef<RTCPeerConnection | null>(null)
-  const monitorStartAttempted = useRef(false)
   const negotiationAttempts = useRef(0)
   const previousJobId = useRef<string | null>(null)
   const negotiationSequence = useRef(0)
@@ -134,14 +141,6 @@ export function RoomMonitor() {
   const jobStatus = monitor.data?.job?.status ?? null
   const signalingReady = monitor.data?.webrtc_status?.signaling_ready === true
   const connectionStatus = connection.jobId === jobId ? connection.status : "waiting"
-
-  useEffect(() => {
-    if (!monitor.isSuccess || monitorStartAttempted.current || startMonitor.isPending) return
-    if (!jobStatus || TERMINAL_JOB_STATUSES.has(jobStatus)) {
-      monitorStartAttempted.current = true
-      startMonitor.mutate()
-    }
-  }, [monitor.isSuccess, jobStatus, startMonitor])
 
   useEffect(() => {
     if (previousJobId.current === jobId) return
@@ -335,10 +334,11 @@ export function RoomMonitor() {
   const brightnessActive = brightness?.state === "queued" || brightness?.state === "running"
   const brightnessReady = connectionStatus === "connected" && brightness?.supported === true
   const brightnessMessage = brightness?.message ?? "Brightness control is available after the camera opens."
+  const monitorNeedsStart = !jobStatus || TERMINAL_JOB_STATUSES.has(jobStatus)
 
   return (
     <Card data-testid="dashboard-room-monitor" className="col-span-12 overflow-hidden xl:col-span-7">
-      <CardHeader><CardTitle className="flex items-center gap-2"><Radio className="size-4 text-primary-strong" />Test cell monitor</CardTitle><CardDescription>Live supervised overview of the workcell during setup and acquisition.</CardDescription></CardHeader>
+      <CardHeader><CardTitle className="flex items-center gap-2"><Radio className="size-4 text-primary-strong" />Test cell monitor</CardTitle><CardDescription>Live supervised overview of the workcell during setup and acquisition. The room camera opens only after an operator starts it.</CardDescription></CardHeader>
       <CardContent>
         <div className="surface-grid relative aspect-video overflow-hidden rounded-lg bg-muted">
           <video
@@ -355,10 +355,10 @@ export function RoomMonitor() {
         </div>
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
-            <StatusBadge status={displayStatus} />
+            <StatusBadge status={displayStatus} tone={monitorStatusTone(displayStatus)} />
             <div data-testid="room-monitor-brightness-status" className="mt-1 max-w-xl truncate text-[11px] text-muted-foreground" title={brightnessMessage}>{brightnessMessage}</div>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex flex-wrap items-center gap-1">
             <Button
               data-testid="room-monitor-auto-brightness"
               size="sm"
@@ -369,7 +369,8 @@ export function RoomMonitor() {
               <SunMedium className={brightnessActive ? "animate-pulse" : ""} />
               {brightnessActive || calibrateBrightness.isPending ? "Calibrating…" : "Auto brightness"}
             </Button>
-            <Button size="sm" variant="ghost" onClick={retry} disabled={startMonitor.isPending}><RefreshCw />{connectionStatus === "connected" ? "Reconnect" : "Retry"}</Button>
+            <Button size="sm" variant={monitorNeedsStart ? "outline" : "ghost"} onClick={retry} disabled={monitor.isPending || startMonitor.isPending}><RefreshCw />{monitor.isPending ? "Checking…" : startMonitor.isPending ? "Starting…" : connectionStatus === "connected" ? "Reconnect" : monitorNeedsStart ? "Start monitor" : "Retry"}</Button>
+            {jobId && <Button asChild size="sm" variant="ghost"><Link to="/jobs">Open Jobs</Link></Button>}
           </div>
         </div>
       </CardContent>

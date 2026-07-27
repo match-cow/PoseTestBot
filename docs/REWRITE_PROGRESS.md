@@ -43,13 +43,141 @@ The code rewrite is implemented across:
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
 
+## 2026-07-27 Software Completion and Physical-Plan Reconciliation
+
+All remaining software-only rewrite maintenance is complete. The live
+remaining-work document now contains only five operator-run physical
+milestones: ordinary-capture controller commissioning, camera-service
+acceptance, current five-sensor capture, the RealSense metric depth-scale
+recheck, and physical pose-template review.
+
+The nine-frame calibration Sunrise program is operationally accepted. The
+operator confirms that `PoseTestBot_CalibrationVarianceProposal` compiled in
+Workbench, all nine persistent frames were taught, the application was
+commissioned, and the guided captures succeeded. The repository independently
+retains the three completed guided runs and explicitly promoted attempt
+`268c897e1baf49e7bd78a434a4569b99`; its common `IPPE + Shah` result passes the
+calibration-validation rewrite gate at 3/3. The exact Workbench project,
+controller revision record, and completed frame-teaching worksheet were not
+available to copy into the repository, so no provenance was fabricated. The
+teaching checklist remains a future recommissioning reference rather than an
+open rewrite gate. The separate ordinary-capture Sunrise application remains
+uncommissioned and is one of the five physical milestones.
+
+The completed web and job-history maintenance includes:
+
+- `WebSettings`, `WebRuntime`, and `LocalJobRunner` ownership in the dedicated
+  `posetestbot.web.runtime` module, with application-factory injection for
+  isolated tests;
+- focused jobs/commands, system-status, capture, pipeline/configuration,
+  calibration-stage, and sync-quality blueprints, followed by removal of
+  `posetestbot/web/legacy.py` only after production and test imports were
+  eliminated and packaging was verified;
+- authoritative top-level `scope_kind` and `run_root` job provenance. New jobs
+  explicitly select `run`, `library`, or `global`; insufficient historical
+  provenance loads as `unknown`;
+- a non-destructive, rebuildable SQLite index below the job root. Canonical
+  job directories, `job.json` records, and logs remain the source of truth and
+  are never pruned. Startup recovers nonterminal work only, while terminal
+  history is loaded by exact ID or indexed page;
+- opaque-cursor `/jobs` pagination with bounded limits, server-side text,
+  status, scope, and run filtering, totals, status counts, first-page active
+  inclusion, and the retained `jobs` and `resources` response members; and
+- server-backed incremental Jobs history, authoritative active-run,
+  other-run, reusable-library, lab-wide, and legacy-unknown labels, explicit
+  typed status tones, and visible keyboard-accessible reasons beside
+  persistently disabled actions.
+
+Pipeline, calibration, annotation, evaluation, and run-selection jobs are
+run-owned; catalogue, target, and template authoring jobs are library-owned;
+previews, snapshots, monitoring, and manual robot commands are global.
+Existing parameter dictionaries remain command provenance but are no longer
+used to guess UI scope.
+
+Legacy data readers, `web_interface.py`, and the direct non-destructive sync
+CLI are retained compatibility surfaces rather than undecided tasks. Optional
+D435 physical-sync research, regeneration of the old v4 derived export,
+physical duplicate repetition, external estimator-result acceptance, bundle
+size tuning, and a one-file binary catalogue format were removed from the
+active backlog without removing their already supported software contracts or
+historical documentation.
+
+Non-hardware acceptance for this pass completed with:
+
+- installer shell syntax and the full installer check-only path;
+- Ruff and 984 default pytest contracts;
+- frontend type checking, lint, and a production Vite build;
+- all 52 packaged Playwright contracts;
+- a wheel and sdist containing the exact current 45-file packaged UI plus all
+  new runtime/blueprint modules and no removed legacy module;
+- an isolated installed-wheel smoke covering 128 Flask rules, the Workpiece
+  Catalogue and retained pose-template catalogue APIs, generation/selection
+  routes, Jobs pagination, and served hashed assets; and
+- `git diff --check`.
+
+No camera stream, snapshot, hardware status probe, robot command, or recording
+was started during this work. The installer reported optional `pyzed.sl` as
+unavailable, as expected on this development host.
+
+## 2026-07-27 Active Run Folder and Console Usability Pass
+
+The persistent top bar now uses one neutral, muted selector for the
+**Active run folder**. Inside that control, a folder icon, scope label, exact
+monospaced path value, adjacent statement that all run-owned pages and actions
+use the folder, and inline **Change** affordance replace the former unlabeled
+select and detached chevron-only action. Existing, custom, and new/unlisted
+folders remain choices within the same control without making run selection
+compete visually with the page's primary action.
+
+The folder-entry dialog now names the operation as an active-context switch,
+states that the folder controls the entire operator workflow rather than only
+an output destination, and asks the operator to confirm the intended
+acquisition run. It also makes clear that a new folder begins unconfigured and
+that changing context does not copy setup or evidence from the prior run.
+
+The accompanying consistency and usability pass:
+
+- shows untouched future workflow steps as **Not started** instead of implying
+  that they failed, shows only the selected step's panel while preserving
+  unsaved drafts and live job tracking in previously visited steps, and labels
+  the dataset journey as five required steps plus one optional annotation step;
+- makes dataset step 5 own synchronization, quality verification,
+  calibration validation, rectification, and the base BOP export, while step 6
+  owns optional pose or pose-plus-mask ground-truth evidence and completes only
+  when that annotation output is verified;
+- consistently calls the printed object arrangement a **pose template**, uses
+  **Cell View** in navigation and the page heading, and distinguishes running,
+  verified, and both spellings of canceled status;
+- returns Cell View and Jobs to the selected run's remembered workflow
+  position, sends the Devices handoff directly to the active journey's setup
+  step, and uses guided setup as the fallback; and
+- keeps queued readiness, capture, processing, annotation, target-selection,
+  and pose-template-selection work visible after navigation with precise run
+  scope, routes to **Jobs**, and fail-closed duplicate prevention. Switching
+  the active folder resets run-setup drafts before the new folder can be
+  saved, and the Dashboard room monitor opens its camera only after an
+  explicit **Start monitor** action.
+
+All 51 packaged Playwright contracts (39 console and 12 preview) passed,
+including focused assertions for the visible desktop affordance, strengthened
+dialog, active-folder persistence and reset, step-draft preservation,
+background-job recovery, workflow handoffs, optional-step state transitions,
+explicit monitor start, and desktop overflow behavior. The default suite also
+passed all 969 non-browser contracts. Frontend type checking, lint, and the
+production Vite build passed. The packaged UI was visually inspected at 1920 ×
+1080 and 1440 × 900, with an additional narrow reachability check at 900 × 900.
+No camera or robot was opened or commanded.
+
 ## 2026-07-27 Dashboard Acquisition Operations
 
 The Dashboard now prioritizes live acquisition supervision instead of
 duplicating pipeline recommendations. The workcell WebRTC monitor occupies the
 larger side of the primary desktop row; the former **Recommended next action**
 card is removed because the persistent workflow return and evidence strip
-already own guided navigation.
+already own guided navigation. A page visit only reads monitor status; it does
+not open the room camera. **Start monitor** is the explicit camera-opening
+action, while an already running monitor can reconnect and remains visible in
+**Jobs**.
 
 The adjacent **Job activity** panel polls operator jobs every second, keeps
 every queued/running/canceling job immediately visible in a bounded local
@@ -104,9 +232,10 @@ opened or commanded.
 
 ## 2026-07-26 Guided BOP Ground-Truth Products
 
-The canonical **Workflow → Object dataset → Export the BOP dataset** step now
-offers two explicit, run-scoped annotation products after the base image/model
-export is verified. **Plain pose ground truth** derives every instance's
+The canonical **Workflow → Object dataset → Add optional BOP ground-truth
+evidence** step offers two explicit, run-scoped annotation products after the
+required base image/model export is verified. **Plain pose ground truth**
+derives every instance's
 OpenCV model-to-camera rotation and millimetre translation through immutable
 object geometry, pose-template instance/placement transforms, matched robot
 poses, and the selected calibration snapshot. It writes standard
@@ -193,7 +322,7 @@ NumPy-2 main environment.
 
 ## 2026-07-26 Object-Dataset Research Speed Range
 
-The guided **Record an object-template dataset** setup now accepts requested
+The guided **Record an object dataset** setup now accepts requested
 capture speeds from 0.01–1.00 m/s and preserves existing run-owned values in
 that range. Calibration setup remains at 0.01–0.03 m/s. Dataset requests above
 the conservative 0.03 m/s legacy range use `robot_command.v1`; the canonical

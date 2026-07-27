@@ -312,6 +312,8 @@ def test_attempt_submission_scopes_exact_cameras_and_queues_cpu_disk_parent_job(
     assert payload["job_id"] == "calibrationjob1"
     submission = runner.submissions[0]
     assert submission["resources"] == ["cpu", "disk_io"]
+    assert submission["scope_kind"] == "run"
+    assert submission["run_root"] == run_root.as_posix()
     assert submission["parameters"]["sensor_keys"] == ["oak_d_pro:2"]
     assert submission["command"][:4] == [
         "uv",
@@ -504,6 +506,8 @@ def test_attempt_history_is_immutable_and_promotion_accepts_partial_results(
     assert promoted.status_code == 202
     assert promoted.get_json()["selections"] == {"realsense_d435:1": candidate_id}
     assert runner.submissions[-1]["resources"] == ["cpu", "disk_io"]
+    assert runner.submissions[-1]["scope_kind"] == "run"
+    assert runner.submissions[-1]["run_root"] == run_root.as_posix()
     assert runner.submissions[-1]["command"][-1] == "--promote"
 
 

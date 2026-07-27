@@ -61,7 +61,7 @@ export function ConsoleGuide({ open, onOpenChange }: ConsoleGuideProps) {
               <div className="p-3"><dt className="font-semibold">Run</dt><dd className="mt-1 text-muted-foreground">One folder containing configuration, raw evidence, derived artifacts, and export output for one acquisition intent.</dd></div>
               <div className="p-3"><dt className="font-semibold">Readiness</dt><dd className="mt-1 text-muted-foreground">A saved check of configuration and current prerequisites. It does not reserve devices or authorize capture.</dd></div>
               <div className="p-3"><dt className="font-semibold">Immutable</dt><dd className="mt-1 text-muted-foreground">A published, hash-bound target or template version that later edits cannot silently change.</dd></div>
-              <div className="p-3"><dt className="font-semibold">BOP dataset</dt><dd className="mt-1 text-muted-foreground">The portable acquisition output. Estimator execution and metric evaluation happen in a separate consumer repository.</dd></div>
+              <div className="p-3"><dt className="font-semibold">BOP dataset</dt><dd className="mt-1 text-muted-foreground">The portable acquisition output. Estimator execution and result conversion remain in a consumer repository; Inspect can validate an annotation-bearing export against an already compatible BOP19 result CSV.</dd></div>
             </dl>
           </section>
         </div>

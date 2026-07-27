@@ -12,13 +12,31 @@ def run_web_server(
 ) -> None:
     """Run Flask and always release jobs that may own lab hardware."""
 
-    if app_instance is None or runner is None:
+    if app_instance is None:
         from posetestbot.web.app import app
-        from posetestbot.web.legacy import job_runner
 
-        app_instance = app if app_instance is None else app_instance
-        runner = job_runner if runner is None else runner
-    from posetestbot.web.legacy import WEB_DEBUG, WEB_HOST, WEB_PORT
+        app_instance = app
+
+    from posetestbot.web.runtime import WebSettings, get_web_runtime
+
+    settings = None
+    app_context = getattr(app_instance, "app_context", None)
+    if app_context is not None:
+        with app_context():
+            runtime = get_web_runtime()
+            settings = runtime.settings
+            if runner is None:
+                runner = runtime.job_runner
+    if runner is None:
+        from posetestbot.web.app import app
+
+        app_instance = app
+        with app_instance.app_context():
+            runtime = get_web_runtime()
+            settings = runtime.settings
+            runner = runtime.job_runner
+    if settings is None:
+        settings = WebSettings.from_environment()
 
     previous_sigterm = None
     if threading.current_thread() is threading.main_thread():
@@ -30,9 +48,9 @@ def run_web_server(
         signal.signal(signal.SIGTERM, request_shutdown)
     try:
         app_instance.run(
-            host=WEB_HOST,
-            port=WEB_PORT,
-            debug=WEB_DEBUG,
+            host=settings.host,
+            port=settings.port,
+            debug=settings.debug,
             use_reloader=False,
         )
     finally:

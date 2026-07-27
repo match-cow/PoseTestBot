@@ -19,6 +19,7 @@ import {
   Trash2,
   X,
 } from "lucide-react"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 import { EmptyState } from "@/components/empty-state"
 import { HelpTip } from "@/components/help-tip"
@@ -36,7 +37,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea"
 import { api, errorMessage } from "@/lib/api"
 import type { CatalogObject, Job } from "@/lib/contracts"
-import { jobFailureDetail } from "@/lib/jobs"
+import { jobFailureDetail, jobStatusTone } from "@/lib/jobs"
 import { WorkpieceIsometricThumbnail } from "@/components/geometry-previews"
 import { WorkpiecePreviews } from "./workpiece-previews"
 
@@ -337,13 +338,32 @@ function WorkpieceCard({ item, selected, onSelect }: { item: Workpiece; selected
       <div className="min-w-0 flex-1">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0"><div className="truncate text-sm font-semibold">{item.name}</div>{item.alias && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{item.alias}</div>}</div>
-          <StatusBadge status={item.state} />
+          <StatusBadge status={item.state} tone={item.state === "active" ? "informational" : "neutral"} />
         </div>
         <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
           <span className="font-mono">obj_{String(item.obj_id).padStart(6, "0")}</span>
           <span>{item.source_format.toUpperCase()}</span>
         </div>
         {(tags.length > 0 || groups.length > 0) && <div className="mt-2 flex flex-wrap gap-1">{groups.slice(0, 2).map((value) => <Badge variant="outline" key={`group-${value}`} className="normal-case tracking-normal">{value}</Badge>)}{tags.slice(0, 2).map((value) => <Badge variant="secondary" key={`tag-${value}`} className="normal-case tracking-normal">{value}</Badge>)}</div>}
+      </div>
+    </CardContent>
+  </Card>
+}
+
+function BackgroundJobProgress({ testId, title, description, jobId, status }: { testId: string; title: string; description: string; jobId: string; status: string }) {
+  return <Card className="border-primary/40 bg-accent/25" data-testid={testId}>
+    <CardContent className="flex items-center justify-between gap-4 py-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <LoaderCircle className="size-5 shrink-0 animate-spin text-primary-strong" />
+        <div className="min-w-0">
+          <div className="text-sm font-semibold">{title}</div>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{description} This background work continues after navigation; Jobs shows its live status and output.</p>
+          <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{jobId}</p>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button asChild size="sm" variant="outline"><Link to="/jobs">Open Jobs</Link></Button>
+        <StatusBadge status={status} tone={jobStatusTone(status)} />
       </div>
     </CardContent>
   </Card>
@@ -622,6 +642,15 @@ export function WorkpiecesPage() {
   }
   const serviceAvailable = status.data?.available !== false
   const unitCorrectionAvailable = status.data?.unit_corrections?.supported ?? serviceAvailable
+  const unitCorrectionDisabledReason = selected
+    ? !unitCorrectionAvailable
+      ? "PoseTemplateCreator is required for unit correction."
+      : selected.state === "active"
+        ? "Archive this workpiece to enable unit correction."
+        : pendingCorrection
+          ? "Wait for the current unit-correction job to finish."
+          : null
+    : null
 
   return <div className="space-y-6" data-testid="workpieces-page">
     <PageHeader
@@ -633,12 +662,12 @@ export function WorkpiecesPage() {
         <Button asChild variant="outline" data-testid="workpiece-catalog-export"><a href="/workpieces/catalog/export" download><Download />Export JSON</a></Button>
         <Button variant="outline" onClick={() => setImportOpen(true)} data-testid="workpiece-catalog-import"><FileJson />Import JSON</Button>
         <HelpTip label="catalogue JSON portability">JSON import and export move metadata only. Back up or copy the managed object_catalog asset tree separately to move CAD, canonical PLY, and texture bytes.</HelpTip>
-        <Button onClick={openUpload} disabled={!serviceAvailable || Boolean(pendingUpload)} data-testid="workpiece-upload-button"><FileUp />Add workpiece</Button>
+        <Button onClick={openUpload} disabled={!serviceAvailable || Boolean(pendingUpload)} aria-describedby={!serviceAvailable ? "workpiece-service-disabled-reason" : undefined} data-testid="workpiece-upload-button"><FileUp />Add workpiece</Button>
       </>}
     />
     <ProcessHandoff
       title="Active workpieces become pose-template choices"
-      description="Manage stable object identity and canonical geometry here. Next, choose physical resting orientations and arrange active workpieces into an immutable printable template."
+      description="This is a global reusable library: changes here do not mutate the active run. Manage stable object identity and canonical geometry here, then choose physical resting orientations and arrange active workpieces into an immutable printable pose template."
       to="/pose-templates"
       action="Arrange pose template"
     />
@@ -647,25 +676,17 @@ export function WorkpiecesPage() {
       <CardContent className="flex items-center justify-between gap-5 py-3.5">
         <div className="flex items-center gap-3">
           <div className={`grid size-9 place-items-center rounded-lg ${serviceAvailable ? "bg-success/10 text-success" : "bg-destructive/10 text-destructive"}`}><PackageOpen className="size-5" /></div>
-          <div><div className="flex items-center gap-2 text-sm font-semibold">CAD inspection service <StatusBadge status={serviceAvailable ? "ready" : status.data?.status} /></div><p className="mt-0.5 text-[11px] text-muted-foreground">{status.isError ? errorMessage(status.error) : status.data?.reason ?? "Canonical mesh inspection is available."}</p>{status.data?.catalog_root && <p className="mt-0.5 max-w-3xl truncate font-mono text-[9px] text-muted-foreground" title={status.data.catalog_root}>Persistent JSON and assets · {status.data.catalog_root}</p>}</div>
+          <div><div className="flex items-center gap-2 text-sm font-semibold">CAD inspection service <StatusBadge status={serviceAvailable ? "ready" : status.data?.status} tone={serviceAvailable ? "success" : status.isError ? "destructive" : "warning"} /></div><p id={!serviceAvailable ? "workpiece-service-disabled-reason" : undefined} className="mt-0.5 text-[11px] text-muted-foreground">{status.isError ? errorMessage(status.error) : status.data?.reason ?? "Canonical mesh inspection is available."}</p>{status.data?.catalog_root && <p className="mt-0.5 max-w-3xl truncate font-mono text-[9px] text-muted-foreground" title={status.data.catalog_root}>Persistent JSON and assets · {status.data.catalog_root}</p>}</div>
         </div>
         <div className="text-right text-[10px] leading-5 text-muted-foreground">{status.data?.formats?.map((format) => format.toUpperCase()).join(" · ") || "PLY · STL · OBJ"}<br />{formatBytes(status.data?.limits?.cad_bytes)} per CAD file</div>
       </CardContent>
     </Card>
 
-    {pendingUpload && <Card className="border-primary/40 bg-accent/25" data-testid="workpiece-upload-progress">
-      <CardContent className="flex items-center justify-between gap-4 py-4">
-        <div className="flex items-center gap-3"><LoaderCircle className="size-5 animate-spin text-primary-strong" /><div><div className="text-sm font-semibold">Inspecting {pendingUpload.filename}</div><p className="mt-0.5 text-[11px] text-muted-foreground">Canonical conversion and mesh inspection run in the background. This catalogue refreshes automatically.</p></div></div>
-        <StatusBadge status={uploadJob.data?.job.status ?? "queued"} />
-      </CardContent>
-    </Card>}
+    {pendingUpload && <BackgroundJobProgress testId="workpiece-upload-progress" title={`Inspecting ${pendingUpload.filename}`} description="Canonical conversion and mesh inspection run in the background. This catalogue refreshes automatically." jobId={pendingUpload.id} status={uploadJob.data?.job.status ?? "queued"} />}
 
-    {pendingCorrection && <Card className="border-primary/40 bg-accent/25" data-testid="workpiece-unit-correction-progress">
-      <CardContent className="flex items-center justify-between gap-4 py-4">
-        <div className="flex items-center gap-3"><LoaderCircle className="size-5 animate-spin text-primary-strong" /><div><div className="text-sm font-semibold">Correcting units for {pendingCorrection.name}</div><p className="mt-0.5 text-[11px] text-muted-foreground">A new canonical geometry revision is being derived. The retained upload and published template snapshots stay unchanged.</p></div></div>
-        <StatusBadge status={correctionJob.data?.job.status ?? "queued"} />
-      </CardContent>
-    </Card>}
+    {pendingCorrection && <BackgroundJobProgress testId="workpiece-unit-correction-progress" title={`Correcting units for ${pendingCorrection.name}`} description="A new canonical geometry revision is being derived. The retained upload and published template snapshots stay unchanged." jobId={pendingCorrection.id} status={correctionJob.data?.job.status ?? "queued"} />}
+
+    {pendingPreview && <BackgroundJobProgress testId="workpiece-preview-progress" title={`Refreshing recognition preview for ${pendingPreview.name}`} description="Stable-orientation analysis and the bounded catalogue-card mesh are being regenerated." jobId={pendingPreview.id} status={previewJob.data?.job.status ?? "queued"} />}
 
     <div className="grid grid-cols-3 gap-3" aria-label="Workpiece catalogue summary">
       <Card><CardContent className="flex items-center justify-between py-4"><div><div className="metric-number">{counts.total}</div><div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Total objects</div></div><Box className="size-6 text-muted-foreground" /></CardContent></Card>
@@ -685,7 +706,7 @@ export function WorkpiecesPage() {
 
     {catalogue.isPending ? <Card><CardContent className="grid min-h-80 place-items-center text-sm text-muted-foreground"><div><LoaderCircle className="mx-auto mb-2 size-5 animate-spin" />Loading workpieces…</div></CardContent></Card>
       : catalogue.isError ? <Card className="border-destructive/40"><CardHeader><CardTitle>Catalogue unavailable</CardTitle><CardDescription>{errorMessage(catalogue.error)}</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={() => catalogue.refetch()}><RefreshCw />Try again</Button></CardContent></Card>
-        : objects.length === 0 ? <EmptyState icon={Box} title="No workpieces yet" description="Upload a PLY, STL, or OBJ file to build the persistent catalogue." action={<Button onClick={openUpload} disabled={!serviceAvailable}><FileUp />Add first workpiece</Button>} />
+        : objects.length === 0 ? <EmptyState icon={Box} title="No workpieces yet" description="Upload a PLY, STL, or OBJ file to build the persistent catalogue." action={<Button onClick={openUpload} disabled={!serviceAvailable} aria-describedby={!serviceAvailable ? "workpiece-service-disabled-reason" : undefined}><FileUp />Add first workpiece</Button>} />
           : <div className="grid items-start gap-5 xl:grid-cols-[minmax(285px,.72fr)_minmax(0,1.65fr)]">
             <Card data-testid="workpiece-catalog-list">
               <CardHeader className="border-b"><div className="flex items-center justify-between gap-3"><div><CardTitle>Objects</CardTitle><CardDescription className="mt-1">{filtered.length} of {objects.length} visible</CardDescription></div><Layers3 className="size-5 text-muted-foreground" /></div></CardHeader>
@@ -698,12 +719,13 @@ export function WorkpiecesPage() {
             {selected ? <Card data-testid="workpiece-selected-object">
               <CardHeader className="border-b">
                 <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0"><div className="mb-2 flex items-center gap-2"><StatusBadge status={selected.state} /><span className="font-mono text-[10px] text-muted-foreground">obj_{String(selected.obj_id).padStart(6, "0")}</span></div><CardTitle className="text-xl leading-tight">{selected.name}</CardTitle>{selected.alias && <CardDescription className="mt-1 text-sm">{selected.alias}</CardDescription>}</div>
+                  <div className="min-w-0"><div className="mb-2 flex items-center gap-2"><StatusBadge status={selected.state} tone={selected.state === "active" ? "informational" : "neutral"} /><span className="font-mono text-[10px] text-muted-foreground">obj_{String(selected.obj_id).padStart(6, "0")}</span></div><CardTitle className="text-xl leading-tight">{selected.name}</CardTitle>{selected.alias && <CardDescription className="mt-1 text-sm">{selected.alias}</CardDescription>}</div>
                   <div className="flex flex-wrap justify-end gap-2">
                     <Button variant="outline" onClick={() => openEditor(selected)}><Pencil />Edit metadata</Button>
                     <Button
                       variant="outline"
                       disabled={selected.state !== "archived" || !unitCorrectionAvailable || Boolean(pendingCorrection)}
+                      aria-describedby={unitCorrectionDisabledReason ? "unit-correction-disabled-reason" : undefined}
                       title={!unitCorrectionAvailable ? "PoseTemplateCreator is required for unit correction" : selected.state === "active" ? "Archive this workpiece before correcting its model units" : "Create a corrected canonical geometry revision"}
                       onClick={() => { setUnitConversion("meter_to_millimeter"); setUnitCorrectionOperator(""); setUnitCorrectionConfirmed(false); setUnitCorrectionOpen(true) }}
                     ><Scaling />Correct model units</Button>
@@ -711,6 +733,7 @@ export function WorkpiecesPage() {
                     <Button variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${selected.name}`} title="Permanently delete this workpiece" onClick={() => setConfirmation({ action: "delete", item: selected })}><Trash2 />Delete</Button>
                   </div>
                 </div>
+                {unitCorrectionDisabledReason && <p id="unit-correction-disabled-reason" className="mt-3 text-right text-xs text-muted-foreground">{unitCorrectionDisabledReason}</p>}
               </CardHeader>
               <CardContent className="space-y-6 pt-5">
                 <section aria-labelledby="workpiece-preview-heading"><div className="mb-3 flex items-end justify-between gap-3"><div><h3 id="workpiece-preview-heading" className="text-sm font-semibold">3D preview</h3><p className="mt-0.5 text-[11px] text-muted-foreground">The selected detail loads the full canonical PLY so holes, recesses, ports, and other identifying features remain visible. Drag to rotate and scroll to zoom.</p></div><div className="flex shrink-0 items-center gap-2"><Badge variant="outline">{selected.source_format.toUpperCase()}</Badge><Button size="sm" variant="outline" disabled={!serviceAvailable || regeneratePreview.isPending || Boolean(pendingPreview)} onClick={() => regeneratePreview.mutate(selected)} title="Queue stable-orientation analysis and rebuild the bounded catalogue-card mesh"><RefreshCw className={pendingPreview?.catalogUuid === selected.catalog_uuid ? "animate-spin" : undefined} />Refresh card preview</Button></div></div><WorkpiecePreviews key={`${selected.catalog_uuid}:${selected.canonical_ply_sha256 ?? selected.geometry_revision ?? 1}`} object={selected} /></section>

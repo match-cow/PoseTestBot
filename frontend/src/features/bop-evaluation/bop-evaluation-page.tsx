@@ -36,6 +36,7 @@ import type {
   BopResultSubmission,
   Job,
 } from "@/lib/contracts"
+import { jobStatusTone } from "@/lib/jobs"
 import { cn, formatDate, titleCase } from "@/lib/utils"
 import { useOperator } from "@/providers/operator-provider"
 
@@ -77,7 +78,8 @@ function targetCoverage(value: number) {
 }
 
 function evaluationJob(job: Job, runRoot: string) {
-  return job.parameters.run_root === runRoot
+  return job.scope_kind === "run"
+    && job.run_root === runRoot
     && typeof job.parameters.evaluation_id === "string"
 }
 
@@ -102,7 +104,7 @@ function ResultDetails({ result }: { result: BopResultSubmission }) {
   return <div data-testid="bop-result-details" className={cn("rounded-lg border p-4", result.compatible ? "border-success/30 bg-success/5" : "border-destructive/35 bg-destructive/5")}>
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{result.display_name}</span><StatusBadge status={result.compatible ? "valid" : "invalid"}>{result.compatible ? "compatible" : "incompatible"}</StatusBadge></div>
+        <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{result.display_name}</span><StatusBadge status={result.compatible ? "valid" : "invalid"} tone={result.compatible ? "success" : "destructive"}>{result.compatible ? "compatible" : "incompatible"}</StatusBadge></div>
         <div className="mt-1 text-xs text-muted-foreground">{result.method} · imported {formatDate(result.created_at)}</div>
       </div>
       <div className="font-mono text-[10px] text-muted-foreground">{shortHash(result.sha256)}</div>
@@ -148,7 +150,7 @@ function EvaluationJobStatus({ job, evaluationId, reportAvailable }: { job: Job;
       <div className="flex min-w-0 items-start gap-3">
         <Icon aria-hidden="true" className={cn("mt-0.5 size-5 shrink-0", active && "animate-spin", failed ? "text-destructive" : reportAvailable ? "text-success" : "text-primary-strong")} />
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{title}</span><StatusBadge status={job.status} /></div>
+          <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{title}</span><StatusBadge status={job.status} tone={jobStatusTone(job.status)} /></div>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
           {job.message && failed && <p className="mt-2 break-words font-mono text-[10px] text-destructive">{job.message}</p>}
         </div>
@@ -165,7 +167,7 @@ function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
     <CardHeader className="border-b border-border bg-muted/20">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <CardTitle className="flex flex-wrap items-center gap-2 text-base">Official BOP metrics <StatusBadge status={evaluation.status} /></CardTitle>
+          <CardTitle className="flex flex-wrap items-center gap-2 text-base">Official BOP metrics <StatusBadge status={evaluation.status} tone={jobStatusTone(evaluation.status)} /></CardTitle>
           <CardDescription className="mt-1">{evaluation.protocol} · evaluation {evaluation.evaluation_id}</CardDescription>
         </div>
         <div className="text-left text-[10px] text-muted-foreground sm:text-right"><div className="font-semibold uppercase tracking-wide">Completed</div><div className="mt-1">{formatDate(evaluation.completed_at)}</div></div>
@@ -402,7 +404,7 @@ export function BopEvaluationPage() {
           <Card data-testid="bop-evaluation-dataset" className={dataset.evaluation_ready ? "border-success/30" : "border-warning/40"}>
             <CardHeader className="border-b border-border bg-muted/20">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div><CardTitle className="flex flex-wrap items-center gap-2 text-base"><Database aria-hidden="true" className="size-4 text-primary-strong" />Selected-run dataset <StatusBadge status={dataset.evaluation_ready ? "ready" : dataset.status}>{dataset.evaluation_ready ? "evaluation ready" : dataset.status}</StatusBadge></CardTitle><CardDescription className="mt-1">The console's global selected run is the dataset selector. This run owns one BOP export.</CardDescription></div>
+                <div><CardTitle className="flex flex-wrap items-center gap-2 text-base"><Database aria-hidden="true" className="size-4 text-primary-strong" />Selected-run dataset <StatusBadge status={dataset.evaluation_ready ? "ready" : dataset.status} tone={dataset.evaluation_ready ? "success" : "destructive"}>{dataset.evaluation_ready ? "evaluation ready" : dataset.status}</StatusBadge></CardTitle><CardDescription className="mt-1">The console's global selected run is the dataset selector. This run owns one BOP export.</CardDescription></div>
                 <div className="max-w-full text-left sm:text-right"><div className="text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">Selected run</div><div className="mt-1 max-w-3xl truncate font-mono text-[10px]" title={selectedRun}>{selectedRun}</div></div>
               </div>
             </CardHeader>
@@ -476,7 +478,7 @@ export function BopEvaluationPage() {
 
             <div className="space-y-5">
               <Card data-testid="bop-toolkit-status" className={toolkit.available && toolkit.environment_ready ? "border-success/30" : "border-destructive/35"}>
-                <CardHeader><CardTitle className="flex flex-wrap items-center gap-2 text-base"><ShieldCheck aria-hidden="true" className="size-4" />BOP Toolkit environment <StatusBadge status={toolkit.available && toolkit.environment_ready ? "ready" : toolkit.status} /></CardTitle><CardDescription>Evaluation is bound to the pinned toolkit and renderer environment reported by the server.</CardDescription></CardHeader>
+                <CardHeader><CardTitle className="flex flex-wrap items-center gap-2 text-base"><ShieldCheck aria-hidden="true" className="size-4" />BOP Toolkit environment <StatusBadge status={toolkit.available && toolkit.environment_ready ? "ready" : toolkit.status} tone={toolkit.available && toolkit.environment_ready ? "success" : "destructive"} /></CardTitle><CardDescription>Evaluation is bound to the pinned toolkit and renderer environment reported by the server.</CardDescription></CardHeader>
                 <CardContent className="space-y-4">
                   <div className="grid grid-cols-2 gap-3">
                     <Detail label="Detected revision" value={toolkit.revision ?? "—"} mono />
@@ -514,7 +516,7 @@ export function BopEvaluationPage() {
                     <td className="px-3 py-2.5"><div className="font-semibold">{evaluation.source_kind === "gt_simulation" ? "GT simulation · Test only" : evaluation.result?.display_name ?? evaluation.result_id ?? "Registered result"}</div><div className="mt-0.5 text-[10px] text-muted-foreground">{evaluation.source_kind === "gt_simulation" && evaluation.simulation ? `${evaluation.simulation.translation_sigma_mm.toFixed(3)} mm · ${evaluation.simulation.rotation_sigma_deg.toFixed(3)}° · seed ${evaluation.simulation.seed}` : evaluation.result?.method ?? titleCase(evaluation.source_kind)}</div></td>
                     <td className="px-3 py-2.5">{evaluation.protocol}</td>
                     <td className="px-3 py-2.5"><span className="inline-flex items-center gap-1"><Clock3 aria-hidden="true" className="size-3" />{formatDate(evaluation.created_at)}</span></td>
-                    <td className="px-3 py-2.5"><StatusBadge status={evaluation.status} /></td>
+                    <td className="px-3 py-2.5"><StatusBadge status={evaluation.status} tone={jobStatusTone(evaluation.status)} /></td>
                     <td className="px-3 py-2.5 text-right"><Button size="sm" variant={evaluation.evaluation_id === selectedEvaluationId ? "secondary" : "outline"} aria-label={`${evaluation.report_available ? "View metrics" : "View status"} for evaluation ${evaluation.evaluation_id}`} aria-pressed={evaluation.evaluation_id === selectedEvaluationId} onClick={() => setEvaluationSelection({ runRoot: selectedRun, evaluationId: evaluation.evaluation_id })}>{evaluation.report_available ? "View metrics" : "View status"}</Button></td>
                   </tr>)}</tbody>
                 </table>

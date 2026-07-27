@@ -17,7 +17,7 @@ pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import expect, sync_playwright
 
-from posetestbot.web import legacy as web_legacy
+from posetestbot.web import route_support as web_route_support
 from posetestbot.web.app import create_app
 from posetestbot.web.routes import monitoring as web_monitoring
 from posetestbot.web.routes import sensors as web_sensors
@@ -461,7 +461,7 @@ def preview_server(monkeypatch, tmp_path: Path):
         "monitor_stream_root",
         PreviewRootFactory(tmp_path / "monitor"),
     )
-    monkeypatch.setattr(web_legacy, "job_runner", EmptyRunner())
+    monkeypatch.setattr(web_route_support, "job_runner", EmptyRunner())
     app = create_app()
     app.config.update(TESTING=True)
     server = LiveServer(app)
@@ -657,7 +657,7 @@ def test_sidebar_webcam_does_not_call_transport_connected_usable_video(
         synthetic.stop()
 
 
-def test_sidebar_webcam_monitor_restarts_one_stale_failed_job(
+def test_dashboard_webcam_monitor_restarts_one_stale_failed_job_on_request(
     preview_server,
     page,
     tmp_path: Path,
@@ -680,6 +680,9 @@ def test_sidebar_webcam_monitor_restarts_one_stale_failed_job(
 
     page.goto(server.url, wait_until="domcontentloaded")
 
+    expect(page.get_by_role("button", name="Start monitor")).to_be_visible()
+    assert len(monitor_runner.submitted) == 0
+    page.get_by_role("button", name="Start monitor").click()
     wait_for(lambda: len(monitor_runner.submitted) == 1)
     replacement = monitor_runner.jobs["preview-1"]
     replacement.status = "failed"

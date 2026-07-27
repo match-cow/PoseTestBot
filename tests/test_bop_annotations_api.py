@@ -81,6 +81,8 @@ def test_api_queues_one_run_scoped_annotation_job(
         "pose_and_masks",
     ]
     assert submission["resources"] == ["cpu", "render", "disk_io"]
+    assert submission["scope_kind"] == "run"
+    assert submission["run_root"] == run
     assert submission["parameters"] == {
         "run_root": run.as_posix(),
         "bop_annotations": True,

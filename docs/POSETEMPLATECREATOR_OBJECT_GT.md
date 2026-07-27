@@ -2,11 +2,11 @@
 
 PoseTestBot uses the pinned PoseTemplateCreator backend to turn managed CAD
 models into printable, immutable object-pose templates. This workflow creates
-ground-truth inputs and a validated BOP dataset; it does not run pose
-estimators. Official metric inspection, when needed, is the separate
-run-scoped **Inspect → BOP Evaluation** path and consumes the completed
-annotation-bearing export. Test-object upload and lifecycle are owned by the
-separate **Workpiece Catalogue** page; see
+ground-truth inputs and a validated base BOP dataset; it does not run pose
+estimators. When optional pose-plus-mask evidence is added, official metric
+inspection is the separate run-scoped **Inspect → BOP Evaluation** path and
+consumes that completed annotation-bearing export. Test-object upload and
+lifecycle are owned by the separate **Workpiece Catalogue** page; see
 [WORKPIECE_CATALOGUE.md](WORKPIECE_CATALOGUE.md) for its persistence and API
 contract.
 
@@ -23,10 +23,10 @@ PoseTemplateCreator must be clean and exactly at
 `97ddb9b7b756912deb8c2d2d6dde186b461e5d9d`. If it is missing, dirty, or at a
 different revision, existing catalogs, bundles, and run selections remain
 browsable, and existing workpiece metadata remains editable, but new CAD
-inspection/conversion, exact slicing, and generation are disabled.
-Non-dry-run pose-template rendering requires BlenderProc 2.8.0.
-The evaluation-compatible pose-plus-mask product additionally requires the
-pinned official BOP Toolkit and its isolated runtime:
+inspection/conversion, exact slicing, and generation are disabled. Generating
+optional BOP ground-truth evidence requires BlenderProc 2.8.0. The
+evaluation-compatible pose-plus-mask product additionally requires the pinned
+official BOP Toolkit and its isolated runtime:
 
 ```bash
 bash scripts/install.sh --with-blenderproc --with-bop-toolkit
@@ -106,7 +106,7 @@ transforms, the PDF page boundary, or GT.
      --dataset-mode pose_template
    ```
 
-5. Open **Workflow → Object dataset → Choose the object template and
+5. Open **Workflow → Object dataset → Choose the pose template and
    placement**, select an active immutable version from its bounded
    footprint-preview card, and inspect the immutable objects in the single full
    interactive 3D scene. A **Simplified** badge reports card-only contour/point
@@ -114,13 +114,18 @@ transforms, the PDF page boundary, or GT.
    full template-to-`template_base` placement, identify the operator, and
    explicitly confirm it. Changing the version or any placement value clears
    that confirmation; identity defaults are not implicitly trusted.
-6. Complete capture, synchronization, and the base BOP image/model export in
-   the guided dataset workflow. In step 6, optionally generate **Plain pose
-   ground truth** or **Pose + object masks and ROI**. BlenderProc 2.8.0
-   validates the calibrated scene and derives pose GT; the complete product
-   then uses the pinned BOP Toolkit with captured depth for full/visible masks,
-   ROI, and visibility evidence. No camera or robot operation is initiated by
-   catalogue, template, selection, preparation, annotation, or export actions.
+6. Return to the guided dataset workflow. Step 5, **Process frames and create
+   the base BOP export**, performs synchronization and quality verification,
+   revalidates calibration, rectifies RGB-D frames, and writes the required
+   image/model BOP dataset.
+7. Step 6, **Add optional BOP ground-truth evidence**, can then generate
+   **Plain pose ground truth** or **Pose + object masks and ROI**. BlenderProc
+   2.8.0 validates the calibrated scene and derives pose GT; the complete
+   product then uses the pinned BOP Toolkit with captured depth for
+   full/visible masks, ROI, and visibility evidence. The base export remains
+   valid when this optional step is skipped. No camera or robot operation is
+   initiated by catalogue, template, selection, preparation, annotation, or
+   export actions.
 
 ## Artifacts and immutability
 
@@ -166,7 +171,7 @@ transforms, the PDF page boundary, or GT.
   transaction or its cleanup is recoverable.
 - Prepared identity: `object_instances.json` and per-sensor BlenderProc
   `objects.json`/`posetestbot_render_instances.json`.
-- Run-owned annotation status and renderer provenance:
+- Optional run-owned annotation status and renderer provenance:
   `processed/bop_annotations/generation_report.json`.
 - BOP provenance: `bop/posetestbot_pose_template.json` and
   `bop/posetestbot_instance_map.json` beside standards-compatible BOP files.

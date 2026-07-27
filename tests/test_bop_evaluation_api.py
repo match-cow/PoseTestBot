@@ -81,6 +81,8 @@ def _client_for_run(tmp_path: Path, monkeypatch):
 def _assert_evaluation_submission(submission: dict[str, Any]) -> dict[str, Any]:
     assert submission["name"] == "bop_evaluation"
     assert submission["resources"] == ["cpu", "disk_io"]
+    assert submission["scope_kind"] == "run"
+    assert submission["run_root"] == Path(submission["parameters"]["run_root"])
     assert submission["command"][:4] == [
         "uv",
         "run",

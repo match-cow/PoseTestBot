@@ -7,8 +7,14 @@ from pathlib import Path
 
 from flask import Flask, send_from_directory
 
-from posetestbot.web.legacy import app as legacy_api
+from posetestbot.jobs.runner import LocalJobRunner
 from posetestbot.web.routes.monitoring import monitoring_bp
+from posetestbot.web.routes.jobs_commands import jobs_commands_bp
+from posetestbot.web.routes.system_status import system_status_bp
+from posetestbot.web.routes.capture import capture_bp
+from posetestbot.web.routes.pipeline import pipeline_bp
+from posetestbot.web.routes.calibration_stages import calibration_stages_bp
+from posetestbot.web.routes.sync_quality import sync_quality_bp
 from posetestbot.web.routes.calibration import calibration_bp
 from posetestbot.web.routes.calibration_library import calibration_library_bp
 from posetestbot.web.routes.calibration_targets import calibration_targets_bp
@@ -21,6 +27,13 @@ from posetestbot.web.routes.sensors import sensors_bp
 from posetestbot.web.routes.ui import ui_bp
 from posetestbot.web.routes.workpieces import workpieces_bp
 from posetestbot.web.security import install_request_security
+from posetestbot.web.runtime import (
+    RUNTIME_EXTENSION_KEY,
+    WebRuntime,
+    WebSettings,
+    create_web_runtime,
+    default_web_runtime,
+)
 
 
 BRAND_ASSET_DIR = Path(__file__).resolve().parent / "static"
@@ -47,12 +60,29 @@ def _install_preview_poll_log_filter() -> None:
     logger.addFilter(_PreviewPollLogFilter())
 
 
-def create_app() -> Flask:
+def create_app(
+    *,
+    runtime: WebRuntime | None = None,
+    job_runner: LocalJobRunner | None = None,
+    settings: WebSettings | None = None,
+) -> Flask:
+    if runtime is not None and (job_runner is not None or settings is not None):
+        raise ValueError("runtime cannot be combined with job_runner or settings")
+    selected_runtime = (
+        runtime
+        if runtime is not None
+        else (
+            create_web_runtime(settings=settings, job_runner=job_runner)
+            if job_runner is not None or settings is not None
+            else default_web_runtime()
+        )
+    )
     app = Flask(
         __name__,
         static_folder="static",
         static_url_path="/static",
     )
+    app.extensions[RUNTIME_EXTENSION_KEY] = selected_runtime
     install_request_security(app)
 
     @app.get("/assets/cow_dark.png", defaults={"filename": "cow_dark.png"})
@@ -80,6 +110,12 @@ def create_app() -> Flask:
         )
 
     app.register_blueprint(pages_bp)
+    app.register_blueprint(jobs_commands_bp)
+    app.register_blueprint(system_status_bp)
+    app.register_blueprint(capture_bp)
+    app.register_blueprint(pipeline_bp)
+    app.register_blueprint(calibration_stages_bp)
+    app.register_blueprint(sync_quality_bp)
     app.register_blueprint(calibration_bp)
     app.register_blueprint(calibration_library_bp)
     app.register_blueprint(calibration_targets_bp)
@@ -91,7 +127,6 @@ def create_app() -> Flask:
     app.register_blueprint(monitoring_bp)
     app.register_blueprint(overview_bp)
     app.register_blueprint(ui_bp)
-    app.register_blueprint(legacy_api)
     _install_preview_poll_log_filter()
     return app
 
@@ -101,6 +136,5 @@ app = create_app()
 
 if __name__ == "__main__":
     from posetestbot.web.cli import run_web_server
-    from posetestbot.web.legacy import job_runner
 
-    run_web_server(app, job_runner)
+    run_web_server(app)

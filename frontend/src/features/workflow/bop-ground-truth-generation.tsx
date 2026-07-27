@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { api, errorMessage, query } from "@/lib/api"
 import type { BopAnnotationMode, BopAnnotationSetup, Job } from "@/lib/contracts"
+import { jobStatusTone } from "@/lib/jobs"
 import { cn, formatDate } from "@/lib/utils"
 
 interface BopGroundTruthGenerationProps {
@@ -20,7 +21,8 @@ const FAILED_JOB_STATUSES = new Set(["failed", "canceled", "cancelled"])
 const TERMINAL_JOB_STATUSES = new Set(["succeeded", ...FAILED_JOB_STATUSES])
 
 function isAnnotationJob(job: Job, runRoot: string) {
-  return job.parameters.run_root === runRoot
+  return job.scope_kind === "run"
+    && job.run_root === runRoot
     && job.parameters.bop_annotations === true
     && (job.parameters.annotation_mode === "pose" || job.parameters.annotation_mode === "pose_and_masks")
 }
@@ -133,7 +135,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
               <div className={cn("rounded-lg border p-4", setup.data.runtime.available ? "border-success/30 bg-success/5" : "border-warning/40 bg-warning/5")}>
                 <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
                   BlenderProc runtime
-                  <StatusBadge status={setup.data.runtime.available ? "ready" : "blocked"}>{setup.data.runtime.available ? "available" : "required"}</StatusBadge>
+                  <StatusBadge status={setup.data.runtime.available ? "ready" : "blocked"} tone={setup.data.runtime.available ? "success" : "destructive"}>{setup.data.runtime.available ? "available" : "required"}</StatusBadge>
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                   {setup.data.runtime.available
@@ -147,7 +149,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
               <div className={cn("rounded-lg border p-4", setup.data.toolkit.available ? "border-success/30 bg-success/5" : selectedMode === "pose_and_masks" ? "border-warning/40 bg-warning/5" : "bg-muted/20")}>
                 <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
                   Pinned rendering toolkit
-                  <StatusBadge status={setup.data.toolkit.available ? "ready" : selectedMode === "pose_and_masks" ? "blocked" : "not_required"}>
+                  <StatusBadge status={setup.data.toolkit.available ? "ready" : selectedMode === "pose_and_masks" ? "blocked" : "not_required"} tone={setup.data.toolkit.available ? "success" : selectedMode === "pose_and_masks" ? "destructive" : "neutral"}>
                     {setup.data.toolkit.available ? "available" : selectedMode === "pose_and_masks" ? "required for masks" : "not required for pose-only"}
                   </StatusBadge>
                 </div>
@@ -164,7 +166,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
             <div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={refresh}><RefreshCw aria-hidden="true" />Refresh readiness</Button></div>
 
             <fieldset>
-              <legend className="text-sm font-semibold">Annotation version <span className="ml-1 text-xs font-normal text-destructive">Required</span></legend>
+              <legend className="text-sm font-semibold">Optional annotation version</legend>
               <div className="mt-3 grid gap-4 xl:grid-cols-2" role="radiogroup" aria-label="BOP ground-truth annotation version">
                 <button
                   type="button"
@@ -176,7 +178,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
                   <span className="flex items-start gap-3">
                     <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted"><FileJson aria-hidden="true" className="size-4 text-primary-strong" /></span>
                     <span className="min-w-0">
-                      <span className="flex flex-wrap items-center gap-2"><span className="font-semibold">Plain pose ground truth</span><StatusBadge status="warning">not evaluation-ready</StatusBadge></span>
+                      <span className="flex flex-wrap items-center gap-2"><span className="font-semibold">Plain pose ground truth</span><StatusBadge status="warning" tone="warning">not evaluation-ready</StatusBadge></span>
                       <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">Writes standard per-instance rotations and translations to each scene’s <code>scene_gt.json</code>. No segmentation render is performed.</span>
                       <span className="mt-3 block rounded-md bg-muted/50 p-2 text-[11px]"><strong>Contains:</strong> target identity and exact model-to-camera pose.</span>
                       <span className="mt-2 block text-[11px] text-warning-foreground">Does not create <code>scene_gt_info.json</code>, masks, visible masks, or BOP evaluation visibility evidence.</span>
@@ -194,7 +196,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
                   <span className="flex items-start gap-3">
                     <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10"><ImageIcon aria-hidden="true" className="size-4 text-primary-strong" /></span>
                     <span className="min-w-0">
-                      <span className="flex flex-wrap items-center gap-2"><span className="font-semibold">Pose + object masks and ROI</span><StatusBadge status="ready">recommended</StatusBadge></span>
+                      <span className="flex flex-wrap items-center gap-2"><span className="font-semibold">Pose + object masks and ROI</span><StatusBadge status="ready" tone="success">recommended</StatusBadge></span>
                       <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">BlenderProc loads and validates the calibrated scene and emits pose GT; the pinned official BOP Toolkit then renders full and visible masks against captured depth and writes the BOP visibility evidence.</span>
                       <span className="mt-3 block rounded-md bg-primary/5 p-2 text-[11px]"><strong>Contains:</strong> <code>scene_gt.json</code>, <code>scene_gt_info.json</code>, standard full-frame per-instance <code>mask/</code> and <code>mask_visib/</code> PNGs, plus <code>bbox_obj</code> and <code>bbox_visib</code> ROI metadata.</span>
                       <span className="mt-2 block text-[11px] text-success">This is the evaluation-compatible choice for simulated or real BOP19 pose results.</span>
@@ -218,7 +220,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
                 <div>
                   <div className="flex flex-wrap items-center gap-2 font-semibold">
                     {active ? `Ground-truth generation is ${currentJobStatus}` : failed ? "Ground-truth generation needs attention" : "Ground-truth job finished"}
-                    <StatusBadge status={currentJobStatus}>{currentJobStatus}</StatusBadge>
+                    <StatusBadge status={currentJobStatus} tone={jobStatusTone(currentJobStatus)}>{currentJobStatus}</StatusBadge>
                   </div>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                     {active
@@ -238,7 +240,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
                 <div>
                   <div className="flex flex-wrap items-center gap-2 font-semibold">
                     {modeLabel(output.mode)} evidence
-                    <StatusBadge status={fullEvidenceReady ? "verified" : output.state}>{fullEvidenceReady ? "verified for evaluation" : output.state}</StatusBadge>
+                    <StatusBadge status={fullEvidenceReady ? "verified" : output.state} tone={fullEvidenceReady ? "success" : output.verified ? "warning" : "destructive"}>{fullEvidenceReady ? "verified for evaluation" : output.state}</StatusBadge>
                   </div>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                     {fullEvidenceReady

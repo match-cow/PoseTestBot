@@ -17,8 +17,8 @@ from posetestbot.calibration.attempts import (
     record_attempt_job_submission_failure,
 )
 from posetestbot.jobs.runner import ResourceBusyError
-from posetestbot.web.legacy import job_runner
 from posetestbot.web.paths import APP_ROOT
+from posetestbot.web.runtime import job_runner
 
 
 calibration_bp = Blueprint("calibration", __name__)
@@ -93,6 +93,8 @@ def calibration_attempt_create_endpoint():
                 ],
                 cwd=APP_ROOT,
                 resources=["cpu", "disk_io"],
+                scope_kind="run",
+                run_root=run_root,
                 parameters={
                     "calibration_attempt": attempt["attempt_id"],
                     "run_root": str(run_root),
@@ -247,6 +249,8 @@ def calibration_attempt_promote_endpoint(attempt_id: str):
                 ],
                 cwd=APP_ROOT,
                 resources=["cpu", "disk_io"],
+                scope_kind="run",
+                run_root=run_root,
                 parameters={
                     "calibration_attempt_promotion": attempt_id,
                     "run_root": str(run_root),

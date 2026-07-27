@@ -35,7 +35,7 @@ export function WorkflowStatus({ status, compact = false }: { status: WorkflowSt
 }
 
 export function WorkflowStepper({ steps, selectedStep, onSelect }: { steps: WorkflowStepDefinition[]; selectedStep?: string | null; onSelect: (stepId: string) => void }) {
-  return <nav aria-label="Required workflow steps" className="rounded-xl border bg-card p-3 xl:sticky xl:top-[88px]">
+  return <nav aria-label="Workflow steps" className="rounded-xl border bg-card p-3 xl:sticky xl:top-[88px]">
     <ol className="flex gap-0 overflow-x-auto pb-1 xl:block xl:overflow-visible xl:pb-0">
       {steps.map((step, index) => {
         const active = selectedStep ? step.id === selectedStep : step.status === "current" || step.status === "running"
@@ -47,11 +47,11 @@ export function WorkflowStepper({ steps, selectedStep, onSelect }: { steps: Work
             className={cn("w-full rounded-lg border border-transparent p-3 text-left transition-colors hover:border-border hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60", active && "border-primary/40 bg-primary/5")}
           >
             <span className="flex items-start gap-3">
-              <span data-workflow-step-number className={cn("grid size-7 shrink-0 place-items-center rounded-full border font-mono text-xs font-bold", step.status === "complete" ? "border-success bg-success text-white" : active ? "border-primary bg-primary text-primary-foreground" : "border-border bg-muted text-muted-foreground")}>
+              <span data-workflow-step-number className={cn("grid size-7 shrink-0 place-items-center rounded-full border font-mono text-xs font-bold", step.status === "complete" ? "border-success bg-success text-success-foreground" : active ? "border-primary bg-primary text-primary-foreground" : "border-border bg-muted text-muted-foreground")}>
                 {step.status === "complete" ? <Check aria-hidden="true" className="size-3.5" /> : step.number}
               </span>
               <span className="min-w-0">
-                <span className="block text-sm font-semibold">{step.title}</span>
+                <span className="flex flex-wrap items-center gap-1.5 text-sm font-semibold">{step.title}{step.required === false && <span className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Optional</span>}</span>
                 <span className="mt-1 line-clamp-2 block text-[11px] leading-relaxed text-muted-foreground">{step.summary}</span>
                 <span className="mt-2 block"><WorkflowStatus status={step.status} compact /></span>
               </span>

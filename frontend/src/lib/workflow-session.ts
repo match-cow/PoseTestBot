@@ -12,6 +12,7 @@ interface WorkflowStepMetadata {
   id: string
   number: number
   title: string
+  required?: boolean
 }
 
 interface WorkflowJourneyMetadata {
@@ -34,11 +35,11 @@ export const workflowJourneyMetadata: Record<WorkflowJourneyId, WorkflowJourneyM
     title: "Object dataset",
     steps: [
       { id: "configure", number: 1, title: "Configure cameras and select calibration" },
-      { id: "template", number: 2, title: "Choose the object template and placement" },
+      { id: "template", number: 2, title: "Choose the pose template and placement" },
       { id: "readiness", number: 3, title: "Check readiness" },
       { id: "capture", number: 4, title: "Record the object dataset" },
-      { id: "sync", number: 5, title: "Synchronize and verify frames" },
-      { id: "export", number: 6, title: "Export the BOP dataset" },
+      { id: "sync", number: 5, title: "Process frames and create the base BOP export" },
+      { id: "export", number: 6, title: "Add optional BOP ground-truth evidence", required: false },
     ],
   },
 }

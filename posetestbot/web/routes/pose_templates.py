@@ -50,7 +50,7 @@ from posetestbot.pose_templates.selection import (
     load_pose_template_selection,
     replacement_blockers,
 )
-from posetestbot.web.legacy import job_runner
+from posetestbot.web.runtime import job_runner
 from posetestbot.web.paths import APP_ROOT
 from posetestbot.web.security import resolve_web_run_root
 
@@ -116,7 +116,14 @@ def _prune_stale_requests(kind: str, *, request_root: Path | None = None) -> Non
 
 
 def _submit(
-    *, name: str, script: str, request_path: Path, request_id: str, resources: list[str]
+    *,
+    name: str,
+    script: str,
+    request_path: Path,
+    request_id: str,
+    resources: list[str],
+    scope_kind: str = "library",
+    run_root: Path | None = None,
 ):
     try:
         job = job_runner.submit(
@@ -131,6 +138,8 @@ def _submit(
             ],
             cwd=APP_ROOT,
             resources=resources,
+            scope_kind=scope_kind,
+            run_root=run_root,
             parameters={
                 "request_id": request_id,
                 "request_path": request_path.as_posix(),
@@ -394,6 +403,7 @@ def preview():
                 ],
                 cwd=APP_ROOT,
                 resources=["cpu", "disk_io"],
+                scope_kind="global",
                 parameters={"request_id": request_id, "result": output.as_posix()},
             )
         except Exception:
@@ -489,6 +499,7 @@ def library_delete(template_uuid: str):
                     "disk_io",
                     f"pose_template_library:{result['template_uuid']}",
                 ],
+                scope_kind="library",
                 parameters={"template_uuid": result["template_uuid"]},
             )
         except Exception as cleanup_error:
@@ -649,6 +660,8 @@ def run_selection_update():
             request_path=request_path,
             request_id=request_id,
             resources=["disk_io"],
+            scope_kind="run",
+            run_root=run_root,
         )
     except Exception as exc:
         return _error(exc)

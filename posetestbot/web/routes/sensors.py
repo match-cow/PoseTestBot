@@ -34,7 +34,8 @@ from posetestbot.sensors.snapshots import (
     snapshot_specs_from_status,
 )
 from posetestbot.sensors.status import collect_sensor_status, parse_expected_counts
-from posetestbot.web.legacy import APP_ROOT, job_runner
+from posetestbot.web.paths import APP_ROOT
+from posetestbot.web.runtime import job_runner
 
 
 sensors_bp = Blueprint("sensors", __name__)
@@ -332,6 +333,7 @@ def _preview_submission(
         command=command,
         cwd=APP_ROOT,
         resources=[_camera_resource(spec)],
+        scope_kind="global",
         parameters={
             "preview_root": preview_root.as_posix(),
             "sensor_key": key,
@@ -423,6 +425,7 @@ def post_sensor_snapshots():
             command=command,
             cwd=APP_ROOT,
             resources=[*sorted({_camera_resource(spec) for spec in specs}), "disk_io"],
+            scope_kind="global",
             parameters={
                 "snapshot_root": snapshot_root.as_posix(),
                 "sensor_keys": [

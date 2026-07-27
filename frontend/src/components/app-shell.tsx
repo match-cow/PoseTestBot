@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { Activity, ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, ChevronDown, CircleDot, FlaskConical, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Plus, Route, Sun, Workflow } from "lucide-react"
+import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, FlaskConical, FolderOpen, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Plus, Route, Sun, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { ConsoleGuide } from "@/components/console-guide"
 import { Button } from "@/components/ui/button"
@@ -51,7 +51,7 @@ const workflowStatusPresentation: Record<WorkflowProgressStatus, { label: string
   ready: { label: "Ready", className: "border-primary/35 bg-primary/10 text-primary-strong", icon: CircleDot },
   blocked: { label: "Needs attention", className: "border-destructive/30 bg-destructive/10 text-destructive", icon: LockKeyhole },
   running: { label: "Running", className: "border-warning/35 bg-warning/10 text-warning-foreground", icon: LoaderCircle },
-  not_started: { label: "Not started", className: "border-sidebar-border bg-secondary text-sidebar-foreground/60", icon: CircleDot },
+  not_started: { label: "Not started", className: "border-sidebar-border bg-secondary text-sidebar-foreground/60", icon: Circle },
 }
 
 interface WorkflowRuntimeStatus {
@@ -73,16 +73,16 @@ function CurrentWorkflowCard({ workflow, runtime }: { workflow: ActiveWorkflow; 
   const status = runtime ? workflowRuntimePresentation(runtime) : workflowStatusPresentation[workflow.status]
   const StatusIcon = status.icon
   const href = activeWorkflowHref(workflow)
-  return <section data-testid="current-workflow-card" aria-label="Current workflow for selected run" className="rounded-[10px] border border-primary/35 bg-primary/5 p-3">
+  return <section data-testid="current-workflow-card" aria-label="Workflow resume position for active run" className="rounded-[10px] border border-primary/35 bg-primary/5 p-3">
     <div className="flex items-start justify-between gap-2">
-      <div className="text-[9px] font-bold uppercase tracking-[0.15em] text-primary-strong">Current workflow</div>
+      <div className="text-[9px] font-bold uppercase tracking-[0.15em] text-primary-strong">Resume position</div>
       <span role="status" className={cn("inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-semibold", status.className)}>
         <StatusIcon aria-hidden="true" className={cn("size-2.5", (workflow.status === "running" || runtime && ["queued", "running", "canceling"].includes(runtime.value)) && "animate-spin")} />
         {status.label}
       </span>
     </div>
     <div className="mt-2 text-xs font-semibold">{workflow.journeyTitle}</div>
-    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-sidebar-foreground/45">Selected run · Step {workflow.stepNumber} of {workflow.stepCount}</div>
+    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-sidebar-foreground/45">Active run · Viewed step {workflow.stepNumber} of {workflow.stepCount}</div>
     <div className="mt-1 text-[11px] leading-snug text-sidebar-foreground/70">{workflow.stepTitle}</div>
     <Button asChild size="sm" className="mt-3 h-8 w-full text-xs">
       <Link to={href} aria-label={`Resume ${workflow.journeyTitle.toLowerCase()} at step ${workflow.stepNumber}: ${workflow.stepTitle}`}>Resume step {workflow.stepNumber}<ArrowRight aria-hidden="true" /></Link>
@@ -116,7 +116,8 @@ export function AppShell() {
     : undefined
   const datasetProcessingJob = currentWorkflow?.journey === "dataset" && currentWorkflow.stepId === "sync"
     ? [...(processingJobs.data?.jobs ?? [])]
-        .filter((job) => job.parameters.run_root === selectedRun
+        .filter((job) => job.scope_kind === "run"
+          && job.run_root === selectedRun
           && (job.parameters.pipeline_sequence === "calibrated_capture_to_bop_dataset_dry_run"
             || job.name === "pipeline-run-config:calibrated_capture_to_bop_dataset_dry_run"))
         .sort((left, right) => right.created_at.localeCompare(left.created_at))[0]
@@ -203,22 +204,39 @@ export function AppShell() {
                 <Link to="/dashboard" className="shrink-0 xl:hidden" aria-label="Open dashboard">
                   <img src={bootstrap.brand.logo_urls[theme]} alt="" className="size-8 rounded-[7px] object-contain" />
                 </Link>
-                <Activity className="hidden size-4 shrink-0 text-primary-strong sm:block" aria-hidden="true" />
-                <Select value={runs.some((run) => run.path === selectedRun) ? selectedRun : "__custom"} onValueChange={(value) => value === "__new" ? openRunDialog() : value !== "__custom" && selectRun(value)}>
-                  <SelectTrigger className="w-full min-w-0 border-0 bg-muted/60 font-medium shadow-none sm:w-[390px] sm:max-w-[58vw] xl:max-w-[42vw]" aria-label="Selected run"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {!runs.some((run) => run.path === selectedRun) && <SelectItem value="__custom">{selectedRun}</SelectItem>}
-                    {runs.map((run) => <SelectItem value={run.path} key={run.path}>{run.name} · {run.config_valid ? run.sequence ?? "configured" : "not configured"}</SelectItem>)}
-                    <SelectItem value="__new"><span className="flex items-center gap-2"><Plus className="size-3.5" />Use another run path</span></SelectItem>
-                  </SelectContent>
-                </Select>
-                <span className="hidden truncate text-xs text-muted-foreground 2xl:block">{selectedRun}</span>
+                <section
+                  aria-label="Active run context"
+                  className="min-w-0 flex-1 xl:max-w-[780px]"
+                  data-testid="active-run-context"
+                >
+                  <Select value={runs.some((run) => run.path === selectedRun) ? selectedRun : "__custom"} onValueChange={(value) => value === "__new" ? openRunDialog() : value !== "__custom" && selectRun(value)}>
+                    <SelectTrigger
+                      aria-label="Active run folder"
+                      className="h-[50px] min-w-0 gap-2 border-border bg-muted/45 px-3 py-1.5 text-left shadow-none hover:border-primary/45 hover:bg-muted/70 focus:ring-1 focus:ring-ring/55 focus:ring-offset-0"
+                      title={selectedRun}
+                    >
+                      <FolderOpen className="hidden size-[18px] shrink-0 text-primary-strong sm:block" aria-hidden="true" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="shrink-0 text-[9px] font-bold uppercase tracking-[0.14em] text-foreground">Active run folder</span>
+                          <span className="hidden truncate text-[10px] text-muted-foreground md:inline">All run-owned pages and actions use this folder</span>
+                        </div>
+                        <SelectValue><span className="mt-0.5 block truncate font-mono text-[11px] font-semibold text-foreground">{selectedRun}</span></SelectValue>
+                      </div>
+                      <span aria-hidden="true" className="hidden shrink-0 rounded-[6px] border bg-card px-2 py-1 text-[10px] font-semibold text-muted-foreground sm:inline">Change</span>
+                    </SelectTrigger>
+                    <SelectContent className="min-w-[var(--radix-select-trigger-width)] max-w-[min(720px,calc(100vw-2rem))]">
+                      {!runs.some((run) => run.path === selectedRun) && <SelectItem value="__custom">{selectedRun}</SelectItem>}
+                      {runs.map((run) => <SelectItem value={run.path} textValue={`${run.name} · ${run.config_valid ? run.sequence ?? "configured" : "not configured"} · ${run.path}`} key={run.path}><span className="flex min-w-0 flex-col gap-0.5 py-0.5"><span className="font-medium">{run.name} · {run.config_valid ? run.sequence ?? "configured" : "not configured"}</span><span className="truncate font-mono text-[10px] text-muted-foreground">{run.path}</span></span></SelectItem>)}
+                      <SelectItem value="__new"><span className="flex items-center gap-2"><Plus className="size-3.5" />Enter a new or unlisted folder…</span></SelectItem>
+                    </SelectContent>
+                  </Select>
+                </section>
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <Tooltip><TooltipTrigger asChild><Button asChild variant="outline" size="icon" className="hidden size-[34px] sm:inline-flex"><a href="https://github.com/match-cow/PoseTestBot" target="_blank" rel="noreferrer" aria-label="Open PoseTestBot on GitHub"><Github /></a></Button></TooltipTrigger><TooltipContent>GitHub repository</TooltipContent></Tooltip>
                 <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="size-[34px]" onClick={() => setGuideOpen(true)} aria-label="Open operator console guide"><BookOpen /></Button></TooltipTrigger><TooltipContent>Console guide</TooltipContent></Tooltip>
                 <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="size-[34px]" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}>{theme === "light" ? <Moon /> : <Sun />}</Button></TooltipTrigger><TooltipContent>{theme === "light" ? "Use dark theme" : "Use light theme"}</TooltipContent></Tooltip>
-                <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" onClick={openRunDialog} aria-label="Choose run path"><ChevronDown /></Button></TooltipTrigger><TooltipContent>Use another run folder</TooltipContent></Tooltip>
               </div>
               <nav className="order-3 flex w-full gap-1 overflow-x-auto pb-0.5 xl:hidden" aria-label="Primary navigation">
                 {navigation.map(({ to, label, icon: Icon, match }) => {
@@ -236,10 +254,20 @@ export function AppShell() {
       <Dialog open={newRunOpen} onOpenChange={setNewRunOpen}>
         <DialogContent>
           <form onSubmit={(event) => { event.preventDefault(); applyNewRun() }} className="space-y-4">
-            <DialogHeader><DialogTitle>Use a run folder</DialogTitle><DialogDescription>Choose an existing run or enter a new folder inside one of the server-approved roots. A new folder is configured from Workflow.</DialogDescription></DialogHeader>
-            <div className="space-y-2"><Label htmlFor="new-run-path">Run path</Label><Input id="new-run-path" autoFocus value={newRun} onChange={(event) => setNewRun(event.target.value)} /></div>
+            <DialogHeader>
+              <DialogTitle>Change the active run folder</DialogTitle>
+              <DialogDescription>This is the context for the entire operator workflow, not only a file destination. Every run-owned page, configuration, evidence file, and action uses the selected folder.</DialogDescription>
+            </DialogHeader>
+            <div className="flex gap-3 rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed">
+              <FolderOpen className="mt-0.5 size-4 shrink-0 text-primary-strong" aria-hidden="true" />
+              <div>
+                <strong>Confirm the acquisition run before continuing.</strong>
+                <p className="mt-1 text-muted-foreground">A new folder starts unconfigured. Switching folders does not copy setup or evidence from the current run.</p>
+              </div>
+            </div>
+            <div className="space-y-2"><Label htmlFor="new-run-path">Run folder path</Label><Input id="new-run-path" autoFocus value={newRun} onChange={(event) => setNewRun(event.target.value)} /></div>
             <div className="rounded-lg bg-muted p-3 text-xs text-muted-foreground"><strong className="text-foreground">Allowed roots</strong>{bootstrap.allowed_run_roots.map((root) => <div className="mt-1 font-mono" key={root}>{root}</div>)}</div>
-            <DialogFooter><Button type="button" variant="outline" onClick={() => setNewRunOpen(false)}>Cancel</Button><Button type="submit">Use run</Button></DialogFooter>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setNewRunOpen(false)}>Cancel</Button><Button type="submit">Switch active folder</Button></DialogFooter>
           </form>
         </DialogContent>
       </Dialog>

@@ -232,6 +232,8 @@ def test_workpiece_upload_queues_validated_metadata_and_catalog_resource(
     submission = runner.submissions[0]
     assert submission["name"] == "workpiece_catalog_import"
     assert submission["resources"] == ["cpu", "disk_io", "workpiece_catalog"]
+    assert submission["scope_kind"] == "library"
+    assert submission.get("run_root") is None
     assert submission["command"][:4] == [
         "uv",
         "run",
@@ -417,6 +419,8 @@ def test_workpiece_unit_correction_requires_intent_and_queues_catalog_job(
     queued = runner.submissions[-1]
     assert queued["name"] == "workpiece_unit_correction"
     assert queued["resources"] == ["cpu", "disk_io", "workpiece_catalog"]
+    assert queued["scope_kind"] == "library"
+    assert queued.get("run_root") is None
     assert queued["command"][3] == "scripts/run_workpiece_unit_correction.py"
     request_path = Path(queued["parameters"]["request_path"])
     request_json = json.loads(request_path.read_text())

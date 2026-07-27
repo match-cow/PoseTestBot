@@ -8,16 +8,23 @@ PoseTestBot presents two outcome-oriented workflows in the operator console:
 The numbered steps are the normal operator path. Low-level pipeline stages are
 available under **Advanced tools** for diagnosis and recovery, but they do not
 replace the guided order and may produce incomplete evidence when run alone.
-Workflow progress comes from run-owned artifacts, not browser state.
+Workflow completion and status come from run-owned artifacts. Browser-local
+state remembers only the selected run's last viewed workflow step for fast
+return from supporting pages. An unsaved step draft remains intact while the
+operator reviews another step in the same journey, but changing the active run
+folder clears run-setup and placement drafts instead of carrying them into the
+new run.
 
 ## Required and optional work
 
-- **Required** steps form the numbered spine. A later step remains blocked when
-  its required inputs or durable evidence are missing.
-- **Optional** actions are shown separately and do not block the required
-  outcome. Examples include creating a new grid when a suitable one already
-  exists, editing catalogue data, inspecting alternate solver evidence, and
-  generating pose-only or pose-plus-mask BOP annotations after the base export.
+- **Required** steps form the required workflow spine. A later untouched step
+  is shown as not started; **blocked** is reserved for a real failed check or
+  missing prerequisite.
+- **Optional** work is explicitly labeled and does not block the required
+  outcome. Most optional actions are shown separately; dataset step 6 remains
+  in the numbered rail so optional annotation evidence has a clear home.
+  Other examples include creating a new grid when a suitable one already
+  exists, editing catalogue data, and inspecting alternate solver evidence.
 - **Automatic processing** means a queued local job performs the computation.
   It never means that PoseTestBot may open cameras or move the robot without a
   fresh operator action.
@@ -72,7 +79,7 @@ The two supported extrinsic interpretations are:
 - **Eye to hand:** the camera is static, the grid moves rigidly with
   `robot_flange`, and the primary result is `camera -> template_base`.
 
-## Journey 2: record an object-template dataset
+## Journey 2: record an object dataset
 
 Use this journey to acquire an object-bearing dataset after a compatible camera
 calibration has been promoted.
@@ -109,7 +116,7 @@ calibration has been promoted.
    camera data, or raw robot-pose evidence exists, the qualification cannot be
    published or replaced. Start a new run when either the contract or
    qualification must change.
-2. **Choose the object template and placement — required.** Select the immutable
+2. **Choose the pose template and placement — required.** Select the immutable
    printed pose-template version that is physically present, enter its measured
    pose in `template_base`, and confirm the placement. Creating or editing
    workpieces and publishing a new template are optional prerequisites only
@@ -131,37 +138,38 @@ calibration has been promoted.
    while preserving raw evidence. Immediately before receiver startup, the
    supervisor revalidates the contract and qualification and records their
    exact hashes in the successful capture report.
-5. **Synchronize and verify frames — required.** PoseTestBot applies each
-   selected profile's saved timing automatically; manual values and generic
-   defaults cannot override it. It writes derived frame-to-pose matches below
-   `processed/synchronized/` and rejects missing matches, excessive pose gaps,
-   incompatible timestamps, or calibration-provenance differences.
-   Per-camera `sync_report.json` files and the run-level
-   `sync_quality_report.json` retain the exact applied policy. Raw capture data
-   remains untouched. Hardware-trigger runs additionally associate global
-   depth timestamps whose full earliest-to-latest group span is within the
-   configured threshold, and write only complete
-   mixed-mount sets to
+5. **Process frames and create the base BOP export — required.** One
+   recoverable background job applies each selected profile's saved timing;
+   manual values and generic defaults cannot override it. It writes derived
+   frame-to-pose matches below `processed/synchronized/`, verifies sync quality
+   and calibration provenance, rectifies the RGB-D frames, and writes the base
+   BOP scenes, camera data, models, targets, frame map, and PoseTestBot
+   provenance sidecars. Per-camera `sync_report.json` files and the run-level
+   `sync_quality_report.json` retain the exact applied timing policy. Raw
+   capture data remains untouched.
+
+   Hardware-trigger runs additionally associate global depth timestamps whose
+   full earliest-to-latest group span is within the configured threshold and
+   write only complete mixed-mount sets to
    `processed/synchronized/multiview_frame_groups.json`. Early master frames,
    incomplete groups, and unmatched frames remain preserved as raw evidence
-   but are not authoritative combined observations. Group validation requires
-   a succeeded full-capture report with both execution gates and the same
-   capture-time configuration/qualification binding.
-6. **Export the BOP dataset — required.** Revalidate the selected calibration
-   and template identities, then write the BOP scenes, camera data, object
-   poses, models, targets, frame map, and PoseTestBot provenance sidecars.
-   Hardware-trigger export maps every authoritative complete group onto its
-   per-camera BOP scene/image views in `bop/posetestbot_frame_sets.json` and
-   carries forward that capture-report binding. The BOP rewrite gate compares
-   it across the current qualification, capture report, authoritative groups,
-   frame sets, frame map, and exported files. After the base image/model export
-   passes, optionally choose **Plain pose ground truth** or **Pose + object
-   masks and ROI**. Both modes use BlenderProc 2.8.0 to validate the immutable
-   scene and derive standard model-to-camera pose rows. The complete mode also
-   uses the pinned official BOP Toolkit renderer and captured depth to write
-   `scene_gt_info.json`, full masks, visible masks, ROI, pixel counts, and
-   visibility fractions. Ground-truth work is one recoverable CPU/render/disk
-   job and remains visible in **Jobs** after navigation.
+   but are not authoritative combined observations. The export maps every
+   authoritative complete group onto its per-camera BOP scene/image views in
+   `bop/posetestbot_frame_sets.json` and carries forward the capture-report
+   binding. The BOP rewrite gate compares it across the current qualification,
+   capture report, authoritative groups, frame sets, frame map, and exported
+   files. The job continues after navigation and remains available in
+   **Jobs** for progress, logs, and cancellation.
+6. **Add optional BOP ground-truth evidence — optional.** After the base
+   image/model export is verified, optionally choose **Plain pose ground
+   truth** or **Pose + object masks and ROI**. Both modes use BlenderProc 2.8.0
+   to validate the immutable scene and derive standard model-to-camera pose
+   rows. The complete mode also uses the pinned official BOP Toolkit renderer
+   and captured depth to write `scene_gt_info.json`, full masks, visible masks,
+   ROI, pixel counts, and visibility fractions. Ground-truth work is one
+   recoverable CPU/render/disk job and remains visible in **Jobs** after
+   navigation. The workflow marks this step complete only when the selected
+   annotation output has verified durable evidence.
 
 Annotation generation is explicitly optional. A synchronized calibrated base
 export remains valid without GT or masks, while plain pose GT deliberately is

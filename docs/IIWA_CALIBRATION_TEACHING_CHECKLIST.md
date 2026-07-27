@@ -8,10 +8,13 @@ relative-motion contract is in
 > Teaching aid only—not reachability, redundancy, singularity, collision, or
 > cable-clearance validation. Physical work requires the normal lab risk
 > assessment, controller safety functions, an authorized operator, and a
-> reviewer. The repository source is currently enabled for lab validation, but
-> the exact deployed controller application and revision are not yet recorded.
-> That boolean is not commissioning evidence: verify the deployed identity and
-> retain the checks below whenever the application or cell changes.
+> reviewer. The 2026 calibration-program rewrite milestone is accepted from
+> operator attestation that the program compiled, all nine frames were taught,
+> commissioning completed, and the guided captures succeeded, together with
+> retained 3/3 calibration evidence. Its exact Workbench project, deployed
+> revision record, and completed worksheet were unavailable to copy back and
+> must not be reconstructed. Blank fields below are a reusable procedure for
+> future recommissioning or cell changes, not an unfinished rewrite gate.
 
 > **Current program lifecycle:** do not send the UDP `STOP` command during a
 > repeated calibration session. While the application is waiting, `STOP` exits
@@ -183,10 +186,15 @@ recalculated and published a fresh common `IPPE + Shah` profile for all three
 cameras with saved Auto offsets. This supplies reusable calibration; it is not
 additional physical-capture or controller-commissioning evidence.
 
-Those retained runs prove their recorded capture and calibration outcomes. They do
-not identify the exact deployed Sunrise application/revision or replace the
-Workbench compile, offline path, T1, and reviewer evidence required by this
-commissioning checklist. No iiwa `STOP` command was sent during the campaign.
+Those retained runs prove their recorded capture and calibration outcomes.
+The operator additionally attests that the calibration program compiled, its
+nine frames were taught, and physical commissioning completed. The exact
+deployed Sunrise project/revision and filled worksheet remain unavailable and
+are deliberately not inferred. That provenance limitation is recorded in
+[REWRITE_PROGRESS.md](REWRITE_PROGRESS.md); the rewrite accepts the attestation
+instead of asking for a fabricated historical worksheet. Use the checklist
+below for future recommissioning. No iiwa `STOP` command was sent during the
+campaign.
 
 - [ ] Obtain explicit operator authorization.
 - [ ] Pass both PoseTestBot execution gates: `--allow-real-robot` and

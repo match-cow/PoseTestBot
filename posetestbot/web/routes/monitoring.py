@@ -31,7 +31,8 @@ from posetestbot.monitoring.webrtc import (
     monitor_stream_root,
     public_monitor_status,
 )
-from posetestbot.web.legacy import APP_ROOT, job_runner
+from posetestbot.web.paths import APP_ROOT
+from posetestbot.web.runtime import job_runner
 
 
 monitoring_bp = Blueprint("monitoring", __name__)
@@ -140,6 +141,7 @@ def _submit_monitor_service() -> Any:
         ),
         cwd=APP_ROOT,
         resources=[f"monitoring_camera:{UGREEN_DEVICE_ID}"],
+        scope_kind="global",
         visibility=SERVICE_VISIBILITY,
         parameters={
             "monitor_root": root.as_posix(),

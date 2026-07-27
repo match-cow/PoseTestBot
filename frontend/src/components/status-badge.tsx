@@ -1,13 +1,19 @@
 import { Badge } from "@/components/ui/badge"
 
-function variant(status: string | null | undefined) {
-  const value = status?.toLowerCase() ?? "unknown"
-  if (["complete", "connected", "ok", "ready", "running", "succeeded", "valid", "pass", "passed"].includes(value)) return "success" as const
-  if (["error", "failed", "blocked", "invalid", "disconnected", "canceled"].includes(value)) return "destructive" as const
-  if (["warning", "stale", "queued", "canceling", "in_progress", "waiting", "receiving"].includes(value)) return "warning" as const
-  return "outline" as const
+export type StatusTone = "informational" | "success" | "warning" | "neutral" | "destructive"
+
+const toneStyle = {
+  informational: {
+    variant: "outline" as const,
+    className: "border-primary/35 bg-primary/10 text-primary-strong",
+  },
+  success: { variant: "success" as const, className: undefined },
+  warning: { variant: "warning" as const, className: undefined },
+  neutral: { variant: "outline" as const, className: undefined },
+  destructive: { variant: "destructive" as const, className: undefined },
 }
 
-export function StatusBadge({ status, children }: { status?: string | null; children?: React.ReactNode }) {
-  return <Badge variant={variant(status)}>{children ?? status?.replaceAll("_", " ") ?? "unknown"}</Badge>
+export function StatusBadge({ status, tone, children }: { status?: string | null; tone: StatusTone; children?: React.ReactNode }) {
+  const style = toneStyle[tone]
+  return <Badge variant={style.variant} className={style.className} data-status-tone={tone}>{children ?? status?.replaceAll("_", " ") ?? "unknown"}</Badge>
 }

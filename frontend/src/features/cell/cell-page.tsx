@@ -8,7 +8,7 @@ import { AlertTriangle, Box, Camera, CirclePause, CirclePlay, Crosshair, Eye, Ey
 import { HelpTip } from "@/components/help-tip"
 import { PageHeader } from "@/components/page-header"
 import { ProcessHandoff } from "@/components/process-handoff"
-import { StatusBadge } from "@/components/status-badge"
+import { StatusBadge, type StatusTone } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { api, query } from "@/lib/api"
 import type { CellEntity, CellPose, CellScene, CellTimelineMetadata, CellTimelinePage, CellTransform } from "@/lib/contracts"
 import { titleCase } from "@/lib/utils"
+import { activeWorkflowHref } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
 
 const PAGE_SIZE = 2_000
@@ -96,6 +97,20 @@ function Matrix({ values, testId = "cell-calibration-matrix" }: { values: readon
   return <pre data-testid={testId} className="overflow-x-auto rounded bg-muted p-3 text-[9px] leading-5">{values.map((row) => row.map((value) => fixed(value, 6).padStart(12)).join(" ")).join("\n")}</pre>
 }
 
+function entityStatusTone(status: CellEntity["status"]): StatusTone {
+  switch (status) {
+    case "recorded":
+      return "success"
+    case "unresolved":
+      return "destructive"
+    case "planned":
+    case "reference":
+      return "informational"
+    case "not_configured":
+      return "neutral"
+  }
+}
+
 function SelectionDetails({ entity }: { entity: CellEntity | null }) {
   if (!entity) return <div className="py-6 text-center text-sm text-muted-foreground"><Box className="mx-auto mb-2 size-5" />Nothing selected</div>
   const calibration = entity.calibration
@@ -105,7 +120,7 @@ function SelectionDetails({ entity }: { entity: CellEntity | null }) {
     : null
   const pdfUrl = typeof entity.geometry.pdf_url === "string" ? entity.geometry.pdf_url : null
   return <div className="space-y-4 text-xs">
-    <div className="flex items-center justify-between gap-2"><span className="text-sm font-semibold">{entity.label}</span><StatusBadge status={entity.status} /></div>
+    <div className="flex items-center justify-between gap-2"><span className="text-sm font-semibold">{entity.label}</span><StatusBadge status={entity.status} tone={entityStatusTone(entity.status)} /></div>
     <div><span className="text-muted-foreground">Type</span><div>{titleCase(entity.type)}</div></div>
     {entity.unresolved_reason && <div className="rounded border border-destructive/30 bg-destructive/5 p-3 text-destructive">{entity.unresolved_reason}</div>}
     {entity.transform && !calibration && <div className="space-y-3 rounded border p-3">
@@ -117,7 +132,7 @@ function SelectionDetails({ entity }: { entity: CellEntity | null }) {
       {pdfUrl && <a className="inline-flex text-primary underline underline-offset-4" href={pdfUrl} target="_blank" rel="noreferrer">Open exact calibration-target PDF</a>}
     </div>}
     {calibration && <div data-testid="cell-calibration-evidence" className="space-y-4 rounded border border-success/30 p-3">
-      <div className="flex items-center justify-between gap-2"><div><div className="font-semibold">Calibration extrinsic</div><div className="mt-1 font-mono text-[10px]" data-testid="cell-calibration-transform-frames">{calibration.extrinsics.from} → {calibration.extrinsics.to}</div></div><StatusBadge status={calibration.status} /></div>
+      <div className="flex items-center justify-between gap-2"><div><div className="font-semibold">Calibration extrinsic</div><div className="mt-1 font-mono text-[10px]" data-testid="cell-calibration-transform-frames">{calibration.extrinsics.from} → {calibration.extrinsics.to}</div></div><StatusBadge status={calibration.status} tone="success" /></div>
       <Matrix values={calibration.extrinsics.matrix} />
       <div className="grid grid-cols-1 gap-3">
         <Detail label="Quaternion WXYZ" value={vector(calibration.extrinsics.rotation_quaternion_wxyz, 7)} />
@@ -384,7 +399,7 @@ function CameraModalityPanel({ selectedRun, timeline, pose, loading, modality, o
   return <section data-testid="cell-camera-frame-panel" data-camera-id={timeline.id} data-modality={modality} className="min-w-0 border-t border-white/10 first:border-t-0">
     <div className="flex items-center justify-between gap-2 px-4 py-2">
       <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-300">{modalityLabel}</div>
-      <StatusBadge status={evidence.available ? "recorded" : "unavailable"}>{evidence.available ? "Available" : "Unavailable"}</StatusBadge>
+      <StatusBadge status={evidence.available ? "recorded" : "unavailable"} tone={evidence.available ? "success" : "neutral"}>{evidence.available ? "Available" : "Unavailable"}</StatusBadge>
     </div>
     <div className="grid aspect-[4/3] max-h-[420px] w-full place-items-center overflow-hidden bg-black/25 p-3" aria-live="polite">
       {frameUrl && !failed
@@ -456,14 +471,15 @@ function CameraFramesSection({ timelines, selectedTimelineIds, selectedRun, fram
 }
 
 export function CellPage() {
-  const { selectedRun } = useOperator()
+  const { currentWorkflow, selectedRun } = useOperator()
   const sceneQuery = useQuery({ queryKey: ["cell-scene", selectedRun], queryFn: () => api<CellScene>(query("/ui/cell-scene", { run_root: selectedRun })) })
   if (sceneQuery.isPending) return <div className="grid min-h-[60vh] place-items-center text-sm text-muted-foreground">Building cell scene…</div>
   if (sceneQuery.isError || !sceneQuery.data) return <Card className="border-destructive/40"><CardHeader><CardTitle>Cell scene unavailable</CardTitle><CardDescription>{sceneQuery.error instanceof Error ? sceneQuery.error.message : "The selected run could not be composed."}</CardDescription></CardHeader></Card>
-  return <CellSceneView key={`${selectedRun}:${sceneQuery.data.default_timeline_id ?? "none"}`} selectedRun={selectedRun} scene={sceneQuery.data} />
+  const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
+  return <CellSceneView key={`${selectedRun}:${sceneQuery.data.default_timeline_id ?? "none"}`} selectedRun={selectedRun} scene={sceneQuery.data} workflowHref={workflowHref} />
 }
 
-function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: CellScene }) {
+function CellSceneView({ selectedRun, scene, workflowHref }: { selectedRun: string; scene: CellScene; workflowHref: string }) {
   const client = useQueryClient()
   const [timelineId, setTimelineId] = useState(scene.default_timeline_id ?? "")
   const [frame, setFrame] = useState(0)
@@ -540,8 +556,8 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
     .concat(unresolved.filter((entity) => entity.type !== "camera").map((entity) => `${entity.label}: ${entity.unresolved_reason}`))
 
   return <div className="space-y-5">
-    <PageHeader eyebrow="Dataset contents" title="Cell" description="Read-only inspection of cell geometry, exact flange poses, and retained synchronized RGB-D evidence." />
-    <ProcessHandoff title="Inspect evidence here; change it in Workflow" description="Cell never edits transforms, images, or depth data. Use it to compare geometry and retained evidence, then return to the guided workflow to resolve missing calibration, capture, synchronization, or export evidence." to="/workflow/setup" action="Open workflow" />
+    <PageHeader eyebrow="Dataset contents" title="Cell View" description="Read-only inspection of cell geometry, exact flange poses, and retained synchronized RGB-D evidence." />
+    <ProcessHandoff title="Inspect evidence here; change it in Workflow" description="Cell never edits transforms, images, or depth data. Use it to compare geometry and retained evidence, then return to the guided workflow to resolve missing calibration, capture, synchronization, or export evidence." to={workflowHref} action="Open workflow" />
     {(scene.warnings.length > 0 || unresolved.length > 0) && <div className="flex items-start gap-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-4 text-sm"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" /><div className="min-w-0"><div className="font-semibold">Partial cell scene</div><div className="mt-1 text-xs text-muted-foreground">{unresolvedCameras.length > 0 ? `${unresolvedCameras.length} camera${unresolvedCameras.length === 1 ? " is" : "s are"} hidden until this run has matching promoted calibration profiles. The recorded trajectory and available template evidence remain visible.` : "Available scene evidence remains visible."}</div>{otherIssues.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-xs font-medium">Show {otherIssues.length} provenance detail{otherIssues.length === 1 ? "" : "s"}</summary><ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-muted-foreground">{otherIssues.map((message, index) => <li key={index}>{message}</li>)}</ul></details>}</div></div>}
     <Card className="overflow-hidden"><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>3D cell</CardTitle><CardDescription data-testid="cell-coordinate-convention" className="flex flex-wrap items-center gap-1">{targetAligned ? "Target-aligned · right-handed · origin top-left · +X right · +Y down · +Z into grid · millimetres" : "Right-handed · Z-up · millimetres"} · no pose interpolation <HelpTip label="cell coordinate and timeline display">Transforms are rendered from stored evidence in millimetres. Timeline playback shows exact recorded poses only; it never interpolates or invents a robot pose between frames.</HelpTip></CardDescription></div><div className="flex flex-wrap gap-2"><Button size="sm" variant={preset === "perspective" ? "default" : "outline"} onClick={() => setPreset("perspective")}><Focus />Perspective</Button><Button size="sm" variant={preset === "top" ? "default" : "outline"} onClick={() => setPreset("top")}><ScanLine />Top</Button><Button size="sm" variant={preset === "front" ? "default" : "outline"} onClick={() => setPreset("front")}><Crosshair />Front</Button><Button size="sm" variant="outline" aria-label="Reset cell view" onClick={() => { setPreset("perspective"); setResetToken((value) => value + 1) }}><RotateCcw /></Button></div></div></CardHeader>
       <CardContent className="p-0">{webgl ? <div className="h-[620px] min-w-0"><CellCanvas scene={scene} visible={visible} pose={pose} trajectory={trajectory} selected={selected} onSelect={setSelected} preset={preset} resetToken={resetToken} /></div> : <div data-testid="cell-webgl-fallback" className="grid h-[620px] min-w-0 place-items-center p-10 text-center"><div><AlertTriangle className="mx-auto mb-3 size-8 text-amber-500" /><div className="font-semibold">WebGL is unavailable</div><p className="mt-2 max-w-md text-sm text-muted-foreground">The component and provenance list remains available. Use a browser with WebGL support to orbit the scene.</p></div></div>}</CardContent>
@@ -551,7 +567,7 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
     <div className="grid items-start gap-5 xl:grid-cols-[300px_minmax(0,1fr)_340px]">
       <Card><CardHeader><CardTitle className="text-base">Scene visibility</CardTitle><CardDescription>Choose which geometry remains visible in the 3D scene above.</CardDescription></CardHeader><CardContent className="grid grid-cols-2 gap-2">{LAYERS.map((layer) => <Label key={layer} className="flex items-center gap-2 rounded border p-2 text-xs"><Checkbox checked={visible.has(layer)} onCheckedChange={() => toggleLayer(layer)} />{titleCase(layer)}</Label>)}<Label className="col-span-2 flex items-center gap-2 rounded border p-2 text-xs"><Checkbox checked={trajectory} onCheckedChange={(value) => setTrajectory(value === true)} /><Route className="size-3.5" />Recorded trajectory</Label></CardContent></Card>
       <Card><CardHeader><CardTitle className="text-base">Selection evidence</CardTitle><CardDescription>Click geometry above or choose a recorded component at right.</CardDescription></CardHeader><CardContent><SelectionDetails entity={selected} /></CardContent></Card>
-      <Card><CardHeader><CardTitle className="text-base">Recorded components</CardTitle><CardDescription>{scene.object_selection.objectless ? "Objectless RGB-D run" : `${scene.object_selection.instance_count} pose-template instance(s)`}</CardDescription></CardHeader><CardContent className="max-h-[520px] space-y-2 overflow-auto">{scene.entities.map((entity) => <button key={entity.id} type="button" className="flex w-full items-center gap-2 rounded border px-3 py-2 text-left text-xs hover:bg-muted" onClick={() => setSelected(entity)}>{entity.type === "camera" ? <Camera className="size-3.5" /> : entity.status === "unresolved" ? <EyeOff className="size-3.5 text-destructive" /> : <Eye className="size-3.5" />}<span className="min-w-0 flex-1 truncate">{entity.label}</span><StatusBadge status={entity.status} /></button>)}</CardContent></Card>
+      <Card><CardHeader><CardTitle className="text-base">Recorded components</CardTitle><CardDescription>{scene.object_selection.objectless ? "Objectless RGB-D run" : `${scene.object_selection.instance_count} pose-template instance(s)`}</CardDescription></CardHeader><CardContent className="max-h-[520px] space-y-2 overflow-auto">{scene.entities.map((entity) => <button key={entity.id} type="button" className="flex w-full items-center gap-2 rounded border px-3 py-2 text-left text-xs hover:bg-muted" onClick={() => setSelected(entity)}>{entity.type === "camera" ? <Camera className="size-3.5" /> : entity.status === "unresolved" ? <EyeOff className="size-3.5 text-destructive" /> : <Eye className="size-3.5" />}<span className="min-w-0 flex-1 truncate">{entity.label}</span><StatusBadge status={entity.status} tone={entityStatusTone(entity.status)} /></button>)}</CardContent></Card>
     </div>
   </div>
 }

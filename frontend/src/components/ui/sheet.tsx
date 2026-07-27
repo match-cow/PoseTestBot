@@ -6,8 +6,22 @@ import { cn } from "@/lib/utils"
 export const Sheet = DialogPrimitive.Root
 export const SheetTrigger = DialogPrimitive.Trigger
 export const SheetClose = DialogPrimitive.Close
-export const SheetTitle = DialogPrimitive.Title
-export const SheetDescription = DialogPrimitive.Description
+
+export const SheetTitle = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Title>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Title ref={ref} className={cn("font-display text-xl font-semibold tracking-tight", className)} {...props} />
+))
+SheetTitle.displayName = DialogPrimitive.Title.displayName
+
+export const SheetDescription = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Description>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Description ref={ref} className={cn("text-sm leading-relaxed text-muted-foreground", className)} {...props} />
+))
+SheetDescription.displayName = DialogPrimitive.Description.displayName
 
 export const SheetContent = React.forwardRef<React.ElementRef<typeof DialogPrimitive.Content>, React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>>(({ className, children, ...props }, ref) => (
   <DialogPrimitive.Portal>
