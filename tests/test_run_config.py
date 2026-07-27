@@ -89,7 +89,24 @@ def test_sensor_config_token_accepts_alias_and_mounting_mode() -> None:
     assert sensor.device_id == "mxid-1"
     assert sensor.mounting_mode == "static"
     assert sensor.display_name == "Cell OAK-D Pro"
+    assert sensor.operator_alias == "Cell OAK-D Pro"
     assert sensor.inverted is False
+
+
+def test_sensor_config_normalizes_explicit_run_operator_alias() -> None:
+    sensor = sensor_config_from_mapping(
+        {
+            "sensor_type": "realsense",
+            "device_id": "123",
+            "mounting_mode": "eye_in_hand",
+            "display_name": "Intel RealSense 123",
+            "operator_alias": "  Run wrist camera  ",
+        }
+    )
+
+    assert sensor.operator_alias == "Run wrist camera"
+    assert sensor.display_name == "Run wrist camera"
+    assert sensor.to_dict()["operator_alias"] == "Run wrist camera"
 
 
 def test_sensor_config_accepts_realsense_inverted_orientation() -> None:
@@ -150,6 +167,7 @@ def test_sensor_configs_from_status_uses_alias_defaults() -> None:
                             "sensor_type": "realsense_d435",
                             "device_id": "123",
                             "display_name": "Intel RealSense 123",
+                            "alias": "Wrist Camera",
                             "effective_display_name": "Wrist Camera",
                             "mounting_mode": "eye_in_hand",
                             "inverted": True,
@@ -164,6 +182,7 @@ def test_sensor_configs_from_status_uses_alias_defaults() -> None:
     assert len(sensors) == 1
     assert sensors[0].device_id == "123"
     assert sensors[0].display_name == "Wrist Camera"
+    assert sensors[0].operator_alias == "Wrist Camera"
     assert sensors[0].inverted is True
     assert sensors[0].metadata == {"model": "D435"}
 
@@ -531,6 +550,7 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
             "inverted": False,
             "metadata": {},
             "mounting_mode": "static",
+            "operator_alias": "Cell RealSense",
             "sensor_type": "realsense_d435",
         }
     ]

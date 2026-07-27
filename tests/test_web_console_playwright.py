@@ -4911,6 +4911,59 @@ def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
     expect(export_step_button).to_contain_text("Complete", timeout=5_000)
 
 
+def test_run_setup_keeps_and_edits_the_run_owned_camera_alias(
+    console_server,
+    page,
+) -> None:
+    requests: list[dict] = []
+    configured = run_config(
+        sensors=[
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "display_name": "Saved run wrist",
+                "operator_alias": "Saved run wrist",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+            }
+        ]
+    )
+    status = selected_sensor_status()
+    status["families"][0]["devices"][0]["alias"] = "New lab-wide wrist"
+    status["families"][0]["devices"][0][
+        "effective_display_name"
+    ] = "New lab-wide wrist"
+    install_common_mocks(page, requests=requests, config_payload=configured)
+    page.route("**/sensors/status", lambda route: fulfill_json(route, status))
+
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=configure",
+        wait_until="networkidle",
+    )
+
+    row = page.locator(
+        '[data-testid="run-camera-row"][data-sensor-key="realsense_d435:wrist-1"]'
+    )
+    expect(row).to_contain_text("Saved run wrist")
+    expect(row).not_to_contain_text("New lab-wide wrist")
+    alias = row.get_by_label("Operator alias for realsense_d435:wrist-1")
+    expect(alias).to_have_value("Saved run wrist")
+    expect(row).to_contain_text("run_config.json")
+    expect(row).to_contain_text("dataset_manifest.json")
+
+    alias.fill("Dataset wrist view")
+    expect(row).to_contain_text("Dataset wrist view")
+    page.get_by_role("button", name="Save setup").click()
+    expect(page.get_by_text("Calibration recording setup saved")).to_be_visible()
+
+    written = next(item["body"] for item in requests if item["path"] == "/run-config")
+    saved = written["sensors"][0]
+    assert saved["operator_alias"] == "Dataset wrist view"
+    assert saved["display_name"] == "Dataset wrist view"
+    assert saved["device_id"] == "wrist-1"
+
+
 def test_run_setup_disables_camera_without_deleting_identity_or_profile(
     console_server,
     page,

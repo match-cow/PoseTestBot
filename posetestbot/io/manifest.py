@@ -34,6 +34,7 @@ class SensorManifestRecord:
     mounting_mode: str | None = None
     status: str = "configured"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    operator_alias: str | None = None
 
 
 def utc_now_iso() -> str:
@@ -82,22 +83,34 @@ def make_sensor_record(
     mounting_mode: str | MountingMode | None = None,
     status: str = "configured",
     metadata: Mapping[str, Any] | None = None,
+    operator_alias: str | None = None,
 ) -> dict[str, Any]:
     sensor_type_value = sensor_type.value if isinstance(sensor_type, SensorType) else sensor_type
     mounting_mode_value = (
         mounting_mode.value if isinstance(mounting_mode, MountingMode) else mounting_mode
     )
+    normalized_operator_alias = (
+        operator_alias.strip() if operator_alias is not None else None
+    ) or None
     folder_path = Path(folder)
     record = SensorManifestRecord(
         sensor_type=sensor_type_value,
         device_id=device_id,
         folder=_relative_to(folder_path, run_root),
-        display_name=display_name or f"{sensor_type_value} {device_id}",
+        display_name=(
+            normalized_operator_alias
+            or display_name
+            or f"{sensor_type_value} {device_id}"
+        ),
         mounting_mode=mounting_mode_value,
         status=status,
         metadata=metadata or {},
+        operator_alias=normalized_operator_alias,
     )
-    return asdict(record)
+    data = asdict(record)
+    if record.operator_alias is None:
+        data.pop("operator_alias")
+    return data
 
 
 def discover_sensor_records(run_root: str | Path) -> list[dict[str, Any]]:

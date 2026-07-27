@@ -47,6 +47,11 @@ def test_capture_plan_builds_sensor_commands_then_one_receiver(tmp_path: Path) -
         "luxonis_auto",
         "zed_2i_auto",
     ]
+    assert [sensor["operator_alias"] for sensor in plan["sensors"]] == [
+        "Cell RealSense",
+        "Cell OAK-D Pro",
+        "Cell ZED 2i",
+    ]
     assert [command["role"] for command in plan["commands"]] == [
         "sensor_capture",
         "sensor_capture",
@@ -329,4 +334,6 @@ def test_capture_plan_stage_writes_manifest_artifact(tmp_path: Path) -> None:
     assert manifest["artifacts"] == {}
     assert manifest["sensors"][0]["status"] == "planned"
     assert manifest["sensors"][0]["folder"] == "realsense_123"
+    assert manifest["sensors"][0]["display_name"] == "Cell RealSense"
+    assert manifest["sensors"][0]["operator_alias"] == "Cell RealSense"
     assert (run_root / RUN_CONFIG).is_file()

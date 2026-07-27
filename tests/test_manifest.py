@@ -80,6 +80,7 @@ def test_manifest_write_load_and_stage_updates(tmp_path: Path) -> None:
         folder=sensor_root,
         run_root=run_root,
         display_name="realsense_123",
+        operator_alias="Run wrist camera",
         status="recording",
     )
     manifest = create_run_manifest(
@@ -98,6 +99,7 @@ def test_manifest_write_load_and_stage_updates(tmp_path: Path) -> None:
     assert loaded["run_id"] == "run-1"
     assert loaded["capture_config"]["fps"] == 6
     assert loaded["sensors"][0]["folder"] == "realsense_123"
+    assert loaded["sensors"][0]["operator_alias"] == "Run wrist camera"
     assert loaded["stages"][0]["name"] == "capture"
 
 

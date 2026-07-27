@@ -107,8 +107,8 @@ This depends on milestones 1 and 2 and on an operator-ready robot/camera cell.
 
 - [ ] Install and verify `pyzed.sl` on the lab host, then verify all three
   configured RealSense serials, OAK-D Pro, and ZED 2i are visible with the
-  intended identities, aliases, mounts, orientations, resolutions, and frame
-  rates.
+  intended identities, run-owned alias snapshots, mounts, orientations,
+  resolutions, and frame rates.
 - [ ] Create a fresh run root at the reviewed capture velocity. Never reuse a
   root containing raw camera frames or raw robot poses.
 - [ ] Generate and inspect `real_full_capture_validation` in plan-only mode,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,7 +12,21 @@ from posetestbot.pipeline.run_config import normalize_inverted, normalize_mounti
 from posetestbot.sensors.contracts import SensorType
 
 
-DEFAULT_SENSOR_ALIASES_PATH = Path("working_data") / "sensor_aliases.json"
+def _default_sensor_aliases_path() -> Path:
+    explicit_root = os.environ.get("POSETESTBOT_APP_ROOT")
+    if explicit_root:
+        app_root = Path(explicit_root).expanduser().resolve()
+    else:
+        source_root = Path(__file__).resolve().parents[2]
+        app_root = (
+            source_root
+            if (source_root / "pyproject.toml").is_file()
+            else Path.cwd()
+        )
+    return app_root / "working_data" / "sensor_aliases.json"
+
+
+DEFAULT_SENSOR_ALIASES_PATH = _default_sensor_aliases_path()
 
 
 def sensor_alias_key(sensor_type: SensorType | str, device_id: str) -> str:

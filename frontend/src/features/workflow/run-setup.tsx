@@ -225,6 +225,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
       : defaultSetupValues(),
   })
   const [enabledOverrides, setEnabledOverrides] = useState<Record<string, Record<string, boolean>>>({})
+  const [operatorAliasDrafts, setOperatorAliasDrafts] = useState<Record<string, string>>({})
   const [sourceSelection, setSourceSelection] = useState<{ runRoot: string; sourceRunRoot: string } | null>(null)
   const [confirmReplacement, setConfirmReplacement] = useState(false)
   const setupLookupPending = existing.isPending
@@ -239,10 +240,18 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     const configured = existing.data?.config.capture.sensors ?? []
     const rows = configured.map((sensor) => {
       const detected = detectedByKey.get(sensorKey(sensor))
+      const legacyOperatorAlias = sensor.operator_alias !== undefined
+        ? sensor.operator_alias
+        : (
+            !detected
+            || sensor.display_name !== detected.display_name
+              ? sensor.display_name
+              : null
+          )
       return {
         ...detected,
         ...sensor,
-        display_name: detected?.effective_display_name ?? detected?.display_name ?? sensor.display_name,
+        operator_alias: legacyOperatorAlias,
         enabled: sensor.enabled ?? true,
       } as RunSensor
     })
@@ -254,6 +263,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
       rows.push({
         ...detected,
         display_name: detected.effective_display_name ?? detected.display_name ?? detected.device_id,
+        operator_alias: detected.alias ?? null,
         mounting_mode: detected.mounting_mode ?? "eye_in_hand",
         enabled: true,
         inverted: Boolean(detected.inverted),
@@ -262,6 +272,19 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     return rows
   }, [detectedByKey, existing.data?.config.capture.sensors])
 
+  const operatorAliasFor = (sensor: RunSensor) => {
+    const key = sensorKey(sensor)
+    return Object.prototype.hasOwnProperty.call(operatorAliasDrafts, key)
+      ? operatorAliasDrafts[key]
+      : sensor.operator_alias ?? ""
+  }
+  const cameraLabel = (sensor: RunSensor) => {
+    const alias = operatorAliasFor(sensor).trim()
+    if (alias) return alias
+    const detected = detectedByKey.get(sensorKey(sensor))
+    if (detected?.display_name) return detected.display_name
+    return sensor.operator_alias ? sensorKey(sensor) : sensor.display_name || sensor.device_id
+  }
   const enabledBySensor = enabledOverrides[selectedRun] ?? {}
   const isEnabled = (sensor: RunSensor) => enabledBySensor[sensorKey(sensor)] ?? sensor.enabled ?? true
   const enabledSensors = configuredSensors.filter(isEnabled)
@@ -395,11 +418,20 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
         throw new Error("Choose a compatible saved calibration before saving this dataset setup")
       }
 
-      const selectedSensors = configuredSensors.map((sensor) => ({
-        ...sensor,
-        enabled: isEnabled(sensor),
-        ...(sensorProfiles[sensorKey(sensor)] ? { calibration_profile_id: sensorProfiles[sensorKey(sensor)] } : {}),
-      }))
+      const selectedSensors = configuredSensors.map((sensor) => {
+        const operatorAlias = operatorAliasFor(sensor).trim() || null
+        const detected = detectedByKey.get(sensorKey(sensor))
+        const fallbackDisplayName = detected?.display_name
+          ?? (sensor.operator_alias ? sensorKey(sensor) : sensor.display_name)
+          ?? sensor.device_id
+        return {
+          ...sensor,
+          display_name: operatorAlias ?? fallbackDisplayName,
+          operator_alias: operatorAlias,
+          enabled: isEnabled(sensor),
+          ...(sensorProfiles[sensorKey(sensor)] ? { calibration_profile_id: sensorProfiles[sensorKey(sensor)] } : {}),
+        }
+      })
       const sequenceOptions = intent === "object_dataset" ? {
         camera_rectification: { intrinsic_profiles: intrinsicProfiles },
       } : {}
@@ -466,13 +498,13 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
             <div className="rounded border border-warning/40 bg-warning/10 p-3 text-xs leading-relaxed"><div className="font-semibold">Depth-only hardware synchronization boundary</div><p className="mt-1 text-muted-foreground">The supported implementation synchronizes <strong className="text-foreground">RealSense depth exposure</strong> through inter-camera triggering. RGB remains timestamp-associated with each camera’s depth frame and is <strong className="text-foreground">not certified as hardware-synchronous across cameras</strong>.</p></div>
             <div className="grid gap-4 md:grid-cols-3">
               <Field id="hardware-sync-group-id" label="Trigger group ID" hint="Stable safe identifier recorded in the run configuration." error={form.formState.errors.hardware_sync_group_id?.message}><Input id="hardware-sync-group-id" {...form.register("hardware_sync_group_id")} /></Field>
-              <Field id="hardware-sync-master" label="Depth trigger master" hint="One enabled exact-ID RealSense drives the group."><Controller control={form.control} name="hardware_sync_master_sensor_key" render={({ field }) => <Select value={field.value} onValueChange={field.onChange}><SelectTrigger id="hardware-sync-master"><SelectValue placeholder="Choose master" /></SelectTrigger><SelectContent>{hardwareMasterOptions.map((sensor) => <SelectItem value={sensorKey(sensor)} key={sensorKey(sensor)}>{sensor.display_name || sensor.device_id}</SelectItem>)}</SelectContent></Select>} /></Field>
+              <Field id="hardware-sync-master" label="Depth trigger master" hint="One enabled exact-ID RealSense drives the group."><Controller control={form.control} name="hardware_sync_master_sensor_key" render={({ field }) => <Select value={field.value} onValueChange={field.onChange}><SelectTrigger id="hardware-sync-master"><SelectValue placeholder="Choose master" /></SelectTrigger><SelectContent>{hardwareMasterOptions.map((sensor) => <SelectItem value={sensorKey(sensor)} key={sensorKey(sensor)}>{cameraLabel(sensor)}</SelectItem>)}</SelectContent></Select>} /></Field>
               <Field id="max-depth-timestamp-skew-ms" label="Max group span (ms)" hint="Maximum earliest-to-latest depth timestamp span across every camera in one complete group; default 2.0 ms, maximum 5.0 ms." error={form.formState.errors.max_depth_timestamp_skew_ms?.message}><Input id="max-depth-timestamp-skew-ms" type="number" min="0.001" max="5" step="0.001" {...form.register("max_depth_timestamp_skew_ms", { valueAsNumber: true })} /></Field>
             </div>
             <div className="overflow-x-auto rounded border"><table className="w-full min-w-[620px] text-left text-[11px]"><thead className="bg-muted/60 text-muted-foreground"><tr><th className="px-3 py-2">Camera</th><th className="px-3 py-2">Mount</th><th className="px-3 py-2">Depth-trigger eligibility</th><th className="px-3 py-2">Role</th></tr></thead><tbody>{enabledSensors.map((sensor) => {
               const key = sensorKey(sensor)
               const eligible = isExactHardwareSensor(sensor)
-              return <tr className="border-t" key={key}><td className="px-3 py-2"><div className="font-medium">{sensor.display_name || sensor.device_id}</div><div className="font-mono text-[9px] text-muted-foreground">{key}</div></td><td className="px-3 py-2">{sensor.mounting_mode === "static" ? "Static" : "Robot-mounted"}</td><td className={`px-3 py-2 font-semibold ${eligible ? "text-success" : "text-destructive"}`}>{eligible ? "Exact-ID D435" : "Unsupported"}</td><td className="px-3 py-2">{key === hardwareMasterSensorKey ? "Master" : eligible ? "Follower" : "—"}</td></tr>
+              return <tr className="border-t" key={key}><td className="px-3 py-2"><div className="font-medium">{cameraLabel(sensor)}</div><div className="font-mono text-[9px] text-muted-foreground">{key}</div></td><td className="px-3 py-2">{sensor.mounting_mode === "static" ? "Static" : "Robot-mounted"}</td><td className={`px-3 py-2 font-semibold ${eligible ? "text-success" : "text-destructive"}`}>{eligible ? "Exact-ID D435" : "Unsupported"}</td><td className="px-3 py-2">{key === hardwareMasterSensorKey ? "Master" : eligible ? "Follower" : "—"}</td></tr>
             })}</tbody></table></div>
             <div className={`rounded border p-3 text-xs ${hardwareBlockers.length ? "border-destructive/35 bg-destructive/5" : "border-success/35 bg-success/5"}`} data-testid="hardware-sync-contract-status"><div className="font-semibold">{hardwareBlockers.length ? "Hardware trigger configuration is blocked" : "Hardware trigger configuration is complete"}</div>{hardwareBlockers.length ? <ul className="mt-2 list-disc space-y-1 pl-4 text-muted-foreground">{hardwareBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul> : <p className="mt-1 text-muted-foreground">The server will validate the exact cameras, mounting mix, master identity, implementation, scope, and skew again before saving. This completes configuration only; it does not yet prove the physical trigger harness.</p>}</div>
             <div className="flex items-start gap-2 rounded border border-warning/40 bg-warning/10 p-3 text-xs" data-testid="hardware-sync-qualification-requirement"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Current physical qualification required before recording</div><p className="mt-1 text-muted-foreground">Readiness requires a hash-verified <code>hardware_sync_qualification.json</code> bound to this exact resolution, frame rate, trigger policy, camera identity, mount, and role assignment. Record operator-confirmed pulsed-light or equivalent exposure-timing evidence with <code>scripts/record_hardware_sync_qualification.py</code>. Any change to this setup invalidates that qualification.</p></div></div>
@@ -517,11 +549,14 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     </Card>
 
     <div className="space-y-4">
-      <Card><CardHeader><CardTitle className="flex items-center gap-2 text-base"><Camera className="size-4" />Cameras for this recording</CardTitle><CardDescription>Disabled cameras keep their identity and calibration metadata but are not opened or expected.</CardDescription></CardHeader><CardContent><div className="metric-number">{enabledSensors.length}</div><div className="mt-1 text-xs text-muted-foreground">enabled · {configuredSensors.length - enabledSensors.length} disabled · {sensors.data?.total_connected ?? 0} connected</div>{configuredSensors.length === 0 && <div className="mt-3 rounded border border-warning/40 bg-warning/10 p-2 text-xs">Select at least one camera on <Link to="/devices" className="font-semibold underline">Devices</Link>.</div>}<div className="mt-4 space-y-2">{configuredSensors.map((sensor) => {
+      <Card><CardHeader><CardTitle className="flex items-center gap-2 text-base"><Camera className="size-4" />Cameras for this recording</CardTitle><CardDescription>Each alias below belongs to this run. Disabled cameras keep their identity, alias, and calibration metadata but are not opened or expected.</CardDescription></CardHeader><CardContent><div className="metric-number">{enabledSensors.length}</div><div className="mt-1 text-xs text-muted-foreground">enabled · {configuredSensors.length - enabledSensors.length} disabled · {sensors.data?.total_connected ?? 0} connected</div>{configuredSensors.length === 0 && <div className="mt-3 rounded border border-warning/40 bg-warning/10 p-2 text-xs">Select at least one camera on <Link to="/devices" className="font-semibold underline">Devices</Link>.</div>}<div className="mt-4 space-y-2">{configuredSensors.map((sensor) => {
         const enabled = isEnabled(sensor)
-        const detected = detectedByKey.get(sensorKey(sensor))
+        const key = sensorKey(sensor)
+        const detected = detectedByKey.get(key)
+        const label = cameraLabel(sensor)
+        const aliasInputId = `run-operator-alias-${key.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`
         const readiness = !detected ? "not detected" : detected.capture_ready === false ? "not ready" : "ready"
-        return <div data-testid="run-camera-row" data-sensor-key={sensorKey(sensor)} data-camera-state={enabled ? "enabled" : "disabled"} key={sensorKey(sensor)} className={`rounded border px-3 py-3 text-xs transition-opacity ${enabled ? "border-border bg-muted" : "border-dashed border-border/70 bg-muted/30 opacity-60"}`}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="truncate font-medium">{sensor.display_name || sensor.device_id}</div><div className="mt-0.5 font-mono text-[10px] text-muted-foreground">{sensorKey(sensor)}</div></div><span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${enabled ? "bg-success/15 text-success" : "bg-muted-foreground/15 text-muted-foreground"}`}>{enabled ? "Enabled" : "Disabled"}</span></div><Label className="mt-3 flex cursor-pointer items-center gap-2"><Checkbox aria-label={`Enable ${sensor.display_name || sensor.device_id} for this run`} checked={enabled} onCheckedChange={(checked) => setEnabledOverrides((current) => ({ ...current, [selectedRun]: { ...current[selectedRun], [sensorKey(sensor)]: checked === true } }))} /><span>Use for this recording</span></Label><div className={`mt-2 flex items-center gap-1 text-[10px] ${readiness !== "ready" && enabled ? "text-destructive" : "text-muted-foreground"}`}><Gauge className="size-3" />{sensor.mounting_mode === "static" ? "Static camera" : "Robot-mounted camera"} · {readiness}</div></div>
+        return <div data-testid="run-camera-row" data-sensor-key={key} data-camera-state={enabled ? "enabled" : "disabled"} key={key} className={`rounded border px-3 py-3 text-xs transition-opacity ${enabled ? "border-border bg-muted" : "border-dashed border-border/70 bg-muted/30 opacity-60"}`}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="truncate font-medium">{label}</div><div className="mt-0.5 font-mono text-[10px] text-muted-foreground">{key}</div></div><span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${enabled ? "bg-success/15 text-success" : "bg-muted-foreground/15 text-muted-foreground"}`}>{enabled ? "Enabled" : "Disabled"}</span></div><div className="mt-3 space-y-1.5"><Label htmlFor={aliasInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Operator alias for this run</Label><Input id={aliasInputId} data-testid="run-camera-alias" aria-label={`Operator alias for ${key}`} value={operatorAliasFor(sensor)} placeholder={detected?.display_name ?? sensor.display_name ?? sensor.device_id} onChange={(event) => setOperatorAliasDrafts((current) => ({ ...current, [key]: event.target.value }))} /><p className="text-[10px] leading-relaxed text-muted-foreground">Saved in <code>run_config.json</code>. When enabled, capture planning copies it into <code>capture_plan.json</code> and <code>dataset_manifest.json</code>. Changing the Devices default later does not rename this run.</p></div><Label className="mt-3 flex cursor-pointer items-center gap-2"><Checkbox aria-label={`Enable ${label} for this run`} checked={enabled} onCheckedChange={(checked) => setEnabledOverrides((current) => ({ ...current, [selectedRun]: { ...current[selectedRun], [key]: checked === true } }))} /><span>Use for this recording</span></Label><div className={`mt-2 flex items-center gap-1 text-[10px] ${readiness !== "ready" && enabled ? "text-destructive" : "text-muted-foreground"}`}><Gauge className="size-3" />{sensor.mounting_mode === "static" ? "Static camera" : "Robot-mounted camera"} · {readiness}</div></div>
       })}</div></CardContent></Card>
       <Card className="border-primary/25"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><ShieldCheck className="size-4 text-primary-strong" />Safety boundary</CardTitle></CardHeader><CardContent className="text-xs leading-relaxed text-muted-foreground">Setup stores parameters only. Recording later requires a current readiness check plus fresh camera and robot confirmations. Those confirmations are never saved.</CardContent></Card>
     </div>

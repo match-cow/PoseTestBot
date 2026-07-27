@@ -154,6 +154,10 @@ def main() -> None:
                 plan,
                 cwd=Path(__file__).resolve().parents[1],
             )
+            # Sequence steps update the shared manifest in their own processes.
+            # Reload their committed state before recording sequence completion
+            # so this parent does not replace it with the pre-execution snapshot.
+            manifest = load_or_create_run_manifest(run_root)
             message = (
                 f"Pipeline sequence {plan.sequence_id} completed "
                 f"{len(plan.steps)} step(s)."
@@ -168,6 +172,9 @@ def main() -> None:
         )
         write_run_manifest(manifest, run_root)
     except Exception as exc:
+        # A failing child may also have committed partial evidence and its own
+        # terminal stage state. Preserve that state before marking the parent.
+        manifest = load_or_create_run_manifest(run_root)
         upsert_stage(
             manifest,
             name=stage_name,

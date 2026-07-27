@@ -404,7 +404,8 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
                     "sensor_type": "realsense",
                     "device_id": "123",
                     "mounting_mode": "static",
-                    "display_name": "Cell RealSense",
+                    "display_name": "Intel RealSense 123",
+                    "operator_alias": "Run wrist camera",
                     "inverted": True,
                 },
                 {
@@ -421,6 +422,14 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
     payload = response.get_json()
     assert response.status_code == 201
     assert payload["config"]["capture"]["sensors"][0]["inverted"] is True
+    assert (
+        payload["config"]["capture"]["sensors"][0]["operator_alias"]
+        == "Run wrist camera"
+    )
+    assert (
+        payload["config"]["capture"]["sensors"][0]["display_name"]
+        == "Run wrist camera"
+    )
     assert payload["config"]["capture"]["sensors"][1]["inverted"] is False
     assert payload["config"]["capture"]["sensors"][1]["enabled"] is False
 
@@ -430,6 +439,10 @@ def test_run_config_endpoint_round_trips_realsense_inverted(tmp_path: Path) -> N
     ).get_json()
 
     assert loaded["config"]["capture"]["sensors"][0]["inverted"] is True
+    assert (
+        loaded["config"]["capture"]["sensors"][0]["operator_alias"]
+        == "Run wrist camera"
+    )
     assert loaded["config"]["capture"]["sensors"][0]["sensor_type"] == "realsense_d435"
     assert loaded["config"]["capture"]["sensors"][1]["enabled"] is False
 
@@ -463,8 +476,9 @@ def test_run_config_partial_post_preserves_existing_operator_contract(
             SensorRunConfig(
                 "realsense_d435",
                 "static-1",
-                "Static D435",
+                "Run-owned static D435",
                 mounting_mode="static",
+                operator_alias="Run-owned static D435",
             ),
         ),
         dataset_mode="pose_template",
@@ -504,6 +518,11 @@ def test_run_config_partial_post_preserves_existing_operator_contract(
     assert config["run_name"] == "Research combined-view run"
     assert config["capture"]["fps"] == 12
     assert config["capture"]["velocity_m_s"] == 0.123
+    assert config["capture"]["sensors"][0]["display_name"] == "Run-owned static D435"
+    assert (
+        config["capture"]["sensors"][0]["operator_alias"]
+        == "Run-owned static D435"
+    )
     assert config["robot_profile"]["cartesian_velocity_m_s"] == 0.123
     assert config["pipeline"] == {
         "sequence_id": "sync_aruco",

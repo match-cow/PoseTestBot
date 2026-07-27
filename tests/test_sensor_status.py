@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from posetestbot.sensors import discovery
+from posetestbot.sensors import aliases as sensor_aliases
 from posetestbot.sensors.aliases import (
     load_sensor_aliases,
     save_sensor_aliases,
@@ -23,6 +24,17 @@ def device(sensor_type: SensorType, device_id: str) -> SensorDeviceInfo:
         device_id=device_id,
         display_name=f"{sensor_type.value} {device_id}",
         metadata={"fixture": True},
+    )
+
+
+def test_default_sensor_alias_path_honors_the_application_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("POSETESTBOT_APP_ROOT", tmp_path.as_posix())
+
+    assert sensor_aliases._default_sensor_aliases_path() == (
+        tmp_path / "working_data" / "sensor_aliases.json"
     )
 
 

@@ -252,6 +252,7 @@ export interface RunConfig {
       sensor_type: string
       device_id: string
       display_name: string
+      operator_alias: string | null
       mounting_mode: string
       enabled: boolean
       inverted: boolean

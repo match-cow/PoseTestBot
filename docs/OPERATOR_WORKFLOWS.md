@@ -15,6 +15,13 @@ operator reviews another step in the same journey, but changing the active run
 folder clears run-setup and placement drafts instead of carrying them into the
 new run.
 
+Camera names follow the same scope boundary. **Devices** stores reusable lab
+defaults; step 1 snapshots an editable **Operator alias for this run** into
+`run_config.json`. Existing runs always hydrate that saved value rather than a
+newer lab default. Capture planning carries the label into `capture_plan.json`
+and `dataset_manifest.json`, but sensor type and device ID remain the durable
+physical identity.
+
 ## Required and optional work
 
 - **Required** steps form the required workflow spine. A later untouched step
@@ -38,9 +45,9 @@ Use this journey when a camera, mounting mode, resolution, or workcell geometry
 needs a new reusable calibration.
 
 1. **Configure the run and cameras — required.** Choose every camera to
-   calibrate and confirm its serial/device identity, mounting mode, orientation,
-   resolution, frame rate, and supervised robot speed. Saving setup does not
-   open hardware.
+   calibrate and confirm its serial/device identity, run-owned operator alias,
+   mounting mode, orientation, resolution, frame rate, and supervised robot
+   speed. Saving setup does not open hardware.
 2. **Choose the printed calibration grid — required.** Select the immutable
    target bundle that exactly matches the board in the cell. Its dictionary,
    marker dimensions, spacing, printable PDF, geometry hash, and placement are
@@ -85,9 +92,10 @@ Use this journey to acquire an object-bearing dataset after a compatible camera
 calibration has been promoted.
 
 1. **Configure cameras and select calibration — required.** Choose the enabled
-   cameras and acquisition settings, then select a promoted calibration that
-   covers every camera identity and mounting mode. PoseTestBot copies the exact
-   selected `calibration_profiles.json` and
+   cameras, their run-owned operator aliases, and acquisition settings, then
+   select a promoted calibration that covers every camera identity and
+   mounting mode. PoseTestBot copies the exact selected
+   `calibration_profiles.json` and
    `intrinsic_calibration_profiles.json` into
    `processed/calibration_inputs/<bundle_sha256>/`. The run-owned
    `calibration_profile_selection.json` binds the source bundle, copied-file

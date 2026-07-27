@@ -536,6 +536,56 @@ def test_unready_camera_is_not_presented_as_usable_and_can_be_deselected(
     assert runner.submitted == []
 
 
+def test_saving_visible_alias_preserves_offline_alias_and_survives_reload(
+    preview_server,
+    page,
+    tmp_path: Path,
+) -> None:
+    server, _runner = preview_server
+    alias_path = tmp_path / "aliases.json"
+    offline_alias = {
+        "alias": "Stored offline camera",
+        "mounting_mode": "static",
+        "inverted": True,
+    }
+    write_json(
+        alias_path,
+        {
+            SENSOR_A: {
+                "alias": "Previous wrist camera",
+                "mounting_mode": "eye_in_hand",
+                "inverted": False,
+            },
+            SENSOR_C: offline_alias,
+        },
+    )
+
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
+
+    visible = sensor_card(page, SENSOR_A)
+    alias_input = visible.get_by_label("Default operator alias", exact=True)
+    expect(alias_input).to_have_value("Previous wrist camera")
+    alias_input.fill("Persistent wrist camera")
+    with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith("/sensors/aliases")
+    ) as response_info:
+        page.get_by_role("button", name="Save labels & mounts").click()
+    assert response_info.value.status == 200
+
+    saved = json.loads(alias_path.read_text())
+    assert saved[SENSOR_A]["alias"] == "Persistent wrist camera"
+    assert saved[SENSOR_C] == offline_alias
+
+    page.reload(wait_until="domcontentloaded")
+
+    reloaded = sensor_card(page, SENSOR_A)
+    expect(reloaded.get_by_label("Default operator alias", exact=True)).to_have_value(
+        "Persistent wrist camera"
+    )
+    expect(reloaded.get_by_text("Persistent wrist camera", exact=True)).to_be_visible()
+
+
 def test_sidebar_webcam_monitor_plays_synthetic_webrtc_without_jpegs(
     preview_server,
     page,

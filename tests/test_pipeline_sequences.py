@@ -3,10 +3,17 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from posetestbot.io.manifest import (
+    load_or_create_run_manifest,
+    load_run_manifest,
+    upsert_stage,
+    write_run_manifest,
+)
 from posetestbot.pipeline.sequences import (
     PIPELINE_SEQUENCES,
     SEQUENCE_EXECUTION_ACK_ENV,
@@ -15,6 +22,7 @@ from posetestbot.pipeline.sequences import (
     list_pipeline_sequences,
     write_sequence_plan,
 )
+from scripts import run_pipeline_sequence
 
 
 def step_ids(plan) -> list[str]:
@@ -215,6 +223,118 @@ def test_direct_real_sequence_rejects_missing_or_string_gates_before_writes(
     assert result.returncode != 0
     assert "fresh literal-true" in result.stderr
     assert not run_root.exists()
+
+
+def test_executed_sequence_retains_child_manifest_sensor_updates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = tmp_path / "sequence-manifest"
+    sensor = {
+        "sensor_type": "realsense_d435",
+        "device_id": "123",
+        "folder": "realsense_123",
+        "display_name": "Wrist camera",
+        "mounting_mode": "eye_in_hand",
+        "status": "planned",
+        "metadata": {},
+    }
+
+    def execute_child_steps(plan, *, cwd) -> None:
+        assert plan.sequence_id == "sync_to_bop_dry_run"
+        assert cwd == Path(__file__).resolve().parents[1]
+        child_manifest = load_or_create_run_manifest(run_root)
+        child_manifest["sensors"] = [sensor]
+        upsert_stage(
+            child_manifest,
+            name="child_sensor_stage",
+            status="succeeded",
+        )
+        write_run_manifest(child_manifest, run_root)
+
+    monkeypatch.setattr(
+        run_pipeline_sequence,
+        "execute_sequence_plan",
+        execute_child_steps,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_pipeline_sequence.py",
+            run_root.as_posix(),
+            "--sequence",
+            "sync_to_bop_dry_run",
+        ],
+    )
+
+    run_pipeline_sequence.main()
+
+    manifest = load_run_manifest(run_root)
+    assert manifest["sensors"] == [sensor]
+    stages = {stage["name"]: stage for stage in manifest["stages"]}
+    assert stages["child_sensor_stage"]["status"] == "succeeded"
+    assert (
+        stages["pipeline_sequence:sync_to_bop_dry_run"]["status"]
+        == "succeeded"
+    )
+
+
+def test_failed_sequence_retains_child_manifest_sensor_updates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = tmp_path / "failed-sequence-manifest"
+    sensor = {
+        "sensor_type": "realsense_d435",
+        "device_id": "123",
+        "folder": "realsense_123",
+        "display_name": "Wrist camera",
+        "operator_alias": "Wrist camera",
+        "mounting_mode": "eye_in_hand",
+        "status": "planned",
+        "metadata": {},
+    }
+
+    def execute_failing_child(plan, *, cwd) -> None:
+        child_manifest = load_or_create_run_manifest(run_root)
+        child_manifest["sensors"] = [sensor]
+        upsert_stage(
+            child_manifest,
+            name="child_sensor_stage",
+            status="failed",
+            message="child failed after planning",
+        )
+        write_run_manifest(child_manifest, run_root)
+        raise RuntimeError("child failed after planning")
+
+    monkeypatch.setattr(
+        run_pipeline_sequence,
+        "execute_sequence_plan",
+        execute_failing_child,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_pipeline_sequence.py",
+            run_root.as_posix(),
+            "--sequence",
+            "sync_to_bop_dry_run",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="child failed after planning"):
+        run_pipeline_sequence.main()
+
+    manifest = load_run_manifest(run_root)
+    assert manifest["sensors"] == [sensor]
+    stages = {stage["name"]: stage for stage in manifest["stages"]}
+    assert stages["child_sensor_stage"]["status"] == "failed"
+    assert (
+        stages["pipeline_sequence:sync_to_bop_dry_run"]["status"]
+        == "failed"
+    )
 
 
 def test_real_capture_planning_steps_claim_camera_resource(tmp_path: Path) -> None:

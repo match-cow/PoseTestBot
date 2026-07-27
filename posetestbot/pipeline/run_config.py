@@ -143,9 +143,19 @@ class SensorRunConfig:
     calibration_profile_id: str | None = None
     inverted: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    operator_alias: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        operator_alias = (
+            self.operator_alias.strip() if self.operator_alias is not None else None
+        )
+        if not operator_alias:
+            data.pop("operator_alias")
+        else:
+            data["operator_alias"] = operator_alias
+            data["display_name"] = operator_alias
+        return data
 
 
 @dataclass(frozen=True)
@@ -339,6 +349,16 @@ def normalize_sensor_enabled(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     raise ValueError("Sensor enabled must be a literal JSON boolean")
+
+
+def normalize_operator_alias(value: Any) -> str | None:
+    """Return a trimmed, optional operator-facing camera alias."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Sensor operator_alias must be a string or null")
+    return value.strip() or None
 
 
 def capture_synchronization_from_mapping(
@@ -541,11 +561,12 @@ def sensor_config_from_token(
     mounting_mode = normalize_mounting_mode(
         parts[2] if len(parts) >= 3 and parts[2] else default_mounting_mode
     )
-    display_name = (
+    operator_alias = (
         parts[3].strip()
         if len(parts) >= 4 and parts[3].strip()
-        else f"{sensor_type.value}:{device_id}"
+        else None
     )
+    display_name = operator_alias or f"{sensor_type.value}:{device_id}"
     inverted = normalize_inverted(parts[4]) if len(parts) == 5 else False
     _validate_sensor_orientation(sensor_type, inverted)
     return SensorRunConfig(
@@ -554,6 +575,7 @@ def sensor_config_from_token(
         display_name=display_name,
         mounting_mode=mounting_mode.value,
         inverted=inverted,
+        operator_alias=operator_alias,
     )
 
 
@@ -569,8 +591,11 @@ def sensor_config_from_mapping(
     mounting_mode = normalize_mounting_mode(
         str(value.get("mounting_mode") or default_mounting_mode)
     ).value
+    operator_alias = normalize_operator_alias(value.get("operator_alias"))
     display_name = str(
-        value.get("display_name") or f"{sensor_type}:{device_id}"
+        operator_alias
+        or value.get("display_name")
+        or f"{sensor_type.value}:{device_id}"
     ).strip()
     metadata = value.get("metadata", {})
     if not isinstance(metadata, Mapping):
@@ -589,6 +614,7 @@ def sensor_config_from_mapping(
         calibration_profile_id=calibration_profile_id,
         inverted=inverted,
         metadata=dict(metadata),
+        operator_alias=operator_alias,
     )
 
 
@@ -639,10 +665,21 @@ def sensor_configs_from_status(
             device_id = str(device.get("device_id", "")).strip()
             if not device_id:
                 continue
+            operator_alias = normalize_operator_alias(device.get("alias"))
+            effective_display_name = str(
+                device.get("effective_display_name") or ""
+            ).strip()
+            discovered_display_name = str(device.get("display_name") or "").strip()
+            if (
+                operator_alias is None
+                and effective_display_name
+                and effective_display_name != discovered_display_name
+            ):
+                operator_alias = effective_display_name
             display_name = str(
-                device.get("effective_display_name")
-                or device.get("alias")
-                or device.get("display_name")
+                operator_alias
+                or effective_display_name
+                or discovered_display_name
                 or f"{sensor_type.value}:{device_id}"
             )
             mounting_mode = normalize_mounting_mode(
@@ -661,6 +698,7 @@ def sensor_configs_from_status(
                     mounting_mode=mounting_mode,
                     inverted=inverted,
                     metadata=dict(metadata),
+                    operator_alias=operator_alias,
                 )
             )
     return tuple(sensors)
@@ -989,6 +1027,12 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         if not str(sensor.get("device_id", "")).strip():
             raise ValueError(f"Run config sensor {index} device_id must not be empty")
         try:
+            normalize_operator_alias(sensor.get("operator_alias"))
+        except ValueError as exc:
+            raise ValueError(
+                f"Run config sensor {index} operator_alias must be a string or null"
+            ) from exc
+        try:
             enabled = normalize_sensor_enabled(sensor.get("enabled", True))
         except ValueError as exc:
             raise ValueError(f"Run config sensor {index} enabled must be a boolean") from exc
@@ -1091,6 +1135,12 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
             for sensor in sensors:
                 if isinstance(sensor, dict):
                     sensor.setdefault("enabled", True)
+                    operator_alias = normalize_operator_alias(
+                        sensor.get("operator_alias")
+                    )
+                    if operator_alias is not None:
+                        sensor["operator_alias"] = operator_alias
+                        sensor["display_name"] = operator_alias
         if value.get("schema_version") in {
             LEGACY_SCHEMA_VERSION,
             PREVIOUS_SCHEMA_VERSION,

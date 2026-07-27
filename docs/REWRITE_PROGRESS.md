@@ -16,7 +16,8 @@ The code rewrite is implemented across:
 - real-only capture planning, preflight, supervised execution, and raw-evidence
   protection;
 - RealSense, OAK-D Pro, and ZED 2i sensor adapters and status contracts, with
-  run-scoped enable/disable selection that preserves disabled camera metadata;
+  run-scoped aliases and enable/disable selection that preserve disabled camera
+  metadata;
 - transactional synchronization and sync-quality reporting, including strict
   hash-bound reuse of each selected calibration profile's saved timing policy;
 - explicit `run_config.v3` mixed-mount D435 depth-exposure triggering, complete
@@ -42,6 +43,31 @@ The code rewrite is implemented across:
   `processed/bop_evaluation/`; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
+
+## 2026-07-27 Run-Owned Camera Alias Persistence
+
+Camera labels now have an explicit scope and durable acquisition provenance.
+The **Devices** page calls its value the reusable **Default operator alias**,
+anchors its JSON store to the application root, and overlays visible-camera
+edits onto the complete saved map so a disconnected camera is not forgotten.
+Workflow step 1 separately exposes **Operator alias for this run** for every
+configured camera. New runs inherit the current lab default, while existing
+runs hydrate their saved value and cannot be silently renamed by later sensor
+discovery or a global default edit.
+
+`run_config.v3` accepts the additive optional
+`capture.sensors[].operator_alias` field and keeps `display_name` as its
+effective compatibility label. Capture planning carries both into
+`capture_plan.json` and `dataset_manifest.json`; sensor folders and hardware
+contracts remain keyed only by sensor type and device ID. The sequence runner
+now reloads child-process manifest updates before recording parent completion,
+fixing the stale parent write that previously discarded planned sensor records
+from completed or failed multi-stage runs.
+
+Validation completed with all 988 default pytest contracts and all 54
+desktop/preview Playwright contracts passing. Ruff, frontend type checking and
+lint, the production Vite rebuild, and `git diff --check` also passed. No
+camera, robot, lab service, or physical capture was accessed.
 
 ## 2026-07-27 Software Completion and Physical-Plan Reconciliation
 

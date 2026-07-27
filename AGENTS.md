@@ -315,6 +315,14 @@ not open hardware. Update it first when adding or renaming a sensor adapter.
 RealSense, OAK-D Pro, and ZED 2i capture scripts should write frames through
 `write_legacy_rgbd_frame` or `write_aligned_rgbd_frame`.
 
+The Devices-page operator alias is a reusable lab default in
+`working_data/sensor_aliases.json`. Workflow setup snapshots and may edit the
+run-owned `capture.sensors[].operator_alias` in `run_config.json`;
+`display_name` remains its effective compatibility label. Later lab-default
+changes must not rename an existing run. Capture planning mirrors the alias
+into `capture_plan.json` and `dataset_manifest.json`; physical identity and
+sensor-folder naming remain bound to sensor type and device ID.
+
 `run_config.v3` owns the explicit `capture.synchronization` contract.
 `timestamp_aligned` remains the general default. The only supported
 `hardware_trigger` implementation on the current lab inventory is

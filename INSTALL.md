@@ -351,6 +351,16 @@ disabled camera's identity and metadata while excluding it from work. Keep at
 least one camera enabled, then regenerate capture-plan and preflight artifacts
 after any enable/disable change.
 
+The **Default operator alias** on **Devices** is a reusable lab default stored
+in the repository `working_data/sensor_aliases.json`; saving visible cameras
+retains records for cameras that are currently disconnected. Workflow step 1
+snapshots that default as the editable, run-owned
+`capture.sensors[].operator_alias` in `run_config.json`, with `display_name`
+retained as the compatibility-facing effective label. A later edit to the
+Devices default does not rename an existing run. Capture planning copies the
+alias into `capture_plan.json` and `dataset_manifest.json` while physical
+identity and folder naming remain bound to sensor type and device ID.
+
 #### Combined static and robot-mounted D435 triggering
 
 `run_config.v3` supports one explicit mixed-mount hardware mode:

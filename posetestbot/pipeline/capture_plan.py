@@ -329,6 +329,11 @@ def build_capture_plan(
                 display_name=str(sensor.get("display_name") or folder_name),
                 mounting_mode=str(sensor.get("mounting_mode") or ""),
                 status="planned",
+                operator_alias=(
+                    str(sensor["operator_alias"])
+                    if sensor.get("operator_alias")
+                    else None
+                ),
                 metadata={
                     "capture_plan_index": index,
                     "calibration_profile_id": sensor.get("calibration_profile_id"),
