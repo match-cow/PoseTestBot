@@ -3,8 +3,9 @@ import { HelpTip } from "@/components/help-tip"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
+import type { WorkflowProgressStatus } from "@/lib/workflow-session"
 
-export type WorkflowStepStatus = "complete" | "current" | "ready" | "blocked" | "running" | "not_started"
+export type WorkflowStepStatus = WorkflowProgressStatus
 
 export interface WorkflowStepDefinition {
   id: string
@@ -77,7 +78,7 @@ export interface WorkflowStepCardProps {
 
 export function WorkflowStepCard({ id, number, title, description, status = "not_started", required = true, help, children, className }: WorkflowStepCardProps) {
   return <section id={`workflow-step-${id}`} data-workflow-step={id} className={cn("scroll-mt-24 space-y-3", className)} aria-labelledby={`workflow-step-${id}-title`}>
-    <Card className={cn(status === "current" && "border-primary/45", status === "blocked" && "border-destructive/30")}>
+    <Card className={cn(status === "current" && "border-primary/45", status === "blocked" && "border-destructive/30", status === "running" && "border-warning/40")}>
       <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 items-start gap-3">
           <span className={cn("grid size-8 shrink-0 place-items-center rounded-full border font-mono text-xs font-bold", required ? "border-primary/45 bg-primary/10 text-primary-strong" : "border-border bg-muted text-muted-foreground")}>{number ?? "·"}</span>

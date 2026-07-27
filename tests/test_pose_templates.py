@@ -17,6 +17,16 @@ from posetestbot.bop.writer import (
     export_sensor_scene_to_bop,
     validate_bop_model_ply,
 )
+from posetestbot.calibration.profiles import (
+    SCHEMA_VERSION as CALIBRATION_SCHEMA_VERSION,
+)
+from posetestbot.calibration.profiles import (
+    CalibrationProfile,
+    CalibrationQuality,
+    CalibrationStatus,
+    RigidTransform,
+    TransformFrame,
+)
 from posetestbot.pipeline.run_config import (
     SensorRunConfig,
     create_run_config,
@@ -58,6 +68,11 @@ from posetestbot.pose_templates.selection import (
     select_pose_template,
 )
 from posetestbot.pose_templates.transforms import matrix_from_xyz_rpy
+from posetestbot.sensors.contracts import (
+    CameraIntrinsics,
+    MountingMode,
+    SensorType,
+)
 
 
 def mesh_file(path: Path, *, extents=(20, 10, 10)) -> Path:
@@ -1059,6 +1074,30 @@ def test_bop_export_preserves_duplicate_instance_identity_and_target_count(
         np.ones((8, 8), dtype=np.uint16),
     )
     (sensor / "cam_K.txt").write_text("100 0 4 0 100 4 0 0 1\n")
+    (sensor / "depthscale.txt").write_text("1.0\n")
+    calibration_profile = CalibrationProfile(
+        schema_version=CALIBRATION_SCHEMA_VERSION,
+        profile_id="realsense_123_static_fixture",
+        sensor_id="123",
+        sensor_type=SensorType.REALSENSE_D435,
+        mounting_mode=MountingMode.STATIC,
+        rig_position="fixture",
+        intrinsics=CameraIntrinsics(
+            cam_k=(100.0, 0.0, 4.0, 0.0, 100.0, 4.0, 0.0, 0.0, 1.0),
+            width=8,
+            height=8,
+            distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
+            depth_scale_to_mm=1.0,
+        ),
+        extrinsics=RigidTransform(
+            from_frame=TransformFrame.CAMERA,
+            to_frame=TransformFrame.TEMPLATE_BASE,
+            rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+            translation_mm=(0.0, 0.0, 0.0),
+        ),
+        status=CalibrationStatus.VALID,
+        quality=CalibrationQuality(num_observations=1, num_inliers=1),
+    )
     instances = [
         {
             "instance_uuid": f"{index}{index}{index}{index}{index}{index}{index}{index}-1111-4111-8111-111111111111",
@@ -1081,6 +1120,75 @@ def test_bop_export_preserves_duplicate_instance_identity_and_target_count(
         }
         for item in instances
     ]
+    frame_bindings = [
+        {
+            "output_image_id": 0,
+            "source_frame_id": 0,
+            "source_filename": "000000.png",
+        }
+    ]
+    frame_contract = {
+        "schema_version": "blenderproc_frame_contract.v1",
+        "annotation_mode": "pose",
+        "projection": "native",
+        "resolution": {"width": 8, "height": 8},
+        "frames": frame_bindings,
+    }
+    matched_pose_path = sensor / "match_robot_ee_poses.json"
+    matched_pose_path.write_text(
+        json.dumps({"000000.png": {"robot_ee_pose": {"X": 0}}})
+    )
+    frame_contract["source_artifact_sha256"] = {
+        "match_robot_ee_poses.json": hashlib.sha256(
+            matched_pose_path.read_bytes()
+        ).hexdigest()
+    }
+    np.save(
+        output.parent / "camera_matrix.npy",
+        np.asarray([[100.0, 0.0, 4.0], [0.0, 100.0, 4.0], [0.0, 0.0, 1.0]]),
+    )
+    np.save(output.parent / "camera_poses.npy", np.eye(4)[None, ...])
+    (output.parent / "frame_contract.json").write_text(json.dumps(frame_contract))
+    (output.parent / "objects.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "blenderproc_object_instances.v1",
+                "template_uuid": "fixture",
+                "bundle_sha256": "0" * 64,
+                "instances": prepared,
+            }
+        )
+    )
+    prepared_objects = output.parent / "objects"
+    prepared_objects.mkdir()
+    object_file_provenance = []
+    for index, item in enumerate(prepared, start=1):
+        mesh_path = prepared_objects / item["mesh"]
+        transform_path = prepared_objects / item["transform"]
+        mesh_path.write_text("fixture mesh")
+        transform = np.eye(4)
+        transform[:3, 3] = [index * 0.01, 0.0, 0.1]
+        np.save(transform_path, transform)
+        object_file_provenance.append(
+            {
+                "instance_uuid": item["instance_uuid"],
+                "mesh": item["mesh"],
+                "mesh_sha256": hashlib.sha256(mesh_path.read_bytes()).hexdigest(),
+                "transform": item["transform"],
+                "transform_sha256": hashlib.sha256(
+                    transform_path.read_bytes()
+                ).hexdigest(),
+            }
+        )
+    input_sha256 = {
+        name: hashlib.sha256((output.parent / name).read_bytes()).hexdigest()
+        for name in (
+            "camera_matrix.npy",
+            "camera_poses.npy",
+            "frame_contract.json",
+            "objects.json",
+        )
+    }
     annotations = [
         {
             "obj_id": 7,
@@ -1096,8 +1204,10 @@ def test_bop_export_preserves_duplicate_instance_identity_and_target_count(
                 "schema_version": "posetestbot_render_instances.v1",
                 "blenderproc_version": "2.8.0",
                 "supported_blenderproc_version": "2.8.0",
+                "annotation_mode": "pose",
                 "identity_contract": "bop_gt_index_matches_loaded_instance_order.v1",
                 "instances": prepared,
+                "frame_bindings": frame_bindings,
                 "frames": {
                     "0": [
                         {
@@ -1109,6 +1219,50 @@ def test_bop_export_preserves_duplicate_instance_identity_and_target_count(
                         for index, item in enumerate(instances)
                     ]
                 },
+            }
+        )
+    )
+    (output / "posetestbot_gt_provenance.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "posetestbot_gt_provenance.v1",
+                "blenderproc_version": "2.8.0",
+                "supported_blenderproc_version": "2.8.0",
+                "annotation_mode": "pose",
+                "pose_contract": ("analytic_model_to_opencv_camera_rigid_transform.v1"),
+                "coordinate_frames": {
+                    "model": "canonical_object_model",
+                    "camera": "opencv_camera",
+                    "camera_pose_input": "template_base_from_opencv_camera",
+                    "object_pose_input": "template_base_from_object",
+                },
+                "analytic_implementation": {
+                    "revision": "posetestbot_analytic_bop_gt.v1",
+                    "script_sha256": hashlib.sha256(
+                        (
+                            Path(__file__).resolve().parents[1]
+                            / "scripts"
+                            / "blenderproc_render_720p_multi.py"
+                        ).read_bytes()
+                    ).hexdigest(),
+                },
+                "translation_unit": "mm",
+                "rotation_storage": "row_major_3x3",
+                "projection": "native",
+                "resolution": {"width": 8, "height": 8},
+                "frame_bindings": frame_bindings,
+                "source_artifact_sha256": frame_contract["source_artifact_sha256"],
+                "scene_loading": {
+                    "objects": "blenderproc.loader.load_obj",
+                    "camera_intrinsics": (
+                        "blenderproc.camera.set_intrinsics_from_K_matrix"
+                    ),
+                    "camera_poses": "blenderproc.camera.add_camera_pose",
+                    "image_rendering": False,
+                    "mask_generation": "not_requested",
+                },
+                "input_sha256": input_sha256,
+                "object_files": object_file_provenance,
             }
         )
     )
@@ -1124,6 +1278,8 @@ def test_bop_export_preserves_duplicate_instance_identity_and_target_count(
         tmp_path / "bop",
         object_name_to_id={item["instance_uuid"]: 7 for item in instances},
         template_instances=instances,
+        annotation_mode="pose",
+        calibration_profile=calibration_profile,
     )
 
     assert exported.targets == [
@@ -1132,7 +1288,30 @@ def test_bop_export_preserves_duplicate_instance_identity_and_target_count(
     assert [item["instance_uuid"] for item in exported.instance_map] == [
         item["instance_uuid"] for item in instances
     ]
-    assert len(list((tmp_path / "bop" / "test" / "000001" / "mask").glob("*.png"))) == 2
+    scene = tmp_path / "bop" / "test" / "000001"
+    assert exported.annotation_mode == "pose"
+    assert exported.annotation_provenance["schema_version"] == (
+        "posetestbot_gt_provenance.v1"
+    )
+    assert exported.annotation_provenance["frame_binding_count"] == 1
+    assert (scene / "scene_gt.json").is_file()
+    assert (scene / "posetestbot_gt_provenance.json").is_file()
+    assert not (scene / "scene_gt_info.json").exists()
+    assert not (scene / "mask").exists()
+    assert not (scene / "mask_visib").exists()
+
+    matched_pose_path.write_text(
+        json.dumps({"000000.png": {"robot_ee_pose": {"X": 1}}})
+    )
+    with pytest.raises(ValueError, match="current matched robot-pose artifact"):
+        export_sensor_scene_to_bop(
+            sensor,
+            tmp_path / "bop-after-pose-mutation",
+            object_name_to_id={item["instance_uuid"]: 7 for item in instances},
+            template_instances=instances,
+            annotation_mode="pose",
+            calibration_profile=calibration_profile,
+        )
 
 
 def test_bop_export_without_annotations_needs_no_blenderproc_identity(

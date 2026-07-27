@@ -197,6 +197,12 @@ def test_synchronize_sensor_folder_preserves_raw_frames(tmp_path: Path) -> None:
     }
     assert report["timestamp_pair_provenance_audited"] is True
     assert report["matched_frames"] == 2
+    assert report["eligible_in_motion_frames"] == 2
+    assert report["matched_eligible_frames"] == 2
+    assert report["eligible_motion_coverage"] == 1.0
+    assert report["outside_motion_interval_frame_count"] == 1
+    assert report["in_motion_exclusion_count"] == 0
+    assert report["unexplained_in_motion_exclusion_count"] == 0
     assert report["dropped"][0]["frame_id"] == "1500.png"
     assert CAM_K in report["copied_metadata_artifacts"]
     assert FRAME_METADATA_JSONL not in report["copied_metadata_artifacts"]
@@ -264,6 +270,12 @@ def test_sync_strict_nearest_pose_delta_drops_outlier_before_derived_output(
     report = json.loads((output_folder / SYNC_REPORT).read_text())
     assert report["max_nearest_pose_delta_ms"] == 20.0
     assert report["nearest_pose_delta_rejection_count"] == 1
+    assert report["eligible_in_motion_frames"] == 2
+    assert report["matched_eligible_frames"] == 1
+    assert report["eligible_motion_coverage"] == 0.5
+    assert report["outside_motion_interval_frame_count"] == 1
+    assert report["in_motion_exclusion_count"] == 1
+    assert report["unexplained_in_motion_exclusion_count"] == 0
     assert report["mean_abs_nearest_pose_delta_ns"] == 0
     assert report["max_abs_nearest_pose_delta_ns"] == 0
     rejected = next(
@@ -463,7 +475,7 @@ def test_sync_cli_updates_manifest(tmp_path: Path) -> None:
         capture_output=True,
     )
 
-    assert "Matched 2/3 frames" in result.stdout
+    assert "Wrote 2 synchronized in-motion frame-pose match(es)" in result.stdout
 
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(
@@ -713,9 +725,7 @@ def test_run_sync_cli_publishes_complete_groups_for_hardware_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     script_path = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "sync_run_non_destructive.py"
+        Path(__file__).resolve().parents[1] / "scripts" / "sync_run_non_destructive.py"
     )
     spec = importlib.util.spec_from_file_location(
         "test_sync_run_hardware_script",
@@ -761,14 +771,9 @@ def test_run_sync_cli_publishes_complete_groups_for_hardware_policy(
             SyncResult(
                 sensor_folder=(run_root / f"realsense_{device}").as_posix(),
                 output_folder=(
-                    run_root
-                    / "processed"
-                    / "synchronized"
-                    / f"realsense_{device}"
+                    run_root / "processed" / "synchronized" / f"realsense_{device}"
                 ).as_posix(),
-                matched_poses_path=(
-                    run_root / f"{device}-matched.json"
-                ).as_posix(),
+                matched_poses_path=(run_root / f"{device}-matched.json").as_posix(),
                 report_path=(run_root / f"{device}-sync.json").as_posix(),
                 total_frames=3,
                 matched_frames=3,
@@ -787,12 +792,7 @@ def test_run_sync_cli_publishes_complete_groups_for_hardware_policy(
         }
 
     def fake_write(root, value):
-        path = (
-            Path(root)
-            / "processed"
-            / "synchronized"
-            / MULTIVIEW_FRAME_GROUPS
-        )
+        path = Path(root) / "processed" / "synchronized" / MULTIVIEW_FRAME_GROUPS
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value))
         return path
@@ -852,16 +852,12 @@ def test_run_sync_cli_publishes_complete_groups_for_hardware_policy(
     sync_script.main()
 
     assert len(calls) == 1
-    assert grouping_calls[0]["run_config"]["capture"]["synchronization"][
-        "mode"
-    ] == "hardware_trigger"
+    assert (
+        grouping_calls[0]["run_config"]["capture"]["synchronization"]["mode"]
+        == "hardware_trigger"
+    )
     groups = json.loads(
-        (
-            run_root
-            / "processed"
-            / "synchronized"
-            / MULTIVIEW_FRAME_GROUPS
-        ).read_text()
+        (run_root / "processed" / "synchronized" / MULTIVIEW_FRAME_GROUPS).read_text()
     )
     assert groups["hardware_sync_qualification"] == qualification_provenance
     assert groups["hardware_sync_execution_binding"] == execution_binding
@@ -885,25 +881,15 @@ def test_run_sync_cli_publishes_complete_groups_for_hardware_policy(
     with pytest.raises(ValueError, match="new grouping evidence is invalid"):
         sync_script.main()
 
-    canonical = (
-        run_root
-        / "processed"
-        / "synchronized"
-        / MULTIVIEW_FRAME_GROUPS
-    )
+    canonical = run_root / "processed" / "synchronized" / MULTIVIEW_FRAME_GROUPS
     assert not canonical.exists()
-    assert len(
-        list(
-            canonical.parent.glob(
-                f".{MULTIVIEW_FRAME_GROUPS}.*.invalidated"
-            )
-        )
-    ) == 1
+    assert (
+        len(list(canonical.parent.glob(f".{MULTIVIEW_FRAME_GROUPS}.*.invalidated")))
+        == 1
+    )
     failed_manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     failed_stage = next(
-        stage
-        for stage in failed_manifest["stages"]
-        if stage["name"] == "sync_run"
+        stage for stage in failed_manifest["stages"] if stage["name"] == "sync_run"
     )
     assert failed_stage["status"] == "failed"
     assert MULTIVIEW_FRAME_GROUPS not in failed_stage.get("artifacts", {})

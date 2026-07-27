@@ -15,13 +15,15 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api, query } from "@/lib/api"
-import type { CellEntity, CellPose, CellScene, CellTimelinePage, CellTransform } from "@/lib/contracts"
+import type { CellEntity, CellPose, CellScene, CellTimelineMetadata, CellTimelinePage, CellTransform } from "@/lib/contracts"
 import { titleCase } from "@/lib/utils"
 import { useOperator } from "@/providers/operator-provider"
 
 const PAGE_SIZE = 2_000
 const LAYERS = ["reference_frame", "template", "robot_base", "robot_flange", "tcp", "camera", "object", "calibration_target"]
 type Preset = "perspective" | "top" | "front"
+type CameraFrameModality = "rgb" | "depth"
+type CameraFrameViewMode = CameraFrameModality | "rgb_depth"
 type CellPresentation = {
   mode: string
   transform: CellTransform
@@ -365,6 +367,94 @@ function CellCanvas({ scene, visible, pose, trajectory, selected, onSelect, pres
   </Canvas>
 }
 
+function CameraModalityPanel({ selectedRun, timeline, pose, loading, modality, outOfRange }: { selectedRun: string; timeline: CellTimelineMetadata; pose: CellPose | null; loading: boolean; modality: CameraFrameModality; outOfRange: boolean }) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  const camera = timeline.camera
+  const evidence = timeline.camera_frames[modality]
+  const rotation = camera?.image_presentation.display_rotation_degrees ?? 0
+  const modalityLabel = modality === "rgb" ? "RGB" : "Depth"
+  const frameUrl = pose && evidence.available ? query("/ui/cell-scene/camera-frame", {
+    run_root: selectedRun,
+    timeline_id: timeline.id,
+    frame_id: pose.frame_id,
+    modality,
+  }) : null
+  const failed = frameUrl !== null && failedUrl === frameUrl
+
+  return <section data-testid="cell-camera-frame-panel" data-camera-id={timeline.id} data-modality={modality} className="min-w-0 border-t border-white/10 first:border-t-0">
+    <div className="flex items-center justify-between gap-2 px-4 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-300">{modalityLabel}</div>
+      <StatusBadge status={evidence.available ? "recorded" : "unavailable"}>{evidence.available ? "Available" : "Unavailable"}</StatusBadge>
+    </div>
+    <div className="grid aspect-[4/3] max-h-[420px] w-full place-items-center overflow-hidden bg-black/25 p-3" aria-live="polite">
+      {frameUrl && !failed
+        ? <img key={frameUrl} data-testid="cell-camera-frame-image" data-modality={modality} data-display-rotation-degrees={rotation} src={frameUrl} alt={`${camera?.display_name ?? timeline.label} ${modalityLabel} frame ${pose?.frame_id ?? ""}`} className="max-h-full max-w-full object-contain" style={rotation === 180 ? { transform: "rotate(180deg)" } : undefined} decoding="async" onError={() => setFailedUrl(frameUrl)} />
+        : <div className="max-w-xs text-center"><Camera aria-hidden="true" className="mx-auto mb-3 size-8 text-slate-500" /><div className="text-sm font-semibold">{!evidence.available ? `${modalityLabel} data unavailable` : outOfRange ? "No frame at this shared index" : loading ? `Loading exact ${modalityLabel} frame…` : failed ? `${modalityLabel} frame unavailable` : "Select a recorded frame"}</div>{failed && <p className="mt-2 text-xs leading-relaxed text-slate-400">This exact timeline entry has no matching {modalityLabel} PNG. Move the slider to inspect another retained frame.</p>}</div>}
+    </div>
+    {modality === "depth" && <div data-testid="cell-depth-legend" className="border-t border-white/10 px-4 py-2 text-[10px] text-slate-400"><div className="mb-1 h-1.5 rounded-full bg-[linear-gradient(90deg,#b40426,#fdae61,#66c2a5,#3288bd,#30123b)]" /><div className="flex justify-between"><span>Near · {timeline.camera_frames.depth.preview_min_depth_mm.toFixed(0)} mm</span><span>Far · {timeline.camera_frames.depth.preview_max_depth_mm.toFixed(0)} mm</span></div><div className="mt-1">Fixed-range colour preview; zero or invalid depth is black. The retained uint16 depth PNG is unchanged.</div></div>}
+  </section>
+}
+
+function CameraTimelineColumn({ timeline, selectedRun, frame, modalities }: { timeline: CellTimelineMetadata; selectedRun: string; frame: number; modalities: CameraFrameModality[] }) {
+  const offset = Math.floor(frame / PAGE_SIZE) * PAGE_SIZE
+  const outOfRange = frame >= timeline.frame_count
+  const available = modalities.some((modality) => timeline.camera_frames[modality].available)
+  const timelineQuery = useQuery({
+    queryKey: ["cell-timeline", selectedRun, timeline.id, offset],
+    queryFn: () => api<CellTimelinePage>(query("/ui/cell-scene/timeline", { run_root: selectedRun, timeline_id: timeline.id, offset, limit: PAGE_SIZE })),
+    enabled: available && !outOfRange,
+  })
+  const pose = timelineQuery.data?.poses.find((item) => item.index === frame) ?? null
+  const camera = timeline.camera
+  return <article data-testid="cell-camera-column" data-camera-id={timeline.id} className="min-w-0 overflow-hidden rounded-lg border border-slate-800 bg-slate-950 text-slate-100">
+    <header className="flex items-start justify-between gap-3 px-4 py-3">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2 text-sm font-semibold"><Camera aria-hidden="true" className="size-4 shrink-0 text-sky-400" />{camera?.display_name ?? timeline.label}</div>
+        <div className="mt-1 truncate font-mono text-[10px] text-slate-400">{camera ? `${camera.sensor_folder} · ${titleCase(camera.sensor_type)} · ${titleCase(camera.mounting_mode)}` : timeline.label}</div>
+      </div>
+      <div className="shrink-0 text-right text-[10px] text-slate-400">{timeline.frame_count} matched<br />frames</div>
+    </header>
+    <div data-testid="cell-camera-orientation" data-inverted={camera?.inverted ? "true" : "false"} className={camera?.inverted ? "border-t border-amber-400/20 bg-amber-400/10 px-4 py-2 text-[10px] text-amber-200" : "border-t border-white/10 bg-white/[0.025] px-4 py-2 text-[10px] text-slate-400"}>{camera?.inverted ? `Inverted mount · ${camera.image_presentation.correction === "capture" ? "stored frame already corrected by 180° at capture" : "rotated 180° for display in Cell"}` : "Normal mount · stored frame shown directly"}</div>
+    <div>{modalities.map((modality) => <CameraModalityPanel key={modality} selectedRun={selectedRun} timeline={timeline} pose={pose} loading={timelineQuery.isFetching} modality={modality} outOfRange={outOfRange} />)}</div>
+    <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-white/10 px-4 py-3 text-[11px] text-slate-400">
+      <div className="truncate font-mono text-slate-200">{pose?.frame_id ?? "No exact frame loaded"}</div>
+      <div>{pose ? `Shared index ${pose.index + 1} · camera frame ${pose.index + 1} of ${timeline.frame_count}` : outOfRange ? `Shared index ${frame + 1} exceeds this camera's ${timeline.frame_count} frames` : "Waiting for timeline"}</div>
+      <div className="w-full">Exact per-camera matched frame · no interpolation</div>
+    </footer>
+  </article>
+}
+
+function CameraFramesSection({ timelines, selectedTimelineIds, selectedRun, frame, viewMode, open, onToggle, onToggleTimeline, onSelectAll, onClearSelection, onViewModeChange }: { timelines: CellTimelineMetadata[]; selectedTimelineIds: Set<string>; selectedRun: string; frame: number; viewMode: CameraFrameViewMode; open: boolean; onToggle: () => void; onToggleTimeline: (timelineId: string) => void; onSelectAll: () => void; onClearSelection: () => void; onViewModeChange: (mode: CameraFrameViewMode) => void }) {
+  const selectedTimelines = timelines.filter((item) => selectedTimelineIds.has(item.id))
+  const modalities: CameraFrameModality[] = viewMode === "rgb_depth" ? ["rgb", "depth"] : [viewMode]
+  const rgbCount = timelines.filter((item) => item.camera_frames.rgb.available).length
+  const depthCount = timelines.filter((item) => item.camera_frames.depth.available).length
+  const frameGridColumns = selectedTimelines.length > 2 ? "md:grid-cols-2 2xl:grid-cols-3" : selectedTimelines.length === 2 ? "md:grid-cols-2" : ""
+  return <Card data-testid="cell-camera-frames">
+    <CardHeader>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0"><CardTitle className="flex items-center gap-2 text-base"><Camera aria-hidden="true" className="size-4" />Camera evidence</CardTitle><CardDescription className="mt-1">{timelines.length} camera{timelines.length === 1 ? "" : "s"} retain image data. Select any combination for side-by-side RGB or colourized metric-depth inspection.</CardDescription></div>
+        <Button type="button" size="sm" variant={open ? "default" : "outline"} aria-expanded={open} aria-controls="cell-camera-frame-content" onClick={onToggle}>{open ? "Hide frames" : "Show frames"}</Button>
+      </div>
+    </CardHeader>
+    {open && <CardContent id="cell-camera-frame-content" className="space-y-4 border-t pt-4">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto]">
+        <div><div className="flex items-center justify-between gap-3"><Label className="text-xs font-semibold">Cameras to compare · {selectedTimelines.length} selected</Label><div className="flex gap-1"><Button type="button" size="sm" variant="ghost" onClick={onSelectAll}>All</Button><Button type="button" size="sm" variant="ghost" onClick={onClearSelection}>None</Button></div></div><div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-3">{timelines.map((item) => {
+          const camera = item.camera
+          const selected = selectedTimelineIds.has(item.id)
+          const modalitiesAvailable = [item.camera_frames.rgb.available && "RGB", item.camera_frames.depth.available && "depth"].filter(Boolean).join(" + ")
+          return <Label key={item.id} className="flex min-w-0 cursor-pointer items-start gap-2 rounded border p-3 text-xs"><Checkbox checked={selected} onCheckedChange={() => onToggleTimeline(item.id)} aria-label={`Show ${camera?.display_name ?? item.label}`} /><span className="min-w-0"><span className="block truncate font-semibold">{camera?.display_name ?? item.label}</span><span className="mt-0.5 block truncate font-mono text-[9px] text-muted-foreground">{camera?.sensor_folder ?? item.label} · {item.frame_count} frames</span><span className="mt-1 block text-[9px] text-muted-foreground">{modalitiesAvailable || "No displayable data"}{camera?.inverted ? " · inverted mount" : ""}</span></span></Label>
+        })}</div></div>
+        <div><Label className="text-xs font-semibold">Data shown</Label><div className="mt-2 flex flex-wrap gap-2" role="group" aria-label="Camera data shown">{([["rgb", "RGB", rgbCount], ["depth", "Depth", depthCount], ["rgb_depth", "RGB + depth", Math.max(rgbCount, depthCount)]] as const).map(([value, label, count]) => <Button key={value} type="button" size="sm" variant={viewMode === value ? "default" : "outline"} aria-label={`Show ${label}`} aria-pressed={viewMode === value} disabled={count === 0} onClick={() => onViewModeChange(value)}>{label}<span className="rounded bg-black/10 px-1.5 font-mono text-[9px]">{count}</span></Button>)}</div></div>
+      </div>
+      <div className="rounded border border-sky-500/25 bg-sky-500/5 px-3 py-2 text-[10px] leading-relaxed text-muted-foreground">The shared slider applies the same ordinal to each selected camera&apos;s own matched timeline. Side-by-side display does not claim simultaneous exposure unless the run has separate authoritative hardware-sync group evidence.</div>
+      {selectedTimelines.length > 0
+        ? <div data-testid="cell-camera-frame-grid" className={`grid items-start gap-4 ${frameGridColumns}`}>{selectedTimelines.map((timeline) => <CameraTimelineColumn key={timeline.id} timeline={timeline} selectedRun={selectedRun} frame={frame} modalities={modalities} />)}</div>
+        : <div className="rounded-lg border border-dashed px-5 py-10 text-center text-sm text-muted-foreground">Select at least one camera above to show retained frame evidence.</div>}
+    </CardContent>}
+  </Card>
+}
+
 export function CellPage() {
   const { selectedRun } = useOperator()
   const sceneQuery = useQuery({ queryKey: ["cell-scene", selectedRun], queryFn: () => api<CellScene>(query("/ui/cell-scene", { run_root: selectedRun })) })
@@ -379,6 +469,13 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
   const [frame, setFrame] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [trajectory, setTrajectory] = useState(true)
+  const [showCameraFrames, setShowCameraFrames] = useState(false)
+  const [cameraViewMode, setCameraViewMode] = useState<CameraFrameViewMode>("rgb")
+  const [selectedCameraTimelineIds, setSelectedCameraTimelineIds] = useState<Set<string>>(() => {
+    const initial = scene.timelines.find((item) => item.id === scene.default_timeline_id && item.camera_frames.available)
+      ?? scene.timelines.find((item) => item.camera_frames.available)
+    return new Set(initial ? [initial.id] : [])
+  })
   const [visible, setVisible] = useState(() => new Set(LAYERS))
   const [selected, setSelected] = useState<CellEntity | null>(null)
   const [preset, setPreset] = useState<Preset>("perspective")
@@ -388,6 +485,7 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
   const targetAligned = presentation.mode === "calibration_target_front"
 
   const timeline = scene?.timelines.find((item) => item.id === timelineId)
+  const cameraTimelines = scene.timelines.filter((item) => item.camera_frames?.available === true)
   const offset = Math.floor(frame / PAGE_SIZE) * PAGE_SIZE
   const timelineQuery = useQuery({
     queryKey: ["cell-timeline", selectedRun, timelineId, offset],
@@ -412,6 +510,29 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
   }, [playing, timeline])
 
   const toggleLayer = (layer: string) => setVisible((current) => { const next = new Set(current); if (next.has(layer)) next.delete(layer); else next.add(layer); return next })
+  const selectTimeline = (value: string) => {
+    setTimelineId(value)
+    setFrame(0)
+    setPlaying(false)
+  }
+  const toggleCameraFrames = () => {
+    if (showCameraFrames) {
+      setShowCameraFrames(false)
+      return
+    }
+    if (selectedCameraTimelineIds.size === 0 && cameraTimelines.length > 0) {
+      setSelectedCameraTimelineIds(new Set([cameraTimelines[0].id]))
+    }
+    setShowCameraFrames(true)
+  }
+  const toggleCameraTimeline = (value: string) => setSelectedCameraTimelineIds((current) => {
+    const next = new Set(current)
+    if (next.has(value)) next.delete(value)
+    else next.add(value)
+    return next
+  })
+  const selectAllCameraTimelines = () => setSelectedCameraTimelineIds(new Set(cameraTimelines.map((item) => item.id)))
+  const clearCameraTimelines = () => setSelectedCameraTimelineIds(new Set())
   const unresolved = scene.entities.filter((entity) => entity.status === "unresolved")
   const unresolvedCameras = unresolved.filter((entity) => entity.type === "camera")
   const otherIssues = scene.warnings.filter((warning) => warning.code !== "missing_calibration_profiles")
@@ -419,19 +540,18 @@ function CellSceneView({ selectedRun, scene }: { selectedRun: string; scene: Cel
     .concat(unresolved.filter((entity) => entity.type !== "camera").map((entity) => `${entity.label}: ${entity.unresolved_reason}`))
 
   return <div className="space-y-5">
-    <PageHeader eyebrow="Dataset contents" title="Cell" description="Read-only, millimetre-accurate view of the configured cell and recorded flange trajectory." />
-    <ProcessHandoff title="Inspect evidence here; change it in Workflow" description="Cell never edits transforms or fills missing data. Use it to inspect geometry, trajectories, and provenance, then return to the guided workflow to resolve missing calibration, capture, synchronization, or export evidence." to="/workflow/setup" action="Open workflow" />
+    <PageHeader eyebrow="Dataset contents" title="Cell" description="Read-only inspection of cell geometry, exact flange poses, and retained synchronized RGB-D evidence." />
+    <ProcessHandoff title="Inspect evidence here; change it in Workflow" description="Cell never edits transforms, images, or depth data. Use it to compare geometry and retained evidence, then return to the guided workflow to resolve missing calibration, capture, synchronization, or export evidence." to="/workflow/setup" action="Open workflow" />
     {(scene.warnings.length > 0 || unresolved.length > 0) && <div className="flex items-start gap-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-4 text-sm"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" /><div className="min-w-0"><div className="font-semibold">Partial cell scene</div><div className="mt-1 text-xs text-muted-foreground">{unresolvedCameras.length > 0 ? `${unresolvedCameras.length} camera${unresolvedCameras.length === 1 ? " is" : "s are"} hidden until this run has matching promoted calibration profiles. The recorded trajectory and available template evidence remain visible.` : "Available scene evidence remains visible."}</div>{otherIssues.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-xs font-medium">Show {otherIssues.length} provenance detail{otherIssues.length === 1 ? "" : "s"}</summary><ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-muted-foreground">{otherIssues.map((message, index) => <li key={index}>{message}</li>)}</ul></details>}</div></div>}
-    <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
-      <Card className="overflow-hidden"><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>3D cell</CardTitle><CardDescription data-testid="cell-coordinate-convention" className="flex flex-wrap items-center gap-1">{targetAligned ? "Target-aligned · right-handed · origin top-left · +X right · +Y down · +Z into grid · millimetres" : "Right-handed · Z-up · millimetres"} · no pose interpolation <HelpTip label="cell coordinate and timeline display">Transforms are rendered from stored evidence in millimetres. Timeline playback shows exact recorded poses only; it never interpolates or invents a robot pose between frames.</HelpTip></CardDescription></div><div className="flex flex-wrap gap-2"><Button size="sm" variant={preset === "perspective" ? "default" : "outline"} onClick={() => setPreset("perspective")}><Focus />Perspective</Button><Button size="sm" variant={preset === "top" ? "default" : "outline"} onClick={() => setPreset("top")}><ScanLine />Top</Button><Button size="sm" variant={preset === "front" ? "default" : "outline"} onClick={() => setPreset("front")}><Crosshair />Front</Button><Button size="sm" variant="outline" aria-label="Reset cell view" onClick={() => { setPreset("perspective"); setResetToken((value) => value + 1) }}><RotateCcw /></Button></div></div></CardHeader>
-        <CardContent className="p-0">{webgl ? <div className="h-[620px]"><CellCanvas scene={scene} visible={visible} pose={pose} trajectory={trajectory} selected={selected} onSelect={setSelected} preset={preset} resetToken={resetToken} /></div> : <div data-testid="cell-webgl-fallback" className="grid h-[620px] place-items-center p-10 text-center"><div><AlertTriangle className="mx-auto mb-3 size-8 text-amber-500" /><div className="font-semibold">WebGL is unavailable</div><p className="mt-2 max-w-md text-sm text-muted-foreground">The component and provenance list remains available. Use a browser with WebGL support to orbit the scene.</p></div></div>}</CardContent>
-        <div className="space-y-3 border-t bg-muted/20 p-4"><div className="flex items-center gap-3"><Select value={timelineId || "none"} onValueChange={(value) => { setTimelineId(value === "none" ? "" : value); setFrame(0); setPlaying(false) }}><SelectTrigger className="w-[250px]" aria-label="Timeline"><SelectValue placeholder="No trajectory" /></SelectTrigger><SelectContent>{scene.timelines.length ? scene.timelines.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.frame_count} frames</SelectItem>) : <SelectItem value="none">No trajectory</SelectItem>}</SelectContent></Select><Button size="icon" variant="outline" aria-label={playing ? "Pause timeline" : "Play timeline"} disabled={!timeline} onClick={() => setPlaying((value) => !value)}>{playing ? <CirclePause /> : <CirclePlay />}</Button><div className="min-w-0 flex-1"><input aria-label="Frame scrubber" className="w-full accent-primary" type="range" min={0} max={Math.max(0, (timeline?.frame_count ?? 1) - 1)} value={frame} disabled={!timeline} onChange={(event) => { setFrame(Number(event.target.value)); setPlaying(false) }} /></div><div className="w-28 text-right font-mono text-xs">{timeline ? `${frame + 1} / ${timeline.frame_count}` : "No frames"}</div></div><div className="flex justify-between text-[11px] text-muted-foreground"><span>{pose ? `Exact frame ${pose.frame_id}${pose.motion ? ` · ${pose.motion}` : ""}` : timelineQuery.isFetching ? "Loading exact pose page…" : "Select a recorded frame"}</span><span>Adjacent pages prefetch automatically</span></div></div>
-      </Card>
-
-      <div className="space-y-4"><Card><CardHeader><CardTitle className="text-base">Visibility layers</CardTitle></CardHeader><CardContent className="grid grid-cols-2 gap-2">{LAYERS.map((layer) => <Label key={layer} className="flex items-center gap-2 rounded border p-2 text-xs"><Checkbox checked={visible.has(layer)} onCheckedChange={() => toggleLayer(layer)} />{titleCase(layer)}</Label>)}<Label className="col-span-2 flex items-center gap-2 rounded border p-2 text-xs"><Checkbox checked={trajectory} onCheckedChange={(value) => setTrajectory(value === true)} /><Route className="size-3.5" />Recorded trajectory</Label></CardContent></Card>
-        <Card><CardHeader><CardTitle className="text-base">Selection details</CardTitle><CardDescription>Click a component in the scene.</CardDescription></CardHeader><CardContent><SelectionDetails entity={selected} /></CardContent></Card>
-        <Card><CardHeader><CardTitle className="text-base">Dataset contents</CardTitle><CardDescription>{scene.object_selection.objectless ? "Objectless RGB-D run" : `${scene.object_selection.instance_count} pose-template instance(s)`}</CardDescription></CardHeader><CardContent className="max-h-80 space-y-2 overflow-auto">{scene.entities.map((entity) => <button key={entity.id} type="button" className="flex w-full items-center gap-2 rounded border px-3 py-2 text-left text-xs hover:bg-muted" onClick={() => setSelected(entity)}>{entity.type === "camera" ? <Camera className="size-3.5" /> : entity.status === "unresolved" ? <EyeOff className="size-3.5 text-destructive" /> : <Eye className="size-3.5" />}<span className="min-w-0 flex-1 truncate">{entity.label}</span><StatusBadge status={entity.status} /></button>)}</CardContent></Card>
-      </div>
+    <Card className="overflow-hidden"><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>3D cell</CardTitle><CardDescription data-testid="cell-coordinate-convention" className="flex flex-wrap items-center gap-1">{targetAligned ? "Target-aligned · right-handed · origin top-left · +X right · +Y down · +Z into grid · millimetres" : "Right-handed · Z-up · millimetres"} · no pose interpolation <HelpTip label="cell coordinate and timeline display">Transforms are rendered from stored evidence in millimetres. Timeline playback shows exact recorded poses only; it never interpolates or invents a robot pose between frames.</HelpTip></CardDescription></div><div className="flex flex-wrap gap-2"><Button size="sm" variant={preset === "perspective" ? "default" : "outline"} onClick={() => setPreset("perspective")}><Focus />Perspective</Button><Button size="sm" variant={preset === "top" ? "default" : "outline"} onClick={() => setPreset("top")}><ScanLine />Top</Button><Button size="sm" variant={preset === "front" ? "default" : "outline"} onClick={() => setPreset("front")}><Crosshair />Front</Button><Button size="sm" variant="outline" aria-label="Reset cell view" onClick={() => { setPreset("perspective"); setResetToken((value) => value + 1) }}><RotateCcw /></Button></div></div></CardHeader>
+      <CardContent className="p-0">{webgl ? <div className="h-[620px] min-w-0"><CellCanvas scene={scene} visible={visible} pose={pose} trajectory={trajectory} selected={selected} onSelect={setSelected} preset={preset} resetToken={resetToken} /></div> : <div data-testid="cell-webgl-fallback" className="grid h-[620px] min-w-0 place-items-center p-10 text-center"><div><AlertTriangle className="mx-auto mb-3 size-8 text-amber-500" /><div className="font-semibold">WebGL is unavailable</div><p className="mt-2 max-w-md text-sm text-muted-foreground">The component and provenance list remains available. Use a browser with WebGL support to orbit the scene.</p></div></div>}</CardContent>
+      <div className="space-y-3 border-t bg-muted/20 p-4"><div className="flex flex-wrap items-end gap-3"><div className="w-[310px] shrink-0 space-y-1"><Label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">3D pose timeline source</Label><Select value={timelineId || "none"} onValueChange={(value) => selectTimeline(value === "none" ? "" : value)}><SelectTrigger aria-label="Timeline"><SelectValue placeholder="No trajectory" /></SelectTrigger><SelectContent>{scene.timelines.length ? scene.timelines.map((item) => <SelectItem key={item.id} value={item.id}>{item.camera ? `${item.camera.display_name} · ${item.camera.sensor_folder}` : item.label} · {item.frame_count} frames</SelectItem>) : <SelectItem value="none">No trajectory</SelectItem>}</SelectContent></Select></div><Button size="icon" variant="outline" aria-label={playing ? "Pause timeline" : "Play timeline"} disabled={!timeline} onClick={() => setPlaying((value) => !value)}>{playing ? <CirclePause /> : <CirclePlay />}</Button><div className="min-w-[280px] flex-1 pb-2"><input aria-label="Frame scrubber" className="w-full accent-primary" type="range" min={0} max={Math.max(0, (timeline?.frame_count ?? 1) - 1)} value={frame} disabled={!timeline} onChange={(event) => { setFrame(Number(event.target.value)); setPlaying(false) }} /></div><div className="w-28 pb-2 text-right font-mono text-xs">{timeline ? `${frame + 1} / ${timeline.frame_count}` : "No frames"}</div></div><div className="flex flex-wrap justify-between gap-2 text-[11px] text-muted-foreground"><span>{pose ? `Exact 3D pose frame ${pose.frame_id}${pose.motion ? ` · ${pose.motion}` : ""}` : timelineQuery.isFetching ? "Loading exact pose page…" : "Select a recorded frame"}</span><span>{showCameraFrames ? "Selected RGB-D tiles below use this shared ordinal" : "Adjacent pose pages prefetch automatically"}</span></div></div>
+    </Card>
+    {cameraTimelines.length > 0 && <CameraFramesSection timelines={cameraTimelines} selectedTimelineIds={selectedCameraTimelineIds} selectedRun={selectedRun} frame={frame} viewMode={cameraViewMode} open={showCameraFrames} onToggle={toggleCameraFrames} onToggleTimeline={toggleCameraTimeline} onSelectAll={selectAllCameraTimelines} onClearSelection={clearCameraTimelines} onViewModeChange={setCameraViewMode} />}
+    <div className="grid items-start gap-5 xl:grid-cols-[300px_minmax(0,1fr)_340px]">
+      <Card><CardHeader><CardTitle className="text-base">Scene visibility</CardTitle><CardDescription>Choose which geometry remains visible in the 3D scene above.</CardDescription></CardHeader><CardContent className="grid grid-cols-2 gap-2">{LAYERS.map((layer) => <Label key={layer} className="flex items-center gap-2 rounded border p-2 text-xs"><Checkbox checked={visible.has(layer)} onCheckedChange={() => toggleLayer(layer)} />{titleCase(layer)}</Label>)}<Label className="col-span-2 flex items-center gap-2 rounded border p-2 text-xs"><Checkbox checked={trajectory} onCheckedChange={(value) => setTrajectory(value === true)} /><Route className="size-3.5" />Recorded trajectory</Label></CardContent></Card>
+      <Card><CardHeader><CardTitle className="text-base">Selection evidence</CardTitle><CardDescription>Click geometry above or choose a recorded component at right.</CardDescription></CardHeader><CardContent><SelectionDetails entity={selected} /></CardContent></Card>
+      <Card><CardHeader><CardTitle className="text-base">Recorded components</CardTitle><CardDescription>{scene.object_selection.objectless ? "Objectless RGB-D run" : `${scene.object_selection.instance_count} pose-template instance(s)`}</CardDescription></CardHeader><CardContent className="max-h-[520px] space-y-2 overflow-auto">{scene.entities.map((entity) => <button key={entity.id} type="button" className="flex w-full items-center gap-2 rounded border px-3 py-2 text-left text-xs hover:bg-muted" onClick={() => setSelected(entity)}>{entity.type === "camera" ? <Camera className="size-3.5" /> : entity.status === "unresolved" ? <EyeOff className="size-3.5 text-destructive" /> : <Eye className="size-3.5" />}<span className="min-w-0 flex-1 truncate">{entity.label}</span><StatusBadge status={entity.status} /></button>)}</CardContent></Card>
     </div>
   </div>
 }

@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
     PROCESSED_DIR,
+    RAW_ROBOT_EE_POSES,
     SYNC_QUALITY_REPORT,
     SYNC_REPORT,
     SYNCHRONIZED_DIR,
@@ -66,6 +67,27 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _run_robot_pose_packet_loss(root: Path) -> tuple[bool, int | None]:
+    path = root / RAW_ROBOT_EE_POSES
+    if not path.is_file():
+        return False, None
+    value = _read_json(path)
+    if not value:
+        return False, None
+    total = 0
+    for record in value.values():
+        if not isinstance(record, Mapping):
+            return False, None
+        source_packet = record.get("source_packet")
+        if not isinstance(source_packet, Mapping):
+            return False, None
+        loss = source_packet.get("estimated_packets_lost")
+        if isinstance(loss, bool) or not isinstance(loss, int) or loss < 0:
+            return False, None
+        total += loss
+    return True, total
+
+
 def discover_sync_reports(run_root: str | Path) -> list[Path]:
     root = Path(run_root)
     sync_root = root / PROCESSED_DIR / SYNCHRONIZED_DIR
@@ -95,10 +117,84 @@ def _sensor_summary(
     total_frames = int(report.get("total_frames", 0))
     matched_frames = int(report.get("matched_frames", 0))
     dropped_frames = int(report.get("dropped_frames", 0))
-    match_ratio = (matched_frames / total_frames) if total_frames else 0.0
     report_schema = str(report.get("schema_version") or "")
     if report_schema not in SUPPORTED_SYNC_REPORT_SCHEMAS:
         raise ValueError(f"Unsupported sync report schema: {report_schema!r}")
+    dropped_rows = (
+        [row for row in report.get("dropped", []) if isinstance(row, Mapping)]
+        if isinstance(report.get("dropped"), list)
+        else []
+    )
+    outside_motion_interval_frame_count = int(
+        report.get(
+            "outside_motion_interval_frame_count",
+            sum(
+                row.get("reason") == "outside robot motion intervals"
+                for row in dropped_rows
+            ),
+        )
+        or 0
+    )
+    dropped_in_motion_rows = [
+        row
+        for row in dropped_rows
+        if isinstance(row.get("motion"), str) and row.get("motion")
+    ]
+    eligible_in_motion_frames = int(
+        report.get(
+            "eligible_in_motion_frames",
+            (
+                matched_frames + len(dropped_in_motion_rows)
+                if dropped_rows
+                else total_frames
+            ),
+        )
+        or 0
+    )
+    matched_eligible_frames = int(
+        report.get("matched_eligible_frames", matched_frames) or 0
+    )
+    match_ratio = (
+        matched_eligible_frames / eligible_in_motion_frames
+        if eligible_in_motion_frames
+        else 0.0
+    )
+    in_motion_exclusion_count = int(
+        report.get(
+            "in_motion_exclusion_count",
+            max(0, eligible_in_motion_frames - matched_eligible_frames),
+        )
+        or 0
+    )
+    unexplained_in_motion_exclusion_count = int(
+        report.get(
+            "unexplained_in_motion_exclusion_count",
+            sum(
+                row.get("reason") != "nearest robot pose delta exceeds threshold"
+                for row in dropped_in_motion_rows
+            ),
+        )
+        or 0
+    )
+    incompatible_timestamp_pair_count = int(
+        report.get(
+            "incompatible_timestamp_pair_count",
+            sum(
+                row.get("reason")
+                == "frame/robot timestamp fallback clocks are incompatible"
+                for row in dropped_rows
+            ),
+        )
+        or 0
+    )
+    robot_pose_packet_loss_audited = (
+        report.get("robot_pose_packet_loss_audited") is True
+    )
+    robot_pose_packet_loss_count = report.get("robot_pose_packet_loss_count")
+    if robot_pose_packet_loss_audited:
+        robot_pose_packet_loss_count = int(robot_pose_packet_loss_count or 0)
+    else:
+        robot_pose_packet_loss_count = None
     motion_intervals = report.get("motion_intervals")
     motion_windows = report.get("motion_windows", {})
     timestamp_source_counts = report.get("timestamp_source_counts")
@@ -159,6 +255,17 @@ def _sensor_summary(
         "total_frames": total_frames,
         "matched_frames": matched_frames,
         "dropped_frames": dropped_frames,
+        "outside_motion_interval_frame_count": (outside_motion_interval_frame_count),
+        "eligible_in_motion_frames": eligible_in_motion_frames,
+        "matched_eligible_frames": matched_eligible_frames,
+        "eligible_motion_coverage": match_ratio,
+        "in_motion_exclusion_count": in_motion_exclusion_count,
+        "unexplained_in_motion_exclusion_count": (
+            unexplained_in_motion_exclusion_count
+        ),
+        "incompatible_timestamp_pair_count": (incompatible_timestamp_pair_count),
+        "robot_pose_packet_loss_audited": robot_pose_packet_loss_audited,
+        "robot_pose_packet_loss_count": robot_pose_packet_loss_count,
         "match_ratio": match_ratio,
         "motion_count": (
             len(motion_intervals)
@@ -184,59 +291,135 @@ def _sensor_checks(
 ) -> list[dict[str, Any]]:
     name = str(sensor["sensor_name"])
     checks: list[dict[str, Any]] = []
-    total_frames = int(sensor["total_frames"])
-    matched_frames = int(sensor["matched_frames"])
+    eligible_frames = int(sensor["eligible_in_motion_frames"])
+    matched_frames = int(sensor["matched_eligible_frames"])
     match_ratio = float(sensor["match_ratio"])
+    counts_valid = eligible_frames > 0 and 0 <= matched_frames <= eligible_frames
 
     checks.append(
         _check(
             f"sync_frames:{name}",
-            "ok" if total_frames > 0 and matched_frames > 0 else "error",
+            "ok" if counts_valid and matched_frames > 0 else "error",
             (
-                f"{name} matched {matched_frames}/{total_frames} frame(s)."
-                if total_frames > 0 and matched_frames > 0
-                else f"{name} has no synchronized frames."
+                f"{name} synchronized {matched_frames}/{eligible_frames} "
+                "eligible in-motion frame(s)."
+                if counts_valid and matched_frames > 0
+                else f"{name} has no valid synchronized in-motion frame coverage."
             ),
-            details={"matched_frames": matched_frames, "total_frames": total_frames},
+            details={
+                "matched_eligible_frames": matched_frames,
+                "eligible_in_motion_frames": eligible_frames,
+            },
         )
     )
     checks.append(
         _check(
-            f"sync_match_ratio:{name}",
-            "ok" if match_ratio >= min_match_ratio else "warning",
+            f"sync_eligible_motion_coverage:{name}",
+            "ok" if counts_valid and match_ratio >= min_match_ratio else "warning",
             (
-                f"{name} match ratio is {match_ratio:.3f}."
-                if match_ratio >= min_match_ratio
+                f"{name} eligible in-motion coverage is {match_ratio:.3f}."
+                if counts_valid and match_ratio >= min_match_ratio
                 else (
-                    f"{name} match ratio is {match_ratio:.3f}; "
+                    f"{name} eligible in-motion coverage is {match_ratio:.3f}; "
                     f"recommended minimum is {min_match_ratio:.3f}."
                 )
             ),
-            details={"match_ratio": match_ratio, "min_match_ratio": min_match_ratio},
+            details={
+                "eligible_motion_coverage": match_ratio,
+                "min_match_ratio": min_match_ratio,
+                "denominator": "eligible_in_motion_frames",
+            },
         )
     )
 
-    dropped_frames = int(sensor["dropped_frames"])
+    in_motion_exclusion_count = int(sensor["in_motion_exclusion_count"])
     if max_dropped_frames is not None:
         checks.append(
             _check(
-                f"sync_dropped_frames:{name}",
-                "ok" if dropped_frames <= max_dropped_frames else "warning",
+                f"sync_in_motion_exclusions:{name}",
                 (
-                    f"{name} dropped {dropped_frames} frame(s)."
-                    if dropped_frames <= max_dropped_frames
+                    "ok"
+                    if in_motion_exclusion_count <= max_dropped_frames
+                    else "warning"
+                ),
+                (
+                    f"{name} excluded {in_motion_exclusion_count} eligible "
+                    "in-motion frame(s)."
+                    if in_motion_exclusion_count <= max_dropped_frames
                     else (
-                        f"{name} dropped {dropped_frames} frame(s); "
+                        f"{name} excluded {in_motion_exclusion_count} eligible "
+                        "in-motion frame(s); "
                         f"threshold is {max_dropped_frames}."
                     )
                 ),
                 details={
-                    "dropped_frames": dropped_frames,
+                    "in_motion_exclusion_count": in_motion_exclusion_count,
                     "max_dropped_frames": max_dropped_frames,
                 },
             )
         )
 
+    unexplained_exclusions = int(sensor["unexplained_in_motion_exclusion_count"])
+    checks.append(
+        _check(
+            f"sync_unexplained_in_motion_exclusions:{name}",
+            "ok" if unexplained_exclusions == 0 else "error",
+            (
+                f"{name} has no unexplained in-motion frame exclusions."
+                if unexplained_exclusions == 0
+                else (
+                    f"{name} has {unexplained_exclusions} unexplained "
+                    "in-motion frame exclusion(s)."
+                )
+            ),
+            details={"unexplained_in_motion_exclusion_count": unexplained_exclusions},
+        )
+    )
+    nearest_rejections = int(sensor["nearest_pose_delta_rejection_count"])
+    checks.append(
+        _check(
+            f"sync_nearest_pose_rejections:{name}",
+            "ok",
+            (
+                f"{name} rejected {nearest_rejections} eligible frame(s) "
+                "at the nearest-pose threshold."
+            ),
+            details={"nearest_pose_delta_rejection_count": nearest_rejections},
+        )
+    )
+    missing_count = int(sensor.get("timestamp_missing_count", 0) or 0)
+    fallback_count = int(sensor.get("timestamp_fallback_count", 0) or 0)
+    incompatible_count = int(sensor.get("incompatible_timestamp_pair_count", 0) or 0)
+    fallback_allowed = sensor.get("timestamp_fallback_allowed") is True
+    timestamp_complete = (
+        missing_count == 0
+        and incompatible_count == 0
+        and (fallback_count == 0 or fallback_allowed)
+    )
+    checks.append(
+        _check(
+            f"sync_timestamp_completeness:{name}",
+            (
+                "ok"
+                if timestamp_complete
+                else ("error" if expected_calibration_sync else "warning")
+            ),
+            (
+                f"{name} has complete compatible timestamp evidence."
+                if timestamp_complete
+                else (
+                    f"{name} timestamp evidence has missing={missing_count}, "
+                    f"fallback={fallback_count}, incompatible={incompatible_count}."
+                )
+            ),
+            details={
+                "timestamp_missing_count": missing_count,
+                "timestamp_fallback_count": fallback_count,
+                "incompatible_timestamp_pair_count": incompatible_count,
+                "timestamp_fallback_allowed": fallback_allowed,
+            },
+        )
+    )
     if max_nearest_pose_delta_ms is not None:
         max_delta_ns = sensor.get("max_abs_nearest_pose_delta_ns")
         threshold_ns = int(max_nearest_pose_delta_ms * 1_000_000)
@@ -600,9 +783,51 @@ def build_sync_quality_report(
             )
         )
 
+    sensor_packet_loss_audited = bool(sensors) and all(
+        sensor.get("robot_pose_packet_loss_audited") is True for sensor in sensors
+    )
+    if sensor_packet_loss_audited:
+        robot_pose_packet_loss_audited = True
+        robot_pose_packet_loss_count = max(
+            int(sensor.get("robot_pose_packet_loss_count", 0) or 0)
+            for sensor in sensors
+        )
+    else:
+        robot_pose_packet_loss_audited, robot_pose_packet_loss_count = (
+            _run_robot_pose_packet_loss(root)
+        )
+    if robot_pose_packet_loss_audited:
+        assert robot_pose_packet_loss_count is not None
+        checks.append(
+            _check(
+                "sync_robot_pose_packet_loss",
+                "ok" if robot_pose_packet_loss_count == 0 else "warning",
+                (
+                    "Robot pose stream recorded "
+                    f"{robot_pose_packet_loss_count} lost packet(s)."
+                ),
+                details={"robot_pose_packet_loss_count": robot_pose_packet_loss_count},
+            )
+        )
+
     total_frames = sum(int(sensor["total_frames"]) for sensor in sensors)
     matched_frames = sum(int(sensor["matched_frames"]) for sensor in sensors)
     dropped_frames = sum(int(sensor["dropped_frames"]) for sensor in sensors)
+    eligible_in_motion_frames = sum(
+        int(sensor["eligible_in_motion_frames"]) for sensor in sensors
+    )
+    matched_eligible_frames = sum(
+        int(sensor["matched_eligible_frames"]) for sensor in sensors
+    )
+    in_motion_exclusion_count = sum(
+        int(sensor["in_motion_exclusion_count"]) for sensor in sensors
+    )
+    unexplained_in_motion_exclusion_count = sum(
+        int(sensor["unexplained_in_motion_exclusion_count"]) for sensor in sensors
+    )
+    outside_motion_interval_frame_count = sum(
+        int(sensor["outside_motion_interval_frame_count"]) for sensor in sensors
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _generated_at(),
@@ -613,7 +838,26 @@ def build_sync_quality_report(
         "total_frames": total_frames,
         "matched_frames": matched_frames,
         "dropped_frames": dropped_frames,
-        "overall_match_ratio": (matched_frames / total_frames) if total_frames else 0.0,
+        "outside_motion_interval_frame_count": (outside_motion_interval_frame_count),
+        "eligible_in_motion_frames": eligible_in_motion_frames,
+        "matched_eligible_frames": matched_eligible_frames,
+        "in_motion_exclusion_count": in_motion_exclusion_count,
+        "unexplained_in_motion_exclusion_count": (
+            unexplained_in_motion_exclusion_count
+        ),
+        "overall_match_ratio": (
+            matched_eligible_frames / eligible_in_motion_frames
+            if eligible_in_motion_frames
+            else 0.0
+        ),
+        "overall_eligible_motion_coverage": (
+            matched_eligible_frames / eligible_in_motion_frames
+            if eligible_in_motion_frames
+            else 0.0
+        ),
+        "match_ratio_denominator": "eligible_in_motion_frames",
+        "robot_pose_packet_loss_audited": robot_pose_packet_loss_audited,
+        "robot_pose_packet_loss_count": robot_pose_packet_loss_count,
         "min_match_ratio": min_match_ratio,
         "max_dropped_frames": max_dropped_frames,
         "max_nearest_pose_delta_ms": (

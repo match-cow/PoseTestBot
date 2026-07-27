@@ -52,8 +52,8 @@ public class PoseTestBot_CalibrationVarianceProposal
 	private static final String CALIBRATION_COVERAGE_LOWER_CENTER_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerCenter";
 	private static final String CALIBRATION_COVERAGE_LOWER_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerRight";
 
-	/* Enabled in repository source for lab validation; verify deployed identity. */
-	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = true;
+	/* Disabled until offline review and supervised Workbench commissioning pass. */
+	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = false;
 	/* Commission one phase at a time before enabling both together. */
 	private static final boolean RUN_COVERAGE_RASTER = true;
 	private static final boolean RUN_ORIENTATION_DITHER = true;

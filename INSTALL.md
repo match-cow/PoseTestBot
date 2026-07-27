@@ -2,6 +2,8 @@
 
 PoseTestBot is acquisition-first: the repository captures, calibrates,
 synchronizes, optionally prepares ground-truth/masks, and exports BOP datasets.
+Its only evaluation runtime is the optional Inspect-only official BOP19
+dataset-validation path; it does not install or execute pose estimators.
 Use Python 3.12 and `uv` for Python environment management. The project requires
 `>=3.12,<3.13`; `uv` installs the matching interpreter when necessary. PoseTestBot targets only the
 physical lab iiwa; normal setup and validation never execute capture automatically.
@@ -11,7 +13,8 @@ physical lab iiwa; normal setup and validation never execute capture automatical
 From the repository root:
 
 ```bash
-bash scripts/install.sh --with-posegridgen --with-posetemplatecreator
+bash scripts/install.sh --with-posegridgen --with-posetemplatecreator \
+  --with-bop-toolkit
 ```
 
 This safe project bootstrap:
@@ -20,6 +23,8 @@ This safe project bootstrap:
 - runs `uv sync --all-groups`,
 - initializes and verifies the exact, clean PoseGridGen source submodule,
 - initializes and verifies the exact, clean PoseTemplateCreator source submodule,
+- initializes the exact, clean BOP Toolkit source submodule and synchronizes
+  its separate locked `uv` runtime,
 - checks required Python imports,
 - checks optional acquisition runtimes,
 - lists registered sensor adapters without opening hardware,
@@ -52,6 +57,11 @@ selections. Client-side catalogue PLY previews continue to work. New CAD
 inspection/conversion, exact slicing, pose-template preview, and PDF generation
 are disabled until the pinned checkout is available.
 
+Omit `--with-bop-toolkit` only when neither **Inspect → BOP Evaluation** nor the
+evaluation-compatible **Pose + masks** ground-truth product is needed.
+Annotation-free export and plain pose GT remain usable; the console reports the
+missing optional runtime at the affected controls.
+
 Use check-only mode to inspect an already configured environment without
 installing or syncing:
 
@@ -65,7 +75,8 @@ For an Ubuntu lab host where system packages and optional BlenderProc should be
 installed by the script:
 
 ```bash
-bash scripts/install.sh --with-system-packages --with-blenderproc
+bash scripts/install.sh --with-system-packages --with-blenderproc \
+  --with-bop-toolkit
 ```
 
 `--with-system-packages` installs common Ubuntu packages for local development,
@@ -77,7 +88,8 @@ brightness calibration; calibration remains unavailable if that control cannot
 be inspected.
 
 `--with-blenderproc` installs the validated BlenderProc 2.8.0 as a `uv` tool
-when the `blenderproc` executable is missing.
+when it is missing and replaces another detected BlenderProc version. The web
+readiness check and render worker both reject every other version.
 
 `--with-playwright-browsers` installs Chromium for Playwright browser UI tests
 after the uv environment has been synchronized. Keep this opt-in on lab hosts
@@ -96,6 +108,32 @@ neither Bun nor a network connection:
 ```bash
 bash scripts/install.sh --with-web-build
 ```
+
+### Operator Console Run Storage
+
+The web API permits run folders only below explicit server-approved roots. A
+normal checkout enables both:
+
+- `<repository>/working_data`; and
+- `/mnt/working_data_ssd`, the lab acquisition SSD.
+
+The run chooser lists direct run folders from both roots and may accept a new
+folder below either root; Workflow writes its `run_config.json`. Additional
+roots can be appended with the platform path-separator-delimited
+`POSETESTBOT_WEB_RUN_ROOTS` variable (`:` on Linux). For example:
+
+```bash
+export POSETESTBOT_WEB_RUN_ROOTS=/srv/posetestbot-runs:/data/archive
+export POSETESTBOT_WEB_DEFAULT_RUN_ROOT=/mnt/working_data_ssd/current_run
+uv run posetestbot-web
+```
+
+`POSETESTBOT_WEB_DEFAULT_RUN_ROOT` selects the initial run folder but does not
+bypass containment: it must resolve below one of the approved roots. The
+Dashboard polls capacity from the filesystem that will contain the selected
+run, including a not-yet-created child folder. It warns below the smaller of
+500 GiB or 15% free and reports critical capacity below the smaller of 100 GiB
+or 5% free.
 
 ## Manual Prerequisites
 
@@ -172,6 +210,93 @@ and metadata-portability details are documented in
 [`docs/WORKPIECE_CATALOGUE.md`](docs/WORKPIECE_CATALOGUE.md). The printable
 template and object-GT workflow is documented in
 [`docs/POSETEMPLATECREATOR_OBJECT_GT.md`](docs/POSETEMPLATECREATOR_OBJECT_GT.md).
+
+### Workflow BOP Ground Truth
+
+After the guided object-dataset workflow verifies its base BOP image/model
+export, step 6 offers two explicit derived products:
+
+- `pose` loads the immutable objects and calibrated cameras in BlenderProc
+  2.8.0 and writes standard `scene_gt.json` model-to-camera rotations and
+  translations. It does not fabricate visibility data and is deliberately not
+  BOP19 evaluation-ready.
+- `pose_and_masks` starts with the same pose evidence, then uses the pinned
+  official BOP Toolkit Vispy renderer and the captured depth with the BOP19
+  15 mm visibility tolerance. It writes one full-frame binary PNG per GT
+  instance below `mask/` and `mask_visib/`, plus `scene_gt_info.json`
+  `bbox_obj`/`bbox_visib` ROI, pixel counts, and visibility fractions.
+
+Install both optional runtimes for the complete product:
+
+```bash
+bash scripts/install.sh --with-blenderproc --with-bop-toolkit
+```
+
+The console queues a single CPU/render/disk job and recovers it through
+**Jobs** after navigation. For diagnostics, the same safe orchestration can be
+started directly:
+
+```bash
+uv run python scripts/run_bop_annotations.py working_data/example_run \
+  --mode pose
+uv run python scripts/run_bop_annotations.py working_data/example_run \
+  --mode pose_and_masks
+```
+
+Both commands require an already exported BOP v5 pose-estimation dataset, a
+confirmed run-owned pose-template placement, exact matched robot poses,
+rectified RGB-D frames, and the selected immutable calibration snapshot. They
+write derived preparation/render evidence, replace `bop/` transactionally, and
+record status below `processed/bop_annotations/`; they never alter raw capture
+or selection/calibration snapshots.
+
+### Inspect-only BOP Evaluation
+
+The **Inspect → BOP Evaluation** page is a narrow dataset-validation exception
+to PoseTestBot's acquisition-only boundary. It consumes an already exported,
+annotation-bearing BOP v5 dataset and either:
+
+- an immutable, already compatible standard BOP19 result CSV selected from the
+  run's registered results; or
+- a deterministic test-only result generated by adding small translation and
+  rotation offsets to the dataset GT.
+
+It does not run a pose estimator, convert an estimator's proprietary output,
+or register an acquisition-pipeline stage. Install and verify its runtime with:
+
+```bash
+bash scripts/install.sh --with-bop-toolkit
+bash scripts/install.sh --check-only --with-bop-toolkit
+```
+
+The required BOP Toolkit revision is
+`cea62d651c7e395b2e1962b9749e4e89693c6ac4`. The installer initializes
+`third_party/bop_toolkit`, rejects a missing, dirty, or differently pinned
+checkout, and synchronizes the committed lock at
+`tools/bop_toolkit_runtime/uv.lock`. The toolkit stays unmodified: a
+PoseTestBot runtime-only adapter supplies the run's generic dataset layout.
+
+The isolated runtime is intentional. The pinned official toolkit requires
+NumPy below 2, while the main PoseTestBot environment requires NumPy 2 or
+newer. Always update this optional environment with
+`uv sync --project tools/bop_toolkit_runtime`; do not install toolkit
+dependencies into the main project environment. Official VSD rendering uses
+Vispy with EGL in headless mode and therefore also needs a working host
+EGL/OpenGL implementation.
+
+Imported results must already use the BOP filename convention and the exact
+`scene_id,im_id,obj_id,score,R,t,time` header. Each result is copied and
+hash-bound below `processed/bop_evaluation/results/<result_id>/`. Queued
+official BOP19 VSD, MSSD, and MSPD evaluation writes its immutable request,
+progress, adapter/provenance, toolkit outputs, and final metric report below
+`processed/bop_evaluation/evaluations/<evaluation_id>/`. These are derived
+inspection artifacts; the exported `bop/` dataset and raw capture evidence are
+not modified.
+
+New annotation-bearing exports use the official BOP19 visibility target rule
+(`visib_fract >= 0.1`). Inspect warns when an older export's target list does
+not match that rule; such a run can validate its own exported contract, but its
+scores must not be presented as leaderboard-comparable.
 
 ### RealSense D435
 
@@ -336,8 +461,10 @@ https://docs.stereolabs.com/docs/development/zed-sdk/modules/camera/multi-camera
 
 ### BlenderProc
 
-BlenderProc is only needed for non-dry-run optional GT/mask rendering. Dry-run
-render planning and ordinary acquisition checks do not require it.
+BlenderProc is only needed for non-dry-run optional GT scene validation and
+pose generation. The full annotation mode uses the separately pinned BOP
+Toolkit for masks and visibility against captured depth. Dry-run render
+planning and ordinary acquisition checks do not require BlenderProc.
 Explicit objectless render plans also skip BlenderProc completely.
 Pose-template duplicate-instance GT is validated with BlenderProc 2.8.0. The
 renderer rejects other versions before producing derived GT evidence.
@@ -473,7 +600,7 @@ Recommended local validation:
 bash -n scripts/install.sh
 bash scripts/install.sh --help
 bash scripts/install.sh --check-only \
-  --with-posegridgen --with-posetemplatecreator
+  --with-posegridgen --with-posetemplatecreator --with-bop-toolkit
 cd frontend && bun run typecheck && bun run lint && bun run build
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_runtime_status.py tests/test_hardware_status.py
@@ -500,6 +627,20 @@ git diff --check
   Workpiece Catalogue records/assets, immutable bundles, and run selections
   remain readable without the source checkout; only new CAD conversion and
   pose-template geometry/rendering actions are unavailable.
+- BOP evaluation is unavailable: run
+  `git submodule update --init --checkout third_party/bop_toolkit`, confirm the
+  checkout is clean at
+  `cea62d651c7e395b2e1962b9749e4e89693c6ac4`, then run
+  `bash scripts/install.sh --with-bop-toolkit`. Use
+  `bash scripts/install.sh --check-only --with-bop-toolkit` to verify the
+  existing isolated runtime without syncing it. If VSD rendering fails after
+  the Python smoke passes, verify that the host provides a usable EGL/OpenGL
+  stack; the worker selects headless EGL automatically.
+- BOP result import is rejected: provide a canonical BOP19 CSV whose filename
+  identifies the selected dataset/split and whose header is exactly
+  `scene_id,im_id,obj_id,score,R,t,time`. PoseTestBot intentionally has no
+  proprietary-result converter; conversion belongs with the external
+  estimator/consumer project.
 - Workpiece catalogue metadata import reports `skipped_missing_assets`: this is
   expected when matching UUID-addressed CAD assets are not installed locally.
   JSON import/export never embeds or restores CAD, canonical PLY, or PNG bytes;
@@ -525,8 +666,11 @@ git diff --check
   uv, then rerun `uv run python scripts/runtime_status.py --json`.
 - Camera SDK imports succeed but devices are missing: check USB cabling, power,
   device permissions, and vendor udev rules on the lab host.
-- BlenderProc missing: install it with `bash scripts/install.sh --with-blenderproc`
-  or keep using dry-run render planning.
+- Ground-truth generation is disabled: finish the base BOP v5 export, confirm
+  the pose-template placement and selected calibration snapshot, then install
+  BlenderProc with `bash scripts/install.sh --with-blenderproc`. The
+  `pose_and_masks` product additionally needs
+  `bash scripts/install.sh --with-bop-toolkit`.
 - Playwright reports a missing Chromium executable: run
   `UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium`, or use
   `bash scripts/install.sh --with-playwright-browsers`.

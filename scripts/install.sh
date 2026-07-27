@@ -8,6 +8,7 @@ WITH_PLAYWRIGHT_BROWSERS=false
 WITH_WEB_BUILD=false
 WITH_POSEGRIDGEN=false
 WITH_POSETEMPLATECREATOR=false
+WITH_BOP_TOOLKIT=false
 SKIP_RUNTIME_CHECKS=false
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -30,6 +31,7 @@ Options:
   --with-posegridgen       Initialize and verify the pinned PoseGridGen submodule.
   --with-posetemplatecreator
                            Initialize and verify the pinned PoseTemplateCreator submodule.
+  --with-bop-toolkit       Initialize the pinned BOP Toolkit and sync its isolated uv runtime.
   --skip-runtime-checks    Skip runtime and sensor adapter verification.
   -h, --help               Show this help text.
 
@@ -100,6 +102,9 @@ parse_args() {
         ;;
       --with-posetemplatecreator)
         WITH_POSETEMPLATECREATOR=true
+        ;;
+      --with-bop-toolkit)
+        WITH_BOP_TOOLKIT=true
         ;;
       --skip-runtime-checks)
         SKIP_RUNTIME_CHECKS=true
@@ -242,6 +247,52 @@ install_posetemplatecreator() {
   log "PoseTemplateCreator checkout is clean and pinned to ${revision}."
 }
 
+install_bop_toolkit() {
+  if [[ "${WITH_BOP_TOOLKIT}" != true ]]; then
+    return 0
+  fi
+  command_exists git || die "git is required for --with-bop-toolkit."
+  local checkout="${REPO_ROOT}/third_party/bop_toolkit"
+  local runtime="${REPO_ROOT}/tools/bop_toolkit_runtime"
+  local runtime_python="${runtime}/.venv/bin/python"
+  local revision="cea62d651c7e395b2e1962b9749e4e89693c6ac4"
+  if [[ "${CHECK_ONLY}" != true ]]; then
+    log "Initializing the pinned BOP Toolkit source checkout."
+    run git submodule update --init --checkout third_party/bop_toolkit
+  fi
+  [[ -d "${checkout}" ]] || die "BOP Toolkit checkout is missing; rerun without --check-only."
+  [[ -f "${checkout}/scripts/eval_calc_errors.py" ]] || die "BOP Toolkit error-evaluation script is missing."
+  [[ -f "${checkout}/scripts/eval_calc_scores.py" ]] || die "BOP Toolkit score-evaluation script is missing."
+  [[ -f "${runtime}/pyproject.toml" ]] || die "BOP Toolkit runtime project is missing."
+  [[ -f "${runtime}/uv.lock" ]] || die "BOP Toolkit runtime lock is missing."
+  local actual_revision
+  actual_revision="$(git -C "${checkout}" rev-parse HEAD)"
+  [[ "${actual_revision}" == "${revision}" ]] || die "BOP Toolkit is at ${actual_revision}; required ${revision}."
+  [[ -z "$(git -C "${checkout}" status --porcelain --untracked-files=all)" ]] || die "BOP Toolkit checkout is dirty."
+  log "BOP Toolkit checkout is clean and pinned to ${revision}."
+
+  if [[ "${CHECK_ONLY}" != true ]]; then
+    log "Synchronizing the isolated BOP Toolkit uv environment."
+    run uv sync --project "${runtime}" --frozen
+  fi
+  [[ -x "${runtime_python}" ]] || die "BOP Toolkit runtime is missing; rerun without --check-only."
+
+  log "Checking the isolated BOP Toolkit runtime."
+  run "${runtime_python}" -c '
+from pathlib import Path
+
+import bop_toolkit_lib
+import vispy
+from bop_toolkit_lib import dataset_params, inout
+
+expected = (Path.cwd() / "third_party" / "bop_toolkit").resolve()
+actual = Path(bop_toolkit_lib.__file__).resolve()
+if expected not in actual.parents:
+    raise SystemExit(f"bop_toolkit_lib loaded from {actual}, expected {expected}")
+print(f"BOP Toolkit runtime OK ({actual})")
+'
+}
+
 install_blenderproc() {
   if [[ "${WITH_BLENDERPROC}" != true ]]; then
     return 0
@@ -250,7 +301,18 @@ install_blenderproc() {
   export PATH="${HOME}/.local/bin:${PATH}"
 
   if command_exists blenderproc; then
-    log "BlenderProc already on PATH: $(command -v blenderproc)"
+    local blenderproc_version
+    blenderproc_version="$(blenderproc -v 2>/dev/null || true)"
+    if [[ "${blenderproc_version}" == "2.8.0" ]]; then
+      log "BlenderProc 2.8.0 already on PATH: $(command -v blenderproc)"
+      return
+    fi
+    if [[ "${CHECK_ONLY}" == true ]]; then
+      warn "BlenderProc ${blenderproc_version:-unknown} is on PATH; version 2.8.0 is required."
+      return
+    fi
+    warn "Replacing BlenderProc ${blenderproc_version:-unknown} with required version 2.8.0."
+    run uv tool install --force blenderproc==2.8.0
     return
   fi
 
@@ -303,6 +365,7 @@ verify_web_console() {
   compgen -G "${ui_root}/assets/calibration-targets-page-*.js" >/dev/null || die "Bundled web UI has no lazy Calibration Targets asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/workpieces-page-*.js" >/dev/null || die "Bundled web UI has no lazy Workpiece Catalogue asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/pose-templates-page-*.js" >/dev/null || die "Bundled web UI has no lazy Pose Templates asset. Run scripts/install.sh --with-web-build."
+  compgen -G "${ui_root}/assets/bop-evaluation-page-*.js" >/dev/null || die "Bundled web UI has no lazy BOP Evaluation asset. Run scripts/install.sh --with-web-build."
   [[ -f "${cell_asset}" ]] || die "Bundled Cell template is missing ${cell_asset}."
   log "Bundled operator-console assets are present."
 }
@@ -430,6 +493,7 @@ main() {
   install_posetemplatecreator
   install_system_packages
   sync_python_environment
+  install_bop_toolkit
   build_web_console
   verify_web_console
   install_blenderproc

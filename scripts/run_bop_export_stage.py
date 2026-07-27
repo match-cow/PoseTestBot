@@ -8,12 +8,21 @@ import json
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
+import cv2
+
+from posetestbot.bop.mask_driver import (
+    GENERATION_REPORT,
+    run_official_bop_mask_generation,
+)
 from posetestbot.bop.writer import (
+    ANNOTATION_MODES,
     ANNOTATION_SOURCES,
     copy_bop_instance_models,
     export_sensor_scene_to_bop,
+    finalize_official_scene_annotations,
+    resolve_annotation_mode,
     targets_filename,
     validate_bop_dataset,
     write_bop_coco_annotations,
@@ -129,10 +138,20 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(ANNOTATION_SOURCES),
         default="none",
         help=(
-            "Source for BOP scene GT and masks. The acquisition-first default "
-            "'none' omits GT-derived files rather than writing placeholders; "
+            "Source for BOP scene GT. The acquisition-first default 'none' "
+            "omits GT-derived files rather than writing placeholders; "
             "pose-template object targets remain available for inference. Use "
-            "'blenderproc' only after optional GT/mask rendering has completed."
+            "'blenderproc' only after optional GT pose generation has completed."
+        ),
+    )
+    parser.add_argument(
+        "--annotation-mode",
+        choices=sorted(ANNOTATION_MODES),
+        default=None,
+        help=(
+            "GT capability to publish: 'none', BlenderProc-derived 'pose', or "
+            "'pose_and_masks'. When omitted, the legacy source contract is "
+            "preserved: annotation-source blenderproc means pose_and_masks."
         ),
     )
     parser.add_argument(
@@ -483,6 +502,57 @@ def discover_exportable_sensor_folders(
     return sensors
 
 
+def _uniform_export_image_size(
+    output_root: Path,
+    exports: list[Any],
+) -> tuple[int, int]:
+    sizes: set[tuple[int, int]] = set()
+    for export in exports:
+        rgb_folder = output_root / export.scene_folder / RGB_DIR
+        first_rgb = next(iter(sorted(rgb_folder.glob("*.png"))), None)
+        image = (
+            cv2.imread(first_rgb.as_posix(), cv2.IMREAD_UNCHANGED)
+            if first_rgb is not None
+            else None
+        )
+        if image is None:
+            raise ValueError(
+                f"Cannot determine BOP scene image size: {export.scene_folder}"
+            )
+        height, width = image.shape[:2]
+        sizes.add((int(width), int(height)))
+    if len(sizes) != 1:
+        raise ValueError(
+            "Official BOP mask generation requires one resolution across all scenes"
+        )
+    return next(iter(sizes))
+
+
+def complete_official_mask_annotations(
+    output_root: Path,
+    exports: list[Any],
+    object_models: list[Any],
+    *,
+    split: str,
+    mask_runner: Callable[..., Mapping[str, object]] = (
+        run_official_bop_mask_generation
+    ),
+) -> tuple[list[Any], dict[str, object]]:
+    """Complete staged pose GT through the injectable official-toolkit boundary."""
+
+    report = dict(
+        mask_runner(
+            output_root,
+            split=split,
+            scene_ids=[export.scene_id for export in exports],
+            object_ids=[model.obj_id for model in object_models],
+            image_size=_uniform_export_image_size(output_root, exports),
+            app_root=Path(__file__).resolve().parents[1],
+        )
+    )
+    return finalize_official_scene_annotations(output_root, exports), report
+
+
 def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
@@ -502,12 +572,20 @@ def main() -> None:
         f".{output_folder.name}.{uuid.uuid4().hex}.tmp"
     )
     try:
-        if args.annotation_source == "none" and (
+        annotation_mode = resolve_annotation_mode(
+            args.annotation_source,
+            args.annotation_mode,
+        )
+        if annotation_mode == "none" and (
             args.write_multiview_targets or args.write_coco_annotations
         ):
             raise ValueError(
                 "Multiview targets and COCO annotations require "
                 "--annotation-source blenderproc"
+            )
+        if args.write_coco_annotations and annotation_mode != "pose_and_masks":
+            raise ValueError(
+                "COCO annotations require --annotation-mode pose_and_masks"
             )
         try:
             run_config = load_run_config_for_run_root(run_root)
@@ -677,6 +755,7 @@ def main() -> None:
                         else None
                     ),
                     annotation_source=args.annotation_source,
+                    annotation_mode=annotation_mode,
                 )
             )
         if hardware_frame_groups is not None and run_config is not None:
@@ -690,6 +769,44 @@ def main() -> None:
                 raise RuntimeError(
                     "Hardware-sync BOP input changed while the export was running"
                 )
+
+        pose_generation_provenance = {
+            "source": "blenderproc_analytic_gt",
+            "scenes": [
+                {
+                    "scene_id": export.scene_id,
+                    "sensor_name": export.sensor_name,
+                    **export.annotation_provenance,
+                }
+                for export in exports
+                if export.annotation_source == "blenderproc"
+            ],
+        }
+        annotation_provenance: dict[str, object] = {}
+        if annotation_mode == "pose":
+            annotation_provenance = {
+                "schema_version": "posetestbot_bop_gt_generation.v1",
+                "annotation_mode": "pose",
+                "pose_generation": pose_generation_provenance,
+                "mask_generation": {"state": "absent"},
+            }
+        elif annotation_mode == "pose_and_masks":
+            if not object_models:
+                raise ValueError(
+                    "Official BOP mask generation requires exported object models"
+                )
+            exports, mask_generation_provenance = complete_official_mask_annotations(
+                staging_folder,
+                exports,
+                object_models,
+                split=args.split,
+            )
+            annotation_provenance = {
+                "schema_version": "posetestbot_bop_gt_generation.v1",
+                "annotation_mode": "pose_and_masks",
+                "pose_generation": pose_generation_provenance,
+                "mask_generation": mask_generation_provenance,
+            }
 
         targets_path = None
         multiview_targets_path = None
@@ -799,6 +916,8 @@ def main() -> None:
             instance_map_path=instance_map_path,
             pose_template_path=pose_template_path,
             annotation_source=args.annotation_source,
+            annotation_mode=annotation_mode,
+            annotation_provenance=annotation_provenance,
         )
         if hardware_frame_groups is not None and run_config is not None:
             _revalidate_hardware_publication_inputs(
@@ -824,6 +943,8 @@ def main() -> None:
             artifacts[BOP_POSE_TEMPLATE] = output_folder / BOP_POSE_TEMPLATE
         if instance_map_path is not None:
             artifacts[BOP_INSTANCE_MAP] = output_folder / BOP_INSTANCE_MAP
+        if annotation_mode == "pose_and_masks":
+            artifacts[GENERATION_REPORT] = output_folder / GENERATION_REPORT
         if calibration_profiles_path is not None:
             artifacts[CALIBRATION_PROFILES] = calibration_profiles_path
         for export in exports:
@@ -843,7 +964,15 @@ def main() -> None:
             artifacts[BOP_FRAME_SETS] = output_folder / BOP_FRAME_SETS
         message = f"Exported {len(exports)} synchronized sensor folder(s) to BOP."
         if validation["capabilities"]["bop19_evaluation"]:
-            message += " Rendered GT and BOP19 evaluation targets are complete."
+            message += (
+                " GT poses, official full/visible masks, visibility info, and "
+                "BOP19 evaluation targets are complete."
+            )
+        elif validation["capabilities"]["gt_poses"]:
+            message += (
+                " GT poses are complete; masks and BOP19 visibility evidence "
+                "were intentionally omitted."
+            )
         elif validation["capabilities"]["pose_estimation_input"]:
             message += (
                 " RGB-D scenes, models, and populated targets are "

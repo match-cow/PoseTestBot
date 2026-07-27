@@ -11,9 +11,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, query } from "@/lib/api"
 import type { Overview, PipelineStage, PreflightSummary, RunConfig } from "@/lib/contracts"
+import { workflowJourneyMetadata } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
 import { AdvancedStageTools } from "@/features/workflow/advanced-stage-tools"
 import { CalibrationWorkflow } from "@/features/workflow/calibration-workflow"
+import { BopGroundTruthGeneration } from "@/features/workflow/bop-ground-truth-generation"
 import { CaptureGate } from "@/features/workflow/capture-gate"
 import { GroundTruthWorkflow } from "@/features/workflow/ground-truth-workflow"
 import { DatasetProcessing } from "@/features/workflow/dataset-processing"
@@ -33,22 +35,8 @@ const legacyAliases: Record<string, { page: JourneyId; step: string }> = {
   "bop-export": { page: "dataset", step: "export" },
 }
 
-const calibrationOutline = [
-  "Configure the run and cameras",
-  "Choose the printed calibration grid",
-  "Check readiness",
-  "Record calibration images",
-  "Calculate, review, and publish",
-]
-
-const datasetOutline = [
-  "Configure cameras and select calibration",
-  "Choose the object template and placement",
-  "Check readiness",
-  "Record the object dataset",
-  "Synchronize and verify frames",
-  "Export the BOP dataset",
-]
+const calibrationOutline = workflowJourneyMetadata.calibration.steps.map((step) => step.title)
+const datasetOutline = workflowJourneyMetadata.dataset.steps.map((step) => step.title)
 
 function stepStatuses(completed: boolean[]): Array<WorkflowStepDefinition["status"]> {
   const firstIncomplete = completed.findIndex((value) => !value)
@@ -83,6 +71,7 @@ function OptionalAction({ icon: Icon, title, description, to, action }: { icon: 
 }
 
 function JourneyShell({ journey, steps, selectedStep, onSelectStep, children }: { journey: JourneyId; steps: WorkflowStepDefinition[]; selectedStep: string | null; onSelectStep: (stepId: string, scroll?: boolean) => void; children: React.ReactNode }) {
+  const { rememberWorkflowStep } = useOperator()
   const meta = journey === "calibration" ? {
     eyebrow: "Guided workflow · reusable camera geometry",
     title: "Calibrate cameras",
@@ -96,10 +85,17 @@ function JourneyShell({ journey, steps, selectedStep, onSelectStep, children }: 
     ?? steps.find((step) => step.status !== "complete")?.id
     ?? steps.at(-1)?.id
   const effectiveStep = selectedStep && steps.some((step) => step.id === selectedStep) ? selectedStep : fallbackStep
+  const effectiveStepDefinition = steps.find((step) => step.id === effectiveStep)
+  const effectiveStepId = effectiveStepDefinition?.id
+  const effectiveStepStatus = effectiveStepDefinition?.status
   useEffect(() => {
     if (!effectiveStep || selectedStep === effectiveStep) return
     onSelectStep(effectiveStep, false)
   }, [effectiveStep, onSelectStep, selectedStep])
+  useEffect(() => {
+    if (!effectiveStepId || !effectiveStepStatus) return
+    rememberWorkflowStep(journey, effectiveStepId, effectiveStepStatus)
+  }, [effectiveStepId, effectiveStepStatus, journey, rememberWorkflowStep])
   return <div className="space-y-6">
     <div className="flex items-center gap-2 text-xs"><Button asChild variant="ghost" size="sm"><Link to="/workflow/setup"><ArrowLeft aria-hidden="true" />Choose workflow</Link></Button><span className="text-muted-foreground">/</span><span className="font-semibold">{meta.title}</span></div>
     <PageHeader eyebrow={meta.eyebrow} title={meta.title} description={meta.description} />
@@ -192,6 +188,7 @@ export function WorkflowPage() {
   const page = (phase ?? "setup") as WorkflowPageId
   const selectedStep = searchParams.get("step")
   const [autoResumedStep, setAutoResumedStep] = useState<string | null>(null)
+  const [datasetProcessingJobStatus, setDatasetProcessingJobStatus] = useState<string | null>(null)
   const overview = useQuery({
     queryKey: ["overview", selectedRun],
     queryFn: () => api<Overview>(query("/ui/overview", { run_root: selectedRun })),
@@ -286,6 +283,8 @@ export function WorkflowPage() {
   const datasetReady = readinessSatisfied(preflight, datasetRequirements)
   const datasetConfigured = configSaved && datasetCalibrationSelected
   const datasetStatuses = stepStatuses([datasetConfigured, templateSelected, datasetReady, captureComplete, syncComplete && syncQualityComplete && rectificationComplete && bopComplete, bopComplete])
+  if (["queued", "running", "canceling"].includes(datasetProcessingJobStatus ?? "")) datasetStatuses[4] = "running"
+  if (["failed", "canceled", "cancelled"].includes(datasetProcessingJobStatus ?? "") && !bopComplete) datasetStatuses[4] = "blocked"
   const datasetSteps: WorkflowStepDefinition[] = datasetOutline.map((title, index) => ({
     id: ["configure", "template", "readiness", "capture", "sync", "export"][index], number: index + 1, title, summary: ["Reuse calibration that matches the selected cameras.", "Bind known object poses to the physical scene.", "Resolve all blockers in one place.", "Open cameras and authorize supervised robot motion.", "Create derived synchronized frames and check their quality.", "Write the acquisition result in BOP dataset form."][index], status: datasetStatuses[index], required: true,
   }))
@@ -337,12 +336,12 @@ export function WorkflowPage() {
 
       <WorkflowStepCard id="sync" number={5} title="Synchronize and verify frames" description="Create derived frame-to-pose matches with the selected calibration timing, then verify their quality. Raw captures remain unchanged." status={datasetStatuses[4]} help="The quality gate rejects missing matches, excessive pose gaps, incompatible timestamps, and calibration-provenance mismatches.">
         <Card data-testid="dataset-sync-timing-contract" className={datasetCalibrationSelected ? "border-primary/30 bg-primary/5" : "border-destructive/30 bg-destructive/5"}><CardContent className="flex items-start gap-3 py-4"><Database aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-primary-strong" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2 text-sm font-semibold">Calibration timing <StatusBadge status={datasetCalibrationSelected ? "ready" : "blocked"} /><HelpTip label="automatic calibration timing">Processing uses the per-camera offset, timestamp fields, clock-domain rule, and pose-gap limit shown in Step 1. Manual values and generic defaults cannot override them, and export rechecks the evidence.</HelpTip></div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{datasetCalibrationSelected ? "The selected per-camera timing policy will be applied and verified automatically." : "Return to Step 1 and select a calibration with valid timing for every enabled camera."}</p></div></CardContent></Card>
-        <DatasetProcessing runRoot={selectedRun} ready={datasetReady} captureComplete={captureComplete} syncComplete={syncComplete} syncQualityComplete={syncQualityComplete} calibrationComplete={rectificationComplete} exportComplete={bopComplete} onReviewReadiness={() => selectStep("readiness")} />
+        <DatasetProcessing runRoot={selectedRun} ready={datasetReady} captureComplete={captureComplete} syncComplete={syncComplete} syncQualityComplete={syncQualityComplete} calibrationComplete={rectificationComplete} exportComplete={bopComplete} onReviewReadiness={() => selectStep("readiness")} onJobStatusChange={setDatasetProcessingJobStatus} />
       </WorkflowStepCard>
 
-      <WorkflowStepCard id="export" number={6} title="Export the BOP dataset" description="Validate the selected calibration, then write the acquisition result in the standard BOP dataset layout." status={datasetStatuses[5]} help="BOP is the portable dataset format produced by PoseTestBot. Estimator execution and metric evaluation belong in a separate consumer repository.">
-        <Card className={bopComplete ? "border-success/35 bg-success/5" : "border-dashed"}><CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{bopComplete ? "BOP image/model export is ready" : "BOP export has not completed"}</div><p className="mt-1 text-xs text-muted-foreground">{bopComplete ? "The annotation-free export has populated object targets and is ready for pose-estimator consumption. Rendered GT and masks remain absent until the optional annotation path is completed." : "Use Process and export dataset in step 5. It validates calibration, rectifies frames, copies models, and writes BOP scenes without running BlenderProc."}</p></div>{bopComplete ? <Button asChild variant="outline"><Link to="/cell">Review dataset in Cell View<ArrowRight aria-hidden="true" /></Link></Button> : <Button type="button" variant="outline" onClick={() => selectStep("sync")}>Open processing step</Button>}</CardContent></Card>
-        <OptionalAction icon={Sparkles} title="Generate rendered GT, masks, or COCO annotations" description="Use BlenderProc preparation/rendering when evaluation annotations are needed, then rerun BOP export with BlenderProc as the explicit annotation source. The raw recording and synchronization remain valid without them." to="/workflow/advanced" action="Open rendering tools" />
+      <WorkflowStepCard id="export" number={6} title="Export the BOP dataset" description="Verify the base image/model export, then choose pose-only or rendered pose-and-mask ground truth for this run." status={datasetStatuses[5]} help="BOP is the portable dataset format produced by PoseTestBot. Estimators and result conversion remain outside this repository; the Inspect page can evaluate an annotation-bearing export against an already compatible BOP19 result CSV.">
+        <Card className={bopComplete ? "border-success/35 bg-success/5" : "border-dashed"}><CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{bopComplete ? "BOP image/model export is ready" : "BOP export has not completed"}</div><p className="mt-1 text-xs text-muted-foreground">{bopComplete ? "The base export has populated calibrated scenes, models, and object targets. Choose the required ground-truth evidence below; pose + masks is required for Inspect metrics." : "Use Process and export dataset in step 5. It validates calibration, rectifies frames, copies models, and writes the base BOP scenes before ground-truth generation."}</p></div>{bopComplete ? <Button asChild variant="outline"><Link to="/cell">Review dataset in Cell View<ArrowRight aria-hidden="true" /></Link></Button> : <Button type="button" variant="outline" onClick={() => selectStep("sync")}>Open processing step</Button>}</CardContent></Card>
+        <BopGroundTruthGeneration runRoot={selectedRun} bopExportComplete={bopComplete} />
       </WorkflowStepCard>
     </JourneyShell>
   }

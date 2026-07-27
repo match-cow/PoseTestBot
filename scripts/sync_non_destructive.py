@@ -106,14 +106,14 @@ def main() -> None:
         artifacts=sync_result_artifacts(result),
         run_root=run_root,
         message=(
-            f"Matched {result.matched_frames}/{result.total_frames} frames; "
-            f"dropped {result.dropped_frames}."
+            f"Wrote {result.matched_frames} synchronized in-motion "
+            "frame-pose match(es). Raw frames remain preserved."
         ),
     )
     write_run_manifest(manifest, run_root)
 
     print(
-        f"Matched {result.matched_frames}/{result.total_frames} frames "
+        f"Wrote {result.matched_frames} synchronized in-motion frame-pose match(es) "
         f"into {result.output_folder}"
     )
 

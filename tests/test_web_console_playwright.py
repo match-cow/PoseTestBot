@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 import cv2
 import numpy as np
 import pytest
@@ -316,6 +317,31 @@ def install_common_mocks(
         lambda route: fulfill_json(route, overview_payload(config_payload)),
     )
     page.route(
+        "**/ui/storage**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "run_storage.v1",
+                "run_root": RUN_ROOT,
+                "filesystem_path": "/tmp",
+                "status": "ready",
+                "total_bytes": 3 * 1024**4,
+                "used_bytes": 7 * 1024**4 // 4,
+                "free_bytes": 5 * 1024**4 // 4,
+                "free_fraction": 5 / 12,
+                "thresholds": {
+                    "critical_free_bytes": 100 * 1024**3,
+                    "warning_free_bytes": int(3 * 1024**4 * 0.15),
+                    "critical_free_bytes_cap": 100 * 1024**3,
+                    "warning_free_bytes_cap": 500 * 1024**3,
+                    "critical_free_fraction": 0.05,
+                    "warning_free_fraction": 0.15,
+                },
+                "error": None,
+            },
+        ),
+    )
+    page.route(
         "**/sensors/status",
         lambda route: fulfill_json(
             route,
@@ -341,6 +367,67 @@ def install_common_mocks(
             {
                 "schema_version": "runtime_status.v1",
                 "runtimes": [{"runtime_id": "blenderproc", "available": True}],
+            },
+        ),
+    )
+    page.route(
+        "**/bop/annotations/setup?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "bop_annotation_setup.v1",
+                "run_root": RUN_ROOT,
+                "runtime": {
+                    "available": True,
+                    "required_version": "2.8.0",
+                    "detected_version": "2.8.0",
+                    "install_command": None,
+                    "reason": None,
+                },
+                "toolkit": {
+                    "available": True,
+                    "status": "ready",
+                    "revision": "renderer-revision",
+                    "required_revision": "renderer-revision",
+                    "environment_ready": True,
+                    "renderer": "vispy",
+                    "install_command": None,
+                    "reason": None,
+                },
+                "readiness": {
+                    "ready": False,
+                    "blockers": [
+                        {
+                            "code": "bop_export_missing",
+                            "message": "Complete the base BOP export first.",
+                        }
+                    ],
+                    "warnings": [],
+                },
+                "readiness_by_mode": {
+                    "pose": {
+                        "ready": False,
+                        "blockers": [
+                            {
+                                "code": "bop_export_missing",
+                                "message": "Complete the base BOP export first.",
+                            }
+                        ],
+                        "warnings": [],
+                    },
+                    "pose_and_masks": {
+                        "ready": False,
+                        "blockers": [
+                            {
+                                "code": "bop_export_missing",
+                                "message": "Complete the base BOP export first.",
+                            }
+                        ],
+                        "warnings": [],
+                    },
+                },
+                "current_output": None,
+                "counts": {"sensors": 0, "frames": 0, "instances": 0},
             },
         ),
     )
@@ -467,14 +554,25 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         "Workpiece Catalogue",
         "Pose Templates",
         "Cell View",
+        "BOP Evaluation",
         "Jobs",
     ]
     expect(primary_navigation.get_by_role("link", name="Workflow")).to_have_attribute(
         "href", "#/workflow/setup"
     )
+    expect(page.get_by_text("Recommended next action", exact=True)).to_have_count(0)
+    workflow_overview = page.get_by_test_id("dashboard-workflow-overview")
+    expect(workflow_overview).to_have_attribute("data-workflow-journey", "calibration")
     expect(
-        page.get_by_role("link", name="Open camera calibration", exact=True)
-    ).to_have_attribute("href", "#/workflow/calibration")
+        workflow_overview.get_by_role("heading", name="Camera calibration workflow")
+    ).to_be_visible()
+    expect(workflow_overview.locator("[data-workflow-step]")).to_have_count(5)
+    expect(
+        page.get_by_role(
+            "link",
+            name="Open camera calibration step 1: Configure the run and cameras",
+        )
+    ).to_have_attribute("href", "#/workflow/calibration?step=configure")
     assert page.evaluate("localStorage.getItem('posetestbot.theme')") is None
     assert page.evaluate("localStorage.getItem('posetestbot.selectedRun')") is None
     expect(page.get_by_role("combobox", name="Selected run")).to_contain_text("new-run")
@@ -558,6 +656,215 @@ def test_primary_navigation_resets_document_scroll_position(
     expect(page.get_by_role("heading", name="Devices")).to_be_visible()
     page.wait_for_function("window.scrollY === 0")
     assert page.evaluate("window.scrollY") == 0
+
+
+def test_bop_evaluation_queues_result_recovers_job_and_shows_metrics(
+    console_server,
+    page,
+) -> None:
+    install_common_mocks(page)
+    requests: list[dict] = []
+    job_status: dict[str, str | None] = {"value": None}
+    result = {
+        "result_id": "result-aaaaaaaaaaaa",
+        "method": "foundationpose",
+        "display_name": "FoundationPose · trial 1",
+        "filename": "foundationpose_ptb123456789abc-test.csv",
+        "source_kind": "registered_result",
+        "created_at": "2026-07-26T12:00:00Z",
+        "sha256": "a" * 64,
+        "estimate_count": 1621,
+        "target_estimate_count": 1621,
+        "target_coverage": 1.0,
+        "compatible": True,
+        "blockers": [],
+        "simulation": None,
+    }
+    setup = {
+        "toolkit": {
+            "status": "ready",
+            "available": True,
+            "revision": "cea62d651c7e395b2e1962b9749e4e89693c6ac4",
+            "required_revision": "cea62d651c7e395b2e1962b9749e4e89693c6ac4",
+            "environment_ready": True,
+            "renderer": "vispy",
+            "install_command": None,
+            "reason": None,
+        },
+        "dataset": {
+            "status": "ready",
+            "evaluation_ready": True,
+            "simulation_ready": True,
+            "dataset_id": "ptb123456789abc",
+            "name": "PoseTestBot",
+            "split": "test",
+            "export_manifest_sha256": "b" * 64,
+            "manifest_schema_version": "bop_export_manifest.v5",
+            "scene_count": 2,
+            "frame_count": 1621,
+            "target_count": 1621,
+            "model_count": 1,
+            "annotation_count": 1621,
+            "annotation_source": "blenderproc",
+            "image_size": [1280, 720],
+            "result_registration_ready": True,
+            "result_filename_template": "{method}_ptb123456789abc-test.csv",
+            "blockers": [],
+            "warnings": [
+                {
+                    "code": "format_audit",
+                    "message": "Dataset passed the structural format audit.",
+                }
+            ],
+        },
+        "results": [result],
+        "evaluations": [],
+    }
+    page.route(
+        "**/bop/evaluation/setup?**",
+        lambda route: fulfill_json(route, setup),
+    )
+
+    def job_payload(status: str) -> dict:
+        return {
+            "id": "bopeval1",
+            "name": "bop_evaluation",
+            "command": ["uv", "run", "python", "scripts/run_bop_evaluation.py"],
+            "cwd": "/repo",
+            "status": status,
+            "created_at": "2026-07-26T12:01:00Z",
+            "started_at": (
+                "2026-07-26T12:01:01Z" if status != "queued" else None
+            ),
+            "ended_at": "2026-07-26T12:02:00Z" if status == "succeeded" else None,
+            "returncode": 0 if status == "succeeded" else None,
+            "message": "Command completed successfully."
+            if status == "succeeded"
+            else None,
+            "tail": ["evaluating"],
+            "resources": ["cpu", "disk_io"],
+            "parameters": {
+                "run_root": RUN_ROOT,
+                "evaluation_id": "evaluation-bbbbbbbbbbbb",
+                "result_id": result["result_id"],
+            },
+            "log_path": "/tmp/bopeval1.log",
+            "visibility": "operator",
+        }
+
+    def evaluation_handler(route) -> None:
+        requests.append(route.request.post_data_json)
+        job_status["value"] = "queued"
+        fulfill_json(
+            route,
+            {
+                "job": job_payload("queued"),
+                "job_id": "bopeval1",
+                "evaluation_id": "evaluation-bbbbbbbbbbbb",
+            },
+            status=202,
+        )
+
+    def jobs_handler(route) -> None:
+        status = job_status["value"]
+        fulfill_json(
+            route,
+            {
+                "jobs": [] if status is None else [job_payload(status)],
+                "resources": {},
+            },
+        )
+
+    page.route("**/bop/evaluations", evaluation_handler)
+    page.route("**/jobs", jobs_handler)
+    page.goto(f"{console_server.url}/#/bop-evaluation", wait_until="networkidle")
+
+    expect(page.get_by_role("heading", name="BOP evaluation")).to_be_visible()
+    dataset = page.get_by_test_id("bop-evaluation-dataset")
+    expect(dataset).to_contain_text("Selected-run dataset")
+    expect(dataset).to_contain_text(RUN_ROOT)
+    expect(dataset).to_contain_text("1,621")
+    expect(dataset).to_contain_text("Dataset passed the structural format audit.")
+    csv_contract = page.get_by_test_id("bop-result-csv-contract")
+    expect(csv_contract).to_contain_text(
+        "scene_id,im_id,obj_id,score,R,t,time"
+    )
+    expect(csv_contract).to_contain_text("model-to-camera translation in millimetres")
+    expect(csv_contract).to_contain_text("processing time per image in seconds")
+    expect(page.get_by_test_id("bop-result-details")).to_contain_text(
+        "FoundationPose · trial 1"
+    )
+    page.get_by_role("button", name="Queue BOP evaluation").click()
+    expect(page.get_by_text("BOP evaluation queued")).to_be_visible()
+    assert requests == [
+        {
+            "run_root": RUN_ROOT,
+            "source": {
+                "kind": "registered_result",
+                "result_id": "result-aaaaaaaaaaaa",
+            },
+        }
+    ]
+    job = page.get_by_test_id("bop-evaluation-job-status")
+    expect(job).to_contain_text("BOP evaluation is queued")
+    expect(job).to_contain_text("continues after navigation")
+    expect(
+        job.get_by_role("link", name="Open live log in Jobs")
+    ).to_have_attribute("href", "#/jobs")
+
+    job_status["value"] = "running"
+    expect(job).to_contain_text("BOP evaluation is running", timeout=5_000)
+    setup["evaluations"] = [
+        {
+            "evaluation_id": "evaluation-bbbbbbbbbbbb",
+            "created_at": "2026-07-26T12:01:00Z",
+            "completed_at": "2026-07-26T12:02:00Z",
+            "result_id": result["result_id"],
+            "result": result,
+            "source_kind": "registered_result",
+            "simulation": None,
+            "protocol": "BOP19 localization",
+            "status": "succeeded",
+            "metrics": [
+                {
+                    "id": "bop19_average_recall",
+                    "label": "Average Recall",
+                    "value": 0.9876,
+                    "display": "0.9876",
+                },
+                {
+                    "id": "bop19_average_recall_mssd",
+                    "label": "AR MSSD",
+                    "value": 0.9821,
+                    "display": "0.9821",
+                },
+            ],
+            "provenance": {
+                "toolkit_revision": "cea62d651c7e395b2e1962b9749e4e89693c6ac4"
+            },
+            "report_available": True,
+        }
+    ]
+    job_status["value"] = "succeeded"
+    report = page.get_by_test_id("bop-evaluation-report")
+    expect(report).to_contain_text("Official BOP metrics", timeout=5_000)
+    expect(report).to_contain_text("0.9876")
+    expect(report).to_contain_text("AR MSSD")
+    expect(page.get_by_test_id("bop-evaluation-history")).to_contain_text(
+        "FoundationPose · trial 1"
+    )
+
+    page.get_by_role("tab", name="Simulated from GT · Test only").click()
+    expect(
+        page.get_by_text(
+            "Test only: estimates are derived from ground truth",
+            exact=True,
+        )
+    ).to_be_visible()
+    expect(page.locator("#translation-sigma")).to_have_value("1")
+    expect(page.locator("#rotation-sigma")).to_have_value("0.25")
+    expect(page.locator("#simulation-seed")).to_have_value("42")
+    expect(page.locator("#simulation-score")).to_have_value("1")
 
 
 def test_workflow_chooser_distinguishes_numbered_required_journeys(
@@ -650,6 +957,178 @@ def test_workflow_stepper_connectors_follow_numbered_steps(
         assert connector_box["x"] >= button_box["x"] + button_box["width"]
 
 
+def test_sidebar_preserves_current_workflow_step_and_fast_return(
+    console_server,
+    page,
+) -> None:
+    page.set_viewport_size({"width": 1440, "height": 900})
+    capture_runtime: dict[str, str | None] = {"status": None}
+    bundle_sha256 = "d" * 64
+    configured = run_config(
+        sensors=[
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "display_name": "Wrist RGB-D",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+            }
+        ]
+    )
+    configured["dataset_mode"] = "pose_template"
+    configured["calibration_profiles"] = (
+        "processed/calibration_inputs/current/calibration_profiles.json"
+    )
+    configured["intrinsic_calibration_profiles"] = (
+        "processed/calibration_inputs/current/intrinsic_calibration_profiles.json"
+    )
+    configured["calibration_profile_selection"] = {
+        "selection_artifact": "calibration_profile_selection.json",
+        "bundle_sha256": bundle_sha256,
+        "selected_at": "2026-07-22T12:00:00+00:00",
+    }
+    configured["pose_template"] = {
+        "template_uuid": "22222222-2222-4222-8222-222222222222",
+        "placement_confirmed": True,
+    }
+
+    install_common_mocks(page, config_payload=configured)
+    page.route(
+        "**/ui/calibrations?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "selected": valid_library_selection(
+                    bundle_sha256=bundle_sha256,
+                    calibration_profiles=configured["calibration_profiles"],
+                    intrinsic_calibration_profiles=configured[
+                        "intrinsic_calibration_profiles"
+                    ],
+                ),
+                "calibrations": [],
+            },
+        ),
+    )
+    page.route(
+        "**/pose-templates/library",
+        lambda route: fulfill_json(route, {"templates": []}),
+    )
+    page.route(
+        "**/pose-templates/runs/selection?**",
+        lambda route: fulfill_json(
+            route,
+            {"selection": None, "replacement_blockers": [], "ready": True},
+        ),
+    )
+
+    def capture_jobs_handler(route) -> None:
+        status = capture_runtime["status"]
+        fulfill_json(
+            route,
+            {
+                "run_root": RUN_ROOT,
+                "jobs": (
+                    []
+                    if status is None
+                    else [
+                        {
+                            "id": "dataset-capture-1",
+                            "name": "Dataset capture",
+                            "status": status,
+                            "kind": "pipeline_sequence",
+                            "stage": None,
+                            "sequence": "real_full_capture_validation",
+                            "run_root": RUN_ROOT,
+                            "resources": ["cameras", "robot", "disk_io"],
+                            "message": None,
+                            "created_at": "2026-07-26T12:00:00Z",
+                            "started_at": "2026-07-26T12:00:01Z",
+                            "ended_at": None,
+                            "active": True,
+                            "tail": ["recording"],
+                            "log_endpoint": "/capture/jobs/dataset-capture-1/log",
+                            "stop_endpoint": "/capture/jobs/dataset-capture-1/stop",
+                        }
+                    ]
+                ),
+                "active_count": 0 if status is None else 1,
+                "resources": {},
+                "status_artifact": None,
+            },
+        )
+
+    page.route("**/capture/jobs**", capture_jobs_handler)
+
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=capture",
+        wait_until="networkidle",
+    )
+
+    sidebar = page.get_by_role("complementary", name="Application sidebar")
+    current = sidebar.get_by_test_id("current-workflow-card")
+    expect(current).to_contain_text("Current workflow")
+    expect(current).to_contain_text("Object dataset")
+    expect(current).to_contain_text("Selected run · Step 4 of 6")
+    expect(current).to_contain_text("Record the object dataset")
+    expect(current).to_contain_text("Current step")
+    resume = current.get_by_role(
+        "link",
+        name="Resume object dataset at step 4: Record the object dataset",
+    )
+    expect(resume).to_be_in_viewport()
+    expect(resume).to_have_attribute("href", "#/workflow/dataset?step=capture")
+    expect(
+        sidebar.get_by_role("navigation", name="Primary navigation").get_by_role(
+            "link", name="Workflow"
+        )
+    ).to_have_attribute("href", "#/workflow/dataset?step=capture")
+
+    stored = json.loads(
+        page.evaluate("localStorage.getItem('posetestbot.workflowSessions.v1')")
+    )
+    assert stored[RUN_ROOT]["journey"] == "dataset"
+    assert stored[RUN_ROOT]["stepId"] == "capture"
+    assert stored[RUN_ROOT]["status"] == "current"
+
+    sidebar.get_by_role("link", name="Dashboard").click()
+    expect(page).to_have_url(f"{console_server.url}/#/dashboard")
+    capture_runtime["status"] = "running"
+    page.reload(wait_until="networkidle")
+    current = page.get_by_role(
+        "complementary", name="Application sidebar"
+    ).get_by_test_id("current-workflow-card")
+    expect(current).to_contain_text("Selected run · Step 4 of 6")
+    expect(current.get_by_role("status")).to_have_text("Recording running")
+    page.get_by_role("combobox", name="Selected run").click()
+    page.get_by_role("option", name="old-run · sync_aruco").click()
+    sidebar = page.get_by_role("complementary", name="Application sidebar")
+    expect(sidebar.get_by_test_id("current-workflow-card")).to_have_count(0)
+    expect(
+        sidebar.get_by_role("navigation", name="Primary navigation").get_by_role(
+            "link", name="Workflow"
+        )
+    ).to_have_attribute("href", "#/workflow/setup")
+    page.get_by_role("combobox", name="Selected run").click()
+    page.get_by_role(
+        "option", name="new-run · real_full_capture_validation"
+    ).click()
+    current = sidebar.get_by_test_id("current-workflow-card")
+    expect(current).to_contain_text("Selected run · Step 4 of 6")
+    current.get_by_role(
+        "link",
+        name="Resume object dataset at step 4: Record the object dataset",
+    ).click()
+    expect(page).to_have_url(
+        f"{console_server.url}/#/workflow/dataset?step=capture"
+    )
+    expect(
+        page.get_by_role("navigation", name="Required workflow steps").locator(
+            '[aria-current="step"]'
+        )
+    ).to_contain_text("Record the object dataset")
+
+
 def test_new_run_path_renders_guided_setup_when_run_config_is_missing(
     console_server,
     page,
@@ -728,9 +1207,27 @@ def test_responsive_shell_and_dataset_workflow_links(console_server, page) -> No
         primary_navigation.get_by_role("link", name="Pose Templates")
     ).to_be_visible()
     expect(
-        page.get_by_role("link", name="Open object dataset", exact=True)
-    ).to_have_attribute("href", "#/workflow/dataset")
-    expect(page.get_by_text("Object dataset evidence", exact=True)).to_be_visible()
+        page.get_by_role(
+            "link",
+            name="Open object dataset step 1: Configure cameras and select calibration",
+        )
+    ).to_have_attribute("href", "#/workflow/dataset?step=configure")
+    workflow_overview = page.get_by_test_id("dashboard-workflow-overview")
+    expect(workflow_overview).to_have_attribute("data-workflow-journey", "dataset")
+    expect(
+        workflow_overview.get_by_role("heading", name="Object dataset workflow")
+    ).to_be_visible()
+    expect(workflow_overview).to_contain_text("6 required steps")
+    expect(workflow_overview).to_contain_text(
+        "a saved camera calibration is an input to step 1"
+    )
+    expect(workflow_overview.locator("[data-workflow-step]")).to_have_count(6)
+    expect(
+        workflow_overview.locator('[data-workflow-step="template"]')
+    ).to_contain_text("Choose the object template and placement")
+    expect(
+        workflow_overview.locator('[data-workflow-step="export"]')
+    ).to_contain_text("Export the BOP dataset")
     assert page.evaluate("getComputedStyle(document.body).minWidth") == "0px"
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
@@ -1736,6 +2233,17 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
         ).locator("polygon")
     ).to_have_count(6)
     expect(page.get_by_role("button", name="Select Gauge block")).to_have_count(0)
+    expect(page.get_by_text("Wrong model scale?", exact=True)).to_have_count(0)
+    dimensions = page.get_by_test_id("workpiece-dimensions")
+    dimensions.get_by_role("button", name="About model dimensions").hover()
+    expect(page.get_by_role("tooltip")).to_contain_text("Wrong model scale?")
+    expect(page.get_by_role("tooltip")).to_contain_text(
+        "Archive this workpiece first, then use Correct model units."
+    )
+    expect(page.get_by_role("tooltip")).to_contain_text(
+        "Existing immutable templates keep their original geometry snapshot."
+    )
+    page.keyboard.press("Escape")
 
     page.get_by_label("Search workpieces").fill("not present")
     expect(page.get_by_text("No matches", exact=True)).to_be_visible()
@@ -2968,9 +3476,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         )
     ).to_be_visible()
     expect(
-        page.get_by_text(
-            "Speed alone cannot guarantee sharp frames", exact=False
-        )
+        page.get_by_text("Speed alone cannot guarantee sharp frames", exact=False)
     ).to_be_visible()
     speed.fill("0.15")
     expect(
@@ -3358,6 +3864,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
     page,
 ) -> None:
     processing_requests: list[dict] = []
+    processing_job_status: dict[str, str | None] = {"value": None}
     selected_bundle_sha256 = "d" * 64
     selected_calibration_path = (
         "processed/calibration_inputs/current/calibration_profiles.json"
@@ -3454,36 +3961,58 @@ def test_dataset_processing_is_one_ordered_operator_action(
 
     def processing_handler(route) -> None:
         processing_requests.append(route.request.post_data_json)
-        next(section for section in overview["sidebar"] if section["id"] == "sync")[
-            "artifacts"
-        ] = [
-            {
-                "path": "sync_quality_report.json",
-                "exists": True,
-                "status": "ok",
-            }
-        ]
-        next(section for section in overview["sidebar"] if section["id"] == "bop")[
-            "artifacts"
-        ] = [
-            {
-                "path": "camera_rectification_report.json",
-                "exists": True,
-                "status": "complete",
-            },
-            {
-                "path": "bop/bop_export_manifest.json",
-                "exists": True,
-                "status": "complete",
-            },
-        ]
+        processing_job_status["value"] = "queued"
         fulfill_json(
             route,
             {"job_id": "dataset-processing-1", "status": "queued"},
             status=202,
         )
 
+    def jobs_handler(route) -> None:
+        status = processing_job_status["value"]
+        jobs = (
+            []
+            if status is None
+            else [
+                {
+                    "id": "dataset-processing-1",
+                    "name": "pipeline-run-config:calibrated_capture_to_bop_dataset_dry_run",
+                    "command": [
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_pipeline_sequence.py",
+                    ],
+                    "cwd": "/repo",
+                    "status": status,
+                    "created_at": "2026-07-26T10:57:51Z",
+                    "started_at": "2026-07-26T10:57:52Z",
+                    "ended_at": (
+                        "2026-07-26T11:00:48Z"
+                        if status in {"succeeded", "failed", "canceled"}
+                        else None
+                    ),
+                    "returncode": 0 if status == "succeeded" else None,
+                    "message": (
+                        "Command completed successfully."
+                        if status == "succeeded"
+                        else None
+                    ),
+                    "tail": ["processing"],
+                    "resources": ["cpu", "disk_io"],
+                    "parameters": {
+                        "pipeline_sequence": "calibrated_capture_to_bop_dataset_dry_run",
+                        "run_root": RUN_ROOT,
+                    },
+                    "log_path": "/tmp/dataset-processing-1.log",
+                    "visibility": "operator",
+                }
+            ]
+        )
+        fulfill_json(route, {"jobs": jobs, "resources": {}})
+
     page.route("**/pipeline/run-config", processing_handler)
+    page.route("**/jobs", jobs_handler)
     page.goto(
         f"{console_server.url}/#/workflow/dataset?step=sync",
         wait_until="networkidle",
@@ -3534,21 +4063,21 @@ def test_dataset_processing_is_one_ordered_operator_action(
     expect(sync_step.get_by_text("Current step", exact=True)).to_be_visible()
     expect(
         sync_step.get_by_text(
-            "Copy models and write the annotation-free BOP dataset",
+            "Copy models and write the base BOP dataset",
             exact=True,
         )
     ).to_be_visible()
     expect(processing).to_contain_text(
-        "One queued job synchronizes, rectifies, and writes the image/model BOP dataset"
+        "One queued job runs five backend stages grouped into the four operator outcomes below"
     )
     expect(processing).to_contain_text(
-        "It does not run BlenderProc or generate rendered GT/masks"
+        "Ground-truth generation is chosen separately in the export step"
     )
     expect(processing).to_contain_text(
         "Calibration validation is automatic here; there is no second operator preflight."
     )
     expect(processing).to_contain_text(
-        "Copy models and write the annotation-free BOP dataset"
+        "Copy models and write the base BOP dataset"
     )
     process_action = page.get_by_role(
         "button", name="Process and export dataset", exact=True
@@ -3568,18 +4097,305 @@ def test_dataset_processing_is_one_ordered_operator_action(
     export_outcome = page.locator('[data-workflow-step="export"]')
     expect(export_outcome).to_contain_text("BOP export has not completed")
     expect(export_outcome).to_contain_text("Use Process and export dataset in step 5")
-    expect(export_outcome).to_contain_text("without running BlenderProc")
+    expect(export_outcome).to_contain_text("before ground-truth generation")
 
     process_action.click()
     expect(page.get_by_text("Dataset processing queued")).to_be_visible()
     assert processing_requests == [{"run_root": RUN_ROOT}]
+    processing_job_status["value"] = "running"
+    job_status = processing.get_by_test_id("dataset-processing-job-status")
+    expect(job_status).to_contain_text("Dataset processing is running", timeout=5_000)
+    expect(job_status).to_contain_text("dataset-processing-1")
+    expect(job_status).to_contain_text("continues after navigation")
+    expect(
+        job_status.get_by_role("link", name="Open live log in Jobs")
+    ).to_have_attribute("href", "#/jobs")
+    expect(page.get_by_role("button", name="Processing…")).to_be_disabled()
+    stepper = page.get_by_role("navigation", name="Required workflow steps")
+    expect(
+        stepper.get_by_role("button").filter(has_text="Synchronize and verify frames")
+    ).to_contain_text("Running")
+
+    processing_job_status["value"] = "succeeded"
+    expect(job_status).to_contain_text(
+        "Processing finished; export evidence is still being verified",
+        timeout=5_000,
+    )
+    expect(job_status).to_contain_text(
+        "has not yet accepted bop/bop_export_manifest.json"
+    )
+
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "artifacts"
+    ] = [
+        {
+            "path": "camera_rectification_report.json",
+            "exists": True,
+            "status": "complete",
+        },
+        {
+            "path": "bop/bop_export_manifest.json",
+            "exists": True,
+            "status": "complete",
+        },
+    ]
+    job_status.get_by_role("button", name="Refresh evidence").click()
     expect(page.get_by_text("BOP image/model export is ready")).to_be_visible(
         timeout=5_000
     )
-    expect(export_outcome).to_contain_text(
-        "has populated object targets and is ready for pose-estimator consumption"
+    expect(job_status).to_contain_text(
+        "Dataset processing finished and BOP export is verified"
     )
-    expect(sync_step.get_by_text("Complete", exact=True)).to_be_visible()
+    expect(export_outcome).to_contain_text(
+        "base export has populated calibrated scenes, models, and object targets"
+    )
+    expect(
+        stepper.get_by_role("button").filter(has_text="Synchronize and verify frames")
+    ).to_contain_text("Complete")
+
+
+def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
+    console_server,
+    page,
+) -> None:
+    annotation_requests: list[dict] = []
+    annotation_job_status: dict[str, str | None] = {"value": None}
+    configured = run_config(plan_only=False)
+    configured["dataset_mode"] = "pose_template"
+    configured["pose_template"] = {
+        "template_uuid": "22222222-2222-4222-8222-222222222222",
+        "placement_confirmed": True,
+    }
+    overview = overview_payload(configured)
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "artifacts"
+    ] = [
+        {
+            "path": "bop/bop_export_manifest.json",
+            "exists": True,
+            "status": "complete",
+        }
+    ]
+    setup = {
+        "schema_version": "bop_annotation_setup.v1",
+        "run_root": RUN_ROOT,
+        "runtime": {
+            "available": True,
+            "required_version": "2.8.0",
+            "detected_version": "2.8.0",
+            "install_command": None,
+            "reason": None,
+        },
+        "toolkit": {
+            "available": False,
+            "status": "unavailable",
+            "revision": None,
+            "required_revision": "f" * 64,
+            "environment_ready": False,
+            "renderer": "vispy",
+            "install_command": "bash scripts/install.sh --with-bop-toolkit",
+            "reason": "The pinned BOP Toolkit runtime is unavailable.",
+        },
+        "readiness": {"ready": True, "blockers": [], "warnings": []},
+        "readiness_by_mode": {
+            "pose": {
+                "ready": True,
+                "blockers": [],
+                "warnings": [
+                    {
+                        "code": "pose_only",
+                        "message": "Pose-only output cannot be evaluated with BOP metrics.",
+                    }
+                ],
+            },
+            "pose_and_masks": {
+                "ready": False,
+                "blockers": [
+                    {
+                        "code": "bop_toolkit_unavailable",
+                        "message": "The pinned BOP Toolkit runtime is unavailable.",
+                    }
+                ],
+                "warnings": [],
+            },
+        },
+        "current_output": None,
+        "counts": {"sensors": 3, "frames": 1621, "instances": 1621},
+        "provenance": {
+            "bop_export_manifest_sha256": "a" * 64,
+            "calibration_bundle_sha256": "b" * 64,
+            "pose_template_sha256": "c" * 64,
+        },
+    }
+
+    def job_payload(status: str) -> dict:
+        return {
+            "id": "bop-annotations-1",
+            "name": "bop_annotations:pose_and_masks",
+            "command": [
+                "uv",
+                "run",
+                "python",
+                "scripts/run_bop_annotations.py",
+            ],
+            "cwd": "/repo",
+            "status": status,
+            "created_at": "2026-07-26T13:00:00Z",
+            "started_at": (
+                "2026-07-26T13:00:01Z" if status != "queued" else None
+            ),
+            "ended_at": "2026-07-26T13:04:00Z" if status == "succeeded" else None,
+            "returncode": 0 if status == "succeeded" else None,
+            "message": (
+                "Command completed successfully." if status == "succeeded" else None
+            ),
+            "tail": ["rendering instance masks"],
+            "resources": ["cpu", "disk_io"],
+            "parameters": {
+                "run_root": RUN_ROOT,
+                "bop_annotations": True,
+                "annotation_mode": "pose_and_masks",
+            },
+            "log_path": "/tmp/bop-annotations-1.log",
+            "visibility": "operator",
+        }
+
+    def annotations_handler(route) -> None:
+        annotation_requests.append(route.request.post_data_json)
+        annotation_job_status["value"] = "queued"
+        fulfill_json(
+            route,
+            {
+                "job_id": "bop-annotations-1",
+                "job": job_payload("queued"),
+            },
+            status=202,
+        )
+
+    def jobs_handler(route) -> None:
+        status = annotation_job_status["value"]
+        fulfill_json(
+            route,
+            {
+                "jobs": [] if status is None else [job_payload(status)],
+                "resources": {},
+            },
+        )
+
+    install_common_mocks(page, config_payload=configured)
+    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
+    page.route(
+        "**/bop/annotations/setup?**",
+        lambda route: fulfill_json(route, setup),
+    )
+    page.route("**/bop/annotations", annotations_handler)
+    page.route("**/jobs", jobs_handler)
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=export",
+        wait_until="networkidle",
+    )
+
+    generator = page.get_by_test_id("bop-ground-truth-generation")
+    expect(generator).to_be_visible()
+    expect(generator).to_contain_text("Choose the BOP ground-truth evidence")
+    expect(generator).to_contain_text(
+        "object model, pose template, measured placement, robot pose, and selected camera calibration"
+    )
+    expect(generator).to_contain_text("1,621")
+    pose_choice = generator.get_by_role("radio").filter(
+        has_text="Plain pose ground truth"
+    )
+    full_choice = generator.get_by_role("radio").filter(
+        has_text="Pose + object masks and ROI"
+    )
+    expect(pose_choice).to_have_attribute("aria-checked", "false")
+    expect(pose_choice).to_contain_text("scene_gt.json")
+    expect(pose_choice).to_contain_text("not evaluation-ready")
+    expect(full_choice).to_have_attribute("aria-checked", "true")
+    expect(full_choice).to_contain_text("scene_gt_info.json")
+    expect(full_choice).to_contain_text("mask/")
+    expect(full_choice).to_contain_text("mask_visib/")
+    expect(full_choice).to_contain_text("bbox_obj")
+    expect(full_choice).to_contain_text("bbox_visib")
+    expect(generator).to_contain_text(
+        "official BOP Toolkit then renders full and visible masks against captured depth"
+    )
+    expect(generator.get_by_role("button", name="Generate pose + masks")).to_be_disabled()
+    expect(generator.get_by_test_id("bop-annotation-blockers")).to_contain_text(
+        "The pinned BOP Toolkit runtime is unavailable."
+    )
+    pose_choice.click()
+    expect(pose_choice).to_have_attribute("aria-checked", "true")
+    expect(generator.get_by_role("button", name="Generate pose GT")).to_be_enabled()
+    expect(generator).to_contain_text(
+        "Pose-only output cannot be evaluated with BOP metrics."
+    )
+    expect(generator.get_by_role("link", name="Inspect BOP metrics")).to_have_count(0)
+    setup["toolkit"].update(
+        {
+            "available": True,
+            "status": "ready",
+            "revision": "f" * 64,
+            "environment_ready": True,
+            "install_command": None,
+            "reason": None,
+        }
+    )
+    setup["readiness_by_mode"]["pose_and_masks"] = {
+        "ready": True,
+        "blockers": [],
+        "warnings": [],
+    }
+    generator.get_by_role("button", name="Refresh readiness").click()
+    full_choice.click()
+    expect(full_choice).to_have_attribute("aria-checked", "true")
+    expect(generator.get_by_role("button", name="Generate pose + masks")).to_be_enabled()
+
+    generator.get_by_role("button", name="Generate pose + masks").click()
+    expect(page.get_by_text("Ground-truth generation queued")).to_be_visible()
+    assert annotation_requests == [
+        {"run_root": RUN_ROOT, "mode": "pose_and_masks"}
+    ]
+    job_status = generator.get_by_test_id("bop-annotation-job-status")
+    expect(job_status).to_contain_text("Ground-truth generation is queued")
+    expect(job_status).to_contain_text("continues after navigation")
+    expect(
+        job_status.get_by_role("link", name="Open live log in Jobs")
+    ).to_have_attribute("href", "#/jobs")
+
+    annotation_job_status["value"] = "running"
+    page.reload(wait_until="networkidle")
+    generator = page.get_by_test_id("bop-ground-truth-generation")
+    job_status = generator.get_by_test_id("bop-annotation-job-status")
+    expect(job_status).to_contain_text(
+        "Ground-truth generation is running",
+        timeout=5_000,
+    )
+    expect(job_status).to_contain_text("bop-annotations-1")
+    expect(generator.get_by_role("button", name="Generating…")).to_be_disabled()
+
+    setup["current_output"] = {
+        "mode": "pose_and_masks",
+        "state": "complete",
+        "annotation_count": 1621,
+        "mask_count": 1621,
+        "visible_mask_count": 1621,
+        "evaluation_ready": True,
+        "verified": True,
+        "integrity_error": None,
+        "manifest_sha256": "d" * 64,
+        "blenderproc_version": "2.8.0",
+        "toolkit_revision": "f" * 64,
+    }
+    annotation_job_status["value"] = "succeeded"
+    evidence = generator.get_by_test_id("bop-annotation-evidence")
+    expect(evidence).to_contain_text("verified for evaluation", timeout=5_000)
+    expect(evidence).to_contain_text("1,621")
+    expect(evidence).to_contain_text("1,621")
+    expect(evidence).to_contain_text("full-frame instance masks")
+    expect(
+        evidence.get_by_role("link", name="Inspect BOP metrics")
+    ).to_have_attribute("href", "#/bop-evaluation")
 
 
 def test_run_setup_disables_camera_without_deleting_identity_or_profile(
@@ -3798,8 +4614,116 @@ def test_dashboard_quick_robot_controls_use_configured_target(
     ]
 
 
+def test_dashboard_prioritizes_monitor_storage_and_job_activity(
+    console_server,
+    page,
+) -> None:
+    install_common_mocks(page)
+
+    def job(
+        job_id: str,
+        name: str,
+        status: str,
+        *,
+        message: str | None = None,
+    ) -> dict:
+        active = status in {"queued", "running", "canceling"}
+        return {
+            "id": job_id,
+            "name": name,
+            "command": ["uv", "run", "python"],
+            "cwd": "/repo",
+            "status": status,
+            "created_at": "2026-07-27T08:00:00Z",
+            "started_at": "2026-07-27T08:00:01Z" if status != "queued" else None,
+            "ended_at": None if active else "2026-07-27T08:01:00Z",
+            "returncode": None if active else 1 if status == "failed" else 0,
+            "message": message,
+            "tail": [],
+            "resources": ["disk_io"] if status != "queued" else ["cpu"],
+            "parameters": {"run_root": RUN_ROOT},
+            "log_path": f"/tmp/{job_id}.log",
+            "visibility": "operator",
+        }
+
+    page.route(
+        "**/jobs",
+        lambda route: fulfill_json(
+            route,
+            {
+                "jobs": [
+                    job("running-1", "Synchronize selected run", "running"),
+                    job("queued-1", "Generate BOP annotations", "queued"),
+                    job(
+                        "failed-1",
+                        "Calibration validation",
+                        "failed",
+                        message="Residual threshold exceeded for wrist camera.",
+                    ),
+                    job("succeeded-1", "Old completed export", "succeeded"),
+                ],
+                "resources": {"disk_io": "running-1"},
+            },
+        ),
+    )
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+
+    expect(page.get_by_text("Recommended next action", exact=True)).to_have_count(0)
+    expect(page.get_by_text("Run ArUco target detection", exact=True)).to_have_count(0)
+    expect(
+        page.get_by_text(
+            "Generate target-pose observations for calibration support.",
+            exact=True,
+        )
+    ).to_have_count(0)
+
+    monitor = page.get_by_test_id("dashboard-room-monitor")
+    activity = page.get_by_test_id("dashboard-job-activity")
+    expect(monitor).to_be_visible()
+    expect(activity).to_be_visible()
+    monitor_box = monitor.bounding_box()
+    activity_box = activity.bounding_box()
+    assert monitor_box is not None
+    assert activity_box is not None
+    assert monitor_box["width"] > activity_box["width"]
+
+    storage = page.get_by_test_id("dashboard-storage")
+    expect(storage).to_contain_text("1.25 TiB free")
+    expect(storage).to_contain_text("42% free of 3.00 TiB on /tmp")
+
+    expect(activity.get_by_role("heading", name="Active jobs")).to_be_visible()
+    expect(activity.get_by_text("Synchronize selected run", exact=True)).to_be_visible()
+    expect(activity.get_by_text("Generate BOP annotations", exact=True)).to_be_visible()
+    expect(activity.get_by_role("heading", name="Recent failures")).to_be_visible()
+    expect(activity.get_by_text("Calibration validation", exact=True)).to_be_visible()
+    expect(activity).to_contain_text(
+        "Residual threshold exceeded for wrist camera."
+    )
+    expect(activity.get_by_text("Old completed export", exact=True)).to_have_count(0)
+    expect(activity.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
 def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> None:
     install_common_mocks(page)
+    page.add_init_script(
+        """
+        window.__copiedDebugTexts = [];
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: {
+            writeText: async (text) => {
+              window.__copiedDebugTexts.push(text);
+            },
+          },
+        });
+        """
+    )
     canceled: list[str] = []
     job = {
         "id": "capture-1",
@@ -3839,6 +4763,17 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     page.goto(f"{console_server.url}/#/jobs", wait_until="networkidle")
     page.get_by_role("button", name="Log").click()
     expect(page.locator('[data-testid="job-log"]')).to_contain_text("line two")
+    page.get_by_role("button", name="Copy output").click()
+    expect(page.get_by_text("Job output copied")).to_be_visible()
+    page.get_by_role("button", name="Copy context").click()
+    expect(page.get_by_text("Job context copied")).to_be_visible()
+    copied = page.evaluate("window.__copiedDebugTexts")
+    assert copied[0] == "line one\nline two\n"
+    context = json.loads(copied[1])
+    assert context["schema_version"] == "posetestbot_job_debug_context.v1"
+    assert context["job"]["id"] == "capture-1"
+    assert context["job"]["parameters"] == {"pipeline_stage": "sync_run"}
+    assert "tail" not in context["job"]
     page.get_by_role("button", name="Cancel job").click()
     assert canceled == ["capture-1"]
 
@@ -5509,7 +6444,9 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
     assert deletion == {"run_root": old_run, "confirm": True}
 
 
-def cell_scene_payload(*, objectless: bool = False) -> dict:
+def cell_scene_payload(
+    *, objectless: bool = False, camera_frames_available: bool = False
+) -> dict:
     identity = {
         "semantics": "entity_to_parent",
         "parent_frame": "template_base",
@@ -5758,6 +6695,50 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
                 "interpolation": "none",
                 "page_limit": 2000,
                 "source": "match_robot_ee_poses.json",
+                "camera": {
+                    "sensor_folder": "realsense_123",
+                    "sensor_type": "realsense_d435",
+                    "device_id": "123",
+                    "display_name": "Wrist D435",
+                    "mounting_mode": "eye_in_hand",
+                    "inverted": True,
+                    "image_presentation": {
+                        "configured_inverted": True,
+                        "stored_rotation_degrees": None,
+                        "display_rotation_degrees": 180,
+                        "correction": "viewer",
+                    },
+                },
+                "camera_frames": {
+                    "available": camera_frames_available,
+                    "rgb": {
+                        "available": camera_frames_available,
+                        "kind": "rgb",
+                        "media_type": "image/png",
+                        "source": (
+                            "/tmp/run/processed/synchronized/realsense_123/rgb"
+                            if camera_frames_available
+                            else None
+                        ),
+                    },
+                    "depth": {
+                        "available": camera_frames_available,
+                        "kind": "depth",
+                        "media_type": "image/png",
+                        "source": (
+                            "/tmp/run/processed/synchronized/realsense_123/depth"
+                            if camera_frames_available
+                            else None
+                        ),
+                        "depth_scale_to_mm": (
+                            1.0 if camera_frames_available else None
+                        ),
+                        "visualization": "turbo_near_warm_fixed_range",
+                        "preview_min_depth_mm": 200.0,
+                        "preview_max_depth_mm": 3000.0,
+                        "invalid_depth_value": 0,
+                    },
+                },
             }
         ],
         "default_timeline_id": "sensor:realsense_123",
@@ -5791,27 +6772,101 @@ def cell_scene_payload(*, objectless: bool = False) -> dict:
 
 def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -> None:
     install_common_mocks(page)
-    scene = cell_scene_payload()
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    scene = cell_scene_payload(camera_frames_available=True)
+    static_timeline = {
+        **scene["timelines"][0],
+        "id": "sensor:realsense_456",
+        "label": "realsense_456",
+        "default": False,
+        "source": "/tmp/run/processed/synchronized/realsense_456/match_robot_ee_poses.json",
+        "camera": {
+            "sensor_folder": "realsense_456",
+            "sensor_type": "realsense_d435",
+            "device_id": "456",
+            "display_name": "Static D435",
+            "mounting_mode": "static",
+            "inverted": False,
+            "image_presentation": {
+                "configured_inverted": False,
+                "stored_rotation_degrees": 0,
+                "display_rotation_degrees": 0,
+                "correction": "not_required",
+            },
+        },
+        "camera_frames": {
+            "available": True,
+            "rgb": {
+                "available": True,
+                "kind": "rgb",
+                "media_type": "image/png",
+                "source": "/tmp/run/processed/synchronized/realsense_456/rgb",
+            },
+            "depth": {
+                "available": True,
+                "kind": "depth",
+                "media_type": "image/png",
+                "source": "/tmp/run/processed/synchronized/realsense_456/depth",
+                "depth_scale_to_mm": 1.0,
+                "visualization": "turbo_near_warm_fixed_range",
+                "preview_min_depth_mm": 200.0,
+                "preview_max_depth_mm": 3000.0,
+                "invalid_depth_value": 0,
+            },
+        },
+    }
+    scene["timelines"].append(static_timeline)
+    static_poses = [
+        {
+            **pose,
+            "frame_id": f"10000{index}.png",
+            "transform": {
+                **pose["transform"],
+                "translation_mm": [100 + index, 20, 30],
+            },
+        }
+        for index, pose in enumerate(scene["trajectory_preview"])
+    ]
     calibration = scene["entities"][2]["calibration"]
     calibration["extrinsics"]["matrix"][0][3] = "10"
     calibration["extrinsics"]["rotation_quaternion_wxyz"] = ["1", "0", "0", "0"]
     calibration["extrinsics"]["translation_mm"] = ["10", "20", "30"]
     calibration["quality"]["mean_reprojection_error_px"] = "0.321"
     page.route("**/ui/cell-scene?**", lambda route: fulfill_json(route, scene))
-    page.route(
-        "**/ui/cell-scene/timeline?**",
-        lambda route: fulfill_json(
+    def timeline_handler(route) -> None:
+        timeline_id = parse_qs(urlparse(route.request.url).query)["timeline_id"][0]
+        selected_timeline = next(
+            item for item in scene["timelines"] if item["id"] == timeline_id
+        )
+        fulfill_json(
             route,
             {
                 "schema_version": "cell_timeline.v1",
-                "timeline": scene["timelines"][0],
+                "timeline": selected_timeline,
                 "offset": 0,
                 "limit": 2000,
                 "total": 2,
                 "next_offset": None,
                 "previous_offset": None,
-                "poses": scene["trajectory_preview"],
+                "poses": (
+                    static_poses
+                    if timeline_id == "sensor:realsense_456"
+                    else scene["trajectory_preview"]
+                ),
             },
+        )
+
+    page.route("**/ui/cell-scene/timeline?**", timeline_handler)
+    encoded, camera_png = cv2.imencode(
+        ".png", np.full((32, 64, 3), (30, 120, 220), dtype=np.uint8)
+    )
+    assert encoded
+    page.route(
+        "**/ui/cell-scene/camera-frame?**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="image/png",
+            body=camera_png.tobytes(),
         ),
     )
 
@@ -5879,8 +6934,97 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     expect(raw_provenance).to_contain_text('"sync_delta_ms": 1.2')
     page.get_by_text("Robot flange", exact=True).click()
     expect(page.get_by_text("10.00, 20.00, 30.00")).not_to_be_visible()
+    camera_section = page.get_by_test_id("cell-camera-frames")
+    expect(camera_section).to_contain_text("2 cameras retain image data")
+    page.get_by_role("button", name="Show frames").click()
+    expect(page.get_by_role("checkbox", name="Show Wrist D435")).to_be_checked()
+    expect(
+        page.get_by_role("checkbox", name="Show Static D435")
+    ).not_to_be_checked()
+    page.get_by_role("checkbox", name="Show Static D435").check()
+
+    camera_columns = page.get_by_test_id("cell-camera-column")
+    expect(camera_columns).to_have_count(2)
+    wrist_column = camera_columns.filter(has_text="Wrist D435")
+    static_column = camera_columns.filter(has_text="Static D435")
+    wrist_image = wrist_column.get_by_test_id("cell-camera-frame-image")
+    static_image = static_column.get_by_test_id("cell-camera-frame-image")
+    expect(wrist_image).to_have_attribute(
+        "alt", "Wrist D435 RGB frame 000000.png"
+    )
+    expect(static_image).to_have_attribute(
+        "alt", "Static D435 RGB frame 100000.png"
+    )
+    assert "frame_id=000000.png" in (wrist_image.get_attribute("src") or "")
+    assert "frame_id=100000.png" in (static_image.get_attribute("src") or "")
+    expect(wrist_image).to_have_attribute("data-display-rotation-degrees", "180")
+    expect(wrist_image).to_have_attribute("style", "transform: rotate(180deg);")
+    expect(wrist_column.get_by_test_id("cell-camera-orientation")).to_contain_text(
+        "rotated 180° for display in Cell"
+    )
+    expect(static_image).to_have_attribute("data-display-rotation-degrees", "0")
+    expect(static_image).not_to_have_attribute("style", re.compile("rotate"))
+    canvas_box = page.get_by_test_id("cell-webgl-canvas").bounding_box()
+    camera_section_box = camera_section.bounding_box()
+    wrist_box = wrist_column.bounding_box()
+    static_box = static_column.bounding_box()
+    assert (
+        canvas_box is not None
+        and camera_section_box is not None
+        and wrist_box is not None
+        and static_box is not None
+    )
+    assert camera_section_box["y"] >= canvas_box["y"] + canvas_box["height"]
+    assert abs(wrist_box["y"] - static_box["y"]) < 2
+    assert wrist_box["x"] + wrist_box["width"] <= static_box["x"]
+    wrist_image_box = wrist_image.bounding_box()
+    static_image_box = static_image.bounding_box()
+    assert wrist_image_box is not None and static_image_box is not None
+    assert abs(wrist_image_box["y"] - static_image_box["y"]) < 2
+    expect(
+        page.get_by_text(
+            "Side-by-side display does not claim simultaneous exposure",
+            exact=False,
+        )
+    ).to_be_visible()
     page.get_by_role("slider", name="Frame scrubber").fill("1")
-    expect(page.get_by_text("Exact frame 000001.png · arc")).to_be_visible()
+    expect(page.get_by_text("Exact 3D pose frame 000001.png · arc")).to_be_visible()
+    expect(wrist_image).to_have_attribute(
+        "alt", "Wrist D435 RGB frame 000001.png"
+    )
+    expect(static_image).to_have_attribute(
+        "alt", "Static D435 RGB frame 100001.png"
+    )
+    assert "frame_id=000001.png" in (wrist_image.get_attribute("src") or "")
+    assert "timeline_id=sensor%3Arealsense_456" in (
+        static_image.get_attribute("src") or ""
+    )
+    expect(static_column).to_contain_text(
+        "realsense_456 · Realsense D435 · Static"
+    )
+
+    page.get_by_role("button", name="Show Depth").click()
+    depth_images = page.locator(
+        '[data-testid="cell-camera-frame-image"][data-modality="depth"]'
+    )
+    expect(depth_images).to_have_count(2)
+    expect(page.get_by_test_id("cell-depth-legend")).to_have_count(2)
+    expect(depth_images.first).to_have_attribute(
+        "alt", "Wrist D435 Depth frame 000001.png"
+    )
+    assert "modality=depth" in (depth_images.first.get_attribute("src") or "")
+    expect(depth_images.first).to_have_attribute(
+        "data-display-rotation-degrees", "180"
+    )
+
+    page.get_by_role("button", name="Show RGB + depth").click()
+    expect(page.get_by_test_id("cell-camera-frame-image")).to_have_count(4)
+    expect(wrist_column.get_by_test_id("cell-camera-frame-panel")).to_have_count(2)
+    expect(static_column.get_by_test_id("cell-camera-frame-panel")).to_have_count(2)
+    expect(page.get_by_role("slider", name="Frame scrubber")).to_have_value("1")
+
+    page.get_by_role("button", name="Hide frames").click()
+    expect(camera_columns).not_to_be_visible()
     page.get_by_text("Recorded trajectory", exact=True).click()
     expect(page.get_by_role("checkbox", name="Recorded trajectory")).not_to_be_checked()
 
@@ -5915,3 +7059,4 @@ def test_cell_webgl_fallback_and_objectless_state(console_server, page) -> None:
     expect(page.get_by_text("WebGL is unavailable")).to_be_visible()
     expect(page.get_by_text("Objectless RGB-D run")).to_be_visible()
     expect(page.get_by_text("Robot flange", exact=True)).to_be_visible()
+    expect(page.get_by_test_id("cell-camera-frames")).to_have_count(0)

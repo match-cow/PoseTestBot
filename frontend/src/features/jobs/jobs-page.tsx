@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Ban, ChevronDown, Clock3, FileText, LockKeyhole, RefreshCw, Search, Square, Terminal, X } from "lucide-react"
+import { Ban, ChevronDown, Clock3, Copy, FileText, LockKeyhole, RefreshCw, Search, Square, Terminal, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { EmptyState } from "@/components/empty-state"
@@ -33,6 +33,41 @@ function timing(job: Job) {
   if (job.ended_at) return `Finished ${formatDate(job.ended_at)}`
   if (job.started_at) return `Started ${formatDate(job.started_at)}`
   return "Not started"
+}
+
+async function writeClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const textarea = document.createElement("textarea")
+  textarea.value = text
+  textarea.style.position = "fixed"
+  textarea.style.opacity = "0"
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+  const copied = document.execCommand("copy")
+  textarea.remove()
+  if (!copied) throw new Error("The browser denied clipboard access")
+}
+
+async function copyDebugText(label: string, text: string) {
+  try {
+    await writeClipboard(text)
+    toast.success(`${label} copied`)
+  } catch (error) {
+    toast.error(`${label} could not be copied`, { description: errorMessage(error) })
+  }
+}
+
+function jobContext(job: Job) {
+  const metadata: Partial<Job> = { ...job }
+  delete metadata.tail
+  return JSON.stringify({
+    schema_version: "posetestbot_job_debug_context.v1",
+    job: metadata,
+  }, null, 2)
 }
 
 export function JobsPage() {
@@ -77,6 +112,7 @@ export function JobsPage() {
     enabled: Boolean(currentDetail),
     refetchInterval: currentDetail && ACTIVE.has(currentDetail.status) ? 1_000 : false,
   })
+  const outputText = log.data || currentDetail?.tail.join("\n") || ""
   const cancel = useMutation({
     mutationFn: (job: Job) => api(isCaptureJob(job) ? `/capture/jobs/${job.id}/stop` : `/jobs/${job.id}/cancel`, { method: "POST", body: "{}" }),
     onSuccess: () => {
@@ -153,8 +189,14 @@ export function JobsPage() {
     <Sheet open={Boolean(detail)} onOpenChange={(open) => !open && setDetail(null)}>
       <SheetContent>
         <SheetHeader><SheetTitle className="font-display text-xl font-semibold">{currentDetail?.name}</SheetTitle><SheetDescription>{currentDetail?.id} · {ACTIVE.has(currentDetail?.status ?? "") ? "live process log" : "completed process log"}</SheetDescription></SheetHeader>
-        <div className="flex items-center justify-between"><StatusBadge status={currentDetail?.status} /><span className="text-xs text-muted-foreground">Return code {currentDetail?.returncode ?? "—"}</span></div>
-        <pre data-testid="job-log" className="min-h-0 flex-1 overflow-auto rounded-lg bg-[#11130d] p-4 text-xs leading-relaxed text-[#dce4c4]">{log.isError ? `Log unavailable: ${errorMessage(log.error)}` : log.data || currentDetail?.tail.join("\n") || "Waiting for log output…"}</pre>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3"><StatusBadge status={currentDetail?.status} /><span className="text-xs text-muted-foreground">Return code {currentDetail?.returncode ?? "—"}</span></div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" disabled={!outputText || log.isPending} onClick={() => void copyDebugText("Job output", outputText)} title="Copy the complete process output"><Copy />Copy output</Button>
+            <Button variant="outline" size="sm" disabled={!currentDetail} onClick={() => currentDetail && void copyDebugText("Job context", jobContext(currentDetail))} title="Copy job context and metadata"><Copy />Copy context</Button>
+          </div>
+        </div>
+        <pre data-testid="job-log" className="min-h-0 flex-1 overflow-auto rounded-lg bg-[#11130d] p-4 text-xs leading-relaxed text-[#dce4c4]">{log.isError ? `Log unavailable: ${errorMessage(log.error)}` : outputText || "Waiting for log output…"}</pre>
         {currentDetail && ACTIVE.has(currentDetail.status) && <Button variant="destructive" onClick={() => cancel.mutate(currentDetail)} disabled={currentDetail.status === "canceling" || (cancel.isPending && cancel.variables?.id === currentDetail.id)}><Square />{currentDetail.status === "canceling" ? "Canceling…" : isCaptureJob(currentDetail) ? "Stop capture" : "Cancel job"}</Button>}
       </SheetContent>
     </Sheet>

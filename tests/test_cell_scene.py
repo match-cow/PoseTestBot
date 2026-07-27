@@ -5,6 +5,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -883,6 +884,162 @@ def test_cell_apis_assets_and_objectless_state(tmp_path: Path, monkeypatch) -> N
     assert rejected.status_code == 404
     assert timeline.status_code == 200
     assert len(timeline.get_json()["poses"]) == 2
+
+
+def test_cell_camera_frames_follow_exact_timeline_indices(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_root = make_scene_run(tmp_path)
+    sensor_folder = (
+        run_root / "processed" / "synchronized" / "realsense_111"
+    )
+    rgb = sensor_folder / "rgb"
+    depth = sensor_folder / "depth"
+    rgb.mkdir()
+    depth.mkdir()
+    frame_bytes = b"\x89PNG\r\n\x1a\nexact-frame-one"
+    (rgb / "000001.png").write_bytes(frame_bytes)
+    depth_values = np.array([[0, 200], [1_000, 3_000]], dtype=np.uint16)
+    assert cv2.imwrite((depth / "000001.png").as_posix(), depth_values)
+    (sensor_folder / "depthscale.txt").write_text("1.0\n")
+    metadata_path = sensor_folder / "frame_metadata.jsonl"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "frame_id": "000001.png",
+                "inverted": True,
+                "image_rotation_degrees": 180,
+                "orientation": "inverted",
+            }
+        )
+        + "\n"
+    )
+    config_path = run_root / "run_config.json"
+    config = json.loads(config_path.read_text())
+    next(
+        sensor
+        for sensor in config["capture"]["sensors"]
+        if sensor["device_id"] == "111"
+    )["inverted"] = True
+    config_path.write_text(json.dumps(config))
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\noutside-run")
+    (rgb / "000000.png").symlink_to(outside)
+
+    scene = build_cell_scene(run_root)
+    timelines = {item["id"]: item for item in scene["timelines"]}
+    assert timelines["sensor:realsense_111"]["camera"] == {
+        "sensor_folder": "realsense_111",
+        "sensor_type": "realsense_d435",
+        "device_id": "111",
+        "display_name": "Wrist camera",
+        "mounting_mode": "eye_in_hand",
+        "inverted": True,
+        "image_presentation": {
+            "configured_inverted": True,
+            "stored_rotation_degrees": 180,
+            "display_rotation_degrees": 0,
+            "correction": "capture",
+        },
+    }
+    assert timelines["sensor:realsense_111"]["camera_frames"] == {
+        "available": True,
+        "rgb": {
+            "available": True,
+            "kind": "rgb",
+            "media_type": "image/png",
+            "source": rgb.as_posix(),
+        },
+        "depth": {
+            "available": True,
+            "kind": "depth",
+            "media_type": "image/png",
+            "source": depth.as_posix(),
+            "depth_scale_to_mm": 1.0,
+            "visualization": "turbo_near_warm_fixed_range",
+            "preview_min_depth_mm": 200.0,
+            "preview_max_depth_mm": 3_000.0,
+            "invalid_depth_value": 0,
+        },
+    }
+    assert timelines["sensor:realsense_222"]["camera_frames"]["available"] is False
+
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
+    monkeypatch.setenv("POSETESTBOT_WEB_INPUT_ROOTS", tmp_path.as_posix())
+    client = create_app().test_client()
+    response = client.get(
+        "/ui/cell-scene/camera-frame",
+        query_string={
+            "run_root": run_root,
+            "timeline_id": "sensor:realsense_111",
+            "timeline_index": 1,
+        },
+    )
+    response_by_frame_id = client.get(
+        "/ui/cell-scene/camera-frame",
+        query_string={
+            "run_root": run_root,
+            "timeline_id": "sensor:realsense_111",
+            "frame_id": "000001.png",
+        },
+    )
+    missing = client.get(
+        "/ui/cell-scene/camera-frame",
+        query_string={
+            "run_root": run_root,
+            "timeline_id": "sensor:realsense_111",
+            "timeline_index": 2,
+        },
+    )
+    escaped = client.get(
+        "/ui/cell-scene/camera-frame",
+        query_string={
+            "run_root": run_root,
+            "timeline_id": "sensor:realsense_111",
+            "timeline_index": 0,
+        },
+    )
+    depth_preview = client.get(
+        "/ui/cell-scene/camera-frame",
+        query_string={
+            "run_root": run_root,
+            "timeline_id": "sensor:realsense_111",
+            "timeline_index": 1,
+            "modality": "depth",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.mimetype == "image/png"
+    assert response.data == frame_bytes
+    assert response.cache_control.max_age == 3600
+    assert response_by_frame_id.status_code == 200
+    assert response_by_frame_id.data == frame_bytes
+    assert missing.status_code == 404
+    assert escaped.status_code == 400
+    assert depth_preview.status_code == 200
+    decoded_depth = cv2.imdecode(
+        np.frombuffer(depth_preview.data, dtype=np.uint8),
+        cv2.IMREAD_UNCHANGED,
+    )
+    assert decoded_depth.dtype == np.uint8
+    assert decoded_depth.shape == (2, 2, 3)
+    assert decoded_depth[0, 0].tolist() == [0, 0, 0]
+    assert decoded_depth[0, 1].tolist() != decoded_depth[1, 1].tolist()
+
+    metadata_path.unlink()
+    fallback_scene = build_cell_scene(run_root)
+    fallback_timeline = next(
+        item
+        for item in fallback_scene["timelines"]
+        if item["id"] == "sensor:realsense_111"
+    )
+    assert fallback_timeline["camera"]["image_presentation"] == {
+        "configured_inverted": True,
+        "stored_rotation_degrees": None,
+        "display_rotation_degrees": 180,
+        "correction": "viewer",
+    }
 
 
 def test_retired_cell_registry_asset_route_is_absent(

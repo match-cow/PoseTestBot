@@ -246,6 +246,7 @@ def test_bop_export_stage_writes_objectless_dataset_and_manifest(
     assert manifest["dataset_mode"] == "objectless"
     assert manifest["objectless"] is True
     assert manifest["annotation_source"] == "none"
+    assert manifest["annotation_mode"] == "none"
     assert manifest["annotation_state"] == "absent"
     assert manifest["capabilities"]["bop19_evaluation"] is False
     assert manifest["exports"][0]["input_sensor_folder"] == (

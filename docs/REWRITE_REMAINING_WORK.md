@@ -12,8 +12,13 @@ installation, and README documents.
 
 PoseTestBot ends at a validated BOP dataset. Capture, calibration,
 synchronization, optional BlenderProc GT/mask generation, pose-template
-provenance, and BOP export are in scope. Estimator execution, BOP result CSV
-conversion, evaluation, and metric reporting belong in a consumer repository.
+provenance, and BOP export are in scope. Estimator execution and BOP result CSV
+conversion belong in a consumer repository. The sole evaluation exception is
+the Inspect-only, run-scoped official BOP19 validation path: it consumes a
+completed annotation-bearing export and an already compatible standard result
+CSV, or generates a deterministic test-only slight GT perturbation, and writes
+derived evidence only below `processed/bop_evaluation/`. It is not a pipeline
+stage.
 
 The lab iiwa is the sole robot profile. Raw capture evidence must never be
 overwritten. Every physical action requires explicit operator authorization;
@@ -48,7 +53,11 @@ The rewrite already provides:
   and template thumbnails, target-specific artifact verification, interactive
   selected-template 3D previews, strict bundle/selection validation, durable
   selection recovery, run-owned placement and instance snapshots, BlenderProc
-  2.8.0 identity validation, and BOP v4 provenance sidecars;
+  2.8.0 identity validation, explicit pose-only versus pose-plus-mask GT
+  generation, and clean BOP v5 export/provenance contracts;
+- Inspect-only immutable BOP19 result registration, deterministic GT-derived
+  test fixtures, selectable method/result history, and pinned official BOP19
+  metric jobs below `processed/bop_evaluation/`;
 - a packaged React operator console and scoped Flask APIs; and
 - the three acquisition-only gates: `rewrite_full_capture.v1`,
   `rewrite_calibration_validation.v1`, and
@@ -250,13 +259,14 @@ camera, robot, or physical capture was accessed during its implementation.
   robot occlusion at the synchronized depth exposure. Retain the explicit
   limitation that associated D435 RGB images are not hardware-certified and
   cannot establish a shared moving-robot or changing-illumination instant.
-- [ ] Export BOP v4 and verify `bop/posetestbot_frame_sets.json` maps every
+- [ ] Export BOP v5 and verify `bop/posetestbot_frame_sets.json` maps every
   complete set to all expected scene/image views and carries the exact
   capture-report configuration/qualification binding. Require
   `rewrite_bop_export_readiness.v1` to fail if the current qualification,
   capture report, authoritative groups, BOP frame sets, frame map, or exported
-  bytes disagree. Do not treat optional BlenderProc masks as robot-occluder
-  truth; the articulated iiwa is not rendered.
+  bytes disagree. Do not treat the full rendered object mask as
+  robot-occluder truth; the articulated iiwa is not rendered. The visible mask
+  may reflect robot occlusion only where captured depth validly observed it.
 - [ ] If the research later requires OAK or ZED views in the same hardware
   exposure group, qualify trigger-capable replacement interfaces, a
   level-compatible isolated distribution design, and new adapter contracts.
@@ -324,8 +334,10 @@ sensor, mount, resolution, orientation, target, and timing compatibility gates
 pass. The real annotation-free v4 output from
 `working_data/test20260725_04` proved the capture/synchronization content but
 failed the later official BOP Toolkit model-loader audit. Future exports use
-the clean `bop_export_manifest.v5` contract; regenerating this retained run,
-optional BlenderProc 2.8.0 GT/mask acceptance, and the broader
+the clean `bop_export_manifest.v5` contract. The retained
+`working_data/test20260726_BOPv5` run has now passed BlenderProc 2.8.0
+pose-plus-mask generation, official BOP19 target/metric validation, and the
+11/11 rewrite gate; regenerating the older v4 run and the broader
 physical-template review below remain outstanding.
 
 - [ ] Import/inspect and classify the real CAD and texture assets through
@@ -339,11 +351,15 @@ physical-template review below remain outstanding.
 - [ ] Include at least one duplicate physical instance if duplicate-category
   behavior is part of the intended dataset. Verify exact slicing, immutable
   hashes, stable `obj_id` reuse, and unique instance UUIDs.
-- [ ] Prepare and render real GT/masks with BlenderProc 2.8.0. Require camera,
-  calibration, selection, geometry, renderer-version, GT-index, and instance
-  identity evidence to agree for every sensor/frame. Mark robot-intersected
-  real views as unsupported for synthetic robot-occlusion truth until approved
-  articulated iiwa geometry, joint state, and transforms are recorded.
+- [x] Run the new guided **Pose + masks** product on the retained real v5
+  dataset with BlenderProc 2.8.0. Require camera, calibration,
+  selection, geometry, BlenderProc/toolkit identity, GT-index, and instance
+  identity evidence to agree for every sensor/frame. The official mask pass
+  compares rendered object depth with captured depth, so unmodelled robot
+  occlusion is reflected when the sensor measured it; still inspect
+  robot-intersected and missing-depth views explicitly. The retained product
+  contains 1,621 pose rows, full masks, and visible masks across its two
+  scenes; immutable read-back and all 1,621 visibility-filtered targets agree.
 - [x] Audit the retained real timestamp-aligned run. Confirm that its two
   811-frame BOP scenes contain only synchronized capture-sweep frames and that
   pre/post-motion raw evidence remains outside the export. Reproduce the v4
@@ -359,9 +375,24 @@ physical-template review below remain outstanding.
 - [ ] A future hardware-trigger run must additionally require
   `posetestbot_frame_sets.json` to cover every authoritative complete
   mixed-mount group.
-- [ ] After optional rendered annotations exist, inspect representative
-  RGB/depth/GT/masks and repeated-object rows, then rerun
+- [x] After optional rendered annotations exist, inspect representative
+  RGB/depth/GT/masks and any repeated-object rows, then rerun
   `rewrite_bop_export_readiness.v1` on that annotation-bearing real dataset.
+  Confirm every target `inst_count` exactly counts GT rows with
+  `visib_fract >= 0.1`; do not treat a legacy target mismatch warning as
+  leaderboard-comparable acceptance.
+  Use **Inspect → BOP Evaluation** to run a deterministic slight-offset GT
+  fixture through the pinned official BOP19 metrics and retain its dataset,
+  result, toolkit, renderer, and score provenance below
+  `processed/bop_evaluation/`. The real v5 run passed the 11/11 rewrite gate;
+  it has one instance per image, so duplicate-category row acceptance remains
+  with the separate unchecked physical-duplicate task above;
+  its seed-42, 1 mm / 0.25° validation fixture produced official BOP19 AR
+  0.9628 (VSD 0.8885, MSSD 1.0000, MSPD 1.0000).
+- [ ] When external pose-estimator output becomes available, convert it in the
+  consumer project, import at least two canonical BOP19 CSV result runs, and
+  verify that their method/result selections and retained reports remain
+  independent. Do not add an estimator wrapper or result converter here.
 
 ## P5 — Non-Blocking Maintainability Work
 
@@ -404,7 +435,7 @@ Before declaring the rewrite complete, record a clean run of:
 ```bash
 bash -n scripts/install.sh
 bash scripts/install.sh --check-only \
-  --with-posegridgen --with-posetemplatecreator
+  --with-posegridgen --with-posetemplatecreator --with-bop-toolkit
 UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest
 cd frontend && bun run typecheck && bun run lint && bun run build
@@ -432,8 +463,12 @@ capture.
   states and approved robot geometry/transforms exist.
 - ZED live preview is optional; ZED status, snapshot/capture, calibration, and
   export contracts remain in scope.
-- Estimator runtimes, result conversion, BOP evaluation, and metric reporting
-  remain permanently outside this repository.
+- Estimator runtimes and result conversion remain permanently outside this
+  repository.
+- General evaluator bridges, evaluation pipeline stages, and legacy
+  metric-report exports remain out of scope. The only supported metric path is
+  the run-scoped Inspect-only official BOP19 validation exception documented
+  in the Boundary section.
 - Upstream `third_party/PoseGridGen/plan.md` and
   `third_party/PoseTemplateCreator/PLAN.md` belong to pinned submodules and must
   not be edited or deleted here.

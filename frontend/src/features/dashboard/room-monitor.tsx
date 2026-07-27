@@ -5,7 +5,7 @@ import { toast } from "sonner"
 
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { api, errorMessage } from "@/lib/api"
 
 interface MonitorStatus {
@@ -337,8 +337,8 @@ export function RoomMonitor() {
   const brightnessMessage = brightness?.message ?? "Brightness control is available after the camera opens."
 
   return (
-    <Card className="col-span-12 overflow-hidden xl:col-span-4">
-      <CardHeader><CardTitle className="flex items-center gap-2"><Radio className="size-4 text-primary-strong" />Test cell monitor</CardTitle></CardHeader>
+    <Card data-testid="dashboard-room-monitor" className="col-span-12 overflow-hidden xl:col-span-7">
+      <CardHeader><CardTitle className="flex items-center gap-2"><Radio className="size-4 text-primary-strong" />Test cell monitor</CardTitle><CardDescription>Live supervised overview of the workcell during setup and acquisition.</CardDescription></CardHeader>
       <CardContent>
         <div className="surface-grid relative aspect-video overflow-hidden rounded-lg bg-muted">
           <video

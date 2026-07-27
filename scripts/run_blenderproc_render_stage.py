@@ -43,6 +43,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--subdir", default="blenderproc")
     parser.add_argument("--blenderproc", default="blenderproc")
+    parser.add_argument(
+        "--annotation-mode",
+        choices=("pose", "pose_and_masks"),
+        default="pose_and_masks",
+        help=(
+            "Publish analytic pose GT only, or pose GT for a later official "
+            "BOP Toolkit depth-mask step. BlenderProc does not render masks."
+        ),
+    )
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--object-name", action="append", default=None)
     selection.add_argument(
@@ -63,6 +72,9 @@ def synchronized_input_folder(
 ) -> Path:
     if explicit_input_folder:
         return Path(explicit_input_folder)
+    rectified = run_root / PROCESSED_DIR / "rectified"
+    if rectified.is_dir():
+        return rectified
     return run_root / PROCESSED_DIR / SYNCHRONIZED_DIR
 
 
@@ -86,6 +98,7 @@ def main() -> None:
                 subdir=args.subdir,
                 blenderproc_executable=args.blenderproc,
                 sensor_names=sensor_names,
+                annotation_mode=args.annotation_mode,
             )
         )
         plan_path = write_render_plan(

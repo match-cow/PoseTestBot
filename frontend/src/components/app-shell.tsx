@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
+import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { Activity, BookOpen, Bot, Boxes, ChevronDown, FlaskConical, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, Moon, PackageSearch, Plus, Route, Sun, Workflow } from "lucide-react"
+import { Activity, ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, ChevronDown, CircleDot, FlaskConical, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Plus, Route, Sun, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { ConsoleGuide } from "@/components/console-guide"
 import { Button } from "@/components/ui/button"
@@ -11,7 +12,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useOperator } from "@/providers/operator-provider"
 import { useTheme } from "@/providers/theme-provider"
+import { api, query } from "@/lib/api"
+import type { CaptureState, Job } from "@/lib/contracts"
 import { cn } from "@/lib/utils"
+import { activeWorkflowHref, type ActiveWorkflow, type WorkflowProgressStatus } from "@/lib/workflow-session"
 
 const navigationGroups = [
   {
@@ -34,19 +38,114 @@ const navigationGroups = [
     label: "Inspect",
     items: [
       { to: "/cell", label: "Cell View", icon: Boxes },
+      { to: "/bop-evaluation", label: "BOP Evaluation", icon: ChartNoAxesCombined },
       { to: "/jobs", label: "Jobs", icon: ListChecks },
     ],
   },
 ]
 const navigation = navigationGroups.flatMap((group) => group.items)
 
+const workflowStatusPresentation: Record<WorkflowProgressStatus, { label: string; className: string; icon: typeof CircleDot }> = {
+  complete: { label: "Complete", className: "border-success/30 bg-success/10 text-success", icon: Check },
+  current: { label: "Current step", className: "border-primary/35 bg-primary/10 text-primary-strong", icon: CircleDot },
+  ready: { label: "Ready", className: "border-primary/35 bg-primary/10 text-primary-strong", icon: CircleDot },
+  blocked: { label: "Needs attention", className: "border-destructive/30 bg-destructive/10 text-destructive", icon: LockKeyhole },
+  running: { label: "Running", className: "border-warning/35 bg-warning/10 text-warning-foreground", icon: LoaderCircle },
+  not_started: { label: "Not started", className: "border-sidebar-border bg-secondary text-sidebar-foreground/60", icon: CircleDot },
+}
+
+interface WorkflowRuntimeStatus {
+  value: string
+  label: string
+}
+
+function workflowRuntimePresentation(runtime: WorkflowRuntimeStatus) {
+  if (["failed", "canceled", "cancelled"].includes(runtime.value)) {
+    return { label: runtime.label, className: "border-destructive/30 bg-destructive/10 text-destructive", icon: LockKeyhole }
+  }
+  if (runtime.value === "succeeded") {
+    return { label: runtime.label, className: "border-success/30 bg-success/10 text-success", icon: Check }
+  }
+  return { label: runtime.label, className: "border-warning/35 bg-warning/10 text-warning-foreground", icon: LoaderCircle }
+}
+
+function CurrentWorkflowCard({ workflow, runtime }: { workflow: ActiveWorkflow; runtime?: WorkflowRuntimeStatus | null }) {
+  const status = runtime ? workflowRuntimePresentation(runtime) : workflowStatusPresentation[workflow.status]
+  const StatusIcon = status.icon
+  const href = activeWorkflowHref(workflow)
+  return <section data-testid="current-workflow-card" aria-label="Current workflow for selected run" className="rounded-[10px] border border-primary/35 bg-primary/5 p-3">
+    <div className="flex items-start justify-between gap-2">
+      <div className="text-[9px] font-bold uppercase tracking-[0.15em] text-primary-strong">Current workflow</div>
+      <span role="status" className={cn("inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-semibold", status.className)}>
+        <StatusIcon aria-hidden="true" className={cn("size-2.5", (workflow.status === "running" || runtime && ["queued", "running", "canceling"].includes(runtime.value)) && "animate-spin")} />
+        {status.label}
+      </span>
+    </div>
+    <div className="mt-2 text-xs font-semibold">{workflow.journeyTitle}</div>
+    <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-sidebar-foreground/45">Selected run · Step {workflow.stepNumber} of {workflow.stepCount}</div>
+    <div className="mt-1 text-[11px] leading-snug text-sidebar-foreground/70">{workflow.stepTitle}</div>
+    <Button asChild size="sm" className="mt-3 h-8 w-full text-xs">
+      <Link to={href} aria-label={`Resume ${workflow.journeyTitle.toLowerCase()} at step ${workflow.stepNumber}: ${workflow.stepTitle}`}>Resume step {workflow.stepNumber}<ArrowRight aria-hidden="true" /></Link>
+    </Button>
+    <Link to="/workflow/setup" className="mt-2 block text-center text-[10px] font-semibold text-sidebar-foreground/55 underline-offset-4 hover:text-sidebar-foreground hover:underline">Choose another workflow</Link>
+  </section>
+}
+
 export function AppShell() {
-  const { bootstrap, runs, selectedRun, selectRun } = useOperator()
+  const { bootstrap, runs, selectedRun, selectRun, currentWorkflow } = useOperator()
   const { theme, setTheme } = useTheme()
   const location = useLocation()
   const [newRunOpen, setNewRunOpen] = useState(false)
   const [newRun, setNewRun] = useState(bootstrap.default_run_root)
   const [guideOpen, setGuideOpen] = useState(false)
+  const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
+  const captureState = useQuery({
+    queryKey: ["capture-jobs", selectedRun],
+    queryFn: () => api<CaptureState>(query("/capture/jobs", { run_root: selectedRun })),
+    enabled: currentWorkflow?.stepId === "capture",
+    refetchInterval: (state) => state.state.data?.active_count ? 1_000 : 5_000,
+  })
+  const processingJobs = useQuery({
+    queryKey: ["jobs"],
+    queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>("/jobs"),
+    enabled: currentWorkflow?.journey === "dataset" && currentWorkflow.stepId === "sync",
+    refetchInterval: (state) => state.state.data?.jobs.some((job) => ["queued", "running", "canceling"].includes(job.status)) ? 1_000 : 5_000,
+  })
+  const activeCapture = currentWorkflow?.stepId === "capture"
+    ? captureState.data?.jobs.find((job) => job.active)
+    : undefined
+  const datasetProcessingJob = currentWorkflow?.journey === "dataset" && currentWorkflow.stepId === "sync"
+    ? [...(processingJobs.data?.jobs ?? [])]
+        .filter((job) => job.parameters.run_root === selectedRun
+          && (job.parameters.pipeline_sequence === "calibrated_capture_to_bop_dataset_dry_run"
+            || job.name === "pipeline-run-config:calibrated_capture_to_bop_dataset_dry_run"))
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))[0]
+    : undefined
+  const workflowRuntimeStatus: WorkflowRuntimeStatus | null = activeCapture
+    ? {
+        value: activeCapture.status,
+        label: activeCapture.status === "queued"
+          ? "Recording queued"
+          : activeCapture.status === "canceling"
+            ? "Recording stopping"
+            : "Recording running",
+      }
+    : datasetProcessingJob
+      ? {
+          value: datasetProcessingJob.status,
+          label: datasetProcessingJob.status === "queued"
+            ? "Processing queued"
+            : datasetProcessingJob.status === "running"
+              ? "Processing running"
+              : datasetProcessingJob.status === "canceling"
+                ? "Processing stopping"
+                : datasetProcessingJob.status === "succeeded"
+                  ? "Processing finished"
+                  : ["canceled", "cancelled"].includes(datasetProcessingJob.status)
+                    ? "Processing canceled"
+                    : "Processing failed",
+        }
+      : null
 
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" })
@@ -81,15 +180,16 @@ export function AppShell() {
               <div className="mb-1.5 px-3 text-[9px] font-bold uppercase tracking-[0.16em] text-sidebar-foreground/40">{group.label}</div>
               <div className="space-y-1">{group.items.map(({ to, label, icon: Icon, match }) => {
                 const active = match ? location.pathname.startsWith(match) : location.pathname === to
-                return <NavLink key={to} to={to} className={cn("group flex items-center gap-3 rounded-[8px] border border-transparent px-3 py-2 text-[13px] font-semibold text-sidebar-foreground/65 transition-colors duration-150 hover:bg-secondary hover:text-sidebar-foreground", active && "border-primary/55 bg-sidebar-accent text-sidebar-foreground")}><Icon className={cn("size-[17px]", active && "text-primary-strong")} />{label}</NavLink>
+                const destination = match === "/workflow" ? workflowHref : to
+                return <NavLink key={to} to={destination} className={cn("group flex items-center gap-3 rounded-[8px] border border-transparent px-3 py-2 text-[13px] font-semibold text-sidebar-foreground/65 transition-colors duration-150 hover:bg-secondary hover:text-sidebar-foreground", active && "border-primary/55 bg-sidebar-accent text-sidebar-foreground")}><Icon className={cn("size-[17px]", active && "text-primary-strong")} />{label}</NavLink>
               })}</div>
             </div>)}
           </nav>
           <div className="mt-auto space-y-2 pt-5">
-            <Link to="/workflow/setup" className="block rounded-[10px] border border-primary/30 bg-primary/5 p-3 transition-colors hover:bg-primary/10">
+            {currentWorkflow ? <CurrentWorkflowCard workflow={currentWorkflow} runtime={workflowRuntimeStatus} /> : <Link to="/workflow/setup" className="block rounded-[10px] border border-primary/30 bg-primary/5 p-3 transition-colors hover:bg-primary/10">
               <div className="flex items-center gap-2 text-xs font-semibold"><Route className="size-4 text-primary-strong" />Guided acquisition</div>
               <div className="mt-1 text-[10px] leading-relaxed text-sidebar-foreground/55">Start or resume the required operator path.</div>
-            </Link>
+            </Link>}
             <div className="rounded-[10px] border border-sidebar-border bg-secondary p-3">
               <div className="flex items-center gap-2 text-xs font-semibold"><FlaskConical className="size-4 text-primary" />Trusted lab network</div>
             </div>
@@ -123,7 +223,8 @@ export function AppShell() {
               <nav className="order-3 flex w-full gap-1 overflow-x-auto pb-0.5 xl:hidden" aria-label="Primary navigation">
                 {navigation.map(({ to, label, icon: Icon, match }) => {
                   const active = match ? location.pathname.startsWith(match) : location.pathname === to
-                  return <NavLink key={to} to={to} className={cn("flex shrink-0 items-center gap-2 rounded-[8px] border border-transparent px-2.5 py-2 text-xs font-semibold text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground", active && "border-primary/55 bg-primary/10 text-foreground")}><Icon className={cn("size-4", active && "text-primary-strong")} />{label}</NavLink>
+                  const destination = match === "/workflow" ? workflowHref : to
+                  return <NavLink key={to} to={destination} className={cn("flex shrink-0 items-center gap-2 rounded-[8px] border border-transparent px-2.5 py-2 text-xs font-semibold text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground", active && "border-primary/55 bg-primary/10 text-foreground")}><Icon className={cn("size-4", active && "text-primary-strong")} />{label}</NavLink>
                 })}
               </nav>
             </div>

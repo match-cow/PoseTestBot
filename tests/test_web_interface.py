@@ -117,8 +117,7 @@ def test_preview_poll_log_filter_only_hides_sensor_preview_successes() -> None:
 
     assert not poll_filter.filter(
         record(
-            '10.145.8.50 - - "GET /sensors/previews/job/latest.jpg?t=1 '
-            'HTTP/1.1" 200 -'
+            '10.145.8.50 - - "GET /sensors/previews/job/latest.jpg?t=1 HTTP/1.1" 200 -'
         )
     )
     assert poll_filter.filter(
@@ -360,7 +359,10 @@ def test_artifact_endpoints_are_not_registered(tmp_path: Path) -> None:
         "/artifacts/bop-frame",
         "/artifacts/bop-frame-overlay",
     ):
-        assert client.get(path, query_string={"run_root": run_root.as_posix()}).status_code == 404
+        assert (
+            client.get(path, query_string={"run_root": run_root.as_posix()}).status_code
+            == 404
+        )
 
 
 def test_pipeline_recommendations_endpoint_is_acquisition_only(tmp_path: Path) -> None:
@@ -556,10 +558,7 @@ def test_run_config_endpoint_preserves_hardware_trigger_and_freezes_it_after_raw
 
     assert created.status_code == 201
     assert created.get_json()["config"]["schema_version"] == "run_config.v3"
-    assert (
-        created.get_json()["config"]["capture"]["synchronization"]
-        == synchronization
-    )
+    assert created.get_json()["config"]["capture"]["synchronization"] == synchronization
 
     preserved = client.post(
         "/run-config",
@@ -572,8 +571,7 @@ def test_run_config_endpoint_preserves_hardware_trigger_and_freezes_it_after_raw
 
     assert preserved.status_code == 201
     assert (
-        preserved.get_json()["config"]["capture"]["synchronization"]
-        == synchronization
+        preserved.get_json()["config"]["capture"]["synchronization"] == synchronization
     )
     assert preserved.get_json()["config"]["capture"]["fps"] == 8
 
@@ -586,9 +584,7 @@ def test_run_config_endpoint_preserves_hardware_trigger_and_freezes_it_after_raw
     )
 
     assert preserved_without_sensor_payload.status_code == 201
-    preserved_capture = preserved_without_sensor_payload.get_json()["config"][
-        "capture"
-    ]
+    preserved_capture = preserved_without_sensor_payload.get_json()["config"]["capture"]
     assert preserved_capture["synchronization"] == synchronization
     assert [
         {
@@ -690,10 +686,10 @@ def test_run_config_explicit_redetection_replaces_preserved_sensors(
             "families": [
                 {
                     "sensor_type": "realsense_d435",
-                        "devices": [
-                            {
-                                "sensor_type": "realsense_d435",
-                                "device_id": "new",
+                    "devices": [
+                        {
+                            "sensor_type": "realsense_d435",
+                            "device_id": "new",
                             "display_name": "Detected D435",
                             "connected": True,
                         }
@@ -956,11 +952,57 @@ def test_overview_uses_validated_sync_quality_as_run_level_sync_evidence(
     ).get_json()
 
     sync_section = next(item for item in payload["sidebar"] if item["id"] == "sync")
-    sync_step = next(item for item in payload["steps"] if item["stage_id"] == "sync_run")
+    sync_step = next(
+        item for item in payload["steps"] if item["stage_id"] == "sync_run"
+    )
     assert sync_section["artifacts"] == [
         {"path": "sync_quality_report.json", "exists": True, "status": "ok"}
     ]
     assert sync_step["status"] == "complete"
+
+
+def test_overview_treats_blenderproc_as_optional_for_annotation_free_bop(
+    tmp_path: Path,
+) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "run-annotation-free-bop"
+    write_run_config(
+        run_root,
+        create_run_config(run_root=run_root, sequence_id="sync_to_bop_dry_run"),
+    )
+    write_json(
+        run_root / "camera_rectification_report.json",
+        {
+            "schema_version": "camera_rectification.v1",
+            "sensor_count": 1,
+            "frame_count": 1,
+            "sensors": [{}],
+        },
+    )
+    write_json(
+        run_root / "bop" / "bop_export_manifest.json",
+        {
+            "schema_version": "bop_export_manifest.v5",
+            "exports": [{}],
+        },
+    )
+
+    payload = client.get(
+        "/ui/overview", query_string={"run_root": run_root.as_posix()}
+    ).get_json()
+
+    bop_section = next(item for item in payload["sidebar"] if item["id"] == "bop")
+    assert bop_section["status"] == "complete"
+    render_plan = next(
+        item
+        for item in bop_section["artifacts"]
+        if item["path"] == "blenderproc_render_plan.json"
+    )
+    assert render_plan == {
+        "path": "blenderproc_render_plan.json",
+        "exists": False,
+        "status": None,
+    }
 
 
 def test_overview_rejects_canceled_or_malformed_completion_evidence(
@@ -992,12 +1034,15 @@ def test_overview_rejects_canceled_or_malformed_completion_evidence(
     assert chips["capture_execution_report.json"]["status"] == "canceled"
     assert chips["calibration_profiles.json"]["status"] == "invalid"
     assert chips["bop/bop_export_manifest.json"]["status"] == "invalid"
-    assert next(
-        item for item in payload["sidebar"] if item["id"] == "capture"
-    )["status"] == "blocked"
+    assert (
+        next(item for item in payload["sidebar"] if item["id"] == "capture")["status"]
+        == "blocked"
+    )
 
 
-def test_overview_endpoint_treats_missing_run_config_as_empty_setup(tmp_path: Path) -> None:
+def test_overview_endpoint_treats_missing_run_config_as_empty_setup(
+    tmp_path: Path,
+) -> None:
     client = app.test_client()
     run_root = tmp_path / "empty-web-run"
     run_root.mkdir()
@@ -1026,7 +1071,9 @@ def test_web_rejects_run_root_symlink_escape(tmp_path: Path) -> None:
     assert "allowed root" in response.get_json()["output"]
 
 
-def test_web_rejects_invalid_boolean_instead_of_using_truthiness(tmp_path: Path) -> None:
+def test_web_rejects_invalid_boolean_instead_of_using_truthiness(
+    tmp_path: Path,
+) -> None:
     response = app.test_client().post(
         "/run-config",
         json={
@@ -1081,7 +1128,9 @@ def test_web_pipeline_input_path_must_use_run_or_input_roots(tmp_path: Path) -> 
     assert "calibration_profiles" in response.get_json()["output"]
 
 
-def test_sensor_snapshot_submission_queues_camera_job(monkeypatch, tmp_path: Path) -> None:
+def test_sensor_snapshot_submission_queues_camera_job(
+    monkeypatch, tmp_path: Path
+) -> None:
     class FakeJob:
         id = "job123"
         status = "queued"
@@ -1389,7 +1438,9 @@ def test_sensor_preview_submission_passes_explicit_inverted_spec(
 
     fake_runner = FakeRunner()
     monkeypatch.setattr(web_sensors, "job_runner", fake_runner)
-    monkeypatch.setattr(web_sensors, "preview_stream_root", lambda: tmp_path / "preview")
+    monkeypatch.setattr(
+        web_sensors, "preview_stream_root", lambda: tmp_path / "preview"
+    )
     client = app.test_client()
 
     response = client.post(
@@ -1416,9 +1467,12 @@ def test_sensor_preview_submission_passes_explicit_inverted_spec(
     assert spec["inverted"] is True
     assert spec["metadata"]["video_nodes"][0]["path"] == "/dev/video4"
     assert fake_runner.submitted[0]["parameters"]["inverted"] is True
-    assert fake_runner.submitted[0]["parameters"]["sensor_spec"]["metadata"][
-        "video_nodes"
-    ][0]["path"] == "/dev/video4"
+    assert (
+        fake_runner.submitted[0]["parameters"]["sensor_spec"]["metadata"][
+            "video_nodes"
+        ][0]["path"]
+        == "/dev/video4"
+    )
 
 
 def test_sensor_preview_detail_reports_missing_status_payload(
@@ -1577,7 +1631,9 @@ def test_sensor_preview_list_hides_stale_active_image_during_cleanup(
     assert runner.cancelled.wait(timeout=1)
 
 
-def test_sensor_preview_image_disables_browser_cache(monkeypatch, tmp_path: Path) -> None:
+def test_sensor_preview_image_disables_browser_cache(
+    monkeypatch, tmp_path: Path
+) -> None:
     preview_root = tmp_path / "preview"
     write_png(preview_root / "latest.jpg")
 
@@ -1605,7 +1661,9 @@ def test_sensor_preview_image_disables_browser_cache(monkeypatch, tmp_path: Path
 def test_snapshot_worker_reports_inaccessible_realsense_video_nodes(
     tmp_path: Path,
 ) -> None:
-    script_path = Path(__file__).resolve().parents[1] / "scripts" / "capture_sensor_snapshot.py"
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "capture_sensor_snapshot.py"
+    )
     spec = importlib.util.spec_from_file_location(
         "posetestbot_snapshot_worker_test",
         script_path,

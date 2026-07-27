@@ -71,6 +71,26 @@ export interface Overview {
   recommendation_error: string | null
 }
 
+export interface RunStorage {
+  schema_version: "run_storage.v1"
+  run_root: string
+  filesystem_path: string | null
+  status: "ready" | "warning" | "error" | "unavailable"
+  total_bytes: number | null
+  used_bytes: number | null
+  free_bytes: number | null
+  free_fraction: number | null
+  thresholds: {
+    critical_free_bytes: number
+    warning_free_bytes: number
+    critical_free_bytes_cap: number
+    warning_free_bytes_cap: number
+    critical_free_fraction: number
+    warning_free_fraction: number
+  }
+  error: string | null
+}
+
 export interface SensorDevice {
   sensor_type: string
   device_id: string
@@ -541,6 +561,40 @@ export interface CellTimelineMetadata {
   interpolation: "none"
   page_limit: number
   source: string
+  camera: {
+    sensor_folder: string
+    sensor_type: string
+    device_id: string
+    display_name: string
+    mounting_mode: string
+    inverted: boolean
+    image_presentation: {
+      configured_inverted: boolean
+      stored_rotation_degrees: number | null
+      display_rotation_degrees: number
+      correction: "not_required" | "capture" | "viewer"
+    }
+  } | null
+  camera_frames: {
+    available: boolean
+    rgb: {
+      available: boolean
+      kind: "rgb"
+      media_type: "image/png"
+      source: string | null
+    }
+    depth: {
+      available: boolean
+      kind: "depth"
+      media_type: "image/png"
+      source: string | null
+      depth_scale_to_mm: number | null
+      visualization: "turbo_near_warm_fixed_range"
+      preview_min_depth_mm: number
+      preview_max_depth_mm: number
+      invalid_depth_value: 0
+    }
+  }
 }
 
 export interface CellPose {
@@ -579,6 +633,161 @@ export interface CellTimelinePage {
   next_offset: number | null
   previous_offset: number | null
   poses: CellPose[]
+}
+
+export type BopAnnotationMode = "pose" | "pose_and_masks"
+
+export interface BopAnnotationIssue {
+  code: string
+  message: string
+}
+
+export interface BopAnnotationRuntime {
+  available: boolean
+  required_version: string | null
+  detected_version: string | null
+  install_command: string | null
+  reason: string | null
+}
+
+export interface BopAnnotationToolkit {
+  available: boolean
+  status?: string
+  revision?: string | null
+  required_revision?: string | null
+  environment_ready?: boolean
+  renderer?: string | null
+  install_command?: string | null
+  reason?: string | null
+}
+
+export interface BopAnnotationReadiness {
+  ready: boolean
+  blockers: BopAnnotationIssue[]
+  warnings: BopAnnotationIssue[]
+}
+
+export interface BopAnnotationOutput {
+  mode: BopAnnotationMode
+  state: string
+  annotation_count: number
+  mask_count: number
+  visible_mask_count: number
+  evaluation_ready: boolean
+  verified: boolean
+  integrity_error: string | null
+  manifest_sha256: string | null
+  blenderproc_version: string | null
+  toolkit_revision: string | null
+  [key: string]: JsonValue
+}
+
+export interface BopAnnotationSetup {
+  schema_version: string
+  run_root: string
+  runtime: BopAnnotationRuntime
+  toolkit: BopAnnotationToolkit
+  readiness: BopAnnotationReadiness
+  readiness_by_mode?: Record<BopAnnotationMode, BopAnnotationReadiness>
+  current_output: BopAnnotationOutput | null
+  counts: {
+    sensors: number
+    frames: number
+    instances: number
+  }
+  provenance?: Record<string, JsonValue>
+}
+
+export interface BopEvaluationIssue {
+  code: string
+  message: string
+}
+
+export interface BopEvaluationToolkit {
+  status: string
+  available: boolean
+  revision: string | null
+  required_revision: string
+  environment_ready: boolean
+  renderer: string | null
+  install_command: string | null
+  reason: string | null
+}
+
+export interface BopEvaluationDataset {
+  status: string
+  evaluation_ready: boolean
+  simulation_ready: boolean
+  dataset_id: string | null
+  name: string | null
+  split: string | null
+  export_manifest_sha256: string | null
+  manifest_schema_version: string | null
+  scene_count: number
+  frame_count: number
+  target_count: number
+  model_count: number
+  annotation_count: number
+  annotation_source: string | null
+  image_size: [number, number] | null
+  result_registration_ready: boolean
+  result_filename_template: string | null
+  blockers: BopEvaluationIssue[]
+  warnings: BopEvaluationIssue[]
+}
+
+export interface BopSimulationParameters {
+  method_name?: string
+  translation_sigma_mm: number
+  rotation_sigma_deg: number
+  seed: number
+  score?: number
+}
+
+export interface BopResultSubmission {
+  result_id: string
+  method: string
+  display_name: string
+  filename: string
+  source_kind: string
+  created_at: string
+  sha256: string
+  estimate_count: number
+  target_estimate_count: number
+  target_coverage: number
+  compatible: boolean
+  blockers: BopEvaluationIssue[]
+  simulation?: BopSimulationParameters | null
+}
+
+export interface BopEvaluationMetric {
+  id: string
+  label: string
+  value: number
+  display: string
+  unit?: string | null
+}
+
+export interface BopEvaluationSummary {
+  evaluation_id: string
+  created_at: string
+  completed_at: string | null
+  result_id: string | null
+  result: BopResultSubmission | null
+  source_kind: string
+  simulation?: BopSimulationParameters | null
+  protocol: string
+  status: string
+  metrics: BopEvaluationMetric[]
+  provenance: Record<string, JsonValue>
+  report_available: boolean
+}
+
+export interface BopEvaluationSetup {
+  toolkit: BopEvaluationToolkit
+  dataset: BopEvaluationDataset
+  results: BopResultSubmission[]
+  evaluations: BopEvaluationSummary[]
 }
 
 export interface PreflightSummary {

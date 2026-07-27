@@ -4,9 +4,12 @@ import os
 import re
 from importlib.resources import files
 from pathlib import Path
+from types import SimpleNamespace
 
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.web.app import create_app
+from posetestbot.web.routes import ui as web_ui
+from posetestbot.web.security import DEFAULT_RUN_ROOTS
 
 
 def _write_valid_run(path: Path, *, sequence: str, plan_only: bool = True) -> None:
@@ -83,9 +86,50 @@ def test_ui_bootstrap_and_run_query_reject_outside_paths(
 
     assert bootstrap["schema_version"] == "web_bootstrap.v1"
     assert bootstrap["default_run_root"] == (allowed / "console-default").as_posix()
+    assert bootstrap["allowed_run_roots"][: len(DEFAULT_RUN_ROOTS)] == [
+        root.resolve().as_posix() for root in DEFAULT_RUN_ROOTS
+    ]
     assert allowed.as_posix() in bootstrap["allowed_run_roots"]
     assert outside.status_code == 400
     assert "allowed root" in outside.get_json()["output"]
+
+
+def test_ui_storage_reports_selected_run_filesystem_capacity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    allowed = tmp_path / "allowed"
+    run_root = allowed / "new-run"
+    run_root.mkdir(parents=True)
+    total_bytes = 4 * 1024**4
+    free_bytes = 400 * 1024**3
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", allowed.as_posix())
+    monkeypatch.setattr(
+        web_ui.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(
+            total=total_bytes,
+            used=total_bytes - free_bytes,
+            free=free_bytes,
+        ),
+    )
+
+    response = create_app().test_client().get(
+        "/ui/storage",
+        query_string={"run_root": run_root.as_posix()},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["schema_version"] == "run_storage.v1"
+    assert payload["run_root"] == run_root.as_posix()
+    assert payload["status"] == "warning"
+    assert payload["total_bytes"] == total_bytes
+    assert payload["free_bytes"] == free_bytes
+    assert payload["free_fraction"] == free_bytes / total_bytes
+    assert payload["thresholds"]["warning_free_bytes"] == 500 * 1024**3
+    assert payload["thresholds"]["warning_free_bytes_cap"] == 500 * 1024**3
+    assert payload["error"] is None
 
 
 def test_spa_index_and_hashed_assets_are_served() -> None:

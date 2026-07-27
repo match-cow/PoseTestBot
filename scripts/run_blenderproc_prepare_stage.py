@@ -75,6 +75,15 @@ def parse_args() -> argparse.Namespace:
         default="blenderproc",
         help="Subdirectory created inside each synchronized sensor folder.",
     )
+    parser.add_argument(
+        "--annotation-mode",
+        choices=("pose", "pose_and_masks"),
+        default="pose_and_masks",
+        help=(
+            "Prepare deterministic pose GT only, or pose GT for a later "
+            "depth-aware mask generation step."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -108,13 +117,10 @@ def derived_camera_transform_path(run_root: Path) -> Path:
     return run_root / PROCESSED_DIR / CALIBRATION_DIR / DERIVED_CAMERA_EE_TRANSFORM
 
 
-def _selected_calibration_configured(
-    run_root: Path, run_config: dict | None
-) -> bool:
-    return (
-        (run_config or {}).get("calibration_profile_selection") is not None
-        or (run_root / CALIBRATION_PROFILE_SELECTION).exists()
-    )
+def _selected_calibration_configured(run_root: Path, run_config: dict | None) -> bool:
+    return (run_config or {}).get("calibration_profile_selection") is not None or (
+        run_root / CALIBRATION_PROFILE_SELECTION
+    ).exists()
 
 
 def _run_input_path(run_root: Path, value: str) -> Path:
@@ -143,6 +149,7 @@ def run_prepare(
     object_instances: dict | None = None,
     run_root: Path | None = None,
     sensor_names: tuple[str, ...] | None = None,
+    annotation_mode: str = "pose_and_masks",
 ) -> dict[str, Path]:
     prepared = prepare_sensor_folders(
         input_folder=input_folder,
@@ -151,6 +158,7 @@ def run_prepare(
         object_instances=object_instances,
         run_root=run_root,
         sensor_names=sensor_names,
+        annotation_mode=annotation_mode,
     )
     return {f"{item.sensor_name}:{subdir}": item.output_folder for item in prepared}
 
@@ -220,6 +228,7 @@ def main() -> None:
             object_instances=object_instances,
             run_root=run_root,
             sensor_names=sensor_names,
+            annotation_mode=args.annotation_mode,
         )
         if calibration_profiles is not None:
             transform_path = write_camera_transformations(

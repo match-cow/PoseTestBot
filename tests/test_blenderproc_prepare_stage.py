@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -47,6 +49,16 @@ def create_blenderproc_prepare_fixture(tmp_path: Path) -> tuple[Path, Path]:
     run_root = tmp_path / "run-1"
     sensor_folder = run_root / "processed" / "synchronized" / "realsense_123"
     sensor_folder.mkdir(parents=True)
+    (sensor_folder / "rgb").mkdir()
+    (sensor_folder / "depth").mkdir()
+    assert cv2.imwrite(
+        (sensor_folder / "rgb" / "000000.png").as_posix(),
+        np.zeros((60, 80, 3), dtype=np.uint8),
+    )
+    assert cv2.imwrite(
+        (sensor_folder / "depth" / "000000.png").as_posix(),
+        np.ones((60, 80), dtype=np.uint16),
+    )
     (sensor_folder / CAM_K).write_text("50 0 40\n0 50 40\n0 0 1\n")
     write_json(
         sensor_folder / MATCH_ROBOT_EE_POSES,
@@ -117,6 +129,32 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
     )
     camera_poses = np.load(blenderproc_folder / "camera_poses.npy")
     assert camera_poses.shape == (1, 4, 4)
+    frame_contract = json.loads(
+        (blenderproc_folder / "frame_contract.json").read_text()
+    )
+    matched_pose_sha256 = hashlib.sha256(
+        (
+            run_root
+            / "processed"
+            / "synchronized"
+            / "realsense_123"
+            / MATCH_ROBOT_EE_POSES
+        ).read_bytes()
+    ).hexdigest()
+    assert frame_contract == {
+        "schema_version": "blenderproc_frame_contract.v1",
+        "annotation_mode": "pose_and_masks",
+        "projection": "native",
+        "resolution": {"width": 80, "height": 60},
+        "source_artifact_sha256": {MATCH_ROBOT_EE_POSES: matched_pose_sha256},
+        "frames": [
+            {
+                "output_image_id": 0,
+                "source_frame_id": 0,
+                "source_filename": "000000.png",
+            }
+        ],
+    }
 
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(
@@ -304,6 +342,14 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
             },
         },
     )
+    for folder_name, value in (
+        ("rgb", np.zeros((60, 80, 3), dtype=np.uint8)),
+        ("depth", np.ones((60, 80), dtype=np.uint16)),
+    ):
+        assert cv2.imwrite(
+            (sensor_folder / folder_name / "000001.png").as_posix(),
+            value,
+        )
     calibration_profiles = tmp_path / "calibration_profiles.json"
     write_profile_collection(
         [
@@ -403,3 +449,53 @@ def test_blenderproc_prepare_objectless_clears_stale_models(tmp_path: Path) -> N
     assert json.loads((output / "objects.json").read_text())["instances"] == []
     assert list((output / "objects").iterdir()) == []
     assert (output / "camera_poses.npy").is_file()
+
+
+@pytest.mark.parametrize("missing_from", ["rgb", "depth", "poses"])
+def test_blenderproc_prepare_rejects_rgb_depth_pose_key_mismatch(
+    tmp_path: Path,
+    missing_from: str,
+) -> None:
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(tmp_path)
+    sensor = run_root / "processed" / "synchronized" / "realsense_123"
+    if missing_from == "poses":
+        poses = json.loads((sensor / MATCH_ROBOT_EE_POSES).read_text())
+        poses["000001.png"] = poses["000000.png"]
+        write_json(sensor / MATCH_ROBOT_EE_POSES, poses)
+    else:
+        folder = sensor / missing_from
+        image = (
+            np.zeros((60, 80, 3), dtype=np.uint8)
+            if missing_from == "rgb"
+            else np.ones((60, 80), dtype=np.uint16)
+        )
+        assert cv2.imwrite((folder / "000001.png").as_posix(), image)
+
+    with pytest.raises(
+        ValueError,
+        match="RGB/depth/matched-pose frame names must be identical",
+    ):
+        prepare_sensor_folders(
+            input_folder=run_root / "processed" / "synchronized",
+            camera_transformations=load_camera_transformations(camera_transforms),
+        )
+
+
+@pytest.mark.parametrize("annotation_mode", ["pose", "pose_and_masks"])
+def test_blenderproc_prepare_records_annotation_mode(
+    tmp_path: Path,
+    annotation_mode: str,
+) -> None:
+    run_root, camera_transforms = create_blenderproc_prepare_fixture(tmp_path)
+
+    prepared = prepare_sensor_folders(
+        input_folder=run_root / "processed" / "synchronized",
+        camera_transformations=load_camera_transformations(camera_transforms),
+        annotation_mode=annotation_mode,
+    )
+
+    assert prepared[0].annotation_mode == annotation_mode
+    contract = json.loads(
+        (prepared[0].output_folder / "frame_contract.json").read_text()
+    )
+    assert contract["annotation_mode"] == annotation_mode

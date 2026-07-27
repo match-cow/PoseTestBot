@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -12,14 +13,22 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+import cv2
 from pytransform3d import rotations as pr
 from pytransform3d import transformations as pt
 from pytransform3d.transform_manager import TransformManager
 
 from posetestbot.io.atomic import atomic_write_json, replace_directories
-from posetestbot.io.artifacts import CAM_K, MATCH_ROBOT_EE_POSES
+from posetestbot.io.artifacts import (
+    CAM_K,
+    DEPTH_DIR,
+    MATCH_ROBOT_EE_POSES,
+    RGB_DIR,
+)
 
 SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+ANNOTATION_MODES = frozenset({"pose", "pose_and_masks"})
+FRAME_CONTRACT = "frame_contract.json"
 
 
 @dataclass(frozen=True)
@@ -28,6 +37,8 @@ class PreparedSensor:
     output_folder: Path
     frame_count: int
     object_count: int
+    annotation_mode: str
+    resolution: tuple[int, int]
 
 
 def validate_subdir(subdir: str) -> str:
@@ -38,6 +49,17 @@ def validate_subdir(subdir: str) -> str:
             f"BlenderProc subdir must be one safe path component: {subdir!r}"
         )
     return subdir
+
+
+def validate_annotation_mode(annotation_mode: str) -> str:
+    """Validate the two supported GT evidence modes."""
+
+    if annotation_mode not in ANNOTATION_MODES:
+        raise ValueError(
+            "BlenderProc annotation mode must be one of: "
+            + ", ".join(sorted(ANNOTATION_MODES))
+        )
+    return annotation_mode
 
 
 def _read_json_mapping(path: Path, description: str) -> Mapping[str, object]:
@@ -147,11 +169,13 @@ def read_camera_parameters(sensor_folder: Path) -> tuple[np.ndarray, np.ndarray]
     return camera_matrix, distortion.reshape(5, 1)
 
 
-def _ordered_robot_poses(sensor_folder: Path) -> list[Mapping[str, object]]:
+def _ordered_robot_poses(
+    sensor_folder: Path,
+) -> list[tuple[str, int, Mapping[str, object]]]:
     values = _read_json_mapping(
         sensor_folder / MATCH_ROBOT_EE_POSES, "matched robot poses"
     )
-    ordered: list[tuple[int, Mapping[str, object]]] = []
+    ordered: list[tuple[str, int, Mapping[str, object]]] = []
     for filename, record in values.items():
         if not isinstance(filename, str) or Path(filename).suffix != ".png":
             raise ValueError(f"Matched pose key must be a PNG filename: {filename!r}")
@@ -166,13 +190,119 @@ def _ordered_robot_poses(sensor_folder: Path) -> list[Mapping[str, object]]:
         robot_pose = record.get("robot_ee_pose")
         if not isinstance(robot_pose, Mapping):
             raise ValueError(f"Matched pose record lacks robot_ee_pose: {filename}")
-        ordered.append((frame_id, robot_pose))
-    ordered.sort(key=lambda item: item[0])
-    if len({frame_id for frame_id, _pose in ordered}) != len(ordered):
+        ordered.append((filename, frame_id, robot_pose))
+    ordered.sort(key=lambda item: (item[1], item[0]))
+    if len({frame_id for _filename, frame_id, _pose in ordered}) != len(ordered):
         raise ValueError(
             f"Duplicate numeric frame IDs in {sensor_folder / MATCH_ROBOT_EE_POSES}"
         )
-    return [pose for _frame_id, pose in ordered]
+    return ordered
+
+
+def _input_frame_contract(
+    sensor_folder: Path,
+    robot_pose_records: Sequence[tuple[str, int, Mapping[str, object]]],
+    *,
+    annotation_mode: str,
+) -> tuple[dict[str, object], tuple[int, int]]:
+    """Bind camera poses to exact RGB-D frame names and their real dimensions."""
+
+    rgb_folder = sensor_folder / RGB_DIR
+    depth_folder = sensor_folder / DEPTH_DIR
+    if not rgb_folder.is_dir():
+        raise FileNotFoundError(f"Missing RGB folder: {rgb_folder}")
+    if not depth_folder.is_dir():
+        raise FileNotFoundError(f"Missing depth folder: {depth_folder}")
+
+    rgb = {path.name: path for path in rgb_folder.glob("*.png")}
+    depth = {path.name: path for path in depth_folder.glob("*.png")}
+    matched_names = {filename for filename, _frame_id, _pose in robot_pose_records}
+    if not rgb or not depth:
+        raise FileNotFoundError(
+            f"RGB and depth PNG inputs must be non-empty: {sensor_folder}"
+        )
+    rgb_names = set(rgb)
+    depth_names = set(depth)
+    if rgb_names != depth_names or rgb_names != matched_names:
+        raise ValueError(
+            "RGB/depth/matched-pose frame names must be identical; "
+            f"missing_depth={sorted(rgb_names - depth_names)}, "
+            f"missing_rgb={sorted(depth_names - rgb_names)}, "
+            f"missing_pose={sorted((rgb_names | depth_names) - matched_names)}, "
+            f"pose_without_rgbd={sorted(matched_names - (rgb_names & depth_names))}"
+        )
+
+    expected_names = [filename for filename, _frame_id, _pose in robot_pose_records]
+    if expected_names != sorted(expected_names):
+        raise ValueError(
+            "Numeric matched-pose frame order differs from sorted PNG filename order; "
+            "use consistently zero-padded numeric frame names"
+        )
+
+    resolution: tuple[int, int] | None = None
+    for filename in expected_names:
+        rgb_image = cv2.imread(rgb[filename].as_posix(), cv2.IMREAD_UNCHANGED)
+        depth_image = cv2.imread(depth[filename].as_posix(), cv2.IMREAD_UNCHANGED)
+        if rgb_image is None:
+            raise ValueError(f"Unreadable RGB PNG: {rgb[filename]}")
+        if depth_image is None:
+            raise ValueError(f"Unreadable depth PNG: {depth[filename]}")
+        if (
+            rgb_image.dtype != np.uint8
+            or rgb_image.ndim != 3
+            or rgb_image.shape[2] not in {3, 4}
+        ):
+            raise ValueError(
+                f"RGB input must be uint8 with three or four channels: {rgb[filename]}"
+            )
+        if depth_image.dtype != np.uint16 or depth_image.ndim != 2:
+            raise ValueError(
+                f"Depth input must be single-channel uint16: {depth[filename]}"
+            )
+        if rgb_image.shape[:2] != depth_image.shape:
+            raise ValueError(
+                f"RGB/depth dimensions do not match for frame {filename}: "
+                f"{rgb_image.shape[:2]} != {depth_image.shape}"
+            )
+        current = (int(rgb_image.shape[1]), int(rgb_image.shape[0]))
+        if resolution is None:
+            resolution = current
+        elif current != resolution:
+            raise ValueError(
+                "All BlenderProc input frames must have one resolution; "
+                f"{filename} is {current}, expected {resolution}"
+            )
+
+    assert resolution is not None
+    frames = [
+        {
+            "output_image_id": output_image_id,
+            "source_frame_id": frame_id,
+            "source_filename": filename,
+        }
+        for output_image_id, (filename, frame_id, _pose) in enumerate(
+            robot_pose_records
+        )
+    ]
+    return (
+        {
+            "schema_version": "blenderproc_frame_contract.v1",
+            "annotation_mode": annotation_mode,
+            "projection": (
+                "rectified"
+                if (sensor_folder / "rectification_provenance.json").is_file()
+                else "native"
+            ),
+            "resolution": {"width": resolution[0], "height": resolution[1]},
+            "source_artifact_sha256": {
+                MATCH_ROBOT_EE_POSES: hashlib.sha256(
+                    (sensor_folder / MATCH_ROBOT_EE_POSES).read_bytes()
+                ).hexdigest()
+            },
+            "frames": frames,
+        },
+        resolution,
+    )
 
 
 def _camera_poses(
@@ -215,9 +345,16 @@ def _prepare_sensor(
     camera_transform: Mapping[str, object],
     object_instances: Mapping[str, Any] | None = None,
     run_root: Path | None = None,
+    annotation_mode: str,
 ) -> PreparedSensor:
     camera_matrix, distortion = read_camera_parameters(sensor_folder)
-    robot_poses = _ordered_robot_poses(sensor_folder)
+    robot_pose_records = _ordered_robot_poses(sensor_folder)
+    frame_contract, resolution = _input_frame_contract(
+        sensor_folder,
+        robot_pose_records,
+        annotation_mode=annotation_mode,
+    )
+    robot_poses = [pose for _filename, _frame_id, pose in robot_pose_records]
     camera_poses = _camera_poses(robot_poses, camera_transform)
     objects_output = staging / "objects"
     objects_output.mkdir(parents=True)
@@ -287,6 +424,7 @@ def _prepare_sensor(
     np.save(staging / "camera_matrix.npy", camera_matrix)
     np.save(staging / "dist_coefficients.npy", distortion)
     np.save(staging / "camera_poses.npy", camera_poses)
+    atomic_write_json(staging / FRAME_CONTRACT, frame_contract)
     if np.load(staging / "camera_poses.npy").shape != (len(robot_poses), 4, 4):
         raise ValueError(
             f"Prepared camera pose count is invalid for {sensor_folder.name}"
@@ -296,6 +434,8 @@ def _prepare_sensor(
         output_folder=sensor_folder,
         frame_count=len(robot_poses),
         object_count=len(object_instances["instances"]) if object_instances else 0,
+        annotation_mode=annotation_mode,
+        resolution=resolution,
     )
 
 
@@ -307,11 +447,13 @@ def prepare_sensor_folders(
     object_instances: Mapping[str, Any] | None = None,
     run_root: str | Path | None = None,
     sensor_names: Sequence[str] | None = None,
+    annotation_mode: str = "pose_and_masks",
 ) -> list[PreparedSensor]:
     """Prepare every sensor in staging and promote only after all validate."""
 
     input_path = Path(input_folder)
     validate_subdir(subdir)
+    validate_annotation_mode(annotation_mode)
     if not input_path.is_dir():
         raise FileNotFoundError(f"Synchronized input folder not found: {input_path}")
     sensors = [path for path in sorted(input_path.iterdir()) if path.is_dir()]
@@ -341,6 +483,7 @@ def prepare_sensor_folders(
                     ),
                     object_instances=object_instances,
                     run_root=Path(run_root).resolve() if run_root is not None else None,
+                    annotation_mode=annotation_mode,
                 )
             )
         replace_directories(staged)
@@ -354,6 +497,8 @@ def prepare_sensor_folders(
             output_folder=item.output_folder / subdir,
             frame_count=item.frame_count,
             object_count=item.object_count,
+            annotation_mode=item.annotation_mode,
+            resolution=item.resolution,
         )
         for item in prepared
     ]

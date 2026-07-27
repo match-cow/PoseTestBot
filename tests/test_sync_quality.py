@@ -42,10 +42,21 @@ def write_sync_report(
         "timestamp_missing_count": 0,
         "sync_delta_ms": 0,
         "max_nearest_pose_delta_ms": 20.0,
-        "nearest_pose_delta_rejection_count": 2,
+        "nearest_pose_delta_rejection_count": dropped_frames,
         "total_frames": total_frames,
         "matched_frames": matched_frames,
         "dropped_frames": dropped_frames,
+        "outside_motion_interval_frame_count": 0,
+        "eligible_in_motion_frames": total_frames,
+        "matched_eligible_frames": matched_frames,
+        "eligible_motion_coverage": (
+            matched_frames / total_frames if total_frames else 0.0
+        ),
+        "in_motion_exclusion_count": dropped_frames,
+        "unexplained_in_motion_exclusion_count": 0,
+        "incompatible_timestamp_pair_count": 0,
+        "robot_pose_packet_loss_audited": True,
+        "robot_pose_packet_loss_count": 0,
         "motion_intervals": [{"motion": "circ_far", "pose_count": matched_frames}],
         "mean_abs_nearest_pose_delta_ns": 5_000_000,
         "max_abs_nearest_pose_delta_ns": max_delta_ns,
@@ -134,7 +145,10 @@ def test_build_sync_quality_report_summarizes_sync_reports(tmp_path: Path) -> No
     assert report["sensor_count"] == 1
     assert report["matched_frames"] == 8
     assert report["total_frames"] == 10
+    assert report["eligible_in_motion_frames"] == 10
+    assert report["matched_eligible_frames"] == 8
     assert report["overall_match_ratio"] == 0.8
+    assert report["match_ratio_denominator"] == "eligible_in_motion_frames"
     assert report["sensors"][0]["sensor_name"] == "realsense_123"
     assert report["sensors"][0]["max_nearest_pose_delta_ms"] == 20.0
     assert report["sensors"][0]["nearest_pose_delta_rejection_count"] == 2
@@ -183,8 +197,8 @@ def test_build_sync_quality_report_warns_on_quality_thresholds(
     }
     assert report["overall_status"] == "error"
     assert warnings == {
-        "sync_match_ratio:realsense_123",
-        "sync_dropped_frames:realsense_123",
+        "sync_eligible_motion_coverage:realsense_123",
+        "sync_in_motion_exclusions:realsense_123",
         "sync_nearest_pose_delta:realsense_123",
     }
     timestamp_check = next(
@@ -193,6 +207,46 @@ def test_build_sync_quality_report_warns_on_quality_thresholds(
         if check["name"] == "sync_timestamp_source:realsense_123"
     )
     assert timestamp_check["status"] == "error"
+
+
+def test_quality_ignores_preserved_frames_outside_robot_motion(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    report_path = write_sync_report(
+        run_root,
+        total_frames=100,
+        matched_frames=8,
+        dropped_frames=92,
+    )
+    value = json.loads(report_path.read_text())
+    value.update(
+        {
+            "outside_motion_interval_frame_count": 92,
+            "eligible_in_motion_frames": 8,
+            "matched_eligible_frames": 8,
+            "eligible_motion_coverage": 1.0,
+            "in_motion_exclusion_count": 0,
+            "nearest_pose_delta_rejection_count": 0,
+        }
+    )
+    report_path.write_text(json.dumps(value) + "\n")
+
+    report = build_sync_quality_report(run_root, min_match_ratio=0.8)
+
+    assert report["overall_status"] == "ok"
+    assert report["total_frames"] == 100
+    assert report["outside_motion_interval_frame_count"] == 92
+    assert report["eligible_in_motion_frames"] == 8
+    assert report["matched_eligible_frames"] == 8
+    assert report["overall_eligible_motion_coverage"] == 1.0
+    coverage = next(
+        check
+        for check in report["checks"]
+        if check["name"] == "sync_eligible_motion_coverage:realsense_123"
+    )
+    assert coverage["status"] == "ok"
+    assert coverage["details"]["denominator"] == "eligible_in_motion_frames"
 
 
 def test_v1_sync_report_cannot_prove_required_timestamp_source(
@@ -404,5 +458,7 @@ def test_sync_quality_cli_writes_manifest_report(tmp_path: Path) -> None:
         capture_output=True,
     )
 
-    assert "Sync quality: ok (8/10 frames matched, 1 sensors)" in result.stdout
+    assert (
+        "Sync quality: ok (8/10 eligible in-motion frames synchronized, 1 sensors)"
+    ) in result.stdout
     assert (run_root / SYNC_QUALITY_REPORT).is_file()

@@ -12,6 +12,8 @@ from posetestbot.web.routes.monitoring import monitoring_bp
 from posetestbot.web.routes.calibration import calibration_bp
 from posetestbot.web.routes.calibration_library import calibration_library_bp
 from posetestbot.web.routes.calibration_targets import calibration_targets_bp
+from posetestbot.web.routes.bop_annotations import bop_annotations_bp
+from posetestbot.web.routes.bop_evaluation import bop_evaluation_bp
 from posetestbot.web.routes.overview import overview_bp
 from posetestbot.web.routes.pages import pages_bp
 from posetestbot.web.routes.pose_templates import pose_templates_bp
@@ -81,6 +83,8 @@ def create_app() -> Flask:
     app.register_blueprint(calibration_bp)
     app.register_blueprint(calibration_library_bp)
     app.register_blueprint(calibration_targets_bp)
+    app.register_blueprint(bop_annotations_bp)
+    app.register_blueprint(bop_evaluation_bp)
     app.register_blueprint(workpieces_bp)
     app.register_blueprint(pose_templates_bp)
     app.register_blueprint(sensors_bp)

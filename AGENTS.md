@@ -3,8 +3,13 @@
 These notes are for Codex and other coding agents working in this repository.
 PoseTestBot is now acquisition-first: capture, calibration, synchronization,
 optional GT/mask generation, and BOP dataset export are the repo boundary.
-Downstream pose-estimator execution, BOP result conversion, evaluator bridges,
-and metric reporting belong in a separate consumer repo.
+Downstream pose-estimator execution and BOP result conversion belong in a
+separate consumer repo. The sole evaluation exception is the **Inspect** page's
+run-scoped dataset-validation path: it consumes an already exported,
+annotation-bearing BOP dataset plus an immutable standard BOP19 result CSV (or
+a deterministic test-only GT perturbation), invokes the pinned official BOP
+Toolkit, and writes derived evidence only below `processed/bop_evaluation/`.
+It is not an estimator, converter, or acquisition-pipeline stage.
 
 ## Operating Rules
 
@@ -12,6 +17,10 @@ and metric reporting belong in a separate consumer repo.
 - Run scripts as `uv run python ...`.
 - Add dependencies with `uv add ...`; do not hand-edit dependency locks unless
   a tool-generated update is impossible.
+- The web console's default approved run roots are the repository
+  `working_data/` directory and `/mnt/working_data_ssd`. Additional
+  `POSETESTBOT_WEB_RUN_ROOTS` entries append to those defaults and must retain
+  the same containment checks.
 - This host keeps GitHub CLI credentials in the user keyring. A failed
   `gh auth status` inside the sandbox can be a sandbox/keyring visibility false
   negative. Before reporting that GitHub authentication is invalid, rerun the
@@ -152,15 +161,21 @@ Keep or extend these areas:
 - The remaining `posetestbot.pose_templates.*` exact slicing, immutable bundle,
   run-selection, and object-instance preparation contracts.
 - `scripts/run_bop_export_stage.py` and `posetestbot.bop.writer`.
+- The narrow Inspect-only `posetestbot.bop.evaluation` adapter, its official
+  BOP Toolkit runtime bridge, and its run-scoped result/report APIs. It may
+  import already compatible BOP19 CSVs or create deterministic test-only
+  slight-offset results from GT, but must write only below
+  `processed/bop_evaluation/` and must never become a pipeline stage.
 - Flask operator APIs for jobs, capture status, hardware/sensor/runtime
   status, run config, preflight, calibration, the `/workpieces` catalogue,
-  sync quality, and pipeline sequence submission.
+  sync quality, Inspect-only BOP evaluation, and pipeline sequence submission.
 
-Do not reintroduce downstream estimator/evaluator behavior here:
+Do not expand the Inspect-only exception into downstream behavior:
 
 - No FoundationPose/MegaPose/SAM6D stages or wrappers.
 - No BOP19 result CSV conversion stage.
-- No BOP Toolkit evaluation bridge.
+- No general evaluator bridge or evaluation pipeline stage beyond the
+  run-scoped official BOP19 metrics described above.
 - No legacy accuracy or metric-report export stage.
 
 ## Important Artifacts
@@ -227,6 +242,16 @@ Do not reintroduce downstream estimator/evaluator behavior here:
   `bop/posetestbot_pose_template.json` and `bop/posetestbot_instance_map.json`, optional
   `bop/posetestbot_multiview_targets.json`, and optional
   `bop/posetestbot_coco_annotations.json`.
+- Optional BOP annotation evidence:
+  `processed/bop_annotations/generation_report.json`; pose mode adds
+  `scene_gt.json`, while pose-plus-mask mode also adds `scene_gt_info.json`,
+  `mask/`, and `mask_visib/` below each exported BOP scene.
+- Inspect-only BOP evaluation artifacts: immutable imported or simulated result
+  CSVs and `result.json` below
+  `processed/bop_evaluation/results/<result_id>/`; immutable requests,
+  `progress.json`, resolved-source and dataset-adapter evidence, official
+  toolkit output, and `report.json` below
+  `processed/bop_evaluation/evaluations/<evaluation_id>/`.
 
 ## Workpiece Catalogue Contracts
 

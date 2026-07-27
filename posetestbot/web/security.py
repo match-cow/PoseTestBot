@@ -15,6 +15,7 @@ from posetestbot.pipeline.stages import get_pipeline_stage
 from posetestbot.web.paths import APP_ROOT
 
 DEFAULT_RUN_ROOT = APP_ROOT / "working_data"
+DEFAULT_RUN_ROOTS = (DEFAULT_RUN_ROOT, Path("/mnt/working_data_ssd"))
 DEFAULT_INPUT_ROOTS = (APP_ROOT / "scripts" / "default_data",)
 TRUE_STRINGS = {"1", "true", "yes", "on"}
 FALSE_STRINGS = {"0", "false", "no", "off"}
@@ -88,7 +89,7 @@ def _configured_roots(variable: str, defaults: tuple[Path, ...]) -> tuple[Path, 
 
 
 def web_run_roots() -> tuple[Path, ...]:
-    return _configured_roots("POSETESTBOT_WEB_RUN_ROOTS", (DEFAULT_RUN_ROOT,))
+    return _configured_roots("POSETESTBOT_WEB_RUN_ROOTS", DEFAULT_RUN_ROOTS)
 
 
 def web_input_roots() -> tuple[Path, ...]:

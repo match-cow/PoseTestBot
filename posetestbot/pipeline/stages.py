@@ -1288,16 +1288,27 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 kind="path",
                 path_scope="input",
             ),
+            PipelineParameter(
+                name="annotation_mode",
+                flag="--annotation-mode",
+                default="pose_and_masks",
+                choices=("pose", "pose_and_masks"),
+                help=(
+                    "Bind prepared frames to the selected pose-only or "
+                    "pose-plus-mask annotation product."
+                ),
+            ),
             PipelineParameter(name="subdir", flag="--subdir"),
         ),
     ),
     "blenderproc_render": PipelineStageSpec(
         id="blenderproc_render",
-        label="BlenderProc Render",
+        label="BlenderProc Ground-Truth Poses",
         script="scripts/run_blenderproc_render_stage.py",
         description=(
-            "Validate or execute BlenderProc rendering for prepared synchronized "
-            "sensor folders."
+            "Validate prepared scenes in BlenderProc and derive exact "
+            "model-to-camera ground-truth poses. Mask evidence is completed "
+            "during BOP export."
         ),
         resources=("render", "disk_io"),
         parameters=(
@@ -1315,6 +1326,16 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
             ),
             PipelineParameter(name="subdir", flag="--subdir"),
             PipelineParameter(name="blenderproc", flag="--blenderproc"),
+            PipelineParameter(
+                name="annotation_mode",
+                flag="--annotation-mode",
+                default="pose_and_masks",
+                choices=("pose", "pose_and_masks"),
+                help=(
+                    "Select pose-only GT or the pose-plus-mask product. "
+                    "BlenderProc writes the pose evidence for both."
+                ),
+            ),
             PipelineParameter(
                 name="objectless", flag="--objectless", kind="bool", default=False
             ),
@@ -1387,6 +1408,15 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 help=(
                     "Use 'none' for an image/model BOP dataset without rendered "
                     "GT, or 'blenderproc' to consume optional rendered annotations."
+                ),
+            ),
+            PipelineParameter(
+                name="annotation_mode",
+                flag="--annotation-mode",
+                choices=("pose", "pose_and_masks"),
+                help=(
+                    "With BlenderProc annotations, choose pose-only scene_gt or "
+                    "pose plus official BOP masks, visibility, and GT-info."
                 ),
             ),
         ),

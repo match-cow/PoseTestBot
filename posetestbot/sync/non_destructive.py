@@ -293,6 +293,28 @@ def motion_for_timestamp(
     return None
 
 
+def robot_pose_packet_loss(
+    robot_records: Iterable[Mapping[str, Any]],
+) -> tuple[bool, int]:
+    """Return whether packet-loss evidence is complete and its recorded total."""
+
+    audited = True
+    total = 0
+    found = False
+    for record in robot_records:
+        source_packet = record.get("source_packet")
+        if not isinstance(source_packet, Mapping):
+            audited = False
+            continue
+        value = source_packet.get("estimated_packets_lost")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            audited = False
+            continue
+        found = True
+        total += value
+    return audited and found, total
+
+
 def closest_robot_pose(
     timestamp_ns: int, robot_records: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -510,6 +532,9 @@ def synchronize_sensor_folder(
             timestamp_source=resolved_robot_timestamp_source,
         )
         intervals = motion_intervals(robot_records)
+        pose_packet_loss_audited, pose_packet_loss_count = robot_pose_packet_loss(
+            robot_records
+        )
         sensor_sync_delta_ms = resolve_sync_delta_ms(sensor_path, sync_delta)
         sync_delta_ns = int(sensor_sync_delta_ms * 1_000_000)
 
@@ -553,6 +578,9 @@ def synchronize_sensor_folder(
         timestamp_source_counts: dict[str, int] = {}
         timestamp_fallback_count = 0
         timestamp_missing_count = 0
+        incompatible_timestamp_pair_count = 0
+        outside_motion_interval_frame_count = 0
+        eligible_in_motion_frames = 0
         nearest_pose_delta_rejection_count = 0
         previous_frame_timestamp_ns: int | None = None
         output_counter = 0
@@ -580,6 +608,7 @@ def synchronize_sensor_folder(
             if (actual_source, resolved_robot_timestamp_source) not in (
                 SUPPORTED_TIMESTAMP_PAIRS
             ):
+                incompatible_timestamp_pair_count += 1
                 dropped.append(
                     {
                         "frame_id": frame_record.get("frame_id"),
@@ -594,6 +623,7 @@ def synchronize_sensor_folder(
             delayed_timestamp_ns = timestamp_ns - sync_delta_ns
             motion = motion_for_timestamp(delayed_timestamp_ns, intervals)
             if motion is None:
+                outside_motion_interval_frame_count += 1
                 dropped.append(
                     {
                         "frame_id": frame_record.get("frame_id"),
@@ -606,6 +636,7 @@ def synchronize_sensor_folder(
                 )
                 continue
 
+            eligible_in_motion_frames += 1
             closest_pose = closest_robot_pose(delayed_timestamp_ns, robot_records)
             nearest_delta_ns = int(closest_pose["timestamp_ns"]) - delayed_timestamp_ns
             if (
@@ -714,6 +745,10 @@ def synchronize_sensor_folder(
             atomic_write_text(staging_folder / FRAME_METADATA_JSONL, metadata_text)
 
         _write_json(staging_folder / MATCH_ROBOT_EE_POSES, matched)
+        in_motion_exclusion_count = eligible_in_motion_frames - len(matched)
+        unexplained_in_motion_exclusion_count = (
+            in_motion_exclusion_count - nearest_pose_delta_rejection_count
+        )
         report = {
             "schema_version": SCHEMA_VERSION,
             "sensor_folder": _relative_path(sensor_path, run_path),
@@ -738,6 +773,7 @@ def synchronize_sensor_folder(
             "timestamp_source_counts": timestamp_source_counts,
             "timestamp_fallback_count": timestamp_fallback_count,
             "timestamp_missing_count": timestamp_missing_count,
+            "incompatible_timestamp_pair_count": (incompatible_timestamp_pair_count),
             "sync_delta_ms": sensor_sync_delta_ms,
             "max_nearest_pose_delta_ms": nearest_pose_threshold_ms,
             "required_frame_timestamp_domain": required_frame_timestamp_domain,
@@ -749,6 +785,24 @@ def synchronize_sensor_folder(
             "total_frames": len(frame_records),
             "matched_frames": len(matched),
             "dropped_frames": len(dropped),
+            "outside_motion_interval_frame_count": (
+                outside_motion_interval_frame_count
+            ),
+            "eligible_in_motion_frames": eligible_in_motion_frames,
+            "matched_eligible_frames": len(matched),
+            "eligible_motion_coverage": (
+                len(matched) / eligible_in_motion_frames
+                if eligible_in_motion_frames
+                else 0.0
+            ),
+            "in_motion_exclusion_count": in_motion_exclusion_count,
+            "unexplained_in_motion_exclusion_count": (
+                unexplained_in_motion_exclusion_count
+            ),
+            "robot_pose_packet_loss_audited": pose_packet_loss_audited,
+            "robot_pose_packet_loss_count": (
+                pose_packet_loss_count if pose_packet_loss_audited else None
+            ),
             "motion_intervals": intervals,
             "dropped": dropped,
             "copied_metadata_artifacts": copied_metadata_artifacts,

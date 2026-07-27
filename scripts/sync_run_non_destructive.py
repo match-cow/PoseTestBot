@@ -114,9 +114,7 @@ def main() -> None:
     )
     capture = (run_config or {}).get("capture")
     synchronization = capture_synchronization_from_mapping(
-        capture.get("synchronization")
-        if isinstance(capture, dict)
-        else None
+        capture.get("synchronization") if isinstance(capture, dict) else None
     ).to_dict()
     hardware_triggered = synchronization["mode"] == "hardware_trigger"
     if hardware_triggered and args.sensor_folder is not None:
@@ -181,11 +179,9 @@ def main() -> None:
     hardware_sync_qualification = None
     try:
         if hardware_triggered:
-            hardware_sync_qualification = (
-                validate_hardware_sync_qualification(
-                    run_root,
-                    run_config=run_config,
-                )
+            hardware_sync_qualification = validate_hardware_sync_qualification(
+                run_root,
+                run_config=run_config,
             )
         if calibration_sync_policy is None:
             results = synchronize_run(
@@ -224,9 +220,7 @@ def main() -> None:
                 run_root,
                 run_config=run_config,
             )
-            hardware_groups["hardware_sync_qualification"] = (
-                hardware_sync_qualification
-            )
+            hardware_groups["hardware_sync_qualification"] = hardware_sync_qualification
             hardware_groups["hardware_sync_execution_binding"] = (
                 capture_execution_hardware_sync_binding(
                     run_root,
@@ -264,14 +258,12 @@ def main() -> None:
             artifacts=sync_result_artifacts(result),
             run_root=run_root,
             message=(
-                f"Matched {result.matched_frames}/{result.total_frames} frames; "
-                f"dropped {result.dropped_frames}."
+                f"Wrote {result.matched_frames} synchronized in-motion "
+                "frame-pose match(es). Raw frames remain preserved."
             ),
         )
 
-    total_frames = sum(result.total_frames for result in results)
     matched_frames = sum(result.matched_frames for result in results)
-    dropped_frames = sum(result.dropped_frames for result in results)
     upsert_stage(
         manifest,
         name="sync_run",
@@ -283,8 +275,8 @@ def main() -> None:
         ),
         run_root=run_root,
         message=(
-            f"Synchronized {len(results)} sensor(s): matched "
-            f"{matched_frames}/{total_frames}, dropped {dropped_frames}."
+            f"Synchronized {len(results)} sensor(s): wrote "
+            f"{matched_frames} in-motion frame-pose match(es)."
             + (
                 " Applied hash-bound per-camera calibration timing."
                 if calibration_sync_policy is not None
@@ -302,8 +294,8 @@ def main() -> None:
     write_run_manifest(manifest, run_root)
 
     print(
-        f"Synchronized {len(results)} sensor(s): matched "
-        f"{matched_frames}/{total_frames}, dropped {dropped_frames}."
+        f"Synchronized {len(results)} sensor(s): wrote "
+        f"{matched_frames} in-motion frame-pose match(es)."
         + (
             " Published "
             f"{hardware_groups['summary']['complete_group_count']} "

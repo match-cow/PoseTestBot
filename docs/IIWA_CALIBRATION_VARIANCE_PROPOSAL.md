@@ -179,14 +179,14 @@ Use the [printable checklist](IIWA_CALIBRATION_TEACHING_CHECKLIST.md) for frame
 creation, touch-up read-back, per-frame reviewer sign-off, Workbench endpoint
 and swept-path checks, T1 single-stepping, and the supervised capture trial.
 
-The repository source currently sets `ENABLE_AFTER_OFFLINE_VALIDATION=true` for
-lab validation. This does not establish that the controller is running this
-exact source. Record the deployed application and revision, and retain the
-Workbench compile, nine-frame resolution, path simulation, and T1 evidence;
-the boolean alone does not prove commissioning. Future application or cell
-changes must be revalidated before physical capture. Physical T1 validation
-and capture are operator-run work. Repository tests never access the robot or
-cameras.
+The repository source keeps `ENABLE_AFTER_OFFLINE_VALIDATION=false`, so the
+application exits before motion until offline review and supervised
+commissioning are complete. Enabling a deployed copy does not establish that
+the controller is running the reviewed source: record the deployed application
+and revision, and retain the Workbench compile, nine-frame resolution, path
+simulation, and T1 evidence. Future application or cell changes must be
+revalidated before physical capture. Physical T1 validation and capture are
+operator-run work. Repository tests never access the robot or cameras.
 
 For every required camera, a future supervised trial must demonstrate at least
 15 accepted views, five-view-supported normalized centroid spans of at least

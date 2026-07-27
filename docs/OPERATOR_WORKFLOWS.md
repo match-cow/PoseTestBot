@@ -17,7 +17,7 @@ Workflow progress comes from run-owned artifacts, not browser state.
 - **Optional** actions are shown separately and do not block the required
   outcome. Examples include creating a new grid when a suitable one already
   exists, editing catalogue data, inspecting alternate solver evidence, and
-  rendering masks with BlenderProc.
+  generating pose-only or pose-plus-mask BOP annotations after the base export.
 - **Automatic processing** means a queued local job performs the computation.
   It never means that PoseTestBot may open cameras or move the robot without a
   fresh operator action.
@@ -154,20 +154,34 @@ calibration has been promoted.
    per-camera BOP scene/image views in `bop/posetestbot_frame_sets.json` and
    carries forward that capture-report binding. The BOP rewrite gate compares
    it across the current qualification, capture report, authoritative groups,
-   frame sets, frame map, and exported files.
+   frame sets, frame map, and exported files. After the base image/model export
+   passes, optionally choose **Plain pose ground truth** or **Pose + object
+   masks and ROI**. Both modes use BlenderProc 2.8.0 to validate the immutable
+   scene and derive standard model-to-camera pose rows. The complete mode also
+   uses the pinned official BOP Toolkit renderer and captured depth to write
+   `scene_gt_info.json`, full masks, visible masks, ROI, pixel counts, and
+   visibility fractions. Ground-truth work is one recoverable CPU/render/disk
+   job and remains visible in **Jobs** after navigation.
 
-BlenderProc preparation and rendering of GT, masks, or derived COCO annotations
-is explicitly optional. A synchronized calibrated recording remains valid
-without those rendered products. Pose-estimator execution and metric evaluation
-remain outside this repository.
+Annotation generation is explicitly optional. A synchronized calibrated base
+export remains valid without GT or masks, while plain pose GT deliberately is
+not BOP19 evaluation-ready. Pose-estimator execution and proprietary-result
+conversion remain outside this repository. The sole metric exception is the
+run-scoped **Inspect → BOP Evaluation** path: it accepts an already compatible
+standard BOP19 CSV or a deterministic test-only slight GT perturbation, queues
+the pinned official VSD/MSSD/MSPD scripts, and writes derived evidence only
+below `processed/bop_evaluation/`. It is not a pipeline stage.
 
 The real static and robot-mounted depth observations in an authoritative
 complete group share the synchronized depth-exposure instant, including
 depth-visible robot occlusion. Associated D435 RGB images are not
 hardware-synchronized and must not be claimed to share a moving-robot or
 changing-illumination instant. BlenderProc does not currently render the
-articulated iiwa, so optional synthetic GT and masks do not model the robot
-occluder and must not be presented as that visibility truth.
+articulated iiwa, so the full model mask must not be presented as robot
+occlusion truth. In the complete annotation mode, the visible mask is compared
+with captured depth and therefore reflects measured occluders, including the
+robot where valid depth observed it. Missing or invalid captured depth still
+requires explicit inspection.
 
 ## One readiness step, two fresh capture gates
 
@@ -253,13 +267,20 @@ selection reason, and deltas are retained in attempt-level
 - Legacy workflow URLs redirect into the matching guided step; they are route
   compatibility aliases, not separate workflows.
 
+The Dashboard derives its five-step calibration or six-step dataset overview
+from the selected run's saved `dataset_mode`, links every tile to the exact
+guided step, and uses durable run evidence for progress. It also keeps the room
+monitor, acquisition-disk capacity, active jobs, and recent failures visible.
+An unconfigured run is sent to the two-outcome chooser instead of being
+presented as calibration.
+
 The sidebar groups supporting pages by purpose. Devices and the reusable
 Calibration Target, Workpiece Catalogue, and Pose Template libraries prepare
-inputs; Cell and Jobs inspect evidence and background work. Each page shows its
-workflow handoff because visiting or editing a reusable library does not by
-itself mutate the selected run. The global **Operator console guide** summarizes
-these scopes and the physical-execution boundary without replacing the
-step-local prerequisites and safety text.
+inputs; Cell, BOP Evaluation, and Jobs inspect evidence and background work.
+Each page shows its workflow handoff because visiting or editing a reusable
+library does not by itself mutate the selected run. The global **Operator
+console guide** summarizes these scopes and the physical-execution boundary
+without replacing the step-local prerequisites and safety text.
 
 The machine-readable contract mirrors the same compact five- and six-step
 spines. Its `required`, `optional`, and `automatic` fields let other clients

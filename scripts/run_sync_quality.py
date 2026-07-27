@@ -20,8 +20,8 @@ from posetestbot.sync.quality import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Check synchronized sync_report.json files for dropped frames, "
-            "match ratio, timestamp source, and nearest-pose deltas."
+            "Check synchronized sync_report.json files for eligible in-motion "
+            "coverage, timestamp evidence, and nearest-pose deltas."
         )
     )
     parser.add_argument("run_root", help="Run folder containing processed sync output.")
@@ -29,12 +29,15 @@ def parse_args() -> argparse.Namespace:
         "--min-match-ratio",
         type=float,
         default=0.8,
-        help="Warn when a sensor's matched/total frame ratio is below this value.",
+        help=(
+            "Warn when a sensor's synchronized/eligible-in-motion coverage is "
+            "below this value."
+        ),
     )
     parser.add_argument(
         "--max-dropped-frames",
         type=int,
-        help="Warn when a sensor dropped more than this many frames.",
+        help="Warn when a sensor excludes more than this many in-motion frames.",
     )
     parser.add_argument(
         "--max-nearest-pose-delta-ms",
@@ -155,7 +158,9 @@ def main() -> None:
     print(
         "Sync quality: "
         f"{report['overall_status']} "
-        f"({report['matched_frames']}/{report['total_frames']} frames matched, "
+        f"({report['matched_eligible_frames']}/"
+        f"{report['eligible_in_motion_frames']} eligible in-motion frames "
+        "synchronized, "
         f"{report['sensor_count']} sensors)"
     )
     if args.json:

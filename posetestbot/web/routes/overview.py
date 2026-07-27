@@ -104,6 +104,10 @@ WORKFLOW_SECTIONS = [
             BLENDERPROC_RENDER_PLAN,
             f"{BOP_DIR}/{BOP_EXPORT_MANIFEST}",
         ],
+        # An annotation-free BOP dataset is a complete pose-estimation input.
+        # BlenderProc evidence is required only when rendered GT/masks are
+        # explicitly requested.
+        "optional_artifacts": [BLENDERPROC_RENDER_PLAN],
     },
     {"id": "jobs", "label": "Jobs", "artifacts": []},
 ]
@@ -204,9 +208,7 @@ def _positive_int(value: Any) -> bool:
     return type(value) is int and value > 0
 
 
-def _validated_artifact_status(
-    relative_path: str, value: Mapping[str, Any]
-) -> str:
+def _validated_artifact_status(relative_path: str, value: Mapping[str, Any]) -> str:
     """Return an explicit guided-workflow state for durable JSON evidence."""
 
     declared = value.get("overall_status", value.get("status"))
@@ -293,18 +295,24 @@ def _section_summaries(root: Path) -> list[dict[str, Any]]:
     sections = []
     for section in WORKFLOW_SECTIONS:
         chips = [_artifact_chip(root, path) for path in section["artifacts"]]
+        optional_artifacts = set(section.get("optional_artifacts", []))
+        required_chips = [
+            chip for chip in chips if chip["path"] not in optional_artifacts
+        ]
         sections.append(
             {
                 "id": section["id"],
                 "label": section["label"],
-                "status": _section_status(chips),
+                "status": _section_status(required_chips),
                 "artifacts": chips,
             }
         )
     return sections
 
 
-def _sequence_steps(config: Mapping[str, Any] | None, root: Path) -> list[dict[str, Any]]:
+def _sequence_steps(
+    config: Mapping[str, Any] | None, root: Path
+) -> list[dict[str, Any]]:
     if not config:
         return []
     try:

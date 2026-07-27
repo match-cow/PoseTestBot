@@ -1,0 +1,10 @@
+[project]
+name = "bop-toolkit-runtime"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "bop-toolkit-lib",
+]
+
+[tool.uv.sources]
+bop-toolkit-lib = { path = "../../third_party/bop_toolkit", editable = true }

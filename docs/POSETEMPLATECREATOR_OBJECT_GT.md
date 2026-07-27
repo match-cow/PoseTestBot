@@ -2,9 +2,11 @@
 
 PoseTestBot uses the pinned PoseTemplateCreator backend to turn managed CAD
 models into printable, immutable object-pose templates. This workflow creates
-ground-truth inputs and a validated BOP dataset; it does not run pose estimators
-or evaluation. Test-object upload and lifecycle are owned by the separate
-**Workpiece Catalogue** page; see
+ground-truth inputs and a validated BOP dataset; it does not run pose
+estimators. Official metric inspection, when needed, is the separate
+run-scoped **Inspect → BOP Evaluation** path and consumes the completed
+annotation-bearing export. Test-object upload and lifecycle are owned by the
+separate **Workpiece Catalogue** page; see
 [WORKPIECE_CATALOGUE.md](WORKPIECE_CATALOGUE.md) for its persistence and API
 contract.
 
@@ -23,6 +25,12 @@ different revision, existing catalogs, bundles, and run selections remain
 browsable, and existing workpiece metadata remains editable, but new CAD
 inspection/conversion, exact slicing, and generation are disabled.
 Non-dry-run pose-template rendering requires BlenderProc 2.8.0.
+The evaluation-compatible pose-plus-mask product additionally requires the
+pinned official BOP Toolkit and its isolated runtime:
+
+```bash
+bash scripts/install.sh --with-blenderproc --with-bop-toolkit
+```
 
 ## Coordinate contract
 
@@ -98,17 +106,21 @@ transforms, the PDF page boundary, or GT.
      --dataset-mode pose_template
    ```
 
-5. Open **Workflow → Ground Truth**, select an active immutable version from
-   its bounded footprint-preview card, and inspect the immutable objects in the
-   single full interactive 3D scene. A **Simplified** badge reports card-only
-   contour/point reduction; it never changes the printable or GT geometry.
-   Enter the measured full
-   template-to-`template_base` placement, identify the operator, and explicitly
-   confirm it. Changing the version or any placement value clears that
-   confirmation; identity defaults are not implicitly trusted.
-6. Run BlenderProc preparation/rendering and BOP export through the existing
-   workflow. No camera or robot operation is initiated by catalog, template,
-   selection, preparation, or export actions.
+5. Open **Workflow → Object dataset → Choose the object template and
+   placement**, select an active immutable version from its bounded
+   footprint-preview card, and inspect the immutable objects in the single full
+   interactive 3D scene. A **Simplified** badge reports card-only contour/point
+   reduction; it never changes the printable or GT geometry. Enter the measured
+   full template-to-`template_base` placement, identify the operator, and
+   explicitly confirm it. Changing the version or any placement value clears
+   that confirmation; identity defaults are not implicitly trusted.
+6. Complete capture, synchronization, and the base BOP image/model export in
+   the guided dataset workflow. In step 6, optionally generate **Plain pose
+   ground truth** or **Pose + object masks and ROI**. BlenderProc 2.8.0
+   validates the calibrated scene and derives pose GT; the complete product
+   then uses the pinned BOP Toolkit with captured depth for full/visible masks,
+   ROI, and visibility evidence. No camera or robot operation is initiated by
+   catalogue, template, selection, preparation, annotation, or export actions.
 
 ## Artifacts and immutability
 
@@ -154,8 +166,15 @@ transforms, the PDF page boundary, or GT.
   transaction or its cleanup is recoverable.
 - Prepared identity: `object_instances.json` and per-sensor BlenderProc
   `objects.json`/`posetestbot_render_instances.json`.
+- Run-owned annotation status and renderer provenance:
+  `processed/bop_annotations/generation_report.json`.
 - BOP provenance: `bop/posetestbot_pose_template.json` and
   `bop/posetestbot_instance_map.json` beside standards-compatible BOP files.
+  The pose-plus-mask product also contains standard `scene_gt.json`,
+  `scene_gt_info.json`, full-frame `mask/`, and `mask_visib/` files.
+- Optional Inspect-only result registrations and metric reports:
+  `processed/bop_evaluation/`. These are derived consumers of the finished BOP
+  dataset and never mutate the template selection or raw capture.
 
 Catalogue and library archives are reversible. Catalogue JSON export/import is
 metadata-only: JSON never embeds CAD or texture bytes, and import skips records
@@ -192,9 +211,10 @@ uv run python scripts/run_rewrite_gate.py working_data/my_run \
 ```
 
 For pose-template mode the gate cross-checks selection, prepared geometry,
-calibration, renderer version/identity, every BOP GT index, model hashes, and
-both provenance sidecars. Preserve raw capture data; retry preparation or
-export into derived artifacts after correcting a blocker.
+calibration, annotation/toolkit identity when present, every BOP GT index,
+model hashes, target visibility counts, and both provenance sidecars. Preserve
+raw capture data; retry preparation, annotation generation, or export into
+derived artifacts after correcting a blocker.
 
 Selection creation and replacement hold the template-library lock while they
 strictly validate and snapshot the chosen active bundle. The run-local reader

@@ -1,11 +1,13 @@
 # Rewrite Progress
 
-Last updated: 2026-07-26
+Last updated: 2026-07-27
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
-pose-template provenance, and BOP dataset export. Downstream estimator and
-evaluation work is excluded.
+pose-template provenance, and BOP dataset export. Downstream estimators and
+result conversion remain excluded. The sole evaluator exception is the
+Inspect-only, run-scoped official BOP19 dataset-validation path described
+below; it consumes completed exports and is not a pipeline stage.
 
 ## Current State
 
@@ -32,10 +34,162 @@ The code rewrite is implemented across:
   isometric previews, exact planar layout/fit validation, immutable printable
   templates sourced from active workpieces, preview-rich run selection,
   per-instance GT, and Cell provenance;
-- BlenderProc 2.8.0 preparation/render identity checks and transactional BOP
-  v4 export; and
+- BlenderProc 2.8.0 preparation/render identity checks and transactional,
+  selectable pose-only or pose-plus-mask ground truth, and
+  annotation-capability-explicit BOP v5 export;
+- Inspect-only standard-result registration, deterministic GT-derived test
+  fixtures, and official BOP19 metric evaluation below
+  `processed/bop_evaluation/`; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
+
+## 2026-07-27 Dashboard Acquisition Operations
+
+The Dashboard now prioritizes live acquisition supervision instead of
+duplicating pipeline recommendations. The workcell WebRTC monitor occupies the
+larger side of the primary desktop row; the former **Recommended next action**
+card is removed because the persistent workflow return and evidence strip
+already own guided navigation.
+
+The adjacent **Job activity** panel polls operator jobs every second, keeps
+every queued/running/canceling job immediately visible in a bounded local
+scroll area, and retains the three latest failed jobs with their messages.
+Capture jobs still keep the separate prominent stop-control banner. A new
+five-second `/ui/storage` status reports free, used, and total capacity for the
+filesystem containing the selected run. Its warning and critical reserves are
+the smaller of 500/100 GiB and 15%/5% of filesystem capacity, so a nearly empty
+500 GB acquisition SSD is not permanently mislabeled while larger disks retain
+an absolute capture reserve.
+
+The Dashboard workflow overview now uses the same canonical guided-step
+metadata as Workflow instead of collapsing backend artifact sections into an
+approximate five-tile sequence. Saved `dataset_mode=objectless` runs show the
+five camera-calibration steps, while saved `dataset_mode=pose_template` runs
+show all six object-dataset steps and identify the reused calibration as an
+input to dataset step 1. Each tile links to its exact guided `?step=` route;
+completion still comes from run-owned configuration and validated durable
+artifacts. An unconfigured run shows the two-outcome workflow chooser instead
+of being presented as calibration by default. Packaged Playwright coverage
+locks the five-step calibration and six-step dataset variants.
+
+Validation passed seven focused Flask/UI tests, four affected desktop
+Playwright contracts at up to 1920 × 1080, frontend type checking and lint, the
+production Vite build, Ruff, and diff checks. The real
+`/mnt/working_data_ssd` mount was queried read-only and reported healthy with
+about 95% free. No camera or robot was opened or commanded.
+
+## 2026-07-26 Current Workflow Return
+
+The operator console now retains one browser-local guided-workflow return point
+per selected run. After an operator opens camera calibration or object-dataset
+recording, the persistent desktop sidebar identifies that journey, its exact
+viewed step, the step number, and the workflow rail status. Active capture and
+dataset-processing jobs override the cached rail status with live queued,
+running, stopping, finished, or failed state as applicable.
+
+Both the primary **Workflow** navigation item and the sidebar resume action
+return directly to the saved `?step=` route after visits to Dashboard, Cell, or
+other supporting pages and after a browser reload. **Choose another workflow**
+remains a separate explicit action, so fast return does not remove access to
+the outcome chooser. Return points are isolated by run path: changing the
+selected run never presents another run's step as the current one. This
+browser-local navigation state does not mutate run-owned artifacts, imply
+hardware readiness, or authorize physical execution.
+
+Validation passed all 35 operator-console Playwright tests, including the new
+1440 × 900 navigation/reload/live-recording/run-isolation regression, and all
+43 non-browser web-interface tests. Frontend type checking, lint, the
+production Vite build, and diff checks also passed. No camera or robot was
+opened or commanded.
+
+## 2026-07-26 Guided BOP Ground-Truth Products
+
+The canonical **Workflow → Object dataset → Export the BOP dataset** step now
+offers two explicit, run-scoped annotation products after the base image/model
+export is verified. **Plain pose ground truth** derives every instance's
+OpenCV model-to-camera rotation and millimetre translation through immutable
+object geometry, pose-template instance/placement transforms, matched robot
+poses, and the selected calibration snapshot. It writes standard
+`scene_gt.json` plus identity/provenance evidence, deliberately omits
+visibility data, and remains marked non-evaluable.
+
+**Pose + object masks and ROI** begins with the same BlenderProc 2.8.0
+scene/pose validation, then invokes the pinned official BOP Toolkit renderer.
+It compares rendered object depth with captured depth using BOP19 visibility
+semantics and the 15 mm tolerance, writes full-frame binary `mask/` and
+`mask_visib/` PNGs, and produces official `scene_gt_info.json` pixel counts,
+visibility fractions, and `bbox_obj`/`bbox_visib` ROI. Only this complete mode
+rebuilds the visibility-filtered BOP19 targets and advertises evaluation
+readiness.
+
+One `LocalJobRunner` job owns preparation, BlenderProc pose derivation, and
+transactional BOP re-export. Its mode and run remain discoverable through
+persistent Jobs history after navigation. Readiness fails closed on an
+unconfirmed template placement, invalid calibration snapshot, mismatched
+RGB/depth/robot-pose frame keys, stale base export, missing BlenderProc, or—for
+the full product—the missing pinned toolkit runtime. Raw frames, robot poses,
+template selection, and calibration snapshots are read-only.
+
+The retained `working_data/test20260726_BOPv5` run now contains the completed
+`pose_and_masks` product. BlenderProc 2.8.0 validated both calibrated camera
+scenes and generated 1,621 rigid per-instance poses (810 + 811 frames). The
+pinned clean BOP Toolkit then generated 1,621 full masks, 1,621 visible masks,
+and both GT-info files. Every instance is above the 0.1 visibility target
+threshold (minimum visibility fractions 0.8593 and 0.8143 by scene), so the
+1,621 BOP19 target rows reconcile exactly. Durable pose/mask hashes verify,
+the export advertises BOP19 evaluation capability, and
+`rewrite_bop_export_readiness.v1` passes 11/11 checks. Representative
+RGB/full-mask/visible-mask/ROI evidence was inspected without changing raw
+capture data.
+
+## 2026-07-26 Inspect-only Official BOP19 Evaluation
+
+The **Inspect → BOP Evaluation** page now validates a selected run's completed,
+annotation-bearing BOP v5 export without mutating `bop/`, raw capture,
+synchronization, calibration, or GT evidence. It accepts canonical BOP19 result
+CSVs, validates their filename dataset/split identity, exact columns, pose
+values, target coverage, size, and hash, then retains independently selectable
+method/results. Before real estimator output exists, an explicitly test-only
+mode deterministically perturbs GT translation and rotation by small bounded
+offsets and registers the generated file through the same validation contract.
+The UI never presents those simulated values as estimator performance.
+
+Evaluation is a CPU/disk `LocalJobRunner` job and continues after navigation.
+It invokes official BOP Toolkit commit
+`cea62d651c7e395b2e1962b9749e4e89693c6ac4` in the isolated locked
+`tools/bop_toolkit_runtime` environment. A runtime-only generic-dataset adapter
+keeps the pinned submodule clean while directing its standard error/score
+scripts at the selected export. Reports expose overall BOP19 Average Recall,
+AR VSD, AR MSSD, AR MSPD, timing, and immutable dataset, result, adapter,
+renderer, and toolkit provenance. History keeps different methods, result
+runs, and simulated fixtures separately selectable.
+
+The completed real v5 annotation product was exercised through this path with
+the deterministic 1 mm translation / 0.25° rotation, seed-42 fixture. The
+official toolkit accepted all 1,621 estimates and reported overall BOP19 AR
+0.9628, AR VSD 0.8885, AR MSSD 1.0000, and AR MSPD 1.0000. Evaluation
+`evaluation-640602f34b4e` retains the exact dataset, depth-content, result,
+adapter, renderer, command, and toolkit hashes below
+`processed/bop_evaluation/`; these values are format-validation evidence, not
+pose-estimator performance.
+
+Final validation passed 160 focused GT/export/evaluation/web tests, 43 pipeline
+registry/sequence tests, all 50 packaged Playwright contracts, frontend type
+checking and lint, the production Vite build, Ruff, and diff checks. The final
+default suite reports 969 passed and 50 deselected. Both tracked iiwa
+applications retain `ENABLE_AFTER_OFFLINE_VALIDATION=false`, and their tests
+assert that inert repository state. No validation command altered or executed
+either robot application.
+
+The feature is deliberately not an estimator wrapper, proprietary-result
+converter, general evaluator bridge, or pipeline sequence. Imported/simulated
+results live below `processed/bop_evaluation/results/<result_id>/`; requests,
+progress, resolved input, adapter configuration, official toolkit output, and
+final reports live below
+`processed/bop_evaluation/evaluations/<evaluation_id>/`. The optional installer
+flag `--with-bop-toolkit` initializes the pinned checkout and synchronizes this
+separate NumPy-below-2 toolkit environment without changing PoseTestBot's
+NumPy-2 main environment.
 
 ## 2026-07-26 Object-Dataset Research Speed Range
 
@@ -83,21 +237,61 @@ RGB-D pair and Greifer snapshot was accepted by the official generic scenewise
 reader. It reported RGB/depth present and GT/masks absent, loaded the camera and
 populated target row, and loaded both 3,684-vertex / 1,228-face model copies.
 
+The subsequent real object run `working_data/test20260726_BOPv5` completed
+through job `40cf447b9486` with return code 0 and passed
+`rewrite_bop_export_readiness.v1` (11/11 checks). Its clean v5 export contains
+two scenes with 810 and 811 paired RGB-D frames, 1,621 matching BOP19 target
+rows, and one Greifer model in both `models/` and `models_eval/`. It contains no
+placeholder GT, GT-info, mask, or visible-mask files. A read-only quality
+recalculation also confirmed 1,621/1,621 eligible in-motion frames synchronized;
+the 1,363 other raw frames were intentional outside-motion context, not
+synchronization failures. The same official toolkit revision loaded both
+scenes' first and last calibrated RGB-D samples, all camera rows and targets,
+and both 3,684-vertex / 1,228-face model copies directly from this full export.
+
 `bop_export_manifest.v5` also makes annotation capability explicit.
 Annotation-free output contains RGB-D scenes, standard `scene_camera.json`,
 selected models, compact portable provenance, and a populated BOP19 target list
 derived from the confirmed pose-template object counts. It omits placeholder
-GT, GT-info, masks, and GT instance maps. BlenderProc mode adds those
-annotation-dependent artifacts and is the only mode marked ready for BOP19
-evaluation. Export metadata no longer embeds absolute run paths, per-frame
-camera JSON no longer repeats PoseTestBot calibration payloads, and the
-manifest retains only calibration profiles used by exported scenes.
+GT, GT-info, masks, and GT instance maps. Pose-only mode adds `scene_gt.json`
+and identity/provenance without claiming evaluation readiness. The complete
+pose-plus-mask mode adds official visibility and mask evidence and is the only
+mode marked ready for BOP19 evaluation. Export metadata no longer embeds
+absolute run paths, per-frame camera JSON no longer repeats PoseTestBot
+calibration payloads, and the manifest retains only calibration profiles used
+by exported scenes.
+
+For new annotation-bearing exports, `test_targets_bop19.json` now counts only
+GT instances whose `scene_gt_info.json` `visib_fract` is at least 0.1, matching
+the official BOP19 localization target policy. Inspect evaluation cross-checks
+that inventory against GT-info. An older export whose target counts include
+less-visible instances remains inspectable, but receives an explicit warning:
+its scores are valid for its exported target list and are not
+leaderboard-comparable.
 
 The active gates are:
 
 - `rewrite_full_capture.v1`
 - `rewrite_calibration_validation.v1`
 - `rewrite_bop_export_readiness.v1`
+
+The guided dataset-processing step now follows its persistent local job after
+submission and after navigation. It shows queued, running, canceling, failed,
+successful-but-not-yet-verified, and verified states; marks the workflow rail
+as running; identifies the next unverified outcome; refreshes durable evidence
+when the job exits; and links directly to Jobs for the live log and
+cancellation. The Jobs log drawer has separate copy controls for complete
+process output and structured job context/metadata. The overview also treats a
+missing BlenderProc plan as optional for an annotation-free export, so a
+verified image/model BOP dataset is no longer mislabeled `in_progress`.
+
+Timestamp-aligned quality now grades synchronized coverage only against camera
+frames eligible inside robot motion intervals. Preserved lead-in/tail frames
+remain raw lifecycle context and no longer create a false low-match warning.
+Reports separately retain eligible/matched coverage, missing or fallback
+timestamps, nearest-pose rejections, unexplained in-motion exclusions, and
+audited robot-pose packet loss; CLI summaries no longer present all raw frames
+as a dataset-quality denominator.
 
 Calibration-target reuse is explicit in the operator console. A saved target is
 a global reusable library entry and can be selected by every fresh calibration
@@ -129,7 +323,20 @@ still fail closed when this run has no matching promoted profile. Calibration
 target scenes retain the canonical top-left, +X-right, +Y-down, +Z-into-board
 frame and use a presentation-only right-handed target alignment, so cameras on
 the printed/front negative-Z side appear above the grid without changing any
-stored pose or promoted calibration transform.
+stored pose or promoted calibration transform. The page now gives the 3D scene
+its own full-width inspection surface, keeps its pose source and slider directly
+below it, places retained camera evidence in a separate full-width section
+below the scene, and moves visibility, selection provenance, and the component
+list into a final evidence row. Operators can select multiple named camera
+timelines and compare them side by side as RGB, fixed-range colourized metric
+depth, or both. Each tile applies the shared slider ordinal to that camera's own
+exact matched timeline without interpolation; visible copy explicitly avoids
+claiming simultaneous exposure unless separate authoritative hardware-sync
+group evidence exists. Inverted RealSense mounts use capture metadata to avoid
+double rotation: already corrected stored frames are shown directly, while
+older frames lacking that evidence receive the configured 180-degree display
+correction. Depth previews use a stable 200–3000 mm near-warm/far-cool scale,
+keep zero/invalid pixels black, and never modify the retained uint16 PNG.
 
 Historical run `working_data/hot_full_capture_fixed_20260710_1351` passes the
 full-capture gate at 10/10 for three RealSense cameras. The current five-sensor
@@ -709,8 +916,9 @@ runtimes on this host.
 
 ## 2026-07-21 Audit and Cleanup
 
-- Confirmed that no estimator, evaluator, BOP-result conversion, or metric
-  implementation remains in tracked production code.
+- At that checkpoint, confirmed that no estimator, evaluator, BOP-result
+  conversion, or metric implementation remained in tracked production code.
+  The later narrow Inspect-only official BOP19 exception is documented above.
 - Removed obsolete duplicate launch/ArUco/Sunrise files, definition-only
   helpers/constants, stale completed plans, generated build debris, and the
   misleading downstream-compatibility test name.

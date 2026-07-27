@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,8 @@ from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.cell.scene import (
     build_cell_scene,
     cell_calibration_target_pdf_path,
+    cell_camera_frame_path,
+    cell_depth_frame_preview_png,
     cell_timeline_page,
 )
 from posetestbot.pose_templates.selection import load_pose_template_selection
@@ -26,6 +30,12 @@ from posetestbot.web.security import (
 
 
 ui_bp = Blueprint("ui", __name__)
+
+GIB = 1024**3
+STORAGE_CRITICAL_FREE_BYTES_CAP = 100 * GIB
+STORAGE_WARNING_FREE_BYTES_CAP = 500 * GIB
+STORAGE_CRITICAL_FREE_FRACTION = 0.05
+STORAGE_WARNING_FREE_FRACTION = 0.15
 
 
 def _is_below(path: Path, root: Path) -> bool:
@@ -126,6 +136,88 @@ def discover_web_runs() -> list[dict[str, Any]]:
     return ordered
 
 
+def _nearest_existing_path(path: Path) -> Path:
+    candidate = path
+    while not candidate.exists() and candidate.parent != candidate:
+        candidate = candidate.parent
+    if not candidate.exists():
+        raise FileNotFoundError(f"No existing filesystem path for {path}")
+    return candidate
+
+
+def _filesystem_mount_path(path: Path) -> Path:
+    candidate = path if path.is_dir() else path.parent
+    while candidate.parent != candidate and not os.path.ismount(candidate):
+        candidate = candidate.parent
+    return candidate
+
+
+def _storage_thresholds(total_bytes: int | None) -> dict[str, int | float]:
+    critical_free_bytes = STORAGE_CRITICAL_FREE_BYTES_CAP
+    warning_free_bytes = STORAGE_WARNING_FREE_BYTES_CAP
+    if total_bytes is not None:
+        critical_free_bytes = min(
+            critical_free_bytes,
+            int(total_bytes * STORAGE_CRITICAL_FREE_FRACTION),
+        )
+        warning_free_bytes = min(
+            warning_free_bytes,
+            int(total_bytes * STORAGE_WARNING_FREE_FRACTION),
+        )
+    return {
+        "critical_free_bytes": critical_free_bytes,
+        "warning_free_bytes": warning_free_bytes,
+        "critical_free_bytes_cap": STORAGE_CRITICAL_FREE_BYTES_CAP,
+        "warning_free_bytes_cap": STORAGE_WARNING_FREE_BYTES_CAP,
+        "critical_free_fraction": STORAGE_CRITICAL_FREE_FRACTION,
+        "warning_free_fraction": STORAGE_WARNING_FREE_FRACTION,
+    }
+
+
+def run_storage_status(run_root: Path) -> dict[str, Any]:
+    """Report capacity for the filesystem that will contain the selected run."""
+
+    try:
+        probe = _nearest_existing_path(run_root)
+        usage = shutil.disk_usage(probe)
+        if usage.total <= 0:
+            raise OSError("Filesystem reported zero total capacity")
+        thresholds = _storage_thresholds(usage.total)
+        free_fraction = usage.free / usage.total
+        if usage.free <= thresholds["critical_free_bytes"]:
+            status = "error"
+        elif usage.free <= thresholds["warning_free_bytes"]:
+            status = "warning"
+        else:
+            status = "ready"
+        return {
+            "schema_version": "run_storage.v1",
+            "run_root": run_root.as_posix(),
+            "filesystem_path": _filesystem_mount_path(probe).as_posix(),
+            "status": status,
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+            "free_bytes": usage.free,
+            "free_fraction": free_fraction,
+            "thresholds": thresholds,
+            "error": None,
+        }
+    except OSError as exc:
+        thresholds = _storage_thresholds(None)
+        return {
+            "schema_version": "run_storage.v1",
+            "run_root": run_root.as_posix(),
+            "filesystem_path": None,
+            "status": "unavailable",
+            "total_bytes": None,
+            "used_bytes": None,
+            "free_bytes": None,
+            "free_fraction": None,
+            "thresholds": thresholds,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 @ui_bp.get("/ui/bootstrap")
 def ui_bootstrap():
     return jsonify(
@@ -167,6 +259,14 @@ def _requested_run_root() -> Path:
     return resolve_web_run_root(value)
 
 
+@ui_bp.get("/ui/storage")
+def ui_storage():
+    try:
+        return jsonify(run_storage_status(_requested_run_root()))
+    except ValueError as exc:
+        return jsonify({"output": str(exc)}), 400
+
+
 @ui_bp.get("/ui/cell-scene")
 def ui_cell_scene():
     try:
@@ -190,6 +290,53 @@ def ui_cell_timeline():
             limit=int(request.args.get("limit", str(2_000))),
         )
         return jsonify(payload)
+    except KeyError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except FileNotFoundError as exc:
+        return jsonify({"output": str(exc)}), 404
+    except (OSError, ValueError) as exc:
+        return jsonify({"output": str(exc)}), 400
+
+
+@ui_bp.get("/ui/cell-scene/camera-frame")
+def ui_cell_camera_frame():
+    timeline_id = request.args.get("timeline_id")
+    if not timeline_id:
+        return jsonify({"output": "timeline_id is required"}), 400
+    timeline_index = request.args.get("timeline_index")
+    frame_id = request.args.get("frame_id")
+    if timeline_index is None and frame_id is None:
+        return jsonify({"output": "timeline_index or frame_id is required"}), 400
+    modality = request.args.get("modality", "rgb")
+    try:
+        parsed_index = int(timeline_index) if timeline_index is not None else None
+        if modality == "depth":
+            return send_file(
+                BytesIO(
+                    cell_depth_frame_preview_png(
+                        _requested_run_root(),
+                        timeline_id,
+                        parsed_index,
+                        frame_id=frame_id,
+                    )
+                ),
+                mimetype="image/png",
+                download_name="depth-preview.png",
+                conditional=True,
+                max_age=3600,
+            )
+        return send_file(
+            cell_camera_frame_path(
+                _requested_run_root(),
+                timeline_id,
+                parsed_index,
+                frame_id=frame_id,
+                modality=modality,
+            ),
+            mimetype="image/png",
+            conditional=True,
+            max_age=3600,
+        )
     except KeyError as exc:
         return jsonify({"output": str(exc)}), 404
     except FileNotFoundError as exc:

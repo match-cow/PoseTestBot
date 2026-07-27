@@ -62,9 +62,17 @@ dev = [
     "ruff>=0.15.21",
 ]
 
+[tool.ruff]
+extend-exclude = ["third_party"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-m", "not playwright"]
 markers = [
     "playwright: localhost browser regressions that require an installed Chromium binary",
+]
+
+[tool.uv.workspace]
+exclude = [
+    "tools/bop_toolkit_runtime",
 ]

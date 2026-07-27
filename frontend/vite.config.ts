@@ -21,6 +21,7 @@ export default defineConfig({
       "/calibration-targets": "http://127.0.0.1:5000",
       "/workpieces": "http://127.0.0.1:5000",
       "/pose-templates": "http://127.0.0.1:5000",
+      "/bop": "http://127.0.0.1:5000",
       "/jobs": "http://127.0.0.1:5000",
       "/capture": "http://127.0.0.1:5000",
       "/sensors": "http://127.0.0.1:5000",

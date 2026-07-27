@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
 
+import cv2
 import numpy as np
 from pytransform3d import rotations as pr
 from pytransform3d import transformations as pt
@@ -23,9 +24,13 @@ from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
     CALIBRATION_TARGET,
+    DEPTH_DIR,
+    DEPTH_SCALE,
+    FRAME_METADATA_JSONL,
     MATCH_ROBOT_EE_POSES,
     PROCESSED_DIR,
     RAW_ROBOT_EE_POSES,
+    RGB_DIR,
     SYNCHRONIZED_DIR,
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
@@ -37,6 +42,8 @@ SCENE_SCHEMA_VERSION = "cell_scene.v1"
 TIMELINE_SCHEMA_VERSION = "cell_timeline.v1"
 MAX_TIMELINE_PAGE = 2_000
 MAX_PREVIEW_POSES = 200
+DEPTH_PREVIEW_MIN_MM = 200.0
+DEPTH_PREVIEW_MAX_MM = 3_000.0
 CALIBRATION_ATTEMPT_DIRECTORY = Path("processed") / "calibration"
 POSE_TEMPLATE_BUNDLE = "pose_template_bundle.json"
 POSE_TEMPLATE_PREVIEW = "pose_template_preview.json"
@@ -232,24 +239,84 @@ def _raw_timeline(path: Path) -> list[dict[str, Any]]:
     return sorted(poses, key=lambda item: item["frame_index"])
 
 
-def _timeline_sources(
-    run_root: Path, config: Mapping[str, Any]
+def _stored_image_rotation_degrees(sensor_folder: Path) -> int | None:
+    metadata_path = sensor_folder / FRAME_METADATA_JSONL
+    if not metadata_path.is_file():
+        return None
+    try:
+        with metadata_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if not isinstance(record, Mapping):
+                    continue
+                raw = record.get("image_rotation_degrees")
+                if raw is None:
+                    continue
+                rotation = int(raw)
+                if rotation in {0, 180}:
+                    return rotation
+                return None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _image_presentation(
+    sensor: Mapping[str, Any], sensor_folder: Path
+) -> dict[str, Any]:
+    inverted = sensor.get("inverted") is True
+    stored_rotation = _stored_image_rotation_degrees(sensor_folder)
+    display_rotation = 180 if inverted and stored_rotation != 180 else 0
+    if not inverted:
+        correction = "not_required"
+    elif stored_rotation == 180:
+        correction = "capture"
+    else:
+        correction = "viewer"
+    return {
+        "configured_inverted": inverted,
+        "stored_rotation_degrees": stored_rotation,
+        "display_rotation_degrees": display_rotation,
+        "correction": correction,
+    }
+
+
+def _depth_scale_to_mm(sensor_folder: Path) -> float | None:
+    path = sensor_folder / DEPTH_SCALE
+    try:
+        value = float(path.read_text().strip())
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _synchronized_source_contexts(
+    run_root: Path,
+    config: Mapping[str, Any],
+    *,
+    timeline_id: str | None = None,
 ) -> list[dict[str, Any]]:
     candidates = [
         run_root / PROCESSED_DIR / "rectified",
         run_root / PROCESSED_DIR / SYNCHRONIZED_DIR,
     ]
     input_root = next((path for path in candidates if path.is_dir()), None)
-    enabled_names: list[str] = []
+    enabled_sensors: list[tuple[str, Mapping[str, Any]]] = []
     for sensor in config.get("capture", {}).get("sensors", []):
         if not isinstance(sensor, Mapping) or sensor.get("enabled", True) is not True:
             continue
-        enabled_names.append(
-            sensor_folder_name(
-                str(sensor.get("sensor_type", "")),
-                str(sensor.get("device_id", "")),
+        enabled_sensors.append(
+            (
+                sensor_folder_name(
+                    str(sensor.get("sensor_type", "")),
+                    str(sensor.get("device_id", "")),
+                ),
+                sensor,
             )
         )
+    enabled_names = [name for name, _sensor in enabled_sensors]
     folders_by_name = (
         {
             path.name: path
@@ -260,7 +327,10 @@ def _timeline_sources(
         else {}
     )
     sources: list[dict[str, Any]] = []
-    for name in enabled_names:
+    for name, sensor in enabled_sensors:
+        source_id = f"sensor:{name}"
+        if timeline_id is not None and source_id != timeline_id:
+            continue
         folder = folders_by_name.get(name)
         if folder is None:
             continue
@@ -268,15 +338,46 @@ def _timeline_sources(
         if path.is_file():
             sources.append(
                 {
-                    "id": f"sensor:{name}",
+                    "id": source_id,
                     "label": name,
                     "source": path,
                     "kind": "synchronized",
-                    "poses": _matched_timeline(folder),
+                    "run_root": run_root,
+                    "frame_directories": {
+                        "rgb": folder / RGB_DIR,
+                        "depth": folder / DEPTH_DIR,
+                    },
+                    "depth_scale_to_mm": _depth_scale_to_mm(folder),
+                    "camera": {
+                        "sensor_folder": name,
+                        "sensor_type": str(sensor.get("sensor_type", "")),
+                        "device_id": str(sensor.get("device_id", "")),
+                        "display_name": str(sensor.get("display_name") or name),
+                        "mounting_mode": str(sensor.get("mounting_mode", "")),
+                        "inverted": sensor.get("inverted") is True,
+                        "image_presentation": _image_presentation(sensor, folder),
+                    },
                 }
             )
+    return sources
+
+
+def _timeline_sources(
+    run_root: Path, config: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    sources = _synchronized_source_contexts(run_root, config)
     if sources:
+        for source in sources:
+            source["poses"] = _matched_timeline(Path(source["source"]).parent)
         return sources
+    enabled_names = [
+        sensor_folder_name(
+            str(sensor.get("sensor_type", "")),
+            str(sensor.get("device_id", "")),
+        )
+        for sensor in config.get("capture", {}).get("sensors", [])
+        if isinstance(sensor, Mapping) and sensor.get("enabled", True) is True
+    ]
     raw_candidates = [run_root / RAW_ROBOT_EE_POSES]
     raw_candidates.extend(
         run_root / name / RAW_ROBOT_EE_POSES for name in enabled_names
@@ -290,9 +391,114 @@ def _timeline_sources(
                 "source": raw,
                 "kind": "raw",
                 "poses": _raw_timeline(raw),
+                "run_root": run_root,
+                "frame_directories": {},
+                "depth_scale_to_mm": None,
+                "camera": None,
             }
         ]
     return []
+
+
+def _camera_frame_path(
+    source: Mapping[str, Any],
+    frame_id: str,
+    *,
+    modality: str,
+) -> Path:
+    if modality not in {"rgb", "depth"}:
+        raise ValueError("modality must be rgb or depth")
+    raw_directories = source.get("frame_directories")
+    raw_run_root = source.get("run_root")
+    raw_directory = (
+        raw_directories.get(modality)
+        if isinstance(raw_directories, Mapping)
+        else None
+    )
+    if not isinstance(raw_directory, Path) or not isinstance(raw_run_root, Path):
+        raise FileNotFoundError(
+            f"{modality.upper()} frames are not available for this timeline"
+        )
+
+    relative_frame = Path(frame_id)
+    if (
+        not frame_id
+        or relative_frame.name != frame_id
+        or relative_frame.suffix.lower() != ".png"
+    ):
+        raise ValueError("Camera frame identifiers must be plain PNG filenames")
+
+    run_root = raw_run_root.resolve(strict=True)
+    frame_directory = raw_directory.resolve(strict=True)
+    frame_directory.relative_to(run_root)
+    frame_path = (frame_directory / relative_frame).resolve(strict=True)
+    frame_path.relative_to(frame_directory)
+    if not frame_path.is_file():
+        raise FileNotFoundError(f"Camera frame is not a file: {frame_id}")
+    return frame_path
+
+
+def _timeline_camera_frame_path(
+    source: Mapping[str, Any],
+    pose: Mapping[str, Any],
+    *,
+    modality: str,
+) -> Path:
+    return _camera_frame_path(
+        source,
+        str(pose.get("frame_id", "")),
+        modality=modality,
+    )
+
+
+def _modality_metadata(
+    source: Mapping[str, Any], modality: str
+) -> dict[str, Any]:
+    directories = source.get("frame_directories")
+    directory = (
+        directories.get(modality) if isinstance(directories, Mapping) else None
+    )
+    available = False
+    if (
+        isinstance(directory, Path)
+        and directory.is_dir()
+        and (
+            modality != "depth"
+            or isinstance(source.get("depth_scale_to_mm"), float)
+        )
+    ):
+        for pose in source["poses"]:
+            try:
+                _timeline_camera_frame_path(source, pose, modality=modality)
+            except (FileNotFoundError, OSError, ValueError):
+                continue
+            available = True
+            break
+    return {
+        "available": available,
+        "kind": modality,
+        "media_type": "image/png",
+        "source": directory.as_posix() if isinstance(directory, Path) else None,
+    }
+
+
+def _camera_frame_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
+    rgb = _modality_metadata(source, "rgb")
+    depth = _modality_metadata(source, "depth")
+    depth.update(
+        {
+            "depth_scale_to_mm": source.get("depth_scale_to_mm"),
+            "visualization": "turbo_near_warm_fixed_range",
+            "preview_min_depth_mm": DEPTH_PREVIEW_MIN_MM,
+            "preview_max_depth_mm": DEPTH_PREVIEW_MAX_MM,
+            "invalid_depth_value": 0,
+        }
+    )
+    return {
+        "available": rgb["available"] or depth["available"],
+        "rgb": rgb,
+        "depth": depth,
+    }
 
 
 def _timeline_metadata(source: Mapping[str, Any], *, default: bool) -> dict[str, Any]:
@@ -307,6 +513,10 @@ def _timeline_metadata(source: Mapping[str, Any], *, default: bool) -> dict[str,
         "interpolation": "none",
         "page_limit": MAX_TIMELINE_PAGE,
         "source": Path(source["source"]).as_posix(),
+        "camera": dict(source["camera"])
+        if isinstance(source.get("camera"), Mapping)
+        else None,
+        "camera_frames": _camera_frame_metadata(source),
     }
 
 
@@ -1255,3 +1465,126 @@ def cell_timeline_page(
             _pose_payload(item, offset + index) for index, item in enumerate(page)
         ],
     }
+
+
+def _resolve_camera_frame(
+    run_root: str | Path,
+    timeline_id: str,
+    *,
+    timeline_index: int | None,
+    frame_id: str | None,
+    modality: str = "rgb",
+) -> tuple[Mapping[str, Any], Path]:
+    if timeline_index is None and frame_id is None:
+        raise ValueError("timeline_index or frame_id is required")
+    if timeline_index is not None and timeline_index < 0:
+        raise ValueError("timeline_index must be greater than or equal to 0")
+    if modality not in {"rgb", "depth"}:
+        raise ValueError("modality must be rgb or depth")
+    root = Path(run_root)
+    config = load_run_config_for_run_root(root)
+
+    if frame_id is not None:
+        sources = {
+            source["id"]: source
+            for source in _synchronized_source_contexts(
+                root,
+                config,
+                timeline_id=timeline_id,
+            )
+        }
+        if timeline_id not in sources:
+            raise KeyError(f"Unknown timeline_id: {timeline_id}")
+        source = sources[timeline_id]
+        try:
+            return source, _camera_frame_path(
+                source,
+                frame_id,
+                modality=modality,
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"{modality.upper()} frame is unavailable: {frame_id}"
+            ) from exc
+
+    sources = {source["id"]: source for source in _timeline_sources(root, config)}
+    if timeline_id not in sources:
+        raise KeyError(f"Unknown timeline_id: {timeline_id}")
+    source = sources[timeline_id]
+    poses = source["poses"]
+    assert timeline_index is not None
+    if timeline_index >= len(poses):
+        raise KeyError(f"Unknown timeline_index: {timeline_index}")
+    try:
+        return (
+            source,
+            _timeline_camera_frame_path(
+                source,
+                poses[timeline_index],
+                modality=modality,
+            ),
+        )
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"{modality.upper()} frame is unavailable at timeline index "
+            f"{timeline_index}"
+        ) from exc
+
+
+def cell_camera_frame_path(
+    run_root: str | Path,
+    timeline_id: str,
+    timeline_index: int | None = None,
+    *,
+    frame_id: str | None = None,
+    modality: str = "rgb",
+) -> Path:
+    _source, path = _resolve_camera_frame(
+        run_root,
+        timeline_id,
+        timeline_index=timeline_index,
+        frame_id=frame_id,
+        modality=modality,
+    )
+    return path
+
+
+def cell_depth_frame_preview_png(
+    run_root: str | Path,
+    timeline_id: str,
+    timeline_index: int | None = None,
+    *,
+    frame_id: str | None = None,
+) -> bytes:
+    source, path = _resolve_camera_frame(
+        run_root,
+        timeline_id,
+        timeline_index=timeline_index,
+        frame_id=frame_id,
+        modality="depth",
+    )
+    scale_to_mm = source.get("depth_scale_to_mm")
+    if not isinstance(scale_to_mm, float):
+        raise FileNotFoundError(
+            "Depth scale is unavailable for this camera timeline"
+        )
+    depth = cv2.imread(path.as_posix(), cv2.IMREAD_UNCHANGED)
+    if depth is None or depth.dtype != np.uint16 or depth.ndim != 2:
+        raise ValueError(f"Depth frame must be a single-channel uint16 PNG: {path}")
+
+    depth_mm = depth.astype(np.float32) * scale_to_mm
+    valid = depth > 0
+    normalized = np.clip(
+        (depth_mm - DEPTH_PREVIEW_MIN_MM)
+        / (DEPTH_PREVIEW_MAX_MM - DEPTH_PREVIEW_MIN_MM),
+        0.0,
+        1.0,
+    )
+    # Near points are warm and far points are cool; zero-depth pixels stay black.
+    color_index = np.rint((1.0 - normalized) * 255.0).astype(np.uint8)
+    preview = cv2.applyColorMap(color_index, cv2.COLORMAP_TURBO)
+    preview[~valid] = 0
+    encoded, png = cv2.imencode(".png", preview)
+    if not encoded:
+        raise OSError(f"Failed to encode depth preview: {path}")
+    return png.tobytes()

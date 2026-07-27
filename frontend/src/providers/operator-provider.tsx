@@ -1,7 +1,14 @@
 import { useQuery } from "@tanstack/react-query"
-import { createContext, useContext, useEffect, useMemo, useState } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react"
 import { api } from "@/lib/api"
 import type { Bootstrap, RunIndexItem } from "@/lib/contracts"
+import {
+  activeWorkflow,
+  parseActiveWorkflow,
+  type ActiveWorkflow,
+  type WorkflowJourneyId,
+  type WorkflowProgressStatus,
+} from "@/lib/workflow-session"
 
 interface RobotTarget { ip: string; port: number }
 interface OperatorContextValue {
@@ -12,9 +19,33 @@ interface OperatorContextValue {
   selectRun: (path: string) => boolean
   robotTarget: RobotTarget
   setRobotTarget: (target: RobotTarget) => void
+  currentWorkflow: ActiveWorkflow | null
+  rememberWorkflowStep: (journey: WorkflowJourneyId, stepId: string, status: WorkflowProgressStatus) => void
 }
 
 const OperatorContext = createContext<OperatorContextValue | null>(null)
+const WORKFLOW_SESSION_STORAGE_KEY = "posetestbot.workflowSessions.v1"
+
+function loadWorkflowSessions() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(WORKFLOW_SESSION_STORAGE_KEY) ?? "{}") as unknown
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {}
+    const sessions: Record<string, ActiveWorkflow> = {}
+    for (const [runRoot, value] of Object.entries(stored).slice(-50)) {
+      const workflow = parseActiveWorkflow(value)
+      if (workflow) sessions[runRoot] = workflow
+    }
+    return sessions
+  } catch {
+    return {}
+  }
+}
+
+function sameWorkflow(left: ActiveWorkflow | undefined, right: ActiveWorkflow) {
+  return left?.journey === right.journey
+    && left.stepId === right.stepId
+    && left.status === right.status
+}
 
 function isContained(path: string, roots: string[]) {
   const normalize = (value: string) => {
@@ -53,6 +84,7 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
         : null
     } catch { return null }
   })
+  const [workflowSessions, setWorkflowSessions] = useState<Record<string, ActiveWorkflow>>(loadWorkflowSessions)
 
   const bootstrap = bootstrapQuery.data
   const runs = useMemo(() => runsQuery.data?.runs ?? [], [runsQuery.data])
@@ -72,6 +104,21 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
       : runs.find((run) => run.config_valid)?.path ?? bootstrap.default_run_root
     : ""
   const robotTarget = robotOverride ?? bootstrap?.robot ?? null
+  const currentWorkflow = workflowSessions[selectedRun] ?? null
+  const rememberWorkflowStep = useCallback((journey: WorkflowJourneyId, stepId: string, status: WorkflowProgressStatus) => {
+    const workflow = activeWorkflow(journey, stepId, status)
+    if (!workflow || !selectedRun) return
+    setWorkflowSessions((current) => {
+      if (sameWorkflow(current[selectedRun], workflow)) return current
+      const next = { ...current, [selectedRun]: workflow }
+      try {
+        localStorage.setItem(WORKFLOW_SESSION_STORAGE_KEY, JSON.stringify(next))
+      } catch {
+        // A denied browser-local write must not block the operator workflow.
+      }
+      return next
+    })
+  }, [selectedRun])
 
   if (bootstrapQuery.isError || runsQuery.isError) {
     const error = bootstrapQuery.error ?? runsQuery.error
@@ -92,7 +139,7 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem("posetestbot.robotTarget", JSON.stringify(target))
   }
 
-  return <OperatorContext.Provider value={{ bootstrap, runs, selectedRun, selectedRunEpoch: selectedOverride.epoch, selectRun, robotTarget, setRobotTarget }}>{children}</OperatorContext.Provider>
+  return <OperatorContext.Provider value={{ bootstrap, runs, selectedRun, selectedRunEpoch: selectedOverride.epoch, selectRun, robotTarget, setRobotTarget, currentWorkflow, rememberWorkflowStep }}>{children}</OperatorContext.Provider>
 }
 
 export function useOperator() {
