@@ -56,7 +56,7 @@ from posetestbot.io.artifacts import (
     RUN_CONFIG,
     RUN_PREFLIGHT_REPORT,
 )
-from posetestbot.jobs.runner import ResourceBusyError
+from posetestbot.jobs.runner import ResourceBusyError, TERMINAL_STATUSES
 from posetestbot.pipeline.capture_plan import (
     load_capture_plan,
     write_capture_plan_with_manifest,
@@ -920,9 +920,24 @@ def get_job_log(job_id):
 
 def cancel_job(job_id):
     try:
-        job = job_runner.cancel(job_id)
+        job = job_runner.get(job_id)
     except KeyError:
         return jsonify({'output': 'Unknown job'}), 404
+    if (
+        job.status not in TERMINAL_STATUSES
+        and (job.parameters or {}).get("cancelable") is False
+    ):
+        return (
+            jsonify(
+                {
+                    "output": (
+                        "This committed storage operation cannot be canceled safely."
+                    )
+                }
+            ),
+            409,
+        )
+    job = job_runner.cancel(job_id)
     return jsonify({'job': job.to_dict()})
 
 

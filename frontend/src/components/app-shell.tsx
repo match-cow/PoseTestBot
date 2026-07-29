@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, FlaskConical, FolderOpen, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Plus, Route, Sun, Workflow } from "lucide-react"
+import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, FlaskConical, FolderOpen, Folders, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Plus, Route, Sun, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { ConsoleGuide } from "@/components/console-guide"
 import { Button } from "@/components/ui/button"
@@ -38,6 +38,7 @@ const navigationGroups = [
     label: "Inspect",
     items: [
       { to: "/cell", label: "Cell View", icon: Boxes },
+      { to: "/run-folders", label: "Run folders", icon: Folders },
       { to: "/bop-evaluation", label: "BOP Evaluation", icon: ChartNoAxesCombined },
       { to: "/jobs", label: "Jobs", icon: ListChecks },
     ],

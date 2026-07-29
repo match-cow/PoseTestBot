@@ -35,6 +35,11 @@ EXPECTED_DIRECT_SUBMISSIONS = {
         "preview": "global",
         "library_delete": "library",
     },
+    "posetestbot/web/routes/run_folders.py": {
+        "refresh_run_folder_inventory": "global",
+        "move_run_folder": "run",
+        "delete_run_folder": "run",
+    },
     "posetestbot/web/routes/sensors.py": {
         "_preview_submission": "global",
         "post_sensor_snapshots": "global",
@@ -70,8 +75,19 @@ class _CallCollector(ast.NodeVisitor):
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "submit"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "job_runner"
+            and (
+                (
+                    isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "job_runner"
+                )
+                or (
+                    isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Name)
+                    and node.func.value.func.id == "get_job_runner"
+                    and not node.func.value.args
+                    and not node.func.value.keywords
+                )
+            )
         ):
             assert function_name not in self.direct_submissions
             self.direct_submissions[function_name] = node

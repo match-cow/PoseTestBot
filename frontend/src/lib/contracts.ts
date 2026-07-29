@@ -91,6 +91,106 @@ export interface RunStorage {
   error: string | null
 }
 
+export interface RunFolderIdentity {
+  device: number
+  inode: number
+}
+
+export interface RunFolderSensor {
+  sensor_type: string
+  device_id: string
+  name: string
+  mounting_mode: string
+  enabled: boolean
+}
+
+export interface RunFolderEvidence {
+  raw_capture: boolean
+  synchronized: boolean
+  calibration: boolean
+  bop_export: boolean
+  bop_evaluation: boolean
+}
+
+export interface RunFolder {
+  path: string
+  name: string
+  root: string
+  modified_at: string
+  size_bytes: number
+  allocated_bytes: number
+  file_count: number
+  directory_count: number
+  symlink_count: number
+  scan_complete: boolean
+  scan_error_count: number
+  scan_errors: string[]
+  identity: RunFolderIdentity
+  config: {
+    valid: boolean
+    error: string | null
+    run_name: string | null
+    sequence: string | null
+    plan_only: boolean | null
+  }
+  contents: {
+    dataset_mode: string | null
+    resolution: string | null
+    fps: number | null
+    synchronization_mode: string | null
+    sensor_count: number
+    enabled_sensor_count: number
+    sensors: RunFolderSensor[]
+    object_count: number
+    object_names: string[]
+    template_uuid: string | null
+    evidence: RunFolderEvidence
+  }
+  breakdown: Record<string, {
+    size_bytes: number
+    allocated_bytes: number
+    file_count: number
+  }>
+  relocation: {
+    original_path: string
+    aliases: string[]
+    history_count: number
+  } | null
+}
+
+export interface RunFolderInventory {
+  schema_version: "run_folder_inventory.v1"
+  generated_at: string | null
+  inventory_state: "missing" | "refreshing" | "ready" | "stale"
+  stale: boolean
+  roots: Array<{
+    path: string
+    exists: boolean
+    identity: RunFolderIdentity | null
+    storage: RunStorage
+  }>
+  runs: RunFolder[]
+  refresh_job: Job | null
+  operation_job: Job | null
+  maintenance?: {
+    schema_version: "run_folder_maintenance.v1"
+    recovered_count: number
+    transactions: Array<{
+      transaction_id: string
+      operation: "move" | "delete"
+      action: "rolled_back_move" | "completed_move" | "resumed_delete"
+    }>
+    unresolved_count: number
+    journal_fingerprint: string
+    unresolved: Array<{
+      transaction_id: string | null
+      operation: "move" | "delete" | null
+      error: string
+      remnant_bytes: number | null
+    }>
+  }
+}
+
 export interface SensorDevice {
   sensor_type: string
   device_id: string

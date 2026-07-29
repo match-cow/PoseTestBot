@@ -203,6 +203,27 @@ def test_exact_job_log_and_cancel_routes_remain_compatible(
     assert client.get("/jobs/does-not-exist").status_code == 404
 
 
+def test_jobs_api_refuses_cancel_for_committed_storage_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, runner, _active_run, _other_run = _client(tmp_path, monkeypatch)
+    active = runner.submit(
+        name="run-folder-delete",
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
+        parameters={"cancelable": False, "run_folder_operation": "delete"},
+        scope_kind="global",
+    )
+    try:
+        refused = client.post(f"/jobs/{active.id}/cancel")
+        assert refused.status_code == 409
+        assert "cannot be canceled safely" in refused.get_json()["output"]
+        assert runner.get(active.id).status in {"queued", "running"}
+    finally:
+        runner.cancel(active.id)
+        runner.wait(active.id, timeout=5)
+
+
 def test_jobs_api_hides_service_jobs_and_resources_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

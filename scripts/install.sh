@@ -366,6 +366,7 @@ verify_web_console() {
   compgen -G "${ui_root}/assets/workpieces-page-*.js" >/dev/null || die "Bundled web UI has no lazy Workpiece Catalogue asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/pose-templates-page-*.js" >/dev/null || die "Bundled web UI has no lazy Pose Templates asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/bop-evaluation-page-*.js" >/dev/null || die "Bundled web UI has no lazy BOP Evaluation asset. Run scripts/install.sh --with-web-build."
+  compgen -G "${ui_root}/assets/run-folders-page-*.js" >/dev/null || die "Bundled web UI has no lazy Run folders asset. Run scripts/install.sh --with-web-build."
   [[ -f "${cell_asset}" ]] || die "Bundled Cell template is missing ${cell_asset}."
   log "Bundled operator-console assets are present."
 }

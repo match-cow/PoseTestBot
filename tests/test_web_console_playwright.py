@@ -568,6 +568,7 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         "Workpiece Catalogue",
         "Pose Templates",
         "Cell View",
+        "Run folders",
         "BOP Evaluation",
         "Jobs",
     ]
@@ -690,6 +691,571 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         "background-color", "rgba(0, 0, 0, 0)"
     )
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("padding", "0px")
+
+
+def test_run_folders_inventory_move_delete_and_local_overflow(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    primary_root = "/tmp/posetestbot-console"
+    archive_root = "/mnt/posetestbot-archive"
+    movable_run = f"{primary_root}/archive-run"
+    disposable_run = f"{primary_root}/disposable-run"
+    active_run_alias = f"{primary_root}/active-run-alias"
+    move_identity = {"device": 101, "inode": 201}
+    delete_identity = {"device": 101, "inode": 202}
+    move_requests: list[dict] = []
+    delete_requests: list[dict] = []
+    refresh_requests: list[dict] = []
+    job_status = {"move-run-folder": "queued", "delete-run-folder": "queued"}
+    move_submitted = {"value": False}
+    inventory_stale = {"value": False}
+    inventory_cache_missing = {"value": True}
+
+    def storage(root: str) -> dict:
+        return {
+            "schema_version": "run_storage.v1",
+            "run_root": root,
+            "filesystem_path": root,
+            "status": "ready",
+            "total_bytes": 2 * 1024**4,
+            "used_bytes": 512 * 1024**3,
+            "free_bytes": 1536 * 1024**3,
+            "free_fraction": 0.75,
+            "thresholds": {
+                "critical_free_bytes": 100 * 1024**3,
+                "warning_free_bytes": 300 * 1024**3,
+                "critical_free_bytes_cap": 100 * 1024**3,
+                "warning_free_bytes_cap": 500 * 1024**3,
+                "critical_free_fraction": 0.05,
+                "warning_free_fraction": 0.15,
+            },
+            "error": None,
+        }
+
+    def run_folder(
+        *,
+        path: str,
+        size_bytes: int,
+        identity: dict,
+        sensor_name: str,
+        mounting_mode: str,
+        object_names: list[str],
+        evidence: dict,
+    ) -> dict:
+        return {
+            "path": path,
+            "name": Path(path).name,
+            "root": primary_root,
+            "modified_at": "2026-07-29T08:30:00Z",
+            "size_bytes": size_bytes,
+            "allocated_bytes": size_bytes + 4096,
+            "file_count": 24,
+            "directory_count": 8,
+            "symlink_count": 0,
+            "scan_complete": True,
+            "scan_error_count": 0,
+            "scan_errors": [],
+            "identity": identity,
+            "config": {
+                "valid": True,
+                "error": None,
+                "run_name": Path(path).name,
+                "sequence": "calibrated_capture_to_bop_dataset_dry_run",
+                "plan_only": True,
+            },
+            "contents": {
+                "dataset_mode": "pose_template" if object_names else "objectless",
+                "resolution": "720p",
+                "fps": 6,
+                "synchronization_mode": "timestamp_aligned",
+                "sensor_count": 1,
+                "enabled_sensor_count": 1,
+                "sensors": [
+                    {
+                        "sensor_type": "realsense_d435",
+                        "device_id": "wrist-1",
+                        "name": sensor_name,
+                        "mounting_mode": mounting_mode,
+                        "enabled": True,
+                    }
+                ],
+                "object_count": len(object_names),
+                "object_names": object_names,
+                "template_uuid": (
+                    "22222222-2222-4222-8222-222222222222"
+                    if object_names
+                    else None
+                ),
+                "evidence": evidence,
+            },
+            "breakdown": {
+                "raw_capture": {
+                    "size_bytes": size_bytes // 2,
+                    "allocated_bytes": size_bytes // 2,
+                    "file_count": 12,
+                },
+                "processed": {
+                    "size_bytes": size_bytes // 4,
+                    "allocated_bytes": size_bytes // 4,
+                    "file_count": 6,
+                },
+            },
+            "relocation": None,
+        }
+
+    inventory_runs = [
+        run_folder(
+            path=RUN_ROOT,
+            size_bytes=3 * 1024**3,
+            identity={"device": 101, "inode": 200},
+            sensor_name="Active wrist camera",
+            mounting_mode="eye_in_hand",
+            object_names=[],
+            evidence={
+                "raw_capture": True,
+                "synchronized": False,
+                "calibration": True,
+                "bop_export": False,
+                "bop_evaluation": False,
+            },
+        ),
+        run_folder(
+            path=movable_run,
+            size_bytes=8 * 1024**3,
+            identity=move_identity,
+            sensor_name="Wrist RGB-D",
+            mounting_mode="eye_in_hand",
+            object_names=["Clamp", "Gauge block"],
+            evidence={
+                "raw_capture": True,
+                "synchronized": True,
+                "calibration": True,
+                "bop_export": True,
+                "bop_evaluation": True,
+            },
+        ),
+        run_folder(
+            path=disposable_run,
+            size_bytes=512 * 1024**2,
+            identity=delete_identity,
+            sensor_name="Static RGB-D",
+            mounting_mode="static",
+            object_names=["Disposable cube"],
+            evidence={
+                "raw_capture": True,
+                "synchronized": True,
+                "calibration": False,
+                "bop_export": False,
+                "bop_evaluation": False,
+            },
+        ),
+    ]
+    inventory_runs[2]["config"] = {
+        "valid": False,
+        "error": "legacy configuration requires repair",
+        "run_name": None,
+        "sequence": None,
+        "plan_only": None,
+    }
+    inventory_runs[0]["relocation"] = {
+        "original_path": RUN_ROOT,
+        "aliases": [active_run_alias],
+        "history_count": 1,
+    }
+
+    page.add_init_script(
+        f"""
+        localStorage.setItem("posetestbot.selectedRun", {json.dumps(active_run_alias)});
+        localStorage.setItem(
+          "posetestbot.customRunFolders.v1",
+          JSON.stringify([{json.dumps(active_run_alias)}])
+        );
+        """
+    )
+
+    page.unroute("**/ui/bootstrap")
+    page.route(
+        "**/ui/bootstrap",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "web_bootstrap.v1",
+                "brand": {
+                    "name": "PoseTestBot",
+                    "logo_url": "/assets/cow_light.png",
+                    "logo_urls": {
+                        "light": "/assets/cow_light.png",
+                        "dark": "/assets/cow_dark.png",
+                    },
+                    "favicon_url": "/assets/cow_favicon.png",
+                },
+                "robot": {"ip": "172.31.1.147", "port": 30300},
+                "default_run_root": RUN_ROOT,
+                "allowed_run_roots": [primary_root, archive_root],
+            },
+        ),
+    )
+
+    def operation_job(job_id: str) -> dict:
+        status = job_status[job_id]
+        source = movable_run if job_id == "move-run-folder" else disposable_run
+        parameters = {
+            "run_folder_operation": (
+                "move" if job_id == "move-run-folder" else "delete"
+            ),
+            "source_run_root": source,
+            "cancelable": False,
+        }
+        if job_id == "move-run-folder":
+            parameters["destination_run_root"] = f"{archive_root}/archive-run"
+        return {
+            "id": job_id,
+            "name": job_id.replace("-", " "),
+            "command": ["uv", "run", "python", "scripts/manage_run_folder.py"],
+            "cwd": "/repo",
+            "status": status,
+            "created_at": "2026-07-29T08:31:00Z",
+            "started_at": (
+                "2026-07-29T08:31:01Z" if status != "queued" else None
+            ),
+            "ended_at": (
+                "2026-07-29T08:31:02Z" if status == "succeeded" else None
+            ),
+            "returncode": 0 if status == "succeeded" else None,
+            "message": None,
+            "tail": [],
+            "resources": ["disk_io"],
+            "parameters": parameters,
+            "log_path": f"/tmp/jobs/{job_id}/log.txt",
+            "visibility": "operator",
+            "scope_kind": "run",
+            "run_root": source,
+        }
+
+    def refresh_job() -> dict:
+        return {
+            "id": "refresh-run-folders",
+            "name": "run folder inventory",
+            "command": ["uv", "run", "python", "scripts/manage_run_folders.py"],
+            "cwd": "/repo",
+            "status": "succeeded",
+            "created_at": "2026-07-29T08:29:00Z",
+            "started_at": "2026-07-29T08:29:01Z",
+            "ended_at": "2026-07-29T08:29:02Z",
+            "returncode": 0,
+            "message": None,
+            "tail": [],
+            "resources": ["disk_io", "run_folder_storage"],
+            "parameters": {
+                "run_folder_inventory": True,
+                "cancelable": False,
+            },
+            "log_path": "/tmp/jobs/refresh-run-folders/log.txt",
+            "visibility": "operator",
+            "scope_kind": "global",
+            "run_root": None,
+        }
+
+    def run_folders_handler(route) -> None:
+        path = urlparse(route.request.url).path
+        method = route.request.method
+        if path == "/ui/run-folders" and method == "GET":
+            move_active = (
+                move_submitted["value"]
+                and job_status["move-run-folder"] in {"queued", "running", "canceling"}
+            )
+            visible_runs = (
+                inventory_runs
+                if job_status["move-run-folder"] != "succeeded"
+                else [
+                    run
+                    for run in inventory_runs
+                    if run["path"] != movable_run
+                ]
+            )
+            fulfill_json(
+                route,
+                {
+                    "schema_version": "run_folder_inventory.v1",
+                    "generated_at": (
+                        None
+                        if inventory_cache_missing["value"]
+                        else "2026-07-29T08:30:00Z"
+                    ),
+                    "inventory_state": (
+                        "missing"
+                        if inventory_cache_missing["value"]
+                        else "stale"
+                        if inventory_stale["value"]
+                        else "ready"
+                    ),
+                    "stale": (
+                        inventory_cache_missing["value"]
+                        or inventory_stale["value"]
+                    ),
+                    "roots": [
+                        {
+                            "path": primary_root,
+                            "exists": True,
+                            "identity": {"device": 101, "inode": 1001},
+                            "storage": storage(primary_root),
+                        },
+                        {
+                            "path": archive_root,
+                            "exists": True,
+                            "identity": {"device": 202, "inode": 2002},
+                            "storage": storage(archive_root),
+                        },
+                    ],
+                    "runs": [] if inventory_cache_missing["value"] else visible_runs,
+                    "refresh_job": None,
+                    "operation_job": (
+                        operation_job("move-run-folder") if move_active else None
+                    ),
+                    "maintenance": {
+                        "schema_version": "run_folder_maintenance.v1",
+                        "recovered_count": 1,
+                        "transactions": [
+                            {
+                                "transaction_id": "a" * 32,
+                                "operation": "move",
+                                "action": "rolled_back_move",
+                            }
+                        ],
+                        "unresolved_count": 0,
+                        "journal_fingerprint": "no-pending-transactions",
+                        "unresolved": [],
+                    },
+                },
+            )
+            return
+        if path == "/ui/run-folders/refresh" and method == "POST":
+            refresh_requests.append({})
+            inventory_cache_missing["value"] = False
+            job = refresh_job()
+            fulfill_json(
+                route,
+                {"job_id": job["id"], "status": job["status"], "job": job},
+                status=202,
+            )
+            return
+        if path == "/ui/run-folders/move" and method == "POST":
+            move_requests.append(route.request.post_data_json)
+            move_submitted["value"] = True
+            job = operation_job("move-run-folder")
+            fulfill_json(
+                route,
+                {
+                    "job_id": job["id"],
+                    "status": job["status"],
+                    "job": job,
+                    "source_run_root": movable_run,
+                    "destination_run_root": f"{archive_root}/archive-run",
+                    "compatibility_alias": movable_run,
+                },
+                status=202,
+            )
+            return
+        if path == "/ui/run-folders" and method == "DELETE":
+            delete_requests.append(route.request.post_data_json)
+            job = operation_job("delete-run-folder")
+            fulfill_json(
+                route,
+                {
+                    "job_id": job["id"],
+                    "status": job["status"],
+                    "job": job,
+                    "source_run_root": disposable_run,
+                },
+                status=202,
+            )
+            return
+        fulfill_json(route, {"output": "Unexpected run-folder request"}, status=404)
+
+    page.route("**/ui/run-folders**", run_folders_handler)
+
+    def operation_job_handler(route) -> None:
+        job_id = urlparse(route.request.url).path.rsplit("/", 1)[-1]
+        fulfill_json(route, {"job": operation_job(job_id)})
+
+    page.route("**/jobs/move-run-folder", operation_job_handler)
+    page.route("**/jobs/delete-run-folder", operation_job_handler)
+    page.route(
+        "**/jobs/refresh-run-folders",
+        lambda route: fulfill_json(route, {"job": refresh_job()}),
+    )
+
+    page.goto(f"{console_server.url}/#/run-folders", wait_until="networkidle")
+
+    expect(page).to_have_url(f"{console_server.url}/#/run-folders")
+    expect(
+        page.get_by_role("heading", name="Run folders", exact=True)
+    ).to_be_visible()
+    expect(
+        page.get_by_role("link", name="Run folders")
+    ).to_have_attribute("href", "#/run-folders")
+    expect(page.get_by_role("button", name="Refresh inventory")).to_be_visible()
+    expect(page.get_by_test_id("run-folder-root")).to_have_count(2)
+    assert len(refresh_requests) == 1
+    maintenance = page.get_by_test_id("run-folder-maintenance")
+    expect(maintenance).to_contain_text("Interrupted storage work recovered")
+    expect(maintenance).to_contain_text("Rolled Back Move")
+
+    rows = page.get_by_test_id("run-folder-row")
+    expect(rows).to_have_count(3)
+    active_row = page.locator(
+        f'[data-testid="run-folder-row"][data-run-path="{RUN_ROOT}"]'
+    )
+    expect(active_row).to_contain_text("Active run")
+    expect(
+        active_row.get_by_test_id("run-folder-active-action-reason")
+    ).to_have_text(
+        "Switch the active run folder before moving or deleting this folder."
+    )
+    expect(active_row.get_by_role("button", name="Move new-run")).to_be_disabled()
+    expect(active_row.get_by_role("button", name="Delete new-run")).to_be_disabled()
+
+    movable_row = page.locator(
+        f'[data-testid="run-folder-row"][data-run-path="{movable_run}"]'
+    )
+    size = movable_row.get_by_test_id("run-folder-size")
+    expect(size).to_contain_text(re.compile(r"8(?:\.0+)? GiB"))
+    contents = movable_row.get_by_test_id("run-folder-contents")
+    expect(contents).to_contain_text("Wrist RGB-D")
+    expect(contents).to_contain_text(re.compile(r"eye[ _-]in[ _-]hand", re.I))
+    expect(contents).to_contain_text("Clamp")
+    expect(contents).to_contain_text("Gauge block")
+    expect(movable_row).to_contain_text("BOP export")
+    expect(movable_row).to_contain_text("BOP evaluation")
+
+    page.set_viewport_size({"width": 900, "height": 900})
+    table = page.get_by_test_id("run-folders-table")
+    expect(table).to_be_visible()
+    overflow = table.evaluate(
+        """element => ({
+            clientWidth: element.clientWidth,
+            scrollWidth: element.scrollWidth,
+            overflowX: getComputedStyle(element).overflowX,
+        })"""
+    )
+    assert overflow["overflowX"] in {"auto", "scroll"}
+    assert overflow["scrollWidth"] > overflow["clientWidth"]
+    table.evaluate("element => { element.scrollLeft = element.scrollWidth }")
+    move_button = movable_row.get_by_role("button", name="Move archive-run")
+    move_button.scroll_into_view_if_needed()
+    expect(move_button).to_be_in_viewport()
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+    page.set_viewport_size({"width": 1440, "height": 1000})
+
+    movable_row.get_by_role("button", name="Move archive-run").click()
+    move_dialog = page.get_by_test_id("run-folder-move-dialog")
+    expect(move_dialog.get_by_role("heading", name="Move archive-run?")).to_be_visible()
+    expect(move_dialog).to_contain_text(
+        "After the move, a compatibility link at the original path keeps "
+        "existing references working."
+    )
+    move_dialog.get_by_role("combobox", name="Destination root").click()
+    page.get_by_role("option", name=archive_root).click()
+    with page.expect_response(
+        lambda response: urlparse(response.url).path == "/jobs/move-run-folder"
+    ):
+        move_dialog.get_by_role("button", name="Queue move").click()
+    assert move_requests == [
+        {
+            "run_root": movable_run,
+            "destination_root": archive_root,
+            "expected_identity": move_identity,
+            "expected_destination_root_identity": {
+                "device": 202,
+                "inode": 2002,
+            },
+        }
+    ]
+    move_status = page.get_by_test_id("run-folder-operation-status")
+    expect(move_status).to_contain_text("Moving archive-run")
+    expect(move_status).to_contain_text(
+        "This background storage job continues after navigation and cannot be "
+        "canceled safely after submission."
+    )
+    expect(move_status.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
+
+    page.reload(wait_until="networkidle")
+    recovered_move_status = page.get_by_test_id("run-folder-operation-status")
+    expect(recovered_move_status).to_contain_text("Moving archive-run")
+
+    disposable_row = page.locator(
+        f'[data-testid="run-folder-row"][data-run-path="{disposable_run}"]'
+    )
+    expect(disposable_row).to_contain_text("Invalid run configuration")
+    expect(disposable_row).to_contain_text("Disposable cube")
+    expect(
+        disposable_row.get_by_role("button", name="Delete disposable-run")
+    ).to_be_disabled()
+    inventory_cache_missing["value"] = True
+    job_status["move-run-folder"] = "succeeded"
+    expect(
+        page.locator(
+            f'[data-testid="run-folder-row"][data-run-path="{movable_run}"]'
+        )
+    ).to_have_count(0, timeout=5_000)
+    assert len(refresh_requests) == 2
+    expect(
+        disposable_row.get_by_role("button", name="Delete disposable-run")
+    ).to_be_enabled()
+    disposable_row.get_by_role("button", name="Delete disposable-run").click()
+    delete_dialog = page.get_by_test_id("run-folder-delete-dialog")
+    expect(delete_dialog).to_have_count(1)
+    expect(
+        delete_dialog.get_by_role("heading", name="Delete disposable-run?")
+    ).to_be_visible()
+    expect(delete_dialog).to_contain_text(
+        "This permanently deletes the entire run folder, including raw capture "
+        "data and all derived evidence. This action cannot be undone or canceled "
+        "after submission."
+    )
+    page.set_viewport_size({"width": 900, "height": 480})
+    expect(delete_dialog).to_have_css("overflow-y", "auto")
+    confirm_delete = delete_dialog.get_by_role("button", name="Confirm delete")
+    confirm_delete.scroll_into_view_if_needed()
+    expect(confirm_delete).to_be_in_viewport()
+    assert delete_requests == []
+    with page.expect_response(
+        lambda response: urlparse(response.url).path == "/jobs/delete-run-folder"
+    ):
+        confirm_delete.click()
+    assert delete_requests == [
+        {
+            "run_root": disposable_run,
+            "confirm": True,
+            "expected_identity": delete_identity,
+        }
+    ]
+    expect(page.get_by_test_id("run-folder-delete-dialog")).to_have_count(0)
+    delete_status = page.get_by_test_id("run-folder-operation-status")
+    expect(delete_status).to_contain_text("Deleting disposable-run")
+    expect(delete_status.get_by_role("link", name="Open Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
+
+    inventory_stale["value"] = True
+    page.reload(wait_until="networkidle")
+    stale_disposable_row = page.locator(
+        f'[data-testid="run-folder-row"][data-run-path="{disposable_run}"]'
+    )
+    expect(
+        stale_disposable_row.get_by_test_id("run-folder-inventory-action-reason")
+    ).to_contain_text("Wait for a current inventory")
+    expect(
+        stale_disposable_row.get_by_role("button", name="Move disposable-run")
+    ).to_be_disabled()
+    expect(
+        stale_disposable_row.get_by_role("button", name="Delete disposable-run")
+    ).to_be_disabled()
 
 
 def test_primary_navigation_resets_document_scroll_position(
@@ -5390,11 +5956,21 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
         Object.defineProperty(navigator, "clipboard", {
           configurable: true,
           value: {
-            writeText: async (text) => {
-              window.__copiedDebugTexts.push(text);
+            writeText: async () => {
+              throw new DOMException("Clipboard permission denied", "NotAllowedError");
             },
           },
         });
+        document.execCommand = (command) => {
+          if (command !== "copy") return false;
+          const target = document.activeElement;
+          if (!(target instanceof HTMLTextAreaElement)) return false;
+          if (!target.closest('[role="dialog"]')) return false;
+          window.__copiedDebugTexts.push(
+            target.value.slice(target.selectionStart, target.selectionEnd)
+          );
+          return true;
+        };
         """
     )
     canceled: list[str] = []
@@ -5488,7 +6064,7 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
             "message": "monitoring",
             "tail": [],
             "resources": ["camera:test"],
-            "parameters": {"run_root": RUN_ROOT},
+            "parameters": {"run_root": RUN_ROOT, "cancelable": False},
             "scope_kind": "run",
             "run_root": RUN_ROOT,
         }
@@ -5643,6 +6219,14 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
             '[data-status-tone="warning"]'
         ).first
     ).to_contain_text("running")
+    expect(page.get_by_test_id("job-card-active-1")).to_contain_text(
+        "non-cancelable"
+    )
+    expect(
+        page.get_by_test_id("job-card-active-1").get_by_role(
+            "button", name="Cancel", exact=True
+        )
+    ).to_have_count(0)
     expect(
         page.get_by_test_id("job-card-history-22").locator(
             '[data-status-tone="success"]'
@@ -7640,6 +8224,306 @@ def cell_scene_payload(
     }
 
 
+def project_cell_world_point(
+    canvas_box: dict[str, float],
+    point: tuple[float, float, float],
+) -> tuple[float, float]:
+    camera_position = np.asarray([650.0, -700.0, 520.0])
+    camera_target = np.asarray([0.0, 0.0, 80.0])
+    camera_up = np.asarray([0.0, 0.0, 1.0])
+    forward = camera_target - camera_position
+    forward /= np.linalg.norm(forward)
+    right = np.cross(forward, camera_up)
+    right /= np.linalg.norm(right)
+    up = np.cross(right, forward)
+    relative = np.asarray(point) - camera_position
+    depth = float(relative @ forward)
+    tangent = np.tan(np.deg2rad(42.0) / 2.0)
+    aspect = canvas_box["width"] / canvas_box["height"]
+    ndc_x = float(relative @ right) / (depth * tangent * aspect)
+    ndc_y = float(relative @ up) / (depth * tangent)
+    return (
+        canvas_box["x"] + (ndc_x + 1.0) * canvas_box["width"] / 2.0,
+        canvas_box["y"] + (1.0 - ndc_y) * canvas_box["height"] / 2.0,
+    )
+
+
+def test_cell_canvas_local_frames_flange_axis_and_camera_hit_target(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    scene = cell_scene_payload(objectless=True)
+    root = scene["entities"][0]
+    root["geometry"] = {"kind": "none"}
+    flange = scene["entities"][1]
+    flange["transform"] = {
+        **flange["transform"],
+        "translation_mm": [-170, 0, 120],
+    }
+    camera = scene["entities"][2]
+    camera["id"] = "camera:inspection"
+    camera["label"] = "Inspection camera"
+    camera["transform"] = {
+        **camera["transform"],
+        "parent_frame": "template_base",
+        "translation_mm": [170, 0, 100],
+    }
+    camera.pop("calibration")
+    scene["coordinate_system"] = {
+        **scene["coordinate_system"],
+        "up_axis": "+Z",
+        "presentation": {
+            "mode": "reference_z_up",
+            "presentation_only": True,
+            "source_frame": "template_base",
+            "anchor_frame": "template_base",
+            "display_up_axis": "+Z",
+            "matrix": np.eye(4).tolist(),
+            "transform": {
+                "semantics": "entity_to_parent",
+                "parent_frame": "display",
+                "translation_mm": [0, 0, 0],
+                "rotation_quaternion_wxyz": [1, 0, 0, 0],
+            },
+            "target_frame": None,
+        },
+    }
+    scene["entities"] = [root, flange, camera]
+    scene["warnings"] = []
+    scene["timelines"] = []
+    scene["default_timeline_id"] = None
+    scene["trajectory_preview"] = []
+    page.route("**/ui/cell-scene?**", lambda route: fulfill_json(route, scene))
+
+    page.goto(f"{console_server.url}/#/cell", wait_until="networkidle")
+
+    canvas = page.get_by_test_id("cell-webgl-canvas")
+    expect(canvas).to_be_visible()
+    expect(canvas).to_have_attribute("data-reference-grid-clearance-mm", "12")
+    expect(page.get_by_test_id("cell-axis-legend")).to_have_attribute(
+        "aria-label", "Coordinate axes: X red, Y green, Z blue"
+    )
+    canvas_box = canvas.bounding_box()
+    assert canvas_box is not None
+
+    # This point is inside the camera housing behind the optical origin, where
+    # the old line-only +Z frustum had no raycastable geometry.
+    camera_hit = project_cell_world_point(canvas_box, (190.0, 0.0, 87.0))
+    page.mouse.click(*camera_hit)
+    expect(
+        page.get_by_text("camera:inspection → template_base", exact=True)
+    ).to_be_visible()
+
+    screenshot = cv2.imdecode(
+        np.frombuffer(canvas.screenshot(), dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert screenshot is not None
+    blue, green, red = cv2.split(screenshot)
+    blue_i = blue.astype(np.int16)
+    green_i = green.astype(np.int16)
+    red_i = red.astype(np.int16)
+    red_axis = (red_i > 140) & (red_i > green_i * 1.45) & (red_i > blue_i * 1.45)
+    green_axis = (green_i > 120) & (green_i > red_i * 1.45) & (green_i > blue_i * 1.45)
+    blue_axis = (blue_i > 140) & (blue_i > red_i * 1.45) & (blue_i > green_i * 1.45)
+    assert int(red_axis.sum()) > 10
+    assert int(green_axis.sum()) > 10
+    assert int(blue_axis.sum()) > 10
+
+    image_box = {
+        "x": 0.0,
+        "y": 0.0,
+        "width": float(screenshot.shape[1]),
+        "height": float(screenshot.shape[0]),
+    }
+    flange_origin = np.asarray(
+        project_cell_world_point(image_box, (-170.0, 0.0, 120.0))
+    )
+    flange_positive_z = np.asarray(
+        project_cell_world_point(image_box, (-170.0, 0.0, 210.0))
+    )
+    screen_positive_z = flange_positive_z - flange_origin
+    screen_positive_z /= np.linalg.norm(screen_positive_z)
+    rows, columns = np.indices(green.shape)
+    flange_roi = (
+        (columns - flange_origin[0]) ** 2 + (rows - flange_origin[1]) ** 2
+        < 80**2
+    )
+    flange_body = (
+        flange_roi
+        & (green_i > 65)
+        & (green_i > red_i * 1.35)
+        & (green_i > blue_i * 1.25)
+    )
+    flange_pixels = np.column_stack(np.nonzero(flange_body))[:, ::-1]
+    assert len(flange_pixels) > 100
+    flange_z_projection = (flange_pixels - flange_origin) @ screen_positive_z
+    assert float(np.median(flange_z_projection)) < -3.0
+
+
+def test_cell_canvas_print_surfaces_clear_reference_grid(console_server, page) -> None:
+    install_common_mocks(page)
+    target_scene = cell_scene_payload(objectless=True)
+    root = target_scene["entities"][0]
+    root["geometry"] = {"kind": "none"}
+    target = next(
+        entity
+        for entity in target_scene["entities"]
+        if entity["id"] == "calibration_target"
+    )
+    target["label"] = "Layered calibration target"
+    target["status"] = "planned"
+    target["geometry"] = {
+        **target["geometry"],
+        "target_bounds": {
+            "x_mm": -160,
+            "y_mm": -110,
+            "width_mm": 320,
+            "height_mm": 220,
+        },
+        "markers": [
+            {
+                "id": marker_id,
+                "corners_mm": [
+                    [x, y, 0],
+                    [x + 60, y, 0],
+                    [x + 60, y + 60, 0],
+                    [x, y + 60, 0],
+                ],
+            }
+            for marker_id, (x, y) in enumerate(
+                [(-125, -75), (65, -75), (-125, 15), (65, 15)]
+            )
+        ],
+    }
+    target_scene["entities"] = [root, target]
+    target_scene["warnings"] = []
+    target_scene["timelines"] = []
+    target_scene["default_timeline_id"] = None
+    target_scene["trajectory_preview"] = []
+    active_scene = {"value": target_scene}
+    page.route(
+        "**/ui/cell-scene?**",
+        lambda route: fulfill_json(route, active_scene["value"]),
+    )
+    page.goto(f"{console_server.url}/#/cell", wait_until="networkidle")
+
+    def canvas_image() -> np.ndarray:
+        page.get_by_role("button", name="Top").click()
+        canvas = page.get_by_test_id("cell-webgl-canvas")
+        expect(canvas).to_be_visible()
+        image = cv2.imdecode(
+            np.frombuffer(canvas.screenshot(), dtype=np.uint8),
+            cv2.IMREAD_COLOR,
+        )
+        assert image is not None
+        return image
+
+    def white_surface_component(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        channel_min = image.min(axis=2)
+        channel_max = image.max(axis=2)
+        white = (channel_min > 145) & ((channel_max - channel_min) < 65)
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            white.astype(np.uint8),
+            connectivity=8,
+        )
+        assert component_count > 1
+        component = max(
+            range(1, component_count),
+            key=lambda index: stats[index, cv2.CC_STAT_AREA],
+        )
+        left, top, width, height, area = stats[component]
+        assert area > 10_000
+        assert area / float(width * height) > 0.45
+        return labels == component, stats[component]
+
+    target_image = canvas_image()
+    target_white, target_stats = white_surface_component(target_image)
+    left, top, width, height, _area = target_stats
+    target_interior = np.zeros(target_white.shape, dtype=bool)
+    target_interior[top + 4 : top + height - 4, left + 4 : left + width - 4] = True
+    dark = target_image.max(axis=2) < 55
+    dark_components, _labels, dark_stats, _centroids = (
+        cv2.connectedComponentsWithStats(
+            (dark & target_interior).astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    printed_markers = [
+        index
+        for index in range(1, dark_components)
+        if dark_stats[index, cv2.CC_STAT_AREA] > 250
+        and dark_stats[index, cv2.CC_STAT_WIDTH] > 10
+        and dark_stats[index, cv2.CC_STAT_HEIGHT] > 10
+    ]
+    assert len(printed_markers) >= 4
+
+    template_scene = cell_scene_payload(objectless=False)
+    template_root = template_scene["entities"][0]
+    template_root["geometry"] = {"kind": "none"}
+    footprint = next(
+        entity
+        for entity in template_scene["entities"]
+        if entity["id"] == "pose_template_footprint"
+    )
+    footprint["geometry"] = {
+        **footprint["geometry"],
+        "page": {"width_mm": 320, "height_mm": 220},
+        "page_configuration": {"origin_from_lower_left_mm": [160, 110]},
+        "contours": [
+            {
+                "instance_uuid": "object-1",
+                "contours": [
+                    [
+                        {"x_mm": -85, "y_mm": -50},
+                        {"x_mm": 85, "y_mm": -50},
+                        {"x_mm": 85, "y_mm": 50},
+                        {"x_mm": -85, "y_mm": 50},
+                    ]
+                ],
+            }
+        ],
+    }
+    template_scene["coordinate_system"] = {
+        **template_scene["coordinate_system"],
+        "up_axis": "+Z",
+        "presentation": {
+            "mode": "reference_z_up",
+            "presentation_only": True,
+            "source_frame": "template_base",
+            "anchor_frame": "template_base",
+            "display_up_axis": "+Z",
+            "matrix": np.eye(4).tolist(),
+            "transform": {
+                "semantics": "entity_to_parent",
+                "parent_frame": "display",
+                "translation_mm": [0, 0, 0],
+                "rotation_quaternion_wxyz": [1, 0, 0, 0],
+            },
+            "target_frame": None,
+        },
+    }
+    template_scene["entities"] = [template_root, footprint]
+    template_scene["warnings"] = []
+    template_scene["timelines"] = []
+    template_scene["default_timeline_id"] = None
+    template_scene["trajectory_preview"] = []
+    active_scene["value"] = template_scene
+    page.reload(wait_until="networkidle")
+
+    template_image = canvas_image()
+    white_surface_component(template_image)
+    blue, green, red = cv2.split(template_image.astype(np.int16))
+    olive_contour = (
+        (green > 145)
+        & (red > 115)
+        & (blue < 175)
+        & (green > blue * 1.2)
+        & (red > blue * 1.1)
+    )
+    assert int(olive_contour.sum()) > 500
+
+
 def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -> None:
     install_common_mocks(page)
     workflow_sessions = json.dumps(
@@ -7767,6 +8651,12 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     )
     expect(page.get_by_test_id("cell-webgl-canvas")).to_have_attribute(
         "data-presentation-quaternion", "0,1,0,0"
+    )
+    expect(page.get_by_test_id("cell-webgl-canvas")).to_have_attribute(
+        "data-reference-grid-clearance-mm", "12"
+    )
+    expect(page.get_by_test_id("cell-axis-legend")).to_have_attribute(
+        "aria-label", "Coordinate axes: X red, Y green, Z blue"
     )
     expect(page.get_by_test_id("cell-coordinate-convention")).to_contain_text(
         "origin top-left · +X right · +Y down · +Z into grid"

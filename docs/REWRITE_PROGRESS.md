@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-27
+Last updated: 2026-07-29
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -43,6 +43,70 @@ The code rewrite is implemented across:
   `processed/bop_evaluation/`; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
+
+## 2026-07-29 Cell View Frame and Surface Rendering
+
+Cell View now renders the robot base, flange, and TCP proxies on their local Z
+axes. The flange proxy extends behind its recorded mounting-face origin and
+shows a local RGB coordinate frame. Every calibrated camera likewise shows its
+unchanged OpenCV frame (+X right, +Y down, +Z optical-forward) and has a solid
+housing and lens in addition to the calibrated frustum, making direct scene
+selection substantially easier without changing any stored transform.
+
+The display-only reference grid is now a shallow platform recessed below the
+evidence plane. Printable HRI and pose-template sheets have explicit thickness,
+while pose contours and calibration-target ink are separated from their paper
+faces. This removes coplanar depth fighting between the grid, white paper, and
+black target squares while preserving all canonical frame origins and recorded
+placements. Focused desktop Playwright image assertions cover the camera hit
+target, flange direction, RGB axes, clean paper regions, target markers, and
+pose-template contours. The Cell scene backend contracts, frontend type check,
+lint, and production build also pass; no camera or robot was opened or
+commanded.
+
+## 2026-07-29 Run Folder Management
+
+The Inspect navigation now includes a dedicated **Run folders** page for
+auditing and managing acquisition runs across the exact server-approved run
+roots. Its inventory makes each run's recursively measured size prominent and
+summarizes the saved sensor setup, pose-template objects, and durable evidence
+without opening cameras, contacting the robot, or mutating run artifacts.
+
+Deletion and cross-root moves are explicit background disk jobs. The active
+run remains protected until the operator switches context; deleting an
+inactive run requires one fresh confirmation, while moving one requires an
+available destination among the configured roots and refuses collisions.
+Every request binds the discovered folder identity so a stale page cannot act
+on a replacement directory. Moves also bind the inventory-time identity of the
+selected destination root, so an unmounted or replaced SSD cannot silently
+redirect data into the directory underneath its mountpoint. A stale or
+refreshing inventory disables both actions. Discovery and mutation preserve the
+existing allowed-root containment and symlink defenses, and fail before
+isolation when a run contains a nested filesystem or same-device bind mount.
+
+A completed move leaves a compatibility symlink at the former location. This
+keeps immutable artifacts whose recorded provenance contains the original
+absolute run path resolvable while the canonical data tree resides below the
+new approved root. The page explains that contract directly, keeps queued work
+visible after navigation, links to **Jobs**, and refreshes the inventory after
+the background operation finishes.
+
+Fsynced transaction journals make storage work recoverable across worker or
+host interruption. Inventory recovery rolls back an uncommitted move, finishes
+a committed and content-verified move, or resumes a confirmed partial deletion
+without ever republishing a partially deleted tree. Unexpected path occupancy,
+root replacement, or content mismatch is preserved as a visible maintenance
+condition with retained-byte evidence; further mutations remain blocked.
+Inventory/recovery and mutation jobs are non-cancelable because a refresh may
+cross one of those already confirmed recovery boundaries.
+
+The focused Flask and desktop Playwright contracts cover inventory size and
+contents, active-run protection, one-confirm deletion, move request identity,
+destination-root identity, crash recovery and idempotence, compatibility-link
+guidance, background-job handoff, stale-inventory blocking, and table-local
+overflow.
+Validation is software-only; it does not open a camera, contact the robot,
+start a lab service, or perform physical capture.
 
 ## 2026-07-27 Run-Owned Camera Alias Persistence
 

@@ -31,6 +31,10 @@ function isCaptureJob(job: Job) {
   return job.parameters.pipeline_stage === "capture_execution" || job.resources.includes("camera")
 }
 
+function isCancelableJob(job: Job) {
+  return job.parameters.cancelable !== false
+}
+
 function timing(job: Job) {
   if (job.status === "queued") return "Waiting to start"
   if (job.ended_at) return `Finished ${formatDate(job.ended_at)}`
@@ -57,26 +61,46 @@ function jobScopeLabel(job: Job, selectedRun: string) {
   }
 }
 
-async function writeClipboard(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-    return
-  }
+function legacyClipboardCopy(text: string, source: HTMLElement) {
   const textarea = document.createElement("textarea")
   textarea.value = text
+  textarea.readOnly = true
   textarea.style.position = "fixed"
+  textarea.style.left = "-9999px"
+  textarea.style.top = "0"
   textarea.style.opacity = "0"
-  document.body.appendChild(textarea)
-  textarea.focus()
-  textarea.select()
-  const copied = document.execCommand("copy")
-  textarea.remove()
+  const container = source.closest<HTMLElement>('[role="dialog"]') ?? document.body
+  container.appendChild(textarea)
+  let copied = false
+  try {
+    textarea.focus({ preventScroll: true })
+    textarea.select()
+    textarea.setSelectionRange(0, text.length)
+    copied = document.execCommand("copy")
+  } finally {
+    textarea.remove()
+    if (source.isConnected) source.focus({ preventScroll: true })
+  }
   if (!copied) throw new Error("The browser denied clipboard access")
 }
 
-async function copyDebugText(label: string, text: string) {
+async function writeClipboard(text: string, source: HTMLElement) {
   try {
-    await writeClipboard(text)
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return
+    }
+  } catch {
+    // The async Clipboard API can be exposed but denied, especially when the
+    // console is opened from a non-secure lab-network address. Use the
+    // selection-based fallback while the click still authorizes copying.
+  }
+  legacyClipboardCopy(text, source)
+}
+
+async function copyDebugText(label: string, text: string, source: HTMLElement) {
+  try {
+    await writeClipboard(text, source)
     toast.success(`${label} copied`)
   } catch (error) {
     toast.error(`${label} could not be copied`, { description: errorMessage(error) })
@@ -164,7 +188,7 @@ export function JobsPage() {
     <PageHeader eyebrow="Lab-wide job runner" title="Jobs & resource locks" description="Monitor background work across every run folder, inspect live logs, and stop camera or capture jobs from one place. Each job shows whether it belongs to the active run." actions={<Button variant="outline" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh</Button>} />
     <ProcessHandoff
       title="Jobs continue when you leave their originating page"
-      description="Use this page for status, resource ownership, logs, and cancellation. When a job finishes, return to the guided workflow to review its durable evidence and continue."
+      description="Use this page for status, resource ownership, logs, and safe cancellation. Committed storage operations remain non-cancelable so they cannot be interrupted midway. When a job finishes, return to the guided workflow to review its durable evidence and continue."
       to={workflowHref}
       action="Open workflow"
     />
@@ -191,6 +215,7 @@ export function JobsPage() {
             : <div className="space-y-2">
               {ordered.map((job) => {
                 const cancelPending = job.status === "canceling" || (cancel.isPending && cancel.variables?.id === job.id)
+                const cancelable = isCancelableJob(job)
                 const runRoot = jobRunRoot(job)
                 return <Card key={job.id} data-testid={`job-card-${job.id}`} data-job-id={job.id} role="group" aria-label={`${job.name} job ${job.id}`} className={ACTIVE.has(job.status) ? "border-primary/35" : undefined}>
                   <CardContent className="grid items-center gap-4 py-4 xl:grid-cols-[minmax(0,1fr)_180px_260px_auto]">
@@ -201,8 +226,8 @@ export function JobsPage() {
                       {job.message && <p className="mt-2 line-clamp-2 text-xs text-muted-foreground" title={job.message}>{job.message}</p>}
                     </div>
                     <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Timing</div><div className="mt-1 text-xs">{timing(job)}</div></div>
-                    <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Resources</div><div className="mt-1 flex flex-wrap gap-1">{job.resources.length ? job.resources.map((resource) => <StatusBadge status={ACTIVE.has(job.status) ? "warning" : "available"} tone={ACTIVE.has(job.status) ? "warning" : "neutral"} key={resource}>{resource}</StatusBadge>) : <span className="text-xs text-muted-foreground">none</span>}</div></div>
-                    <div className="flex flex-wrap gap-2 xl:justify-end"><Button variant="outline" size="sm" onClick={() => setDetail(job)}><FileText />Log</Button>{ACTIVE.has(job.status) && <Button variant="destructive" size="sm" onClick={() => cancel.mutate(job)} disabled={cancelPending}>{isCaptureJob(job) ? <><Square />{cancelPending ? "Stopping…" : "Stop capture"}</> : <><Ban />{cancelPending ? "Canceling…" : "Cancel"}</>}</Button>}</div>
+                    <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Resources</div><div className="mt-1 flex flex-wrap gap-1">{job.resources.length ? job.resources.map((resource) => <StatusBadge status={ACTIVE.has(job.status) ? "warning" : "available"} tone={ACTIVE.has(job.status) ? "warning" : "neutral"} key={resource}>{resource}</StatusBadge>) : <span className="text-xs text-muted-foreground">none</span>}{ACTIVE.has(job.status) && !cancelable && <StatusBadge status="locked" tone="warning">non-cancelable</StatusBadge>}</div></div>
+                    <div className="flex flex-wrap gap-2 xl:justify-end"><Button variant="outline" size="sm" onClick={() => setDetail(job)}><FileText />Log</Button>{ACTIVE.has(job.status) && cancelable && <Button variant="destructive" size="sm" onClick={() => cancel.mutate(job)} disabled={cancelPending}>{isCaptureJob(job) ? <><Square />{cancelPending ? "Stopping…" : "Stop capture"}</> : <><Ban />{cancelPending ? "Canceling…" : "Cancel"}</>}</Button>}</div>
                   </CardContent>
                 </Card>
               })}
@@ -215,12 +240,13 @@ export function JobsPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3"><StatusBadge status={currentDetail?.status} tone={jobStatusTone(currentDetail?.status)} /><span className="text-xs text-muted-foreground">Return code {currentDetail?.returncode ?? "—"}</span></div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" disabled={!outputText || log.isPending} onClick={() => void copyDebugText("Job output", outputText)} title="Copy the complete process output"><Copy />Copy output</Button>
-            <Button variant="outline" size="sm" disabled={!currentDetail} onClick={() => currentDetail && void copyDebugText("Job context", jobContext(currentDetail))} title="Copy job context and metadata"><Copy />Copy context</Button>
+            <Button variant="outline" size="sm" disabled={!outputText || log.isPending} onClick={(event) => void copyDebugText("Job output", outputText, event.currentTarget)} title="Copy the complete process output"><Copy />Copy output</Button>
+            <Button variant="outline" size="sm" disabled={!currentDetail} onClick={(event) => currentDetail && void copyDebugText("Job context", jobContext(currentDetail), event.currentTarget)} title="Copy job context and metadata"><Copy />Copy context</Button>
           </div>
         </div>
         <pre data-testid="job-log" className="min-h-0 flex-1 overflow-auto rounded-lg bg-[#11130d] p-4 text-xs leading-relaxed text-[#dce4c4]">{log.isError ? `Log unavailable: ${errorMessage(log.error)}` : outputText || "Waiting for log output…"}</pre>
-        {currentDetail && ACTIVE.has(currentDetail.status) && <Button variant="destructive" onClick={() => cancel.mutate(currentDetail)} disabled={currentDetail.status === "canceling" || (cancel.isPending && cancel.variables?.id === currentDetail.id)}><Square />{currentDetail.status === "canceling" ? "Canceling…" : isCaptureJob(currentDetail) ? "Stop capture" : "Cancel job"}</Button>}
+        {currentDetail && ACTIVE.has(currentDetail.status) && !isCancelableJob(currentDetail) && <p className="rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed text-warning-foreground">This committed storage operation cannot be canceled safely after submission.</p>}
+        {currentDetail && ACTIVE.has(currentDetail.status) && isCancelableJob(currentDetail) && <Button variant="destructive" onClick={() => cancel.mutate(currentDetail)} disabled={currentDetail.status === "canceling" || (cancel.isPending && cancel.variables?.id === currentDetail.id)}><Square />{currentDetail.status === "canceling" ? "Canceling…" : isCaptureJob(currentDetail) ? "Stop capture" : "Cancel job"}</Button>}
       </SheetContent>
     </Sheet>
   </div>

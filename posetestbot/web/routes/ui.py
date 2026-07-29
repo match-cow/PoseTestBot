@@ -22,6 +22,7 @@ from posetestbot.cell.scene import (
     cell_timeline_page,
 )
 from posetestbot.pose_templates.selection import load_pose_template_selection
+from posetestbot.run_folders import MOVE_STAGING_PREFIX
 from posetestbot.web.security import (
     DEFAULT_RUN_ROOT,
     resolve_web_run_root,
@@ -108,7 +109,10 @@ def discover_web_runs() -> list[dict[str, Any]]:
             continue
         for candidate in allowed_root.iterdir():
             try:
-                if candidate.name == "calibration_targets":
+                if (
+                    candidate.name == "calibration_targets"
+                    or candidate.name.startswith(MOVE_STAGING_PREFIX)
+                ):
                     continue
                 if candidate.is_symlink() or not candidate.is_dir():
                     continue

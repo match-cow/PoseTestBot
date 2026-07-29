@@ -118,9 +118,40 @@ normal checkout enables both:
 - `/mnt/working_data_ssd`, the lab acquisition SSD.
 
 The run chooser lists direct run folders from both roots and may accept a new
-folder below either root; Workflow writes its `run_config.json`. Additional
-roots can be appended with the platform path-separator-delimited
-`POSETESTBOT_WEB_RUN_ROOTS` variable (`:` on Linux). For example:
+folder below either root; Workflow writes its `run_config.json`. The
+**Inspect → Run folders** page inventories runs across these exact roots,
+including recursively measured size, saved sensor/object setup, and evidence.
+It never opens cameras or contacts the robot.
+
+Inventory/recovery, confirmed deletion, and cross-root moves run as background
+disk jobs and remain visible in **Jobs** after navigation. They cannot be
+canceled after submission because an inventory refresh may be finishing an
+interrupted, already confirmed transaction, and interruption during a
+filesystem commit or permanent deletion is not a safe boundary. The active run
+must be switched before either destructive action is available. A move accepts
+only another configured run root, refuses an occupied destination, and leaves
+a compatibility symlink at the original path so immutable path-bound evidence
+remains resolvable.
+
+Mutation requests bind both the discovered run-folder identity and the
+inventory-time destination-root identity. They fail if either directory was
+replaced or a mounted destination disappeared before the worker acquired its
+disk lock. Trees containing nested filesystems or bind mounts are rejected
+before isolation so moving or deleting one run cannot cross into separately
+mounted data.
+
+Move and delete workers keep atomic, fsynced transaction journals beside the
+run roots. A later inventory refresh rolls back an uncommitted move, completes
+a committed move, or resumes an already confirmed partial deletion. If path,
+filesystem, or content evidence no longer matches, recovery preserves the
+remaining trees, exposes a storage-maintenance warning and retained byte count
+on **Run folders**, and blocks further mutations until an operator repairs the
+reported condition.
+
+Additional roots can be appended with the platform
+path-separator-delimited `POSETESTBOT_WEB_RUN_ROOTS` variable (`:` on Linux).
+The configured entries are the exact roots offered as move destinations; the
+setting does not authorize arbitrary filesystem paths. For example:
 
 ```bash
 export POSETESTBOT_WEB_RUN_ROOTS=/srv/posetestbot-runs:/data/archive

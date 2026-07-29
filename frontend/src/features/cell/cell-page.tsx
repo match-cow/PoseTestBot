@@ -22,6 +22,13 @@ import { useOperator } from "@/providers/operator-provider"
 
 const PAGE_SIZE = 2_000
 const LAYERS = ["reference_frame", "template", "robot_base", "robot_flange", "tcp", "camera", "object", "calibration_target"]
+const REFERENCE_GRID_SIZE_MM = 1_600
+const REFERENCE_GRID_DIVISIONS = 32
+const REFERENCE_GRID_CLEARANCE_MM = 12
+const REFERENCE_GRID_THICKNESS_MM = 6
+const PRINT_SURFACE_THICKNESS_MM = 3
+const PRINT_LAYER_GAP_MM = 0.3
+const PRINT_LAYER_THICKNESS_MM = 0.2
 type Preset = "perspective" | "top" | "front"
 type CameraFrameModality = "rgb" | "depth"
 type CameraFrameViewMode = CameraFrameModality | "rgb_depth"
@@ -91,6 +98,12 @@ function vector(values: readonly unknown[] | null | undefined, digits: number) {
 
 function Detail({ label, value }: { label: string; value: React.ReactNode }) {
   return <div><span className="text-muted-foreground">{label}</span><div className="mt-1 break-all font-mono text-[10px]">{value}</div></div>
+}
+
+function AxisLegend() {
+  return <span data-testid="cell-axis-legend" aria-label="Coordinate axes: X red, Y green, Z blue" className="whitespace-nowrap font-mono">
+    axes <span className="text-red-400">X</span>/<span className="text-emerald-400">Y</span>/<span className="text-blue-400">Z</span>
+  </span>
 }
 
 function Matrix({ values, testId = "cell-calibration-matrix" }: { values: readonly (readonly unknown[])[]; testId?: string }) {
@@ -206,7 +219,7 @@ function selectEvent(event: ThreeEvent<MouseEvent>, callback: () => void) {
   callback()
 }
 
-function Frustum({ color, onSelect, geometry }: { color: string; onSelect: () => void; geometry: CellEntity["geometry"] }) {
+function CameraGeometry({ color, onSelect, geometry }: { color: string; onSelect: () => void; geometry: CellEntity["geometry"] }) {
   const object = useMemo(() => {
     const width = Number(geometry.width || 1280)
     const height = Number(geometry.height || 720)
@@ -225,15 +238,34 @@ function Frustum({ color, onSelect, geometry }: { color: string; onSelect: () =>
     buffer.setAttribute("position", new Float32BufferAttribute(segments, 3))
     return new LineSegments(buffer, new LineBasicMaterial({ color }))
   }, [color, geometry])
-  return <primitive object={object} onClick={(event: ThreeEvent<MouseEvent>) => selectEvent(event, onSelect)} />
+  return <group name="camera-proxy" onClick={(event) => selectEvent(event, onSelect)}>
+    <primitive object={object} />
+    <mesh name="camera-housing" position={[0, 0, -13]} castShadow receiveShadow>
+      <boxGeometry args={[70, 42, 26]} />
+      <meshStandardMaterial color={color} roughness={0.58} metalness={0.12} />
+    </mesh>
+    <mesh name="camera-lens" position={[0, 0, 1.8]} rotation={[Math.PI / 2, 0, 0]}>
+      <cylinderGeometry args={[8, 10, 3.6, 24]} />
+      <meshStandardMaterial color="#07111f" roughness={0.32} metalness={0.28} />
+    </mesh>
+    <axesHelper name="camera-coordinate-frame" args={[80]} />
+  </group>
 }
 
-function TemplatePlane({ url, onSelect }: { url: string; onSelect: () => void }) {
-  const texture = useTexture(url)
-  return <mesh position={[0, 0, -0.8]} scale={[1, -1, 1]} onClick={(event) => selectEvent(event, onSelect)} receiveShadow>
-    <planeGeometry args={[420, 297]} />
-    <meshBasicMaterial map={texture} transparent opacity={0.74} depthWrite={false} />
-  </mesh>
+function TemplatePlane({ entity, onSelect }: { entity: CellEntity; onSelect: () => void }) {
+  const texture = useTexture(String(entity.geometry.asset_url))
+  const width = Number(entity.geometry.width_mm || 420)
+  const height = Number(entity.geometry.height_mm || 297)
+  return <group onClick={(event) => selectEvent(event, onSelect)}>
+    <mesh position={[0, 0, -PRINT_SURFACE_THICKNESS_MM / 2]} receiveShadow>
+      <boxGeometry args={[width, height, PRINT_SURFACE_THICKNESS_MM]} />
+      <meshStandardMaterial color="#f8fafc" roughness={0.95} />
+    </mesh>
+    <mesh position={[0, 0, PRINT_LAYER_GAP_MM]} scale={[1, -1, 1]}>
+      <planeGeometry args={[width, height]} />
+      <meshBasicMaterial map={texture} transparent opacity={0.82} depthWrite={false} polygonOffset polygonOffsetFactor={-1} polygonOffsetUnits={-1} />
+    </mesh>
+  </group>
 }
 
 function TargetGeometry({ entity, color, onSelect }: { entity: CellEntity; color: string; onSelect: () => void }) {
@@ -247,8 +279,8 @@ function TargetGeometry({ entity, color, onSelect }: { entity: CellEntity; color
   const y = Number(bounds?.y_mm) || 0
   const markers = Array.isArray(entity.geometry.markers) ? entity.geometry.markers : []
   return <group onClick={(event) => selectEvent(event, onSelect)}>
-    <mesh position={[x + width / 2, y + height / 2, 1]} receiveShadow>
-      <boxGeometry args={[width + 8, height + 8, 2]} />
+    <mesh position={[x + width / 2, y + height / 2, PRINT_SURFACE_THICKNESS_MM / 2]} receiveShadow>
+      <boxGeometry args={[width + 8, height + 8, PRINT_SURFACE_THICKNESS_MM]} />
       <meshStandardMaterial color="#f8fafc" roughness={0.9} />
     </mesh>
     {markers.map((raw, index) => {
@@ -259,13 +291,13 @@ function TargetGeometry({ entity, color, onSelect }: { entity: CellEntity; color
       if (!xs.length || !ys.length) return null
       const minX = Math.min(...xs); const maxX = Math.max(...xs)
       const minY = Math.min(...ys); const maxY = Math.max(...ys)
-      return <mesh key={index} position={[(minX + maxX) / 2, (minY + maxY) / 2, -0.05]}>
-        <boxGeometry args={[maxX - minX, maxY - minY, 0.1]} />
+      return <mesh key={index} position={[(minX + maxX) / 2, (minY + maxY) / 2, -PRINT_LAYER_GAP_MM - PRINT_LAYER_THICKNESS_MM / 2]}>
+        <boxGeometry args={[maxX - minX, maxY - minY, PRINT_LAYER_THICKNESS_MM]} />
         <meshBasicMaterial color="#020617" />
       </mesh>
     })}
-    {!markers.length && <mesh position={[x + width / 2, y + height / 2, -0.05]}>
-      <boxGeometry args={[width, height, 0.1]} />
+    {!markers.length && <mesh position={[x + width / 2, y + height / 2, -PRINT_LAYER_GAP_MM - PRINT_LAYER_THICKNESS_MM / 2]}>
+      <boxGeometry args={[width, height, PRINT_LAYER_THICKNESS_MM]} />
       <meshStandardMaterial color={color} transparent opacity={0.45} />
     </mesh>}
   </group>
@@ -291,15 +323,15 @@ function PoseTemplateFootprint({ entity, onSelect }: { entity: CellEntity; onSel
     })
   }), [contourGeometry])
   return <group onClick={(event) => selectEvent(event, onSelect)}>
-    <mesh position={[width / 2 - Number(origin[0] || 0), height / 2 - Number(origin[1] || 0), -0.5]} receiveShadow>
-      <boxGeometry args={[width, height, 1]} />
+    <mesh position={[width / 2 - Number(origin[0] || 0), height / 2 - Number(origin[1] || 0), -PRINT_SURFACE_THICKNESS_MM / 2]} receiveShadow>
+      <boxGeometry args={[width, height, PRINT_SURFACE_THICKNESS_MM]} />
       <meshStandardMaterial color="#f8fafc" roughness={0.95} />
     </mesh>
-    {shapes.map(({ key, shape }) => <mesh key={key} position={[0, 0, 0.2]}>
+    {shapes.map(({ key, shape }) => <mesh key={key} position={[0, 0, PRINT_LAYER_GAP_MM]}>
       <shapeGeometry args={[shape]} />
-      <meshBasicMaterial color="#a3b51d" transparent opacity={0.48} side={DoubleSide} />
+      <meshBasicMaterial color="#a3b51d" transparent opacity={0.58} side={DoubleSide} depthWrite={false} polygonOffset polygonOffsetFactor={-1} polygonOffsetUnits={-1} />
     </mesh>)}
-    <mesh position={[0, 0, 0.8]}><circleGeometry args={[3, 24]} /><meshBasicMaterial color="#2374d8" side={DoubleSide} /></mesh>
+    <mesh position={[0, 0, PRINT_LAYER_GAP_MM + 0.3]}><circleGeometry args={[3, 24]} /><meshBasicMaterial color="#2374d8" side={DoubleSide} /></mesh>
   </group>
 }
 
@@ -307,14 +339,24 @@ function EntityVisual({ entity, onSelect }: { entity: CellEntity; onSelect: () =
   const color = statusColor(entity.status)
   const kind = String(entity.geometry.kind || entity.type)
   if (kind === "axes") return <axesHelper args={[Number(entity.geometry.size_mm || 100)]} onClick={(event) => selectEvent(event, onSelect)} />
-  if (kind === "svg_plane") return <TemplatePlane url={String(entity.geometry.asset_url)} onSelect={onSelect} />
+  if (kind === "svg_plane") return <TemplatePlane entity={entity} onSelect={onSelect} />
   if (kind === "mesh") return <MeshBoundary fallback={<mesh onClick={(event) => selectEvent(event, onSelect)}><boxGeometry args={[30, 30, 30]} /><meshStandardMaterial color="#f59e0b" wireframe /></mesh>}><Suspense fallback={null}><PlyMesh entity={entity} onSelect={onSelect} /></Suspense></MeshBoundary>
-  if (kind === "camera_frustum") return <Frustum color={color} onSelect={onSelect} geometry={entity.geometry} />
+  if (kind === "camera_frustum") return <CameraGeometry color={color} onSelect={onSelect} geometry={entity.geometry} />
   if (kind === "calibration_target") return <TargetGeometry entity={entity} color={color} onSelect={onSelect} />
   if (kind === "pose_template_footprint") return <PoseTemplateFootprint entity={entity} onSelect={onSelect} />
-  if (kind === "robot_base") return <mesh position={[0, 0, 45]} onClick={(event) => selectEvent(event, onSelect)}><cylinderGeometry args={[85, 105, 90, 32]} /><meshStandardMaterial color={color} roughness={0.55} /></mesh>
-  if (kind === "flange_proxy") return <mesh onClick={(event) => selectEvent(event, onSelect)}><cylinderGeometry args={[42, 42, 30, 24]} /><meshStandardMaterial color={color} /></mesh>
-  if (kind === "tcp") return <group onClick={(event) => selectEvent(event, onSelect)}><axesHelper args={[70]} /><mesh position={[0, 0, 25]}><cylinderGeometry args={[8, 3, 50, 12]} /><meshStandardMaterial color={color} /></mesh></group>
+  if (kind === "robot_base") return <mesh position={[0, 0, 45]} rotation={[Math.PI / 2, 0, 0]} onClick={(event) => selectEvent(event, onSelect)}><cylinderGeometry args={[85, 105, 90, 32]} /><meshStandardMaterial color={color} roughness={0.55} /></mesh>
+  if (kind === "flange_proxy") return <group name="robot-flange-proxy" onClick={(event) => selectEvent(event, onSelect)}>
+    <mesh name="robot-flange-body" position={[0, 0, -15]} rotation={[Math.PI / 2, 0, 0]} castShadow receiveShadow>
+      <cylinderGeometry args={[42, 42, 30, 32]} />
+      <meshStandardMaterial color={color} roughness={0.48} metalness={0.2} />
+    </mesh>
+    <mesh name="robot-flange-face" position={[0, 0, 0.5]}>
+      <torusGeometry args={[31, 3, 8, 32]} />
+      <meshStandardMaterial color="#dbe5ef" roughness={0.35} metalness={0.45} />
+    </mesh>
+    <axesHelper name="robot-flange-coordinate-frame" args={[90]} />
+  </group>
+  if (kind === "tcp") return <group onClick={(event) => selectEvent(event, onSelect)}><axesHelper args={[70]} /><mesh position={[0, 0, 25]} rotation={[Math.PI / 2, 0, 0]}><cylinderGeometry args={[3, 8, 50, 12]} /><meshStandardMaterial color={color} /></mesh></group>
   return null
 }
 
@@ -357,6 +399,17 @@ function CameraRig({ preset, resetToken }: { preset: Preset; resetToken: number 
   return <OrbitControls ref={controls} makeDefault enablePan enableRotate enableZoom dampingFactor={0.08} />
 }
 
+function ReferenceGrid() {
+  const gridZ = -REFERENCE_GRID_CLEARANCE_MM
+  return <group name="raised-reference-grid">
+    <mesh name="reference-grid-platform" position={[0, 0, gridZ - REFERENCE_GRID_THICKNESS_MM / 2]} receiveShadow>
+      <boxGeometry args={[REFERENCE_GRID_SIZE_MM, REFERENCE_GRID_SIZE_MM, REFERENCE_GRID_THICKNESS_MM]} />
+      <meshStandardMaterial color="#0b1727" roughness={0.96} />
+    </mesh>
+    <gridHelper name="reference-grid-lines" args={[REFERENCE_GRID_SIZE_MM, REFERENCE_GRID_DIVISIONS, "#475569", "#253247"]} position={[0, 0, gridZ + 0.15]} rotation={[Math.PI / 2, 0, 0]} />
+  </group>
+}
+
 function CellCanvas({ scene, visible, pose, trajectory, selected, onSelect, preset, resetToken }: { scene: CellScene; visible: Set<string>; pose: CellPose | null; trajectory: boolean; selected: CellEntity | null; onSelect: (entity: CellEntity) => void; preset: Preset; resetToken: number }) {
   const presentation = cellPresentation(scene)
   const children = useMemo(() => {
@@ -369,11 +422,11 @@ function CellCanvas({ scene, visible, pose, trajectory, selected, onSelect, pres
     return map
   }, [scene.entities])
   const roots = children.get(null) ?? []
-  return <Canvas data-testid="cell-webgl-canvas" data-presentation-mode={presentation.mode} data-presentation-quaternion={presentation.transform.rotation_quaternion_wxyz.join(",")} frameloop="demand" shadows camera={{ position: [650, -700, 520], near: 0.1, far: 10000, fov: 42, up: [0, 0, 1] }} onPointerMissed={() => selected && onSelect(selected)}>
+  return <Canvas data-testid="cell-webgl-canvas" data-presentation-mode={presentation.mode} data-presentation-quaternion={presentation.transform.rotation_quaternion_wxyz.join(",")} data-reference-grid-clearance-mm={REFERENCE_GRID_CLEARANCE_MM} frameloop="demand" shadows camera={{ position: [650, -700, 520], near: 1, far: 10000, fov: 42, up: [0, 0, 1] }} onPointerMissed={() => selected && onSelect(selected)}>
     <color attach="background" args={["#08111f"]} />
     <ambientLight intensity={0.75} />
     <directionalLight position={[350, -250, 700]} intensity={1.8} castShadow />
-    <gridHelper args={[1600, 32, "#334155", "#1e293b"]} rotation={[Math.PI / 2, 0, 0]} />
+    <ReferenceGrid />
     <group {...transformProps(presentation.transform)}>
       {roots.map((entity) => <EntityTree key={entity.id} entity={entity} childrenByParent={children} visible={visible} pose={pose} onSelect={onSelect} />)}
       {trajectory && <Trajectory poses={scene.trajectory_preview} />}
@@ -559,7 +612,7 @@ function CellSceneView({ selectedRun, scene, workflowHref }: { selectedRun: stri
     <PageHeader eyebrow="Dataset contents" title="Cell View" description="Read-only inspection of cell geometry, exact flange poses, and retained synchronized RGB-D evidence." />
     <ProcessHandoff title="Inspect evidence here; change it in Workflow" description="Cell never edits transforms, images, or depth data. Use it to compare geometry and retained evidence, then return to the guided workflow to resolve missing calibration, capture, synchronization, or export evidence." to={workflowHref} action="Open workflow" />
     {(scene.warnings.length > 0 || unresolved.length > 0) && <div className="flex items-start gap-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-4 text-sm"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" /><div className="min-w-0"><div className="font-semibold">Partial cell scene</div><div className="mt-1 text-xs text-muted-foreground">{unresolvedCameras.length > 0 ? `${unresolvedCameras.length} camera${unresolvedCameras.length === 1 ? " is" : "s are"} hidden until this run has matching promoted calibration profiles. The recorded trajectory and available template evidence remain visible.` : "Available scene evidence remains visible."}</div>{otherIssues.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-xs font-medium">Show {otherIssues.length} provenance detail{otherIssues.length === 1 ? "" : "s"}</summary><ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-muted-foreground">{otherIssues.map((message, index) => <li key={index}>{message}</li>)}</ul></details>}</div></div>}
-    <Card className="overflow-hidden"><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>3D cell</CardTitle><CardDescription data-testid="cell-coordinate-convention" className="flex flex-wrap items-center gap-1">{targetAligned ? "Target-aligned · right-handed · origin top-left · +X right · +Y down · +Z into grid · millimetres" : "Right-handed · Z-up · millimetres"} · no pose interpolation <HelpTip label="cell coordinate and timeline display">Transforms are rendered from stored evidence in millimetres. Timeline playback shows exact recorded poses only; it never interpolates or invents a robot pose between frames.</HelpTip></CardDescription></div><div className="flex flex-wrap gap-2"><Button size="sm" variant={preset === "perspective" ? "default" : "outline"} onClick={() => setPreset("perspective")}><Focus />Perspective</Button><Button size="sm" variant={preset === "top" ? "default" : "outline"} onClick={() => setPreset("top")}><ScanLine />Top</Button><Button size="sm" variant={preset === "front" ? "default" : "outline"} onClick={() => setPreset("front")}><Crosshair />Front</Button><Button size="sm" variant="outline" aria-label="Reset cell view" onClick={() => { setPreset("perspective"); setResetToken((value) => value + 1) }}><RotateCcw /></Button></div></div></CardHeader>
+    <Card className="overflow-hidden"><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>3D cell</CardTitle><CardDescription data-testid="cell-coordinate-convention" className="flex flex-wrap items-center gap-1">{targetAligned ? "Target-aligned · right-handed · origin top-left · +X right · +Y down · +Z into grid · millimetres" : "Right-handed · Z-up · millimetres"} · no pose interpolation · <AxisLegend /> <HelpTip label="cell coordinate and timeline display">Transforms are rendered from stored evidence in millimetres. Local coordinate frames use red X, green Y, and blue Z axes. Timeline playback shows exact recorded poses only; it never interpolates or invents a robot pose between frames.</HelpTip></CardDescription></div><div className="flex flex-wrap gap-2"><Button size="sm" variant={preset === "perspective" ? "default" : "outline"} onClick={() => setPreset("perspective")}><Focus />Perspective</Button><Button size="sm" variant={preset === "top" ? "default" : "outline"} onClick={() => setPreset("top")}><ScanLine />Top</Button><Button size="sm" variant={preset === "front" ? "default" : "outline"} onClick={() => setPreset("front")}><Crosshair />Front</Button><Button size="sm" variant="outline" aria-label="Reset cell view" onClick={() => { setPreset("perspective"); setResetToken((value) => value + 1) }}><RotateCcw /></Button></div></div></CardHeader>
       <CardContent className="p-0">{webgl ? <div className="h-[620px] min-w-0"><CellCanvas scene={scene} visible={visible} pose={pose} trajectory={trajectory} selected={selected} onSelect={setSelected} preset={preset} resetToken={resetToken} /></div> : <div data-testid="cell-webgl-fallback" className="grid h-[620px] min-w-0 place-items-center p-10 text-center"><div><AlertTriangle className="mx-auto mb-3 size-8 text-amber-500" /><div className="font-semibold">WebGL is unavailable</div><p className="mt-2 max-w-md text-sm text-muted-foreground">The component and provenance list remains available. Use a browser with WebGL support to orbit the scene.</p></div></div>}</CardContent>
       <div className="space-y-3 border-t bg-muted/20 p-4"><div className="flex flex-wrap items-end gap-3"><div className="w-[310px] shrink-0 space-y-1"><Label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">3D pose timeline source</Label><Select value={timelineId || "none"} onValueChange={(value) => selectTimeline(value === "none" ? "" : value)}><SelectTrigger aria-label="Timeline"><SelectValue placeholder="No trajectory" /></SelectTrigger><SelectContent>{scene.timelines.length ? scene.timelines.map((item) => <SelectItem key={item.id} value={item.id}>{item.camera ? `${item.camera.display_name} · ${item.camera.sensor_folder}` : item.label} · {item.frame_count} frames</SelectItem>) : <SelectItem value="none">No trajectory</SelectItem>}</SelectContent></Select></div><Button size="icon" variant="outline" aria-label={playing ? "Pause timeline" : "Play timeline"} disabled={!timeline} onClick={() => setPlaying((value) => !value)}>{playing ? <CirclePause /> : <CirclePlay />}</Button><div className="min-w-[280px] flex-1 pb-2"><input aria-label="Frame scrubber" className="w-full accent-primary" type="range" min={0} max={Math.max(0, (timeline?.frame_count ?? 1) - 1)} value={frame} disabled={!timeline} onChange={(event) => { setFrame(Number(event.target.value)); setPlaying(false) }} /></div><div className="w-28 pb-2 text-right font-mono text-xs">{timeline ? `${frame + 1} / ${timeline.frame_count}` : "No frames"}</div></div><div className="flex flex-wrap justify-between gap-2 text-[11px] text-muted-foreground"><span>{pose ? `Exact 3D pose frame ${pose.frame_id}${pose.motion ? ` · ${pose.motion}` : ""}` : timelineQuery.isFetching ? "Loading exact pose page…" : "Select a recorded frame"}</span><span>{showCameraFrames ? "Selected RGB-D tiles below use this shared ordinal" : "Adjacent pose pages prefetch automatically"}</span></div></div>
     </Card>

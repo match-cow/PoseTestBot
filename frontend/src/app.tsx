@@ -11,6 +11,7 @@ const CalibrationTargetsPage = lazy(() => import("@/features/calibration-targets
 const WorkpiecesPage = lazy(() => import("@/features/workpieces/workpieces-page").then((module) => ({ default: module.WorkpiecesPage })))
 const PoseTemplatesPage = lazy(() => import("@/features/pose-templates/pose-templates-page").then((module) => ({ default: module.PoseTemplatesPage })))
 const BopEvaluationPage = lazy(() => import("@/features/bop-evaluation/bop-evaluation-page").then((module) => ({ default: module.BopEvaluationPage })))
+const RunFoldersPage = lazy(() => import("@/features/run-folders/run-folders-page").then((module) => ({ default: module.RunFoldersPage })))
 
 function Page({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted-foreground">Loading view…</div>}>{children}</Suspense>
@@ -28,6 +29,7 @@ export function App() {
         <Route path="/workpieces" element={<Page><WorkpiecesPage /></Page>} />
         <Route path="/pose-templates" element={<Page><PoseTemplatesPage /></Page>} />
         <Route path="/bop-evaluation" element={<Page><BopEvaluationPage /></Page>} />
+        <Route path="/run-folders" element={<Page><RunFoldersPage /></Page>} />
         <Route path="/workflow" element={<Navigate to="/workflow/setup" replace />} />
         <Route path="/workflow/:phase" element={<Page><WorkflowPage /></Page>} />
         <Route path="/jobs" element={<Page><JobsPage /></Page>} />
