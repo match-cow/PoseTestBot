@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 RAW_ROBOT_EE_POSES = "raw_robot_ee_poses.json"
+ROBOT_POSE_CADENCE_REPORT = "robot_pose_cadence_report.json"
 MATCH_ROBOT_EE_POSES = "match_robot_ee_poses.json"
 ARUCO_POSE_ESTIMATION = "aruco_pose_estimation.json"
 ARUCO_DETECTIONS = "aruco_detections.json"

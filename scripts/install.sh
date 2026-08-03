@@ -213,7 +213,7 @@ install_posegridgen() {
   fi
   command_exists git || die "git is required for --with-posegridgen."
   local checkout="${REPO_ROOT}/third_party/PoseGridGen"
-  local revision="ad152e369e8d2746d0cf66cb1455f2371b0ec0f0"
+  local revision="9e6975901fe096bf65f7b7b599d7b82461d2e67c"
   if [[ "${CHECK_ONLY}" != true ]]; then
     log "Initializing the pinned PoseGridGen source checkout."
     run git submodule update --init --checkout third_party/PoseGridGen

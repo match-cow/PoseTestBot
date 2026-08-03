@@ -74,7 +74,9 @@ def test_teaching_plan_has_exact_nine_frame_and_phase_contract() -> None:
         (0, 0, 30),
         (0, 0, -15),
     ]
-    assert [tuple(motion["result_offset"].values()) for motion in orientation["motions"]] == [
+    assert [
+        tuple(motion["result_offset"].values()) for motion in orientation["motions"]
+    ] == [
         (-15, 0, 0),
         (15, 0, 0),
         (0, 0, 0),
@@ -108,7 +110,10 @@ def test_manifest_frames_and_relative_deltas_match_java() -> None:
             rf'private static final String [A-Z0-9_]+_PATH\s*=\s*"{re.escape(frame["path"])}";',
             java,
         ), frame["name"]
-    assert 'private static final String TEMPLATE_BASE_PATH = "/PoseTestBot/TemplateBase";' in java
+    assert (
+        'private static final String TEMPLATE_BASE_PATH = "/PoseTestBot/TemplateBase";'
+        in java
+    )
     assert "new Frame(" not in java
     assert "/HRC_Hub/Template_Base" not in java
     assert "CALIBRATION_READY_PATH" not in java
@@ -119,7 +124,10 @@ def test_manifest_frames_and_relative_deltas_match_java() -> None:
     assert "ENABLE_AFTER_OFFLINE_VALIDATION = false" in java
     assert "Transformation.ofDeg(0, 0, 0," in java
     assert "linRel(offset," in java
-    assert "calibrationCenter).setCartVelocity(cartVelocityMmS)" in java
+    assert re.search(
+        r"linRel\(offset,\s*calibrationCenter\)\s*\.setCartVelocity\(cartVelocityMmS\)",
+        java,
+    )
 
     relative_calls = re.findall(
         r"captureRelativeOrientation\((-?\d+), (-?\d+), (-?\d+), cartVelocityMmS,\s*\n?\s*\"([^\"]+)\"\);",
@@ -153,12 +161,10 @@ def test_calibration_motion_uses_smooth_capture_and_orientation_limits() -> None
     assert "MAX_CART_VEL_MM_S = 30.0" in java
     assert "requestedMmS * CAPTURE_VELOCITY_SCALE" in java
     assert ".setJointVelocityRel(ORIENTATION_JOINT_VEL_REL)" in java
-    assert java.count(
-        ".setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)"
-    ) == 4
+    assert java.count(".setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)") == 4
     assert java.count(".setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL)") == 4
     assert java.count("settleAtCurrentPose(") == 5
-    assert 'transmitCurrentPose(motionName + "_settled")' in java
+    assert 'poseStream.sendCurrentPose(motionName + "_settled")' in java
 
 
 def test_printable_checklist_has_one_signoff_row_per_taught_frame() -> None:

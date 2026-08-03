@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-07-29
+Last updated: 2026-08-03
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -43,6 +43,68 @@ The code rewrite is implemented across:
   `processed/bop_evaluation/`; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
+
+## 2026-08-03 DIN A5/A6 Calibration Targets
+
+The pinned PoseGridGen checkout now includes DIN A5 (148 × 210 mm) and A6
+(105 × 148 mm). Both sizes flow through the existing capability-driven paper
+selector, preview, fit, immutable JSON/PDF bundle, selection, and calibration
+contracts without adding another target path or changing marker geometry.
+PoseGridGen rejects the 100 mm ruler on A6 portrait because it cannot fit inside
+the printer-safe width; the operator can disable the ruler or use landscape.
+
+Previously generated immutable bundles from the `ad152e369e` pin remain valid
+and selectable with their exact original hashes and provenance. New generation
+requires the current `9e6975901f` checkout; no saved bundle is rewritten or
+silently rerendered during the pin transition.
+
+## 2026-08-03 IIWA High-Rate Pose-Stream Source
+
+The retained 2026-07-28 calibration run was audited at 1,375 within-motion
+intervals: 61.042 ms median (16.382 Hz), 62.779 ms p95, and 79.253 ms maximum.
+That confirms the deployed stream was far below the Java loop's nominal 10 ms
+sleep and repeatedly outside the former 20 ms nearest-pose calibration limit.
+Attempt `ef9ffe4619104c4fb804dd71ab6e153c` consequently found zero motion groups
+whose frames remained matchable across its complete time-offset search and
+failed during `time_offset_search_execution`; target detection itself had
+succeeded for 335 frames.
+
+Both repository iiwa motion applications now use blocking motions with a
+separate read-only `RoboticsAPICyclicBackgroundTask` requesting a 10 ms
+`BestEffort` period. This removes `IMotionContainer.isFinished()` from the
+sampling hot path. The shared task owns sequenced `robot_pose.v1` delivery,
+retains target/delta/query-duration evidence, contains cyclic runtime failures,
+and exposes them to the motion application. The receiver validates and retains
+the new optional evidence. A non-destructive cadence reporter applies the
+commissioning targets of 50 Hz median, 25 ms p95 gap, and 40 ms maximum gap.
+
+Calibration timing revision
+`constant_latency_nearest_pose_motion_lomo_warn_fallback.v3` now separates
+advisory timing quality from unusable input. New attempts search -300 to
++300 ms, warn when an applied candidate exceeds ±150 ms, retain nearest-pose
+matches through 150 ms, and warn above 20 ms. Weak, ambiguous, boundary, or
+otherwise unevaluable offset-search evidence keeps recorded timing at 0 ms
+with explicit degraded checks and continues into the unchanged robot-camera
+geometry validation. Missing/corrupt robot pose evidence still fails, and
+reprojection, held-out residual, outlier, coverage, motion-diversity, and
+multi-camera closure gates still govern promotion. Historical v1/v2 attempts
+remain immutable and keep their recorded fail-closed semantics.
+
+A fresh v3 attempt on the same retained run,
+`6a02e06bacbf4242b20ca50baa6bca8c`, completed all calculation phases with
+exit status 0. It retained recorded timing for all 514 observations, reported
+the weak +20 ms candidate and 33.363 ms maximum nearest-pose delta as degraded
+warnings, and reached geometric validation. It produced no recommendation
+because the unchanged continuous image-centroid coverage gates failed (x span
+0.435/0.450, y span 0.318/0.350, hull area 0.088/0.100), not because of timing.
+
+The four Java sources compile against a public Sunrise 1.15.1 API set, and all
+1,026 default (non-Playwright) tests pass without hardware access. This is not
+lab deployment evidence: exact Workbench background-task registration,
+installed-API compilation, controller deployment, path recommissioning, and
+supervised cadence measurement remain operator work under remaining milestone
+1. No robot command, UDP `STOP`, camera access, or physical capture was
+performed.
 
 ## 2026-07-29 Cell View Frame and Surface Rendering
 
@@ -578,15 +640,15 @@ At campaign completion each run passed `rewrite_full_capture.v1` at 10/10 and
 profile collections were retired because they predate required time-alignment
 provenance; raw captures and immutable attempt evidence remain.
 
-Calibration attempts now default to per-camera Auto time alignment and retain
-the complete bounded search and fail-closed decision in
+Calibration attempts default to per-camera Auto time alignment and retain
+the complete bounded search and decision in
 `time_offset_search.json`. A retrospective replay selected +70 to +75 ms,
 +80 to +85 ms, and +45 to +55 ms for the three cameras and reduced
 cross-validated stationary-target translation residual by 14–38% versus 0 ms.
 This is effective-latency tuning from robot motion, not hardware-clock proof,
 and it was not promoted back into the historical attempts.
 
-The Auto time-alignment implementation is now revisioned at
+The search-corrected motion audit was introduced in historical revision
 `constant_latency_nearest_pose_motion_lomo_cv.v2`. It keeps the interior
 optimum, aggregate materiality, fold-optimum stability, reference-method
 sensitivity, and rotation gates, then refits the transform with every motion
@@ -597,7 +659,9 @@ grid at 0.05. Per-fold materiality remains recorded as a warning rather than
 allowing one arbitrary three-fold partition to veto stronger motion-level
 evidence. Promotion recalculates the saved per-motion improvements, medians,
 sign probability, and search correction instead of trusting saved `ok` labels.
-Immutable v1 attempts retain their original replay and promotion semantics.
+Current v3 retains that strong-evidence path while converting statistical
+search rejection into the explicit 0 ms warning fallback described above.
+Immutable v1/v2 attempts retain their original replay and promotion semantics.
 
 Real retained-data attempt `1c6b0c9d00dc49ce8d0c14c18d43336b` completed
 under v2 with all three required D435 cameras. It selected +70 ms, +85 ms, and
@@ -1161,9 +1225,10 @@ runtimes on this host.
   manifest states and unique partial evidence, and kept reusable sequence and
   capture plans free of execution authorization.
 - Hardened eye-in-hand attempts so RealSense SDK `global_time` sensor exposure
-  timestamps pair with robot host-wall timestamps, with no fallback and a
-  20 ms maximum nearest-pose delta. The original fixed-zero-only behavior is
-  retained as an explicit baseline; new guided attempts can apply the
+  timestamps pair with robot host-wall timestamps, with no timestamp-source
+  fallback. The original contract used a 20 ms maximum nearest-pose delta;
+  current v3 uses a 20 ms warning and 150 ms hard boundary. The explicit
+  fixed-zero baseline remains available, and new guided attempts can apply the
   evidence-gated per-camera auto offset described in Current State. Added
   spatial/campaign target support, rotation-axis rank checks before and after
   pruning, per-motion balanced fitting, and full-input validation.

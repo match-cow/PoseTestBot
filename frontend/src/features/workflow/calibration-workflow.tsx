@@ -14,7 +14,7 @@ import { useOperator } from "@/providers/operator-provider"
 
 type CalibrationMode = "eye_in_hand" | "eye_to_hand"
 type SynchronizationPolicy = "auto_offset" | "fixed_zero"
-const REQUIRED_AUTO_TIMING_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_cv.v2"
+const REQUIRED_AUTO_TIMING_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_warn_fallback.v3"
 type Camera = { sensor_key: string; sensor_name: string; display_name: string; sensor_type: string; device_id: string; current_mounting_mode?: string | null }
 type SavedTarget = { target_id: string; display_name: string; valid: boolean; selected?: boolean }
 type Setup = {
@@ -35,6 +35,10 @@ type Setup = {
         minimum_robot_pose_time_offset_ms: number
         maximum_robot_pose_time_offset_ms: number
         step_ms: number
+        max_nearest_pose_delta_ms?: number
+        warning_nearest_pose_delta_ms?: number
+        warning_absolute_robot_pose_time_offset_ms?: number
+        time_offset_failure_policy?: "fail_closed" | "warn_keep_zero"
         minimum_motion_count_per_cross_validation_fold?: number
         maximum_leave_one_motion_out_search_adjusted_sign_p_value?: number
       }
@@ -59,6 +63,7 @@ type Setup = {
       min_rotation_span_deg: number
       min_rotation_axis_second_to_first_ratio: number
       max_nearest_pose_delta_ms: number
+      warning_nearest_pose_delta_ms?: number
     }
   }
   latest_attempt: { attempt_id: string; status: string } | null
@@ -138,6 +143,7 @@ type TimeOffsetSensor = {
   selected_sync_delta_ms: number
   candidate_robot_pose_time_offset_ms: number
   evidence_strength: string
+  warning_fallback_used?: boolean
   boundary_hit: boolean
   selection_extrinsic_method?: string
   improvement_evidence_strategy?: string
@@ -156,7 +162,17 @@ type TimeOffsetSearch = {
   policy: SynchronizationPolicy
   status: "complete" | "failed"
   sign_convention: { operator_equation: string; positive_operator_value: string; conversion: string }
-  search: { minimum_robot_pose_time_offset_ms: number; maximum_robot_pose_time_offset_ms: number; step_ms: number }
+  search: {
+    minimum_robot_pose_time_offset_ms: number
+    maximum_robot_pose_time_offset_ms: number
+    step_ms: number
+    max_nearest_pose_delta_ms?: number
+    warning_nearest_pose_delta_ms?: number
+    warning_absolute_robot_pose_time_offset_ms?: number
+    time_offset_failure_policy?: "fail_closed" | "warn_keep_zero"
+  }
+  warning_sensor_keys?: string[]
+  warning_sensor_count?: number
   sensors: TimeOffsetSensor[]
 }
 type Attempt = {
@@ -288,7 +304,7 @@ export function CalibrationWorkflow() {
           <HelpTip label="robot-pose time-offset sign">A positive robot-pose time offset pairs a frame at time t with a robot pose recorded later at t + offset. The lower-level dataset sync delta has the opposite sign.</HelpTip>
         </div>
         {synchronizationPolicy === "auto_offset" && !autoTimingRuntimeReady && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs leading-relaxed" data-testid="calibration-backend-restart-required"><div className="font-semibold text-destructive">Backend restart required</div><p className="mt-1 text-muted-foreground">This page requires timing revision <span className="font-mono">{REQUIRED_AUTO_TIMING_IMPLEMENTATION_REVISION}</span>, but the running backend reports <span className="font-mono">{backendTimingRevision ?? "no revision"}</span>. Restart the PoseTestBot service and reload this page before analyzing with Auto time alignment. Otherwise the attempt would preserve the obsolete timing rule.</p></div>}
-        {setup.data.solver.synchronization?.search && <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">Time-alignment search limits and acceptance rule</summary><div className="space-y-2 border-t px-3 py-3 text-[11px] text-muted-foreground"><p>Fixed search: {formatSigned(setup.data.solver.synchronization.search.minimum_robot_pose_time_offset_ms, " ms")} to {formatSigned(setup.data.solver.synchronization.search.maximum_robot_pose_time_offset_ms, " ms")} in {setup.data.solver.synchronization.search.step_ms.toFixed(1)} ms steps. These limits are recorded with the attempt and are not tuned interactively.</p><p>At least {(setup.data.solver.synchronization.search.minimum_motion_count_per_cross_validation_fold ?? 4) * 3} eligible motion groups are required. After candidate selection, every motion is held out once while the robot-camera transform is fitted from the other motions. Both reference solvers must retain a median improvement of at least 0.25 mm and 10%, with a one-sided sign-consistency probability corrected across the full offset search no greater than {(setup.data.solver.synchronization.search.maximum_leave_one_motion_out_search_adjusted_sign_p_value ?? 0.05).toFixed(2)}.</p></div></details>}
+        {setup.data.solver.synchronization?.search && <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">Time-alignment search limits and warning policy</summary><div className="space-y-2 border-t px-3 py-3 text-[11px] text-muted-foreground"><p>Fixed search: {formatSigned(setup.data.solver.synchronization.search.minimum_robot_pose_time_offset_ms, " ms")} to {formatSigned(setup.data.solver.synchronization.search.maximum_robot_pose_time_offset_ms, " ms")} in {setup.data.solver.synchronization.search.step_ms.toFixed(1)} ms steps. These limits are recorded with the attempt and are not tuned interactively.</p><p>Nearest-pose gaps above {(setup.data.solver.synchronization.search.warning_nearest_pose_delta_ms ?? setup.data.solver.thresholds.warning_nearest_pose_delta_ms ?? 20).toFixed(0)} ms are warnings; matches remain usable through {(setup.data.solver.synchronization.search.max_nearest_pose_delta_ms ?? setup.data.solver.thresholds.max_nearest_pose_delta_ms).toFixed(0)} ms. A supported offset larger than ±{(setup.data.solver.synchronization.search.warning_absolute_robot_pose_time_offset_ms ?? 150).toFixed(0)} ms is also highlighted, but it is not rejected solely for its magnitude.</p><p>At least {(setup.data.solver.synchronization.search.minimum_motion_count_per_cross_validation_fold ?? 4) * 3} eligible motion groups are requested. After candidate selection, every motion is held out once while the robot-camera transform is fitted from the other motions. If that timing evidence is weak or cannot be evaluated, the attempt keeps the recorded 0 ms timing, records a degraded warning, and continues to the robot-camera geometry checks. Missing or corrupt robot-pose evidence still stops the attempt.</p></div></details>}
       </fieldset>
       <Button className="w-full" size="lg" disabled={!canRun} onClick={() => createAttempt.mutate()}>{createAttempt.isPending ? <LoaderCircle className="animate-spin" /> : <Grid3X3 />}Analyze recording</Button>{!canRun && <p className="text-center text-xs text-muted-foreground">{synchronizationPolicy === "auto_offset" && !autoTimingRuntimeReady ? "Restart the PoseTestBot backend and reload this page to use the current Auto time-alignment rule." : "Confirm one mounting group, at least one matching camera, and the step-2 printed grid to continue."}</p>}
     </CardContent></Card>
@@ -304,11 +320,13 @@ function TimeAlignmentSummary({ search }: { search: TimeOffsetSearch | null }) {
   if (!search) return <Card className="border-warning/40 bg-warning/5" data-testid="calibration-time-alignment"><CardContent className="py-4 text-xs"><div className="font-semibold">Legacy timing evidence unavailable</div><p className="mt-1 text-muted-foreground">This historical attempt predates saved time-alignment evidence and is not reusable for a new dataset. Its immutable calculation evidence remains available for review.</p></CardContent></Card>
   const currentTimingRevision = search.policy !== "auto_offset"
     || search.implementation_revision === REQUIRED_AUTO_TIMING_IMPLEMENTATION_REVISION
-  return <Card className={search.status === "failed" ? "border-destructive/40" : ""} data-testid="calibration-time-alignment">
+  const hasTimingWarnings = search.sensors.some((sensor) => sensor.checks.some((check) => check.status === "warning"))
+  return <Card className={search.status === "failed" ? "border-destructive/40" : hasTimingWarnings ? "border-warning/40" : ""} data-testid="calibration-time-alignment">
     <CardHeader><CardTitle className="flex items-center gap-2 text-base">Auto time-alignment evidence <HelpTip label="robot-pose time-offset evidence">A positive offset uses a later robot pose. The lower-level dataset sync delta has the opposite sign. Neither value rewrites raw timestamps.</HelpTip></CardTitle><CardDescription>The offset estimates effective capture/pose latency; it is not evidence that the hardware clocks are synchronized.</CardDescription></CardHeader>
     <CardContent className="space-y-4">
-      {!currentTimingRevision && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs" data-testid="calibration-attempt-legacy-timing-revision"><div className="font-semibold text-destructive">This attempt used an obsolete timing rule</div><p className="mt-1 text-muted-foreground">The immutable attempt records <span className="font-mono">{search.implementation_revision ?? "no timing revision"}</span>, so it did not run the current search-corrected leave-one-motion-out gate. It cannot be upgraded in place. Restart the PoseTestBot backend and create a new attempt from the same preserved recordings.</p></div>}
-      {search.status === "failed" && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs" data-testid="calibration-time-alignment-failed"><div className="font-semibold text-destructive">Auto time alignment stopped this calibration</div><p className="mt-1 text-muted-foreground">{currentTimingRevision ? "At least one camera did not pass offset stability, aggregate improvement, or leave-one-motion-out consistency. No robot-camera result was generated or saved; inspect the rejected candidate and checks below." : "This result was decided by the recorded legacy rule. No robot-camera result was generated or saved; create a fresh attempt after restarting the backend."}</p></div>}
+      {!currentTimingRevision && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs" data-testid="calibration-attempt-legacy-timing-revision"><div className="font-semibold text-destructive">This attempt used an obsolete timing rule</div><p className="mt-1 text-muted-foreground">The immutable attempt records <span className="font-mono">{search.implementation_revision ?? "no timing revision"}</span>, so it did not run the current relaxed matching and warning-fallback policy. It cannot be upgraded in place. Restart the PoseTestBot backend and create a new attempt from the same preserved recordings.</p></div>}
+      {search.status === "failed" && <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs" data-testid="calibration-time-alignment-failed"><div className="font-semibold text-destructive">Auto time alignment stopped this calibration</div><p className="mt-1 text-muted-foreground">{currentTimingRevision ? "Required robot-pose timing input was missing, corrupt, or unusable. No robot-camera result was generated or saved; inspect the checks below." : "This result was decided by the recorded legacy rule. No robot-camera result was generated or saved; create a fresh attempt after restarting the backend."}</p></div>}
+      {search.status === "complete" && hasTimingWarnings && <div className="rounded-md border border-warning/40 bg-warning/5 p-3 text-xs" data-testid="calibration-time-alignment-warning"><div className="font-semibold text-warning-foreground">Calibration continued with timing warnings</div><p className="mt-1 text-muted-foreground">One or more cameras exceeded an advisory timing level or did not provide strong enough evidence to apply an estimated offset. Where needed, PoseTestBot retained the recorded 0 ms timing and continued to the robot-camera geometry checks. Review these warnings together with the final residual and reprojection evidence before saving.</p></div>}
       <div className="overflow-x-auto rounded-lg border">
         <table className="min-w-[1040px] w-full text-left text-[11px]">
           <caption className="sr-only">Motion-disjoint per-camera time-offset search decisions</caption>
@@ -322,8 +340,8 @@ function TimeAlignmentSummary({ search }: { search: TimeOffsetSearch | null }) {
             const warningChecks = sensor.checks.filter((check) => check.status === "warning")
             const errorChecks = sensor.checks.filter((check) => check.status === "error")
             const warning = sensor.status === "failed" || sensor.boundary_hit || warningChecks.length > 0 || errorChecks.length > 0
-            const decision = sensor.status === "failed" ? "Time alignment rejected" : sensor.status === "applied" && warningChecks.length > 0 ? `Applied with ${warningChecks.length} warning${warningChecks.length === 1 ? "" : "s"}` : sensor.status === "applied" ? "Time offset applied" : "Recorded timing kept"
-            const candidateLabel = sensor.status === "failed" ? `rejected ${formatSigned(sensor.candidate_robot_pose_time_offset_ms, " ms")} candidate` : sensor.status === "applied" ? "selected offset" : "0 ms candidate"
+            const decision = sensor.status === "failed" ? "Time alignment rejected" : sensor.status === "applied" && warningChecks.length > 0 ? `Applied with ${warningChecks.length} warning${warningChecks.length === 1 ? "" : "s"}` : sensor.status === "applied" ? "Time offset applied" : sensor.warning_fallback_used ? "Recorded timing kept with warning" : "Recorded timing kept"
+            const candidateLabel = sensor.status === "failed" ? `rejected ${formatSigned(sensor.candidate_robot_pose_time_offset_ms, " ms")} candidate` : sensor.status === "applied" ? "selected offset" : sensor.warning_fallback_used ? `unapplied ${formatSigned(sensor.candidate_robot_pose_time_offset_ms, " ms")} candidate` : "0 ms candidate"
             return <tr key={sensor.sensor_key} className="border-t" data-time-offset-sensor={sensor.sensor_key}>
               <td className="px-3 py-3"><div className="font-semibold">{sensor.display_name ?? sensor.sensor_name ?? sensor.sensor_key}</div><div className="mt-0.5 font-mono text-[9px] text-muted-foreground">{sensor.sensor_key}</div></td>
               <td className="px-3 py-3"><span className={`rounded-full px-2 py-1 font-semibold ${warning ? "bg-warning/15 text-warning-foreground" : sensor.status === "applied" ? "bg-success/10 text-success" : "bg-muted text-muted-foreground"}`}>{decision}</span></td>

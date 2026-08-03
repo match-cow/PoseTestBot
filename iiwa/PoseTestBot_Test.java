@@ -16,7 +16,6 @@ import com.kuka.roboticsAPI.deviceModel.JointPosition;
 import com.kuka.roboticsAPI.deviceModel.LBR;
 import com.kuka.roboticsAPI.geometricModel.Frame;
 import com.kuka.roboticsAPI.geometricModel.ObjectFrame;
-import com.kuka.roboticsAPI.motionModel.IMotionContainer;
 import com.kuka.roboticsAPI.persistenceModel.templateModel.InfoTemplate;
 
 import org.json.simple.JSONObject;
@@ -41,7 +40,6 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 			"/PoseTestBot/CaptureStart";
 	private static final String CAPTURE_END_FRAME_PATH =
 			"/PoseTestBot/CaptureEnd";
-	private static final String POSE_PACKET_SCHEMA_VERSION = "robot_pose.v1";
 	private static final String DEFAULT_RECEIVER_IP = "172.31.1.169";
 	private static final Charset UTF_8 = Charset.forName("UTF-8");
 
@@ -52,13 +50,10 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 	 */
 	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = false;
 
-	private static final int SAMPLE_TIME_MS = 10;
 	private static final int SETTLE_TIME_MS = 1500;
 	private static final int COMMAND_BUFFER_BYTES = 4096;
 	private static final int ROBOT_PORT = 30300;
 	private static final int DEFAULT_RECEIVER_PORT = 8080;
-	private static final int END_PACKET_COUNT = 3;
-	private static final int END_PACKET_INTERVAL_MS = 50;
 
 	private static final double REPOSITION_JOINT_VEL_REL = 0.08;
 	private static final double MAX_CAPTURE_A1_ANGULAR_VELOCITY_RAD_S =
@@ -87,7 +82,7 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 	private ObjectFrame captureStartFrame;
 	private ObjectFrame captureEndFrame;
 	private JointPosition captureAnchorJointPosition;
-	private long nextPacketSequence;
+	private PoseTestBotPoseStreamFunction poseStream;
 
 	@Override
 	public void initialize() {
@@ -128,13 +123,20 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 				+ "active motion. Use only the controller's approved safety "
 				+ "response for an unsafe condition.");
 
+		try {
+			poseStream = getTaskFunction(
+					PoseTestBotPoseStreamFunction.class);
+		} catch (RuntimeException e) {
+			getLogger().error("Required automatic PoseTestBot pose-stream "
+					+ "background task is unavailable: " + e);
+			return;
+		}
+
 		while (true) {
 			CaptureCommand command = waitForStartCommand();
 			if (command == null) {
 				return;
 			}
-
-			nextPacketSequence = 0L;
 
 			try {
 				runCapture(command);
@@ -156,6 +158,12 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 				+ command.runId + " with requested Cartesian speed "
 				+ command.cartesianVelocityMps + " m/s");
 
+		poseStream.configure(
+				command.receiverAddress.getHostAddress(),
+				command.receiverPort,
+				command.runId,
+				POSE_TEMPLATE_BASE_PATH);
+
 		moveToCommissionedFrame(
 				captureStartFrame,
 				CAPTURE_START_FRAME_PATH,
@@ -171,12 +179,17 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 
 		double captureJointVelocityRel = captureJointVelocityRel(
 				command.cartesianVelocityMps);
-		IMotionContainer motion = robot.moveAsync(ptp(jointTarget(A1_MAX_RAD))
-				.setJointVelocityRel(captureJointVelocityRel)
-				.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
-				.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
-
-		int sentPoseCount = transmitPose(motion, command, "a1_capture_sweep");
+		long sentPoseCount;
+		poseStream.startMotion("a1_capture_sweep");
+		try {
+			robot.move(ptp(jointTarget(A1_MAX_RAD))
+					.setJointVelocityRel(captureJointVelocityRel)
+					.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
+					.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
+		} finally {
+			sentPoseCount = poseStream.stopMotion();
+		}
+		verifyPoseStream("a1_capture_sweep", sentPoseCount);
 		getLogger().info("A1 sweep finished after transmitting "
 				+ sentPoseCount + " pose packet(s)");
 		sleepWithLogging(SETTLE_TIME_MS, "post-capture settle");
@@ -190,7 +203,30 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 		 * so the host cannot release the capture job while the robot is still
 		 * executing the commissioned sequence.
 		 */
-		transmitEndMarker(command);
+		poseStream.finishCapture();
+	}
+
+	private void verifyPoseStream(String motionName, long segmentPoseCount) {
+		if (poseStream.getFatalFailureCount() > 0L) {
+			throw new IllegalStateException("Pose stream failed during "
+					+ motionName + ": " + poseStream.getLastError());
+		}
+		if (segmentPoseCount <= 0L) {
+			throw new IllegalStateException(
+					"Pose stream produced no samples during " + motionName);
+		}
+		if (poseStream.getSendFailureCount() > 0L) {
+			getLogger().warn("Pose stream has "
+					+ poseStream.getSendFailureCount()
+					+ " observable UDP send failure(s); last error: "
+					+ poseStream.getLastError());
+		}
+		getLogger().info("Pose cadence evidence for " + motionName
+				+ ": target_period_ms=" + poseStream.getTargetPeriodMs()
+				+ ", maximum_pose_delta_ms="
+				+ poseStream.getMaximumPoseDeltaNs() / 1000000.0
+				+ ", maximum_pose_query_ms="
+				+ poseStream.getMaximumPoseQueryDurationNs() / 1000000.0);
 	}
 
 	private void moveToCommissionedFrame(ObjectFrame targetFrame,
@@ -437,160 +473,6 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 		return "pause_capture".equals(command)
 				|| "stop_after_current_motion".equals(command)
 				|| "emergency_stop".equals(command);
-	}
-
-	@SuppressWarnings("unchecked")
-	private byte[] currentPosePayload(String motionName,
-			CaptureCommand command) {
-		Frame currentPose = robot.getCurrentCartesianPosition(
-				robot.getFlange(), poseTemplateBase);
-		JSONObject jsonObject = packetEnvelope(
-				"pose", motionName, command, nextPacketSequence++);
-		jsonObject.put("X", currentPose.getX());
-		jsonObject.put("Y", currentPose.getY());
-		jsonObject.put("Z", currentPose.getZ());
-		jsonObject.put("A", currentPose.getAlphaRad());
-		jsonObject.put("B", currentPose.getBetaRad());
-		jsonObject.put("C", currentPose.getGammaRad());
-		return jsonObject.toJSONString().getBytes(UTF_8);
-	}
-
-	@SuppressWarnings("unchecked")
-	private JSONObject packetEnvelope(String packetKind, String motionName,
-			CaptureCommand command, long sequence) {
-		JSONObject jsonObject = new JSONObject();
-		jsonObject.put("schema_version", POSE_PACKET_SCHEMA_VERSION);
-		jsonObject.put("packet_kind", packetKind);
-		jsonObject.put("sequence", Long.valueOf(sequence));
-		jsonObject.put("sender_monotonic_ns",
-				Long.valueOf(System.nanoTime()));
-		jsonObject.put("sender_wall_timestamp_ms",
-				Long.valueOf(System.currentTimeMillis()));
-		jsonObject.put("run_id", command.runId);
-		jsonObject.put("motion", motionName);
-		jsonObject.put("from_frame", "robot_flange");
-		jsonObject.put("to_frame", "template_base");
-		jsonObject.put("sunrise_reference_frame_path",
-				POSE_TEMPLATE_BASE_PATH);
-		return jsonObject;
-	}
-
-	private void sendCurrentPose(DatagramSocket socket,
-			CaptureCommand command, String motionName) throws IOException {
-		byte[] data = currentPosePayload(motionName, command);
-		sendPayload(socket, command, data);
-	}
-
-	private void sendPayload(DatagramSocket socket, CaptureCommand command,
-			byte[] data) throws IOException {
-		DatagramPacket packet = new DatagramPacket(
-				data,
-				data.length,
-				command.receiverAddress,
-				command.receiverPort);
-		socket.send(packet);
-	}
-
-	private int transmitPose(IMotionContainer motion, CaptureCommand command,
-			String motionName) {
-		DatagramSocket socket = null;
-		int sentPoseCount = 0;
-		int sendFailureCount = 0;
-		boolean interrupted = false;
-
-		try {
-			socket = new DatagramSocket();
-			while (!motion.isFinished()) {
-				try {
-					sendCurrentPose(socket, command, motionName);
-					sentPoseCount++;
-				} catch (IOException e) {
-					sendFailureCount++;
-					if (sendFailureCount == 1
-							|| sendFailureCount % 100 == 0) {
-						getLogger().error("Pose packet transmission failure "
-								+ sendFailureCount + ": " + e);
-					}
-				}
-
-				try {
-					Thread.sleep(SAMPLE_TIME_MS);
-				} catch (InterruptedException e) {
-					/*
-					 * Do not report capture completion while the asynchronous
-					 * robot motion is still active. Remember the interruption,
-					 * continue observing the motion, and restore it afterward.
-					 */
-					interrupted = true;
-					getLogger().error("Pose transmission wait interrupted; "
-							+ "continuing until the active motion finishes");
-				}
-			}
-		} catch (SocketException e) {
-			getLogger().error("Unable to open pose-transmission socket: " + e);
-			interrupted = waitForMotionCompletion(motion) || interrupted;
-		} catch (RuntimeException e) {
-			getLogger().error("Unable to build a pose packet; waiting for the "
-					+ "active motion to finish before failing capture: " + e);
-			interrupted = waitForMotionCompletion(motion) || interrupted;
-			throw e;
-		} finally {
-			if (socket != null) {
-				socket.close();
-			}
-			if (sendFailureCount > 0) {
-				getLogger().warn("Pose stream completed with "
-						+ sendFailureCount + " observable UDP send failure(s)");
-			}
-			if (interrupted) {
-				Thread.currentThread().interrupt();
-			}
-		}
-		return sentPoseCount;
-	}
-
-	@SuppressWarnings("unchecked")
-	private void transmitEndMarker(CaptureCommand command) {
-		DatagramSocket socket = null;
-		long endSequence = nextPacketSequence++;
-		JSONObject endObject = packetEnvelope(
-				"end", "end", command, endSequence);
-		byte[] data = endObject.toJSONString().getBytes(UTF_8);
-
-		try {
-			socket = new DatagramSocket();
-			for (int i = 0; i < END_PACKET_COUNT; i++) {
-				try {
-					sendPayload(socket, command, data);
-				} catch (IOException e) {
-					getLogger().error("End marker transmission "
-							+ (i + 1) + " failed: " + e);
-				}
-				if (i + 1 < END_PACKET_COUNT) {
-					sleepWithLogging(
-							END_PACKET_INTERVAL_MS,
-							"end-marker retry interval");
-				}
-			}
-		} catch (SocketException e) {
-			getLogger().error("Unable to open end-marker socket: " + e);
-		} finally {
-			if (socket != null) {
-				socket.close();
-			}
-		}
-	}
-
-	private boolean waitForMotionCompletion(IMotionContainer motion) {
-		boolean interrupted = false;
-		while (!motion.isFinished()) {
-			try {
-				Thread.sleep(SAMPLE_TIME_MS);
-			} catch (InterruptedException e) {
-				interrupted = true;
-			}
-		}
-		return interrupted;
 	}
 
 	private void sleepWithLogging(int millis, String reason) {

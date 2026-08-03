@@ -88,13 +88,18 @@ from posetestbot.calibration.targets import (
     validate_target_identity,
 )
 from posetestbot.calibration.time_offset import (
+    DEFAULT_MAX_NEAREST_POSE_DELTA_MS,
     DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE,
     DEFAULT_POLICY as DEFAULT_SYNCHRONIZATION_POLICY,
     DEFAULT_REFERENCE_PNP_METHOD,
+    DEFAULT_WARNING_NEAREST_POSE_DELTA_MS,
+    FAILURE_POLICY_FAIL_CLOSED,
+    FAILURE_POLICY_WARN_KEEP_ZERO,
     IMPROVEMENT_EVIDENCE_STRATEGY,
     IMPLEMENTATION_REVISION as TIME_OFFSET_IMPLEMENTATION_REVISION,
     LEGACY_IMPLEMENTATION_REVISION as TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION,
     LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY,
+    LOMO_IMPLEMENTATION_REVISION as TIME_OFFSET_LOMO_IMPLEMENTATION_REVISION,
     LOMO_CONSISTENCY_STRATEGY,
     POLICIES as SYNCHRONIZATION_POLICIES,
     SCHEMA_VERSION as TIME_OFFSET_SEARCH_SCHEMA_VERSION,
@@ -106,6 +111,7 @@ from posetestbot.calibration.time_offset import (
     offset_values as time_offset_values,
     search_configuration as time_offset_search_configuration,
     sign_convention as time_offset_sign_convention,
+    warning_fallback_sensor_result,
 )
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
@@ -175,7 +181,8 @@ ATTEMPT_MIN_TARGET_MARKER_COVERAGE_RATIO = 0.5
 ATTEMPT_MIN_TARGET_ROW_COVERAGE_RATIO = 0.6
 ATTEMPT_MIN_TARGET_COLUMN_COVERAGE_RATIO = 0.6
 ATTEMPT_SYNC_DELTA_MS = 0.0
-ATTEMPT_MAX_NEAREST_POSE_DELTA_MS = 20.0
+ATTEMPT_MAX_NEAREST_POSE_DELTA_MS = DEFAULT_MAX_NEAREST_POSE_DELTA_MS
+ATTEMPT_WARNING_NEAREST_POSE_DELTA_MS = DEFAULT_WARNING_NEAREST_POSE_DELTA_MS
 ATTEMPT_TIMESTAMP_SOURCE = "sensor"
 ATTEMPT_ROBOT_TIMESTAMP_SOURCE = "host_wall"
 ATTEMPT_REALSENSE_TIMESTAMP_DOMAIN = "global_time"
@@ -736,6 +743,9 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                 ),
                 "max_observations_per_motion": (DEFAULT_MAX_OBSERVATIONS_PER_MOTION),
                 "max_nearest_pose_delta_ms": (ATTEMPT_MAX_NEAREST_POSE_DELTA_MS),
+                "warning_nearest_pose_delta_ms": (
+                    ATTEMPT_WARNING_NEAREST_POSE_DELTA_MS
+                ),
                 "image_coverage_tail_support_views": (
                     DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS
                 ),
@@ -2080,11 +2090,105 @@ def _intrinsics_for_sensors(
     return profiles, by_sensor
 
 
+def _recorded_time_offset_search(
+    request_value: Mapping[str, Any],
+) -> dict[str, Any]:
+    recorded = request_value.get("synchronization_search")
+    return (
+        dict(recorded)
+        if isinstance(recorded, Mapping)
+        else time_offset_search_configuration()
+    )
+
+
+def _recorded_nearest_pose_limits_ms(
+    request_value: Mapping[str, Any],
+) -> tuple[float, float | None]:
+    search = _recorded_time_offset_search(request_value)
+    maximum_ms = float(search["max_nearest_pose_delta_ms"])
+    warning_value = search.get("warning_nearest_pose_delta_ms")
+    warning_ms = float(warning_value) if warning_value is not None else None
+    if not math.isfinite(maximum_ms) or maximum_ms <= 0.0:
+        raise ValueError(
+            "Calibration time-offset max nearest-pose delta must be positive"
+        )
+    if warning_ms is not None and (
+        not math.isfinite(warning_ms) or warning_ms <= 0.0 or warning_ms > maximum_ms
+    ):
+        raise ValueError(
+            "Calibration nearest-pose warning threshold must be positive and no "
+            "greater than the maximum"
+        )
+    return maximum_ms, warning_ms
+
+
+def _append_nearest_pose_warning_checks(
+    sync_quality: dict[str, Any],
+    *,
+    warning_threshold_ms: float | None,
+) -> None:
+    if warning_threshold_ms is None:
+        return
+    checks = sync_quality.get("checks")
+    if not isinstance(checks, list):
+        checks = []
+        sync_quality["checks"] = checks
+    sensors = sync_quality.get("sensors")
+    if not isinstance(sensors, list):
+        return
+    threshold_ns = round(warning_threshold_ms * 1_000_000.0)
+    for sensor in sensors:
+        if not isinstance(sensor, Mapping):
+            continue
+        sensor_name = str(sensor.get("sensor_name") or "unknown")
+        value = sensor.get("max_abs_nearest_pose_delta_ns")
+        try:
+            maximum_ns = int(value)
+        except (TypeError, ValueError):
+            continue
+        exceeds = maximum_ns > threshold_ns
+        checks.append(
+            {
+                "name": f"calibration_nearest_pose_warning:{sensor_name}",
+                "status": "warning" if exceeds else "ok",
+                "message": (
+                    f"{sensor_name} maximum nearest-pose delta "
+                    f"{maximum_ns / 1_000_000.0:.3f} ms "
+                    + (
+                        f"exceeds the {warning_threshold_ms:g} ms warning level; "
+                        "the match remains inside the relaxed hard limit."
+                        if exceeds
+                        else f"is within the {warning_threshold_ms:g} ms warning level."
+                    )
+                ),
+                "details": {
+                    "max_abs_nearest_pose_delta_ns": maximum_ns,
+                    "warning_nearest_pose_delta_ms": warning_threshold_ms,
+                },
+            }
+        )
+
+
+def _refresh_sync_quality_status(sync_quality: dict[str, Any]) -> None:
+    checks = sync_quality.get("checks")
+    statuses = (
+        {str(item.get("status")) for item in checks if isinstance(item, Mapping)}
+        if isinstance(checks, list)
+        else set()
+    )
+    sync_quality["overall_status"] = (
+        "error" if "error" in statuses else "warning" if "warning" in statuses else "ok"
+    )
+
+
 def _prepare_attempt_data(
     run_root: Path,
     attempt_root: Path,
     request_value: Mapping[str, Any],
 ) -> tuple[dict[str, Path], dict[str, dict[str, Any]]]:
+    max_nearest_pose_delta_ms, warning_nearest_pose_delta_ms = (
+        _recorded_nearest_pose_limits_ms(request_value)
+    )
     timestamp_policy = _calibration_timestamp_preflight(
         run_root, request_value["sensors"]
     )
@@ -2163,7 +2267,7 @@ def _prepare_attempt_data(
             sync_delta=ATTEMPT_SYNC_DELTA_MS,
             timestamp_source=sensor_policy["frame_timestamp_source"],
             robot_timestamp_source=sensor_policy["robot_timestamp_source"],
-            max_nearest_pose_delta_ms=ATTEMPT_MAX_NEAREST_POSE_DELTA_MS,
+            max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
         )
         for result in results:
             selected_sensor = selected_by_path[Path(result.sensor_folder).resolve()]
@@ -2176,16 +2280,21 @@ def _prepare_attempt_data(
     sync_quality = build_sync_quality_report(
         run_root,
         report_paths=sync_reports,
-        max_nearest_pose_delta_ms=ATTEMPT_MAX_NEAREST_POSE_DELTA_MS,
+        max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
         require_timestamp_source=required_frame_sources,
         require_robot_timestamp_source=required_robot_sources,
     )
     sync_quality["calibration_attempt_policy"] = {
         "sync_delta_ms": ATTEMPT_SYNC_DELTA_MS,
         **timestamp_policy,
-        "max_nearest_pose_delta_ms": ATTEMPT_MAX_NEAREST_POSE_DELTA_MS,
+        "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
+        "warning_nearest_pose_delta_ms": warning_nearest_pose_delta_ms,
         "historical_per_sensor_offsets_allowed": False,
     }
+    _append_nearest_pose_warning_checks(
+        sync_quality,
+        warning_threshold_ms=warning_nearest_pose_delta_ms,
+    )
     sensor_summaries = sync_quality.get("sensors")
     sync_delta_checks: list[dict[str, Any]] = []
     if not isinstance(sensor_summaries, list) or len(sensor_summaries) != len(
@@ -2249,6 +2358,7 @@ def _prepare_attempt_data(
         quality_checks = []
         sync_quality["checks"] = quality_checks
     quality_checks.extend(sync_delta_checks)
+    _refresh_sync_quality_status(sync_quality)
     atomic_write_json(attempt_root / SYNC_QUALITY_REPORT, sync_quality)
     checks = quality_checks
     blocking_checks = [
@@ -2735,10 +2845,28 @@ def _estimate_and_apply_time_offsets(
             f"{implementation_revision}"
         )
     improvement_evidence_strategy = (
-        LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY
-        if implementation_revision == TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
-        else IMPROVEMENT_EVIDENCE_STRATEGY
+        IMPROVEMENT_EVIDENCE_STRATEGY
+        if implementation_revision
+        in {
+            TIME_OFFSET_LOMO_IMPLEMENTATION_REVISION,
+            TIME_OFFSET_IMPLEMENTATION_REVISION,
+        }
+        else LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY
     )
+    tolerant_warning_fallback = (
+        implementation_revision == TIME_OFFSET_IMPLEMENTATION_REVISION
+    )
+    failure_policy = (
+        FAILURE_POLICY_WARN_KEEP_ZERO
+        if tolerant_warning_fallback
+        else FAILURE_POLICY_FAIL_CLOSED
+    )
+    recorded_failure_policy = search_configuration.get("time_offset_failure_policy")
+    if tolerant_warning_fallback and recorded_failure_policy != failure_policy:
+        raise ValueError(
+            "Current calibration time-offset attempts must record the warning "
+            "fallback policy"
+        )
     max_lomo_search_adjusted_sign_p_value = float(
         search_configuration.get(
             "maximum_leave_one_motion_out_search_adjusted_sign_p_value",
@@ -2757,6 +2885,33 @@ def _estimate_and_apply_time_offsets(
     if not math.isfinite(max_nearest_pose_delta_ms) or max_nearest_pose_delta_ms <= 0.0:
         raise ValueError(
             "Calibration time-offset max nearest-pose delta must be positive"
+        )
+    warning_nearest_pose_delta_ms = float(
+        search_configuration.get(
+            "warning_nearest_pose_delta_ms",
+            min(DEFAULT_WARNING_NEAREST_POSE_DELTA_MS, max_nearest_pose_delta_ms),
+        )
+    )
+    if (
+        not math.isfinite(warning_nearest_pose_delta_ms)
+        or warning_nearest_pose_delta_ms <= 0.0
+        or warning_nearest_pose_delta_ms > max_nearest_pose_delta_ms
+    ):
+        raise ValueError(
+            "Calibration nearest-pose warning threshold must be positive and no "
+            "greater than the maximum"
+        )
+    raw_warning_offset_ms = search_configuration.get(
+        "warning_absolute_robot_pose_time_offset_ms"
+    )
+    warning_abs_offset_ms = (
+        float(raw_warning_offset_ms) if raw_warning_offset_ms is not None else None
+    )
+    if warning_abs_offset_ms is not None and (
+        not math.isfinite(warning_abs_offset_ms) or warning_abs_offset_ms <= 0.0
+    ):
+        raise ValueError(
+            "Calibration robot-pose time-offset warning threshold must be positive"
         )
     sensor_metadata = {
         str(item["sensor_key"]): item for item in request_value["sensors"]
@@ -2781,11 +2936,8 @@ def _estimate_and_apply_time_offsets(
                 for method, items in by_method.items()
             }
         else:
+            robot_records: list[dict[str, Any]] = []
             try:
-                if not reference_observations:
-                    raise ValueError(
-                        f"{sensor_key}: auto-sync reference observations are missing"
-                    )
                 sensor_policy = _timestamp_policy_for_sensor(
                     timestamp_policy
                     if isinstance(timestamp_policy, Mapping)
@@ -2797,6 +2949,10 @@ def _estimate_and_apply_time_offsets(
                     load_robot_poses(run_root, sensor_folder),
                     timestamp_source=str(sensor_policy["robot_timestamp_source"]),
                 )
+                if not reference_observations:
+                    raise ValueError(
+                        f"{sensor_key}: auto-sync reference observations are missing"
+                    )
                 sensor_result, _reference_adjusted = estimate_sensor_time_offset(
                     reference_observations,
                     sensor_key=sensor_key,
@@ -2816,6 +2972,8 @@ def _estimate_and_apply_time_offsets(
                         for item in search_configuration["reference_extrinsic_methods"]
                     ),
                     max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+                    warning_nearest_pose_delta_ms=warning_nearest_pose_delta_ms,
+                    warning_abs_offset_ms=warning_abs_offset_ms,
                     max_observations_per_motion=int(
                         search_configuration["max_observations_per_motion"]
                     ),
@@ -2846,6 +3004,7 @@ def _estimate_and_apply_time_offsets(
                         search_configuration["minimum_offset_stability_ms"]
                     ),
                     improvement_evidence_strategy=improvement_evidence_strategy,
+                    failure_policy=failure_policy,
                     max_leave_one_motion_out_search_adjusted_sign_p_value=(
                         max_lomo_search_adjusted_sign_p_value
                     ),
@@ -2863,18 +3022,49 @@ def _estimate_and_apply_time_offsets(
                     for method, items in by_method.items()
                 }
             except Exception as exc:
-                sensor_result = failed_sensor_result(
-                    sensor_key=sensor_key,
-                    observation_count=len(reference_observations),
-                    error=exc,
-                )
-                adjusted[sensor_key] = {}
+                if tolerant_warning_fallback:
+                    if not robot_records:
+                        raise
+                    adjusted[sensor_key] = {
+                        method: apply_sensor_time_offset(
+                            items,
+                            robot_records=robot_records,
+                            robot_pose_time_offset_ms=0.0,
+                            max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+                        )
+                        for method, items in by_method.items()
+                    }
+                    sensor_result = warning_fallback_sensor_result(
+                        sensor_key=sensor_key,
+                        observation_count=len(reference_observations),
+                        adjusted_observations=adjusted[sensor_key].get(
+                            DEFAULT_REFERENCE_PNP_METHOD, []
+                        ),
+                        error=exc,
+                        warning_nearest_pose_delta_ms=(warning_nearest_pose_delta_ms),
+                        max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+                    )
+                else:
+                    sensor_result = failed_sensor_result(
+                        sensor_key=sensor_key,
+                        observation_count=len(reference_observations),
+                        error=exc,
+                    )
+                    adjusted[sensor_key] = {}
             if sensor_result["status"] == "failed":
                 failed.append(sensor_key)
         sensor_result["display_name"] = sensor.get("display_name")
         sensor_result["sensor_name"] = sensor.get("sensor_name")
         sensor_results.append(sensor_result)
 
+    warning_sensor_keys = [
+        str(item["sensor_key"])
+        for item in sensor_results
+        if any(
+            isinstance(check, Mapping) and check.get("status") == "warning"
+            for check in item.get("checks", [])
+        )
+    ]
     report = {
         "schema_version": TIME_OFFSET_SEARCH_SCHEMA_VERSION,
         "generated_at": utc_now_iso(),
@@ -2887,6 +3077,8 @@ def _estimate_and_apply_time_offsets(
         "status": "failed" if failed else "complete",
         "sensor_count": len(sensor_results),
         "failed_sensor_keys": failed,
+        "warning_sensor_keys": warning_sensor_keys,
+        "warning_sensor_count": len(warning_sensor_keys),
         "sensors": sensor_results,
     }
     atomic_write_json(attempt_root / TIME_OFFSET_SEARCH, report)
@@ -2955,6 +3147,20 @@ def _materialize_authoritative_synchronization(
         ) from exc
     if not math.isfinite(max_nearest_pose_delta_ms) or max_nearest_pose_delta_ms <= 0.0:
         raise ValueError("Time-offset evidence max nearest-pose delta must be positive")
+    raw_warning_nearest_pose_delta_ms = time_offset_search["search"].get(
+        "warning_nearest_pose_delta_ms"
+    )
+    warning_nearest_pose_delta_ms = (
+        float(raw_warning_nearest_pose_delta_ms)
+        if raw_warning_nearest_pose_delta_ms is not None
+        else None
+    )
+    if warning_nearest_pose_delta_ms is not None and (
+        not math.isfinite(warning_nearest_pose_delta_ms)
+        or warning_nearest_pose_delta_ms <= 0.0
+        or warning_nearest_pose_delta_ms > max_nearest_pose_delta_ms
+    ):
+        raise ValueError("Time-offset nearest-pose warning threshold is invalid")
 
     output_root = attempt_root / "processed" / "synchronized"
     synchronized: dict[str, Path] = {}
@@ -3022,15 +3228,28 @@ def _materialize_authoritative_synchronization(
             for sensor_key, value in result_by_sensor.items()
         },
         "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
+        "warning_nearest_pose_delta_ms": warning_nearest_pose_delta_ms,
         "historical_per_sensor_offsets_allowed": False,
         "auto_estimated_per_sensor_offsets": (
             time_offset_search["policy"] == "auto_offset"
+        ),
+        "timing_warning_sensor_keys": list(
+            time_offset_search.get("warning_sensor_keys", [])
+        ),
+        "warning_fallback_sensor_keys": sorted(
+            sensor_key
+            for sensor_key, value in result_by_sensor.items()
+            if value.get("warning_fallback_used") is True
         ),
     }
     checks = sync_quality.get("checks")
     if not isinstance(checks, list):
         checks = []
         sync_quality["checks"] = checks
+    _append_nearest_pose_warning_checks(
+        sync_quality,
+        warning_threshold_ms=warning_nearest_pose_delta_ms,
+    )
     summaries = sync_quality.get("sensors")
     observed_names: set[str] = set()
     if isinstance(summaries, list):
@@ -3077,10 +3296,7 @@ def _materialize_authoritative_synchronization(
                 "message": "Authoritative sync-delta evidence is missing.",
             }
         )
-    statuses = {str(item.get("status")) for item in checks if isinstance(item, Mapping)}
-    sync_quality["overall_status"] = (
-        "error" if "error" in statuses else "warning" if "warning" in statuses else "ok"
-    )
+    _refresh_sync_quality_status(sync_quality)
     atomic_write_json(attempt_root / SYNC_QUALITY_REPORT, sync_quality)
     blocking = [
         item
@@ -3263,6 +3479,9 @@ def _candidate_profile(
     sensor: Mapping[str, Any],
     intrinsic_profile: Mapping[str, Any],
 ) -> CalibrationProfile:
+    max_nearest_pose_delta_ms, warning_nearest_pose_delta_ms = (
+        _recorded_nearest_pose_limits_ms(request_value)
+    )
     transform = candidate["primary_transform"]
     quaternion = tuple(float(item) for item in transform["rotation_quaternion_wxyz"])
     translation = tuple(float(item) for item in transform["translation_mm"])
@@ -3366,7 +3585,11 @@ def _candidate_profile(
                     "required_frame_timestamp_domain"
                 ),
                 "timestamp_fallback_allowed": False,
-                "max_nearest_pose_delta_ms": (ATTEMPT_MAX_NEAREST_POSE_DELTA_MS),
+                "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
+                "warning_nearest_pose_delta_ms": (warning_nearest_pose_delta_ms),
+                "warning_fallback_used": bool(
+                    synchronization.get("warning_fallback_used")
+                ),
                 "historical_per_sensor_offsets_allowed": False,
                 "auto_estimated_per_sensor_offset": (
                     synchronization.get("policy") == "auto_offset"
@@ -3828,6 +4051,9 @@ def _validate_and_rank(
     *,
     time_offset_search: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    max_nearest_pose_delta_ms, warning_nearest_pose_delta_ms = (
+        _recorded_nearest_pose_limits_ms(request_value)
+    )
     raw_timestamp_policy = request_value.get("timestamp_policy")
     timestamp_policy = (
         dict(raw_timestamp_policy)
@@ -3970,7 +4196,8 @@ def _validate_and_rank(
                 DEFAULT_MIN_ROTATION_AXIS_SINGULAR_RATIO
             ),
             "max_observations_per_motion": (DEFAULT_MAX_OBSERVATIONS_PER_MOTION),
-            "max_nearest_pose_delta_ms": (ATTEMPT_MAX_NEAREST_POSE_DELTA_MS),
+            "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
+            "warning_nearest_pose_delta_ms": warning_nearest_pose_delta_ms,
             "timestamp_source": timestamp_policy["frame_timestamp_source"],
             "robot_timestamp_source": timestamp_policy["robot_timestamp_source"],
             "synchronization_policy": time_offset_search["policy"],
@@ -4092,11 +4319,18 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
         )
         observation_report["synchronization_policy"] = time_offset_search["policy"]
         atomic_write_json(attempt_root / CALIBRATION_OBSERVATIONS, observation_report)
+        timing_warning_count = int(time_offset_search.get("warning_sensor_count", 0))
         _update_progress(
             attempt_root,
             phase="estimate_time_offsets",
             phase_status="complete",
-            message="Authoritative camera/robot time alignment is ready.",
+            message=(
+                "Authoritative camera/robot time alignment is ready with "
+                f"warnings for {timing_warning_count} camera(s); recorded timing "
+                "was retained where auto-offset evidence was weak."
+                if timing_warning_count
+                else "Authoritative camera/robot time alignment is ready."
+            ),
         )
         _update_progress(
             attempt_root,
@@ -4134,7 +4368,12 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             status="complete",
             phase="validate_and_rank",
             phase_status="complete",
-            message="Calibration calculations are complete and awaiting review.",
+            message=(
+                "Calibration calculations are complete with timing warnings and "
+                "are awaiting review."
+                if timing_warning_count
+                else "Calibration calculations are complete and awaiting review."
+            ),
         )
         return ranking
     except Exception as exc:
@@ -4797,6 +5036,23 @@ def _promotion_time_offset_evidence(
         raise ValueError(
             "Calibration time-offset promotion evidence does not cover every sensor"
         )
+    if recorded_revision == TIME_OFFSET_IMPLEMENTATION_REVISION:
+        expected_warning_sensor_keys = sorted(
+            sensor_key
+            for sensor_key, item in sensors.items()
+            if any(
+                isinstance(check, Mapping) and check.get("status") == "warning"
+                for check in item.get("checks", [])
+            )
+        )
+        recorded_warning_sensor_keys = report.get("warning_sensor_keys")
+        if (
+            not isinstance(recorded_warning_sensor_keys, list)
+            or sorted(str(item) for item in recorded_warning_sensor_keys)
+            != expected_warning_sensor_keys
+            or report.get("warning_sensor_count") != len(expected_warning_sensor_keys)
+        ):
+            raise ValueError("Calibration time-offset warning evidence is invalid")
     search_grid = time_offset_values(
         float(recorded_search["minimum_robot_pose_time_offset_ms"]),
         float(recorded_search["maximum_robot_pose_time_offset_ms"]),
@@ -4862,6 +5118,10 @@ def _promotion_time_offset_evidence(
             if isinstance(check, Mapping)
         }
         if policy == "auto_offset":
+            degraded_warning_fallback = bool(
+                recorded_revision == TIME_OFFSET_IMPLEMENTATION_REVISION
+                and item.get("warning_fallback_used") is True
+            )
             if (
                 recorded_revision != TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
                 and item.get("improvement_evidence_strategy")
@@ -4871,6 +5131,43 @@ def _promotion_time_offset_evidence(
                     "Auto-sync improvement evidence strategy is invalid for "
                     f"{sensor_key}"
                 )
+            if degraded_warning_fallback:
+                warning_checks = [
+                    check
+                    for check in check_by_name.values()
+                    if check.get("status") == "warning"
+                ]
+                candidate_on_grid = any(
+                    math.isclose(
+                        candidate_offset,
+                        value,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
+                    for value in search_grid
+                )
+                if (
+                    status != "kept_zero"
+                    or item.get("decision") != "recorded_timing_kept"
+                    or item.get("evidence_strength") != "degraded"
+                    or not math.isclose(
+                        operator_offset,
+                        0.0,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
+                    or not candidate_on_grid
+                    or not warning_checks
+                    or any(
+                        check.get("status") == "error"
+                        for check in check_by_name.values()
+                    )
+                ):
+                    raise ValueError(
+                        "Degraded auto-sync warning fallback is invalid for "
+                        f"{sensor_key}"
+                    )
+                continue
             if not required_auto_checks.issubset(check_by_name) or any(
                 check.get("status") == "error" for check in check_by_name.values()
             ):

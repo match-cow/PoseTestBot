@@ -6,6 +6,7 @@ from pathlib import Path
 JAVA_PATH = Path("iiwa/PoseTestBot_Test.java")
 DOC_PATH = Path("docs/IIWA_FULL_CAPTURE_APPLICATION.md")
 CALIBRATION_JAVA_PATH = Path("iiwa/PoseTestBot_CalibrationVarianceProposal.java")
+POSE_STREAM_JAVA_PATH = Path("iiwa/PoseTestBot_PoseStreamTask.java")
 
 
 def test_ordinary_capture_uses_a_distinct_persistent_pose_template_frame() -> None:
@@ -55,9 +56,11 @@ def test_capture_uses_commissioned_start_and_end_ptp_frames() -> None:
     assert capture_body.index("robot.getCurrentJointPosition()") < capture_body.index(
         "moveToA1Min();"
     )
-    assert capture_body.index("transmitPose(") < capture_body.index("captureEndFrame")
+    assert capture_body.index('poseStream.startMotion("a1_capture_sweep")') < (
+        capture_body.index("captureEndFrame")
+    )
     assert capture_body.index("captureEndFrame") < capture_body.index(
-        "transmitEndMarker(command);"
+        "poseStream.finishCapture();"
     )
 
 
@@ -77,6 +80,7 @@ def test_cartesian_command_is_converted_before_joint_velocity_is_applied() -> No
 
 def test_v1_pose_packets_bind_sequence_run_and_frame_identity() -> None:
     java = JAVA_PATH.read_text()
+    pose_stream_java = POSE_STREAM_JAVA_PATH.read_text()
 
     for field in (
         "schema_version",
@@ -89,21 +93,25 @@ def test_v1_pose_packets_bind_sequence_run_and_frame_identity() -> None:
         "to_frame",
         "sunrise_reference_frame_path",
     ):
-        assert f'jsonObject.put("{field}"' in java
-    assert 'jsonObject.put("from_frame", "robot_flange")' in java
-    assert 'jsonObject.put("to_frame", "template_base")' in java
-    assert "END_PACKET_COUNT = 3" in java
+        assert f'jsonObject.put("{field}"' in pose_stream_java
+    assert 'jsonObject.put("from_frame", "robot_flange")' in pose_stream_java
+    assert 'jsonObject.put("to_frame", "template_base")' in pose_stream_java
+    assert "END_PACKET_COUNT = 3" in pose_stream_java
+    assert "command.runId," in java
+    assert "POSE_TEMPLATE_BASE_PATH);" in java
 
 
 def test_network_and_interrupt_failures_are_observable() -> None:
     java = JAVA_PATH.read_text()
+    pose_stream_java = POSE_STREAM_JAVA_PATH.read_text()
+    combined = java + pose_stream_java
 
-    assert "catch (SocketException e) {\n\t\t}" not in java
-    assert "catch (IOException e) {\n\t\t}" not in java
-    assert "catch (InterruptedException e) {\n\t\t}" not in java
-    assert "Pose packet transmission failure" in java
-    assert "End marker transmission" in java
-    assert "Thread.currentThread().interrupt()" in java
+    assert "catch (SocketException e) {\n\t\t}" not in combined
+    assert "catch (IOException e) {\n\t\t}" not in combined
+    assert "catch (InterruptedException e) {\n\t\t}" not in combined
+    assert "recordSendFailure(" in pose_stream_java
+    assert "All end-marker transmissions failed" in pose_stream_java
+    assert "Thread.currentThread().interrupt()" in combined
     assert 'DEFAULT_RECEIVER_IP = "172.31.1.169"' in java
 
 

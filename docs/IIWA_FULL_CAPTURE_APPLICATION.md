@@ -134,6 +134,14 @@ new, independently authorized start command.
 
 ## UDP Pose Stream
 
+The motion application no longer polls `IMotionContainer.isFinished()` before
+every sample. It starts the shared read-only
+`PoseTestBot_PoseStreamTask`, executes the A1 motion as a blocking PTP, and
+stops sampling only after that motion returns. The automatic-compatible cyclic
+task requests a 10 ms `BestEffort` period (100 Hz nominal); this is a measured
+commissioning target, not a KLI real-time guarantee. See the dedicated
+[cadence decision and acceptance procedure](IIWA_POSE_STREAM_CADENCE.md).
+
 The command-supplied receiver address and port take precedence. When
 `receiver_ip` is omitted, the controller uses the lab fallback
 `172.31.1.169`. An explicitly blank or wildcard receiver IP means “use the
@@ -144,6 +152,7 @@ Every new pose packet contains:
 
 - `schema_version=robot_pose.v1`, packet kind, run ID, and increasing sequence;
 - controller monotonic and wall-clock diagnostic timestamps;
+- the 10 ms target period, previous sender pose delta, and pose-query duration;
 - `robot_flange → template_base` endpoint semantics;
 - `sunrise_reference_frame_path=/PoseTestBot/PoseTemplateBase`; and
 - KUKA XYZ in millimetres plus A/B/C in radians.
@@ -178,7 +187,11 @@ condition.
 - Confirm the selected run and pose-template placement use the ordinary frame,
   and reject any static calibration profile expressed in the wrong base.
 - Compile the exact project and resolve `getRootFrame()`, PTP acceleration/jerk
-  setters, JSON-simple, and all three persistent frames.
+  setters, JSON-simple, the task-function provider, and all three persistent
+  frames.
+- Create `PoseTestBot_PoseStreamTask` through the Workbench background-task
+  workflow, configure automatic start, and confirm exactly one
+  `PoseTestBotPoseStreamFunction` provider is registered.
 - Simulate the PTP path to `/PoseTestBot/CaptureStart`, the repositioning path
   to A1 −169°, the captured path to A1 +169°, and the final PTP path to
   `/PoseTestBot/CaptureEnd`, including every joint/redundancy branch, joint and
@@ -188,6 +201,10 @@ condition.
 - Verify the start-frame plus A1-minimum positioning finishes inside the
   receiver's first-packet timeout and the end-frame PTP finishes inside its
   inter-packet timeout.
+- Retain a supervised cadence report and target at least 50 Hz median
+  end-to-end motion rate, no more than 25 ms p95 gap, and no more than 40 ms
+  maximum gap. Investigate a miss before treating the 10 ms request as
+  operationally adequate; cadence alone does not invalidate a calibration.
 - During the supervised trial, verify increasing v1 sequences, the recorded
   Sunrise frame path, requested/applied Cartesian and A1 speed logs, exposure
   settings, image sharpness, camera coverage, and a successful receiver

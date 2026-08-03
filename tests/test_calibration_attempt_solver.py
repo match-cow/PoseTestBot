@@ -92,7 +92,7 @@ def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
         assert kwargs["sync_delta"] == 0.0
         assert kwargs["timestamp_source"] == "sensor"
         assert kwargs["robot_timestamp_source"] == "host_wall"
-        assert kwargs["max_nearest_pose_delta_ms"] == 20.0
+        assert kwargs["max_nearest_pose_delta_ms"] == 150.0
         return [
             SimpleNamespace(
                 sensor_folder=sensor_folder,
@@ -117,7 +117,7 @@ def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
     ) -> dict:
         assert root == run_root
         assert report_paths == [report_path.resolve()]
-        assert max_nearest_pose_delta_ms == 20.0
+        assert max_nearest_pose_delta_ms == 150.0
         assert require_timestamp_source == {"realsense_1": "sensor"}
         assert require_robot_timestamp_source == {"realsense_1": "host_wall"}
         return {
@@ -333,8 +333,9 @@ def test_authoritative_sync_uses_selected_offset_without_replacing_preparation_e
     }
 
 
-def test_auto_sync_failure_writes_diagnostic_artifact_before_stopping(
+def test_auto_sync_execution_problem_warns_and_keeps_recorded_timing(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_root = tmp_path / "run"
     attempt_root = run_root / "processed" / "calibration" / ("a" * 32)
@@ -360,19 +361,36 @@ def test_auto_sync_failure_writes_diagnostic_artifact_before_stopping(
         ),
     }
 
-    with pytest.raises(ValueError, match="failed closed"):
-        attempt_module._estimate_and_apply_time_offsets(
-            run_root,
-            attempt_root,
-            request_value,
-            {sensor_key: {"ITERATIVE": []}},
-        )
+    monkeypatch.setattr(attempt_module, "load_robot_poses", lambda *_args: {})
+    monkeypatch.setattr(
+        attempt_module,
+        "indexed_robot_poses",
+        lambda *_args, **_kwargs: [
+            {
+                "pose_index": 0,
+                "timestamp_ns": 1_000_000_000,
+                "motion": "motion_0",
+                "pose": {"X": 0.0, "Y": 0.0, "Z": 0.0, "A": 0.0, "B": 0.0, "C": 0.0},
+            }
+        ],
+    )
 
-    report = json.loads((attempt_root / "time_offset_search.json").read_text())
-    assert report["status"] == "failed"
-    assert report["failed_sensor_keys"] == [sensor_key]
-    assert report["sensors"][0]["status"] == "failed"
+    report, adjusted = attempt_module._estimate_and_apply_time_offsets(
+        run_root,
+        attempt_root,
+        request_value,
+        {sensor_key: {"ITERATIVE": []}},
+    )
+
+    assert report == json.loads((attempt_root / "time_offset_search.json").read_text())
+    assert report["status"] == "complete"
+    assert report["failed_sensor_keys"] == []
+    assert report["warning_sensor_keys"] == [sensor_key]
+    assert report["sensors"][0]["status"] == "kept_zero"
+    assert report["sensors"][0]["warning_fallback_used"] is True
     assert report["sensors"][0]["checks"][0]["name"] == ("time_offset_search_execution")
+    assert report["sensors"][0]["checks"][0]["status"] == "warning"
+    assert adjusted == {sensor_key: {"ITERATIVE": []}}
 
 
 def test_legacy_auto_sync_failure_requires_fresh_attempt_after_backend_restart(
@@ -1935,7 +1953,9 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
         "robot_timestamp_source": "host_wall",
         "required_frame_timestamp_domain": "global_time",
         "timestamp_fallback_allowed": False,
-        "max_nearest_pose_delta_ms": 20.0,
+        "max_nearest_pose_delta_ms": 150.0,
+        "warning_nearest_pose_delta_ms": 20.0,
+        "warning_fallback_used": False,
         "historical_per_sensor_offsets_allowed": False,
         "auto_estimated_per_sensor_offset": False,
         "sensor_key": sensor_key,

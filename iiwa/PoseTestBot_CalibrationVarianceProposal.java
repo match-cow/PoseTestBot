@@ -1,11 +1,8 @@
 package application;
 
-import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.SocketException;
-import java.util.concurrent.TimeUnit;
+import java.nio.charset.Charset;
 
 import javax.inject.Inject;
 
@@ -16,7 +13,6 @@ import com.kuka.roboticsAPI.deviceModel.LBR;
 import com.kuka.roboticsAPI.geometricModel.Frame;
 import com.kuka.roboticsAPI.geometricModel.ObjectFrame;
 import com.kuka.roboticsAPI.geometricModel.math.Transformation;
-import com.kuka.roboticsAPI.motionModel.IMotionContainer;
 import com.kuka.roboticsAPI.persistenceModel.templateModel.InfoTemplate;
 
 import org.json.simple.JSONObject;
@@ -51,6 +47,8 @@ public class PoseTestBot_CalibrationVarianceProposal
 	private static final String CALIBRATION_COVERAGE_LOWER_LEFT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerLeft";
 	private static final String CALIBRATION_COVERAGE_LOWER_CENTER_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerCenter";
 	private static final String CALIBRATION_COVERAGE_LOWER_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerRight";
+	private static final String DEFAULT_RECEIVER_IP = "172.31.1.169";
+	private static final Charset UTF_8 = Charset.forName("UTF-8");
 
 	/* Disabled until offline review and supervised Workbench commissioning pass. */
 	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = false;
@@ -58,12 +56,11 @@ public class PoseTestBot_CalibrationVarianceProposal
 	private static final boolean RUN_COVERAGE_RASTER = true;
 	private static final boolean RUN_ORIENTATION_DITHER = true;
 
-	private static final int SAMPLE_TIME_MS = 10;
 	private static final int SETTLE_TIME_MS = 1500;
 	private static final int ROBOT_PORT = 30300;
 	private static final int DEFAULT_RECEIVER_PORT = 8080;
-	private static final int END_PACKET_COUNT = 3;
-	private static final int END_PACKET_INTERVAL_MS = 50;
+	private static final int SETTLED_PACKET_COUNT = 3;
+	private static final int SETTLED_PACKET_INTERVAL_MS = 50;
 
 	/* Keep capture motion below the requested run velocity to limit blur. */
 	private static final double CAPTURE_VELOCITY_SCALE = 0.60;
@@ -89,8 +86,7 @@ public class PoseTestBot_CalibrationVarianceProposal
 	private ObjectFrame coverageLowerLeft;
 	private ObjectFrame coverageLowerCenter;
 	private ObjectFrame coverageLowerRight;
-	private String receiverIp = "172.31.1.169";
-	private int receiverPort = DEFAULT_RECEIVER_PORT;
+	private PoseTestBotPoseStreamFunction poseStream;
 
 	@Override
 	public void initialize() {
@@ -132,26 +128,46 @@ public class PoseTestBot_CalibrationVarianceProposal
 				+ "robot at or near the taught CalibrationCenter pose. This is an "
 				+ "operator commissioning requirement, not an enforced safety check.");
 
+		try {
+			poseStream = getTaskFunction(
+					PoseTestBotPoseStreamFunction.class);
+		} catch (RuntimeException e) {
+			getLogger().error("Required automatic PoseTestBot pose-stream "
+					+ "background task is unavailable: " + e);
+			return;
+		}
+
 		while (true) {
-			Double requestedVelocityMps = waitForStartCommand();
-			if (requestedVelocityMps == null) {
+			CaptureCommand command = waitForStartCommand();
+			if (command == null) {
 				return;
 			}
 
-			double cartVelocityMmS = cartVelocityMmS(
-					requestedVelocityMps.doubleValue());
-			getLogger().info("Starting calibration variance capture at "
-					+ cartVelocityMmS + " mm/s");
-			moveToCenter("capture start anchor");
+			try {
+				poseStream.configure(
+						command.receiverIp,
+						command.receiverPort,
+						command.runId,
+						TEMPLATE_BASE_PATH);
+				double cartVelocityMmS = cartVelocityMmS(
+						command.cartesianVelocityMps);
+				getLogger().info("Starting calibration variance capture for run "
+						+ command.runId + " at " + cartVelocityMmS + " mm/s");
+				moveToCenter("capture start anchor");
 
-			if (RUN_COVERAGE_RASTER) {
-				runCoverageRaster(cartVelocityMmS);
-			}
-			if (RUN_ORIENTATION_DITHER) {
-				runOrientationDither(cartVelocityMmS);
-			}
+				if (RUN_COVERAGE_RASTER) {
+					runCoverageRaster(cartVelocityMmS);
+				}
+				if (RUN_ORIENTATION_DITHER) {
+					runOrientationDither(cartVelocityMmS);
+				}
 
-			transmitCurrentPose("end");
+				poseStream.finishCapture();
+			} catch (RuntimeException e) {
+				getLogger().error("Calibration capture failed; no successful "
+						+ "end marker will be reported: " + e);
+				return;
+			}
 			sleep(SETTLE_TIME_MS);
 		}
 	}
@@ -230,11 +246,17 @@ public class PoseTestBot_CalibrationVarianceProposal
 
 	private void captureLinear(ObjectFrame target, double cartVelocityMmS,
 			String motionName) {
-		IMotionContainer motion = robot.moveAsync(lin(target)
-				.setCartVelocity(cartVelocityMmS)
-				.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
-				.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
-		transmitPose(motion, SAMPLE_TIME_MS, motionName);
+		long sentPoseCount;
+		poseStream.startMotion(motionName);
+		try {
+			robot.move(lin(target)
+					.setCartVelocity(cartVelocityMmS)
+					.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
+					.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
+		} finally {
+			sentPoseCount = poseStream.stopMotion();
+		}
+		verifyPoseStream(motionName, sentPoseCount);
 		settleAtCurrentPose(motionName);
 	}
 
@@ -242,18 +264,60 @@ public class PoseTestBot_CalibrationVarianceProposal
 			double gammaDeg, double cartVelocityMmS, String motionName) {
 		Transformation offset = Transformation.ofDeg(0, 0, 0,
 				alphaDeg, betaDeg, gammaDeg);
-		IMotionContainer motion = robot.moveAsync(linRel(offset,
-				calibrationCenter).setCartVelocity(cartVelocityMmS)
-				.setJointVelocityRel(ORIENTATION_JOINT_VEL_REL)
-				.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
-				.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
-		transmitPose(motion, SAMPLE_TIME_MS, motionName);
+		long sentPoseCount;
+		poseStream.startMotion(motionName);
+		try {
+			robot.move(linRel(offset, calibrationCenter)
+					.setCartVelocity(cartVelocityMmS)
+					.setJointVelocityRel(ORIENTATION_JOINT_VEL_REL)
+					.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
+					.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
+		} finally {
+			sentPoseCount = poseStream.stopMotion();
+		}
+		verifyPoseStream(motionName, sentPoseCount);
 		settleAtCurrentPose(motionName);
 	}
 
 	private void settleAtCurrentPose(String motionName) {
 		sleep(SETTLE_TIME_MS);
-		transmitCurrentPose(motionName + "_settled");
+		int successfulSamples = 0;
+		for (int i = 0; i < SETTLED_PACKET_COUNT; i++) {
+			if (poseStream.sendCurrentPose(motionName + "_settled")) {
+				successfulSamples++;
+			}
+			if (i + 1 < SETTLED_PACKET_COUNT) {
+				sleep(SETTLED_PACKET_INTERVAL_MS);
+			}
+		}
+		if (successfulSamples == 0) {
+			throw new IllegalStateException(
+					"Pose stream produced no settled samples for " + motionName);
+		}
+		verifyPoseStream(motionName + "_settled", successfulSamples);
+	}
+
+	private void verifyPoseStream(String motionName, long segmentPoseCount) {
+		if (poseStream.getFatalFailureCount() > 0L) {
+			throw new IllegalStateException("Pose stream failed during "
+					+ motionName + ": " + poseStream.getLastError());
+		}
+		if (segmentPoseCount <= 0L) {
+			throw new IllegalStateException(
+					"Pose stream produced no samples during " + motionName);
+		}
+		if (poseStream.getSendFailureCount() > 0L) {
+			getLogger().warn("Pose stream has "
+					+ poseStream.getSendFailureCount()
+					+ " observable UDP send failure(s); last error: "
+					+ poseStream.getLastError());
+		}
+		getLogger().info("Pose cadence evidence for " + motionName
+				+ ": target_period_ms=" + poseStream.getTargetPeriodMs()
+				+ ", maximum_pose_delta_ms="
+				+ poseStream.getMaximumPoseDeltaNs() / 1000000.0
+				+ ", maximum_pose_query_ms="
+				+ poseStream.getMaximumPoseQueryDurationNs() / 1000000.0);
 	}
 
 	private double cartVelocityMmS(double requestedMps) {
@@ -280,7 +344,7 @@ public class PoseTestBot_CalibrationVarianceProposal
 		return clampedMmS;
 	}
 
-	private Double waitForStartCommand() {
+	private CaptureCommand waitForStartCommand() {
 		while (true) {
 			DatagramSocket socket = null;
 
@@ -294,14 +358,17 @@ public class PoseTestBot_CalibrationVarianceProposal
 				socket.receive(receivePacket);
 
 				String jsonMessage = new String(receivePacket.getData(), 0,
-						receivePacket.getLength());
+						receivePacket.getLength(), UTF_8);
 				JSONObject jsonObject = (JSONObject) new JSONParser().parse(
 						jsonMessage);
 
-				Double startValue = startValue(jsonObject);
-				if (startValue != null) {
-					updateReceiverTarget(jsonObject, receivePacket);
-					return startValue;
+				CaptureCommand command = captureCommand(
+						jsonObject, receivePacket);
+				if (command != null) {
+					getLogger().info("Pose receiver target: "
+							+ command.receiverIp + ":"
+							+ command.receiverPort);
+					return command;
 				}
 
 				if (isStopCommand(jsonObject)) {
@@ -341,6 +408,72 @@ public class PoseTestBot_CalibrationVarianceProposal
 		return Double.valueOf(value.toString());
 	}
 
+	private CaptureCommand captureCommand(JSONObject jsonObject,
+			DatagramPacket receivePacket) {
+		Double velocity = startValue(jsonObject);
+		if (velocity == null) {
+			return null;
+		}
+		if (Double.isNaN(velocity.doubleValue())
+				|| Double.isInfinite(velocity.doubleValue())
+				|| velocity.doubleValue() <= 0.0) {
+			throw new IllegalArgumentException(
+					"cartesian_velocity_m_s must be finite and greater than zero");
+		}
+
+		String requestedReceiverIp = DEFAULT_RECEIVER_IP;
+		Object receiverIpValue = jsonObject.get("receiver_ip");
+		if (receiverIpValue != null) {
+			String value = receiverIpValue.toString().trim();
+			if (value.length() == 0 || value.equals("0.0.0.0")
+					|| value.equals("::")) {
+				requestedReceiverIp =
+						receivePacket.getAddress().getHostAddress();
+			} else {
+				requestedReceiverIp = value;
+			}
+		}
+
+		int requestedReceiverPort = DEFAULT_RECEIVER_PORT;
+		Object receiverPortValue = jsonObject.get("receiver_port");
+		if (receiverPortValue != null) {
+			requestedReceiverPort = integerValue(
+					receiverPortValue, "receiver_port");
+		}
+		if (requestedReceiverPort < 1 || requestedReceiverPort > 65535) {
+			throw new IllegalArgumentException(
+					"receiver_port must be between 1 and 65535");
+		}
+
+		String requestedRunId = "legacy-" + System.currentTimeMillis();
+		Object runIdValue = jsonObject.get("run_id");
+		if (runIdValue != null
+				&& runIdValue.toString().trim().length() > 0) {
+			requestedRunId = runIdValue.toString().trim();
+		}
+		return new CaptureCommand(
+				velocity.doubleValue(),
+				requestedReceiverIp,
+				requestedReceiverPort,
+				requestedRunId);
+	}
+
+	private int integerValue(Object value, String name) {
+		if (value instanceof Number) {
+			double number = ((Number) value).doubleValue();
+			if (Double.isNaN(number)
+					|| Double.isInfinite(number)
+					|| number != Math.rint(number)
+					|| number < Integer.MIN_VALUE
+					|| number > Integer.MAX_VALUE) {
+				throw new IllegalArgumentException(
+						name + " must be an integer");
+			}
+			return (int) number;
+		}
+		return Integer.parseInt(value.toString());
+	}
+
 	private boolean isStopCommand(JSONObject jsonObject) {
 		if (Boolean.TRUE.equals(jsonObject.get("stop"))) {
 			return true;
@@ -352,105 +485,26 @@ public class PoseTestBot_CalibrationVarianceProposal
 				|| "emergency_stop".equals(command);
 	}
 
-	private void updateReceiverTarget(JSONObject jsonObject,
-			DatagramPacket receivePacket) {
-		Object receiverIpValue = jsonObject.get("receiver_ip");
-		if (receiverIpValue != null) {
-			String requestedReceiverIp = receiverIpValue.toString().trim();
-			if (requestedReceiverIp.length() > 0
-					&& !requestedReceiverIp.equals("0.0.0.0")
-					&& !requestedReceiverIp.equals("::")) {
-				receiverIp = requestedReceiverIp;
-			} else {
-				receiverIp = receivePacket.getAddress().getHostAddress();
-			}
-		} else {
-			receiverIp = receivePacket.getAddress().getHostAddress();
-		}
-
-		Object receiverPortValue = jsonObject.get("receiver_port");
-		if (receiverPortValue instanceof Number) {
-			receiverPort = ((Number) receiverPortValue).intValue();
-		} else if (receiverPortValue != null) {
-			receiverPort = Integer.parseInt(receiverPortValue.toString());
-		}
-
-		getLogger().info("Pose receiver target: " + receiverIp + ":"
-				+ receiverPort);
-	}
-
-	@SuppressWarnings("unchecked")
-	private byte[] currentPosePayload(String motionName) {
-		Frame currentPose = robot.getCurrentCartesianPosition(robot.getFlange(),
-				templateBase);
-
-		JSONObject jsonObject = new JSONObject();
-		jsonObject.put("motion", motionName);
-		jsonObject.put("X", currentPose.getX());
-		jsonObject.put("Y", currentPose.getY());
-		jsonObject.put("Z", currentPose.getZ());
-		jsonObject.put("A", currentPose.getAlphaRad());
-		jsonObject.put("B", currentPose.getBetaRad());
-		jsonObject.put("C", currentPose.getGammaRad());
-
-		return jsonObject.toJSONString().getBytes();
-	}
-
-	private void sendCurrentPose(DatagramSocket socket, String motionName)
-			throws IOException {
-		byte[] data = currentPosePayload(motionName);
-		DatagramPacket packet = new DatagramPacket(data, data.length,
-				InetAddress.getByName(receiverIp), receiverPort);
-		socket.send(packet);
-	}
-
-	private void transmitCurrentPose(String motionName) {
-		DatagramSocket socket = null;
-
-		try {
-			socket = new DatagramSocket();
-			for (int i = 0; i < END_PACKET_COUNT; i++) {
-				sendCurrentPose(socket, motionName);
-				TimeUnit.MILLISECONDS.sleep(END_PACKET_INTERVAL_MS);
-			}
-		} catch (Exception e) {
-			getLogger().error("Unable to transmit current pose: " + e);
-		} finally {
-			if (socket != null) {
-				socket.close();
-			}
-		}
-	}
-
-	private void transmitPose(IMotionContainer motion, int sampleTimeMs,
-			String motionName) {
-		DatagramSocket socket = null;
-
-		try {
-			socket = new DatagramSocket();
-			while (!motion.isFinished()) {
-				sendCurrentPose(socket, motionName);
-				TimeUnit.MILLISECONDS.sleep(sampleTimeMs);
-			}
-		} catch (SocketException e) {
-			getLogger().error("Unable to open pose socket: " + e);
-		} catch (IOException e) {
-			getLogger().error("Unable to transmit pose: " + e);
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
-			getLogger().error("Pose transmission interrupted: " + e);
-		} finally {
-			if (socket != null) {
-				socket.close();
-			}
-		}
-	}
-
 	private void sleep(int millis) {
 		try {
 			Thread.sleep(millis);
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
+		}
+	}
+
+	private static final class CaptureCommand {
+		private final double cartesianVelocityMps;
+		private final String receiverIp;
+		private final int receiverPort;
+		private final String runId;
+
+		private CaptureCommand(double cartesianVelocityMps,
+				String receiverIp, int receiverPort, String runId) {
+			this.cartesianVelocityMps = cartesianVelocityMps;
+			this.receiverIp = receiverIp;
+			this.receiverPort = receiverPort;
+			this.runId = runId;
 		}
 	}
 }

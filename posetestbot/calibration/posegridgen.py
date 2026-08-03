@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-POSEGRIDGEN_REVISION = "ad152e369e8d2746d0cf66cb1455f2371b0ec0f0"
+POSEGRIDGEN_REVISION = "9e6975901fe096bf65f7b7b599d7b82461d2e67c"
+POSEGRIDGEN_COMPATIBLE_BUNDLE_REVISIONS = frozenset(
+    {
+        "ad152e369e8d2746d0cf66cb1455f2371b0ec0f0",
+        POSEGRIDGEN_REVISION,
+    }
+)
 POSEGRIDGEN_RELATIVE_PATH = Path("third_party/PoseGridGen")
 _PRIVATE_PACKAGE = f"_posetestbot_posegridgen_{POSEGRIDGEN_REVISION[:12]}"
 _BACKEND_MODULES = ("models", "errors", "fit", "scene", "render")

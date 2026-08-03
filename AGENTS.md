@@ -181,6 +181,8 @@ Do not expand the Inspect-only exception into downstream behavior:
 ## Important Artifacts
 
 - Raw robot pose artifact: `raw_robot_ee_poses.json`.
+- Optional derived robot-pose cadence evidence:
+  `processed/robot_pose_cadence_report.json`.
 - Matched robot pose artifact: `match_robot_ee_poses.json`.
 - Frame timestamp sidecar: `frame_metadata.jsonl`.
 - Run manifest artifact: `dataset_manifest.json`.

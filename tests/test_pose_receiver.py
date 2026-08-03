@@ -108,6 +108,7 @@ def v1_packet(
     motion: str = "a1_capture_sweep",
     reference_path: str = "/PoseTestBot/PoseTemplateBase",
     run_id: str = "run-1",
+    cadence_evidence: bool = False,
 ) -> bytes:
     value: dict[str, Any] = {
         "schema_version": POSE_PACKET_SCHEMA_VERSION,
@@ -132,6 +133,14 @@ def v1_packet(
                 "C": 0.3,
             }
         )
+        if cadence_evidence:
+            value.update(
+                {
+                    "sender_target_period_ms": 10,
+                    "sender_previous_pose_delta_ns": 10_100_000,
+                    "sender_pose_query_duration_ns": 800_000,
+                }
+            )
     return json.dumps(value).encode()
 
 
@@ -304,9 +313,7 @@ def test_receiver_caps_start_velocity_and_records_requested_value(
             (end_packet(), ("192.0.2.10", 40001)),
         ]
     )
-    requested_profile = profile().with_overrides(
-        cartesian_velocity_m_s=0.2
-    )
+    requested_profile = profile().with_overrides(cartesian_velocity_m_s=0.2)
     starts: list[RobotProfile] = []
 
     def fake_start(
@@ -333,10 +340,7 @@ def test_receiver_caps_start_velocity_and_records_requested_value(
     assert starts[0].cartesian_velocity_m_s == 0.03
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     assert manifest["capture_config"]["cartesian_velocity_m_s"] == 0.03
-    assert (
-        manifest["capture_config"]["requested_cartesian_velocity_m_s"]
-        == 0.2
-    )
+    assert manifest["capture_config"]["requested_cartesian_velocity_m_s"] == 0.2
     assert manifest["capture_config"]["command_velocity_cap_m_s"] == 0.03
 
 
@@ -439,6 +443,54 @@ def test_receiver_retains_v1_frame_identity_and_packet_loss_evidence(
     }
     assert saved["1"]["source_packet"]["sequence_delta"] == 2
     assert saved["1"]["source_packet"]["estimated_packets_lost"] == 1
+
+
+def test_receiver_retains_complete_sender_cadence_evidence(tmp_path: Path) -> None:
+    run_root = tmp_path / "v1-cadence"
+    fake_socket = FakeDatagramSocket(
+        [
+            (
+                v1_packet(sequence=10, cadence_evidence=True),
+                ("192.0.2.10", 40001),
+            ),
+            (v1_packet(sequence=11, motion="end"), ("192.0.2.10", 40001)),
+        ]
+    )
+
+    result = run_pose_receiver(
+        run_root,
+        profile=profile(),
+        allow_real_robot=True,
+        allow_cameras=True,
+        socket_factory=FakeSocketFactory(fake_socket),
+        send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
+        install_signal_handlers=False,
+    )
+
+    saved = json.loads(result.raw_pose_path.read_text())
+    assert saved["0"]["source_packet"]["sender_target_period_ms"] == 10
+    assert saved["0"]["source_packet"]["sender_previous_pose_delta_ns"] == 10_100_000
+    assert saved["0"]["source_packet"]["sender_pose_query_duration_ns"] == 800_000
+
+
+def test_receiver_rejects_partial_sender_cadence_evidence(tmp_path: Path) -> None:
+    value = json.loads(v1_packet(sequence=1))
+    value["sender_target_period_ms"] = 10
+
+    with pytest.raises(PoseReceiverPacketError, match="cadence evidence must include"):
+        run_pose_receiver(
+            tmp_path / "partial-cadence",
+            profile=profile(),
+            allow_real_robot=True,
+            allow_cameras=True,
+            socket_factory=FakeSocketFactory(
+                FakeDatagramSocket(
+                    [(json.dumps(value).encode(), ("192.0.2.10", 40001))]
+                )
+            ),
+            send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
+            install_signal_handlers=False,
+        )
 
 
 def test_receiver_rejects_v1_reference_frame_change_mid_stream(

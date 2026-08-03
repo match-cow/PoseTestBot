@@ -89,7 +89,10 @@ def test_status_capabilities_preview_fit_and_pydantic_details(target_client) -> 
     assert client.get("/calibration-targets/status").get_json()["generation_available"] is True
     capabilities = client.get("/calibration-targets/capabilities")
     assert capabilities.status_code == 200
-    assert capabilities.get_json()["board_types"] == ["aruco"]
+    capability_payload = capabilities.get_json()
+    assert capability_payload["board_types"] == ["aruco"]
+    assert capability_payload["paper_sizes_mm"]["A5"] == [148.0, 210.0]
+    assert capability_payload["paper_sizes_mm"]["A6"] == [105.0, 148.0]
 
     preview = client.post("/calibration-targets/preview", json=configuration())
     assert preview.status_code == 200

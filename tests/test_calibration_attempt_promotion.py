@@ -181,6 +181,12 @@ def _write_fixed_zero_time_offset_evidence(
         "failed_sensor_keys": [],
         "sensors": sensor_results,
     }
+    if (
+        request_value["synchronization_implementation_revision"]
+        == attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+    ):
+        report["warning_sensor_keys"] = []
+        report["warning_sensor_count"] = 0
     (attempt_root / TIME_OFFSET_SEARCH).write_text(json.dumps(report))
     (attempt_root / SYNC_QUALITY_REPORT).write_text(
         json.dumps(
@@ -450,9 +456,60 @@ def test_report_backed_fixed_zero_time_offset_evidence_is_promotable(
     assert evidence["realsense_d435:1"]["selected_sync_delta_ms"] == 0.0
 
 
-def _passing_motion_consistency_evidence() -> dict:
+def test_report_backed_degraded_timing_warning_is_promotable(
+    tmp_path: Path,
+) -> None:
+    attempt, attempt_root = _report_backed_fixed_zero_attempt(tmp_path)
+    sensor_key = "realsense_d435:1"
+    attempt["request"]["synchronization_policy"] = "auto_offset"
+    report = attempt["time_offset_search"]
+    report["policy"] = "auto_offset"
+    report["warning_sensor_keys"] = [sensor_key]
+    report["warning_sensor_count"] = 1
+    sensor = report["sensors"][0]
+    sensor.update(
+        {
+            "status": "kept_zero",
+            "decision": "recorded_timing_kept",
+            "decision_reason": "time_offset_search_warning_fallback",
+            "evidence_strength": "degraded",
+            "warning_fallback_used": True,
+            "improvement_evidence_strategy": (
+                attempt_module.IMPROVEMENT_EVIDENCE_STRATEGY
+            ),
+            "checks": [
+                {
+                    "name": "time_offset_search_execution",
+                    "status": "warning",
+                    "original_status": "error",
+                }
+            ],
+        }
+    )
+
+    quality_path = attempt_root / SYNC_QUALITY_REPORT
+    quality = json.loads(quality_path.read_text())
+    quality["overall_status"] = "warning"
+    quality["checks"] = [
+        {
+            "name": f"calibration_nearest_pose_warning:{sensor_key}",
+            "status": "warning",
+        }
+    ]
+    policy = quality["calibration_attempt_policy"]
+    policy["synchronization_policy"] = "auto_offset"
+    policy["auto_estimated_per_sensor_offsets"] = True
+    policy["per_sensor_offsets"][sensor_key]["status"] = "kept_zero"
+    quality_path.write_text(json.dumps(quality))
+
+    evidence = attempt_module._promotion_time_offset_evidence(attempt)
+
+    assert evidence[sensor_key]["status"] == "kept_zero"
+    assert evidence[sensor_key]["warning_fallback_used"] is True
+
+
+def _passing_motion_consistency_evidence(*, hypothesis_count: int = 120) -> dict:
     motion_count = 17
-    hypothesis_count = 60
     raw_p = 1.0 / (2**motion_count)
     adjusted_p = raw_p * hypothesis_count
     methods = {
@@ -573,6 +630,7 @@ def test_v2_motion_consistency_tampering_blocks_promotion(
     "implementation_revision",
     [
         attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION,
+        attempt_module.TIME_OFFSET_LOMO_IMPLEMENTATION_REVISION,
         attempt_module.TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION,
     ],
 )
@@ -602,7 +660,8 @@ def test_report_backed_applied_auto_offset_evidence_is_promotable(
             "cross_validation_fold_materiality",
             "leave_one_motion_out_timing_consistency",
         )
-        if implementation_revision == attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+        if implementation_revision
+        != attempt_module.TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
         else ()
     )
     sensor.update(
@@ -616,7 +675,7 @@ def test_report_backed_applied_auto_offset_evidence_is_promotable(
                     )
                 }
                 if implementation_revision
-                == attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+                != attempt_module.TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
                 else {}
             ),
             "selected_robot_pose_time_offset_ms": 75.0,
@@ -639,8 +698,19 @@ def test_report_backed_applied_auto_offset_evidence_is_promotable(
             ],
         }
     )
-    if implementation_revision == attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION:
-        motion_consistency = _passing_motion_consistency_evidence()
+    if (
+        implementation_revision
+        != attempt_module.TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
+    ):
+        recorded_search = attempt["request"]["synchronization_search"]
+        search_grid = attempt_module.time_offset_values(
+            recorded_search["minimum_robot_pose_time_offset_ms"],
+            recorded_search["maximum_robot_pose_time_offset_ms"],
+            recorded_search["step_ms"],
+        )
+        motion_consistency = _passing_motion_consistency_evidence(
+            hypothesis_count=sum(value != 0.0 for value in search_grid)
+        )
         sensor["motion_consistency"] = motion_consistency
         consistency_check = next(
             check

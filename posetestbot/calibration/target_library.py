@@ -16,6 +16,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from posetestbot.calibration.posegridgen import (
+    POSEGRIDGEN_COMPATIBLE_BUNDLE_REVISIONS,
     POSEGRIDGEN_REVISION,
     render_posegridgen_bundle,
 )
@@ -252,8 +253,16 @@ def validate_target_bundle(
     if not str(bundle.get("display_name", "")).strip():
         raise ValueError("Bundle display_name must not be empty")
     generator = bundle.get("generator")
-    if not isinstance(generator, Mapping) or generator.get("revision") != POSEGRIDGEN_REVISION:
-        raise ValueError("Bundle generator revision is not the pinned PoseGridGen revision")
+    generator_revision = (
+        generator.get("revision") if isinstance(generator, Mapping) else None
+    )
+    if (
+        not isinstance(generator_revision, str)
+        or generator_revision not in POSEGRIDGEN_COMPATIBLE_BUNDLE_REVISIONS
+    ):
+        raise ValueError(
+            "Bundle generator revision is not a compatible PoseGridGen revision"
+        )
     records = bundle.get("files")
     if not isinstance(records, Mapping) or set(records) != set(_FILE_CONTRACT):
         raise ValueError("Bundle files must contain exactly source, target, and pdf")
@@ -292,8 +301,8 @@ def validate_target_bundle(
     posegridgen = target.get("posegridgen")
     if not isinstance(posegridgen, Mapping):
         raise ValueError("Bundle target is missing PoseGridGen provenance")
-    if posegridgen.get("revision") != POSEGRIDGEN_REVISION:
-        raise ValueError("Target generator revision is not the pinned PoseGridGen revision")
+    if posegridgen.get("revision") != generator_revision:
+        raise ValueError("Target generator revision does not match the bundle generator")
     if posegridgen.get("configuration_hash") != bundle.get("configuration_sha256"):
         raise ValueError("Target configuration hash does not match bundle")
     canonical_target = target_from_posegridgen_manifest(
@@ -303,7 +312,7 @@ def validate_target_bundle(
     )
     canonical_target["posegridgen"] = {
         **dict(canonical_target["posegridgen"]),
-        "revision": POSEGRIDGEN_REVISION,
+        "revision": generator_revision,
     }
     canonical_target = normalize_calibration_target_spec(canonical_target)
     if target != canonical_target:

@@ -304,7 +304,7 @@ def install_common_mocks(
                 "generation_available": generator_available,
                 "generator": {
                     "checkout": "/repo/third_party/PoseGridGen",
-                    "required_revision": "ad152e369e8d2746d0cf66cb1455f2371b0ec0f0",
+                    "required_revision": "9e6975901fe096bf65f7b7b599d7b82461d2e67c",
                     "reason": None
                     if generator_available
                     else "Pinned source checkout is unavailable",
@@ -637,12 +637,16 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
         custom_run
     )
-    assert page.evaluate("localStorage.getItem('posetestbot.selectedRun')") == custom_run
+    assert (
+        page.evaluate("localStorage.getItem('posetestbot.selectedRun')") == custom_run
+    )
     page.reload(wait_until="networkidle")
     expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
         custom_run
     )
-    assert page.evaluate("localStorage.getItem('posetestbot.selectedRun')") == custom_run
+    assert (
+        page.evaluate("localStorage.getItem('posetestbot.selectedRun')") == custom_run
+    )
     page.get_by_role("button", name="Open operator console guide").click()
     expect(page.get_by_role("heading", name="Operator console guide")).to_be_visible()
     expect(
@@ -783,9 +787,7 @@ def test_run_folders_inventory_move_delete_and_local_overflow(
                 "object_count": len(object_names),
                 "object_names": object_names,
                 "template_uuid": (
-                    "22222222-2222-4222-8222-222222222222"
-                    if object_names
-                    else None
+                    "22222222-2222-4222-8222-222222222222" if object_names else None
                 ),
                 "evidence": evidence,
             },
@@ -916,12 +918,8 @@ def test_run_folders_inventory_move_delete_and_local_overflow(
             "cwd": "/repo",
             "status": status,
             "created_at": "2026-07-29T08:31:00Z",
-            "started_at": (
-                "2026-07-29T08:31:01Z" if status != "queued" else None
-            ),
-            "ended_at": (
-                "2026-07-29T08:31:02Z" if status == "succeeded" else None
-            ),
+            "started_at": ("2026-07-29T08:31:01Z" if status != "queued" else None),
+            "ended_at": ("2026-07-29T08:31:02Z" if status == "succeeded" else None),
             "returncode": 0 if status == "succeeded" else None,
             "message": None,
             "tail": [],
@@ -961,18 +959,15 @@ def test_run_folders_inventory_move_delete_and_local_overflow(
         path = urlparse(route.request.url).path
         method = route.request.method
         if path == "/ui/run-folders" and method == "GET":
-            move_active = (
-                move_submitted["value"]
-                and job_status["move-run-folder"] in {"queued", "running", "canceling"}
-            )
+            move_active = move_submitted["value"] and job_status["move-run-folder"] in {
+                "queued",
+                "running",
+                "canceling",
+            }
             visible_runs = (
                 inventory_runs
                 if job_status["move-run-folder"] != "succeeded"
-                else [
-                    run
-                    for run in inventory_runs
-                    if run["path"] != movable_run
-                ]
+                else [run for run in inventory_runs if run["path"] != movable_run]
             )
             fulfill_json(
                 route,
@@ -991,8 +986,7 @@ def test_run_folders_inventory_move_delete_and_local_overflow(
                         else "ready"
                     ),
                     "stale": (
-                        inventory_cache_missing["value"]
-                        or inventory_stale["value"]
+                        inventory_cache_missing["value"] or inventory_stale["value"]
                     ),
                     "roots": [
                         {
@@ -1089,12 +1083,10 @@ def test_run_folders_inventory_move_delete_and_local_overflow(
     page.goto(f"{console_server.url}/#/run-folders", wait_until="networkidle")
 
     expect(page).to_have_url(f"{console_server.url}/#/run-folders")
-    expect(
-        page.get_by_role("heading", name="Run folders", exact=True)
-    ).to_be_visible()
-    expect(
-        page.get_by_role("link", name="Run folders")
-    ).to_have_attribute("href", "#/run-folders")
+    expect(page.get_by_role("heading", name="Run folders", exact=True)).to_be_visible()
+    expect(page.get_by_role("link", name="Run folders")).to_have_attribute(
+        "href", "#/run-folders"
+    )
     expect(page.get_by_role("button", name="Refresh inventory")).to_be_visible()
     expect(page.get_by_test_id("run-folder-root")).to_have_count(2)
     assert len(refresh_requests) == 1
@@ -1108,9 +1100,7 @@ def test_run_folders_inventory_move_delete_and_local_overflow(
         f'[data-testid="run-folder-row"][data-run-path="{RUN_ROOT}"]'
     )
     expect(active_row).to_contain_text("Active run")
-    expect(
-        active_row.get_by_test_id("run-folder-active-action-reason")
-    ).to_have_text(
+    expect(active_row.get_by_test_id("run-folder-active-action-reason")).to_have_text(
         "Switch the active run folder before moving or deleting this folder."
     )
     expect(active_row.get_by_role("button", name="Move new-run")).to_be_disabled()
@@ -1199,9 +1189,7 @@ def test_run_folders_inventory_move_delete_and_local_overflow(
     inventory_cache_missing["value"] = True
     job_status["move-run-folder"] = "succeeded"
     expect(
-        page.locator(
-            f'[data-testid="run-folder-row"][data-run-path="{movable_run}"]'
-        )
+        page.locator(f'[data-testid="run-folder-row"][data-run-path="{movable_run}"]')
     ).to_have_count(0, timeout=5_000)
     assert len(refresh_requests) == 2
     expect(
@@ -1351,9 +1339,7 @@ def test_bop_evaluation_queues_result_recovers_job_and_shows_metrics(
             "cwd": "/repo",
             "status": status,
             "created_at": "2026-07-26T12:01:00Z",
-            "started_at": (
-                "2026-07-26T12:01:01Z" if status != "queued" else None
-            ),
+            "started_at": ("2026-07-26T12:01:01Z" if status != "queued" else None),
             "ended_at": "2026-07-26T12:02:00Z" if status == "succeeded" else None,
             "returncode": 0 if status == "succeeded" else None,
             "message": "Command completed successfully."
@@ -1406,9 +1392,7 @@ def test_bop_evaluation_queues_result_recovers_job_and_shows_metrics(
     expect(dataset).to_contain_text("1,621")
     expect(dataset).to_contain_text("Dataset passed the structural format audit.")
     csv_contract = page.get_by_test_id("bop-result-csv-contract")
-    expect(csv_contract).to_contain_text(
-        "scene_id,im_id,obj_id,score,R,t,time"
-    )
+    expect(csv_contract).to_contain_text("scene_id,im_id,obj_id,score,R,t,time")
     expect(csv_contract).to_contain_text("model-to-camera translation in millimetres")
     expect(csv_contract).to_contain_text("processing time per image in seconds")
     expect(page.get_by_test_id("bop-result-details")).to_contain_text(
@@ -1428,9 +1412,9 @@ def test_bop_evaluation_queues_result_recovers_job_and_shows_metrics(
     job = page.get_by_test_id("bop-evaluation-job-status")
     expect(job).to_contain_text("BOP evaluation is queued")
     expect(job).to_contain_text("continues after navigation")
-    expect(
-        job.get_by_role("link", name="Open live log in Jobs")
-    ).to_have_attribute("href", "#/jobs")
+    expect(job.get_by_role("link", name="Open live log in Jobs")).to_have_attribute(
+        "href", "#/jobs"
+    )
 
     job_status["value"] = "running"
     expect(job).to_contain_text("BOP evaluation is running", timeout=5_000)
@@ -1748,18 +1732,14 @@ def test_sidebar_preserves_current_workflow_step_and_fast_return(
         )
     ).to_have_attribute("href", "#/workflow/setup")
     page.get_by_role("combobox", name="Active run folder").click()
-    page.get_by_role(
-        "option", name="new-run · real_full_capture_validation"
-    ).click()
+    page.get_by_role("option", name="new-run · real_full_capture_validation").click()
     current = sidebar.get_by_test_id("current-workflow-card")
     expect(current).to_contain_text("Active run · Viewed step 4 of 6")
     current.get_by_role(
         "link",
         name="Resume object dataset at step 4: Record the object dataset",
     ).click()
-    expect(page).to_have_url(
-        f"{console_server.url}/#/workflow/dataset?step=capture"
-    )
+    expect(page).to_have_url(f"{console_server.url}/#/workflow/dataset?step=capture")
     expect(
         page.get_by_role("navigation", name="Workflow steps").locator(
             '[aria-current="step"]'
@@ -1833,9 +1813,7 @@ def test_new_run_path_renders_guided_setup_when_run_config_is_missing(
     expect(setup).to_be_visible()
     expect(setup.get_by_test_id("run-camera-row")).to_have_count(2)
     expect(setup.get_by_role("button", name="Save setup")).to_be_enabled()
-    expect(
-        page.get_by_role("navigation", name="Workflow steps")
-    ).to_be_visible()
+    expect(page.get_by_role("navigation", name="Workflow steps")).to_be_visible()
     expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
         fresh_run
     )
@@ -1953,9 +1931,9 @@ def test_responsive_shell_and_dataset_workflow_links(console_server, page) -> No
     }
     overview = overview_payload(config)
     for section_id in ("preflight", "capture", "sync"):
-        next(
-            section for section in overview["sidebar"] if section["id"] == section_id
-        )["status"] = "complete"
+        next(section for section in overview["sidebar"] if section["id"] == section_id)[
+            "status"
+        ] = "complete"
     next(section for section in overview["sidebar"] if section["id"] == "bop")[
         "status"
     ] = "blocked"
@@ -1996,15 +1974,15 @@ def test_responsive_shell_and_dataset_workflow_links(console_server, page) -> No
     expect(
         workflow_overview.locator('[data-workflow-step="template"]')
     ).to_contain_text("Choose the pose template and placement")
-    expect(
-        workflow_overview.locator('[data-workflow-step="export"]')
-    ).to_contain_text("Add optional BOP ground-truth evidence")
-    expect(
-        workflow_overview.locator('[data-workflow-step="export"]')
-    ).to_contain_text("Optional")
-    expect(
-        workflow_overview.locator('[data-workflow-step="sync"]')
-    ).to_contain_text("Blocked")
+    expect(workflow_overview.locator('[data-workflow-step="export"]')).to_contain_text(
+        "Add optional BOP ground-truth evidence"
+    )
+    expect(workflow_overview.locator('[data-workflow-step="export"]')).to_contain_text(
+        "Optional"
+    )
+    expect(workflow_overview.locator('[data-workflow-step="sync"]')).to_contain_text(
+        "Blocked"
+    )
     expect(
         workflow_overview.locator('[data-workflow-step="export"]')
     ).not_to_contain_text("Blocked")
@@ -2785,9 +2763,9 @@ def test_pose_templates_editor_catalog_generation_and_unavailable_browse(
     expect(page.get_by_test_id("pose-template-disabled-action-reason")).to_have_text(
         "PoseTemplateCreator checkout is missing"
     )
-    expect(page.get_by_test_id("pose-template-generation-disabled-reason")).to_have_text(
-        "PoseTemplateCreator checkout is missing"
-    )
+    expect(
+        page.get_by_test_id("pose-template-generation-disabled-reason")
+    ).to_have_text("PoseTemplateCreator checkout is missing")
     expect(
         page.get_by_text("bash scripts/install.sh --with-posetemplatecreator")
     ).to_be_visible()
@@ -3040,8 +3018,12 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
 
     expect(page.get_by_test_id("workpieces-page")).to_be_visible()
     expect(page.get_by_role("link", name="Workpiece Catalogue")).to_be_visible()
-    expect(page.get_by_text("This is a global reusable library", exact=False)).to_be_visible()
-    expect(page.get_by_text("do not mutate the active run", exact=False)).to_be_visible()
+    expect(
+        page.get_by_text("This is a global reusable library", exact=False)
+    ).to_be_visible()
+    expect(
+        page.get_by_text("do not mutate the active run", exact=False)
+    ).to_be_visible()
     expect(page.get_by_test_id("workpiece-preview-fallback")).to_be_visible()
     expect(page.get_by_text("3D preview is unavailable")).to_be_visible()
     expect(page.get_by_role("heading", name="3D preview")).to_be_visible()
@@ -3798,9 +3780,7 @@ def test_ground_truth_workflow_selection_and_full_placement(
                             "instance_uuid": "33333333-3333-4333-8333-333333333333",
                             "name": "Clamp",
                             "obj_id": 7,
-                            "template_base_from_object": {
-                                "translation_mm": [0, 0, 0]
-                            },
+                            "template_base_from_object": {"translation_mm": [0, 0, 0]},
                         }
                     ],
                 }
@@ -3828,12 +3808,8 @@ def test_ground_truth_workflow_selection_and_full_placement(
     ]
     assert all(box is not None for box in placement_boxes)
     boxes = [box for box in placement_boxes if box is not None]
-    assert max(box["y"] for box in boxes[:3]) - min(
-        box["y"] for box in boxes[:3]
-    ) < 2
-    assert max(box["y"] for box in boxes[3:]) - min(
-        box["y"] for box in boxes[3:]
-    ) < 2
+    assert max(box["y"] for box in boxes[:3]) - min(box["y"] for box in boxes[:3]) < 2
+    assert max(box["y"] for box in boxes[3:]) - min(box["y"] for box in boxes[3:]) < 2
     assert boxes[3]["y"] > boxes[0]["y"] + boxes[0]["height"]
     assert min(box["width"] for box in boxes) >= 75
     template_thumbnail = page.get_by_test_id(
@@ -3919,9 +3895,7 @@ def test_ground_truth_workflow_selection_and_full_placement(
     ).to_be_visible()
     expect(draft).to_contain_text("The saved pose template at left remains active")
     expect(draft.get_by_text("Required", exact=True)).to_have_count(0)
-    expect(
-        draft.get_by_role("button", name="Replace run selection")
-    ).to_be_visible()
+    expect(draft.get_by_role("button", name="Replace run selection")).to_be_visible()
 
 
 def test_run_config_preflight_blocker_and_fresh_capture_gates(
@@ -3978,12 +3952,8 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
             "cwd": "/repo",
             "status": status,
             "created_at": "2026-07-27T11:00:00Z",
-            "started_at": (
-                "2026-07-27T11:00:01Z" if status != "queued" else None
-            ),
-            "ended_at": (
-                "2026-07-27T11:00:03Z" if status == "succeeded" else None
-            ),
+            "started_at": ("2026-07-27T11:00:01Z" if status != "queued" else None),
+            "ended_at": ("2026-07-27T11:00:03Z" if status == "succeeded" else None),
             "returncode": 0 if status == "succeeded" else None,
             "message": None,
             "tail": [],
@@ -3998,9 +3968,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
         }
 
     def readiness_submit_handler(route) -> None:
-        requests.append(
-            {"path": "/pipeline/run", "body": route.request.post_data_json}
-        )
+        requests.append({"path": "/pipeline/run", "body": route.request.post_data_json})
         readiness_job_status["value"] = "queued"
         fulfill_json(route, {"job_id": "readiness-1", "status": "queued"}, status=202)
 
@@ -4183,16 +4151,12 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     assert preflight_request["stage"] == "run_preflight"
     assert "allow_cameras" not in json.dumps(preflight_request)
     readiness_job = readiness.get_by_test_id("calibration-readiness-job-status")
-    expect(readiness_job).to_contain_text(
-        "Readiness check is queued", timeout=5_000
-    )
+    expect(readiness_job).to_contain_text("Readiness check is queued", timeout=5_000)
     expect(readiness_job).to_contain_text("continues after navigation")
     expect(
         readiness_job.get_by_role("link", name="Open live status in Jobs")
     ).to_have_attribute("href", "#/jobs")
-    expect(
-        readiness.get_by_role("button", name="Check in progress…")
-    ).to_be_disabled()
+    expect(readiness.get_by_role("button", name="Check in progress…")).to_be_disabled()
 
     readiness_job_status["value"] = "running"
     page.reload(wait_until="networkidle")
@@ -4200,15 +4164,13 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     expect(
         readiness.get_by_test_id("calibration-readiness-job-status")
     ).to_contain_text("Readiness check is running", timeout=5_000)
-    expect(
-        readiness.get_by_role("button", name="Check in progress…")
-    ).to_be_disabled()
+    expect(readiness.get_by_role("button", name="Check in progress…")).to_be_disabled()
     readiness_job_status["value"] = "succeeded"
     preflight_state["blocker"] = None
     page.reload(wait_until="networkidle")
-    page.get_by_role("navigation", name="Workflow steps").get_by_role(
-        "button"
-    ).filter(has_text="Record calibration images").click()
+    page.get_by_role("navigation", name="Workflow steps").get_by_role("button").filter(
+        has_text="Record calibration images"
+    ).click()
     page.get_by_role("button", name="Review and start capture", exact=True).click()
     expect(page.get_by_test_id("capture-timeout-envelope")).to_contain_text(
         "720 s total · 15 s sustained camera readiness (3 frames each) · 5 s maximum live camera-metadata pause · 120 s to first robot packet · 60 s between robot packets"
@@ -4257,12 +4219,13 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     expect(
         page.get_by_role("button", name="Review and start capture", exact=True)
     ).to_have_count(0)
-    assert len(
-        [item for item in requests if item["path"] == "/pipeline/run-sequence"]
-    ) == 1
-    page.get_by_role("navigation", name="Workflow steps").get_by_role(
-        "button"
-    ).filter(has_text="Calculate, review, and publish").click()
+    assert (
+        len([item for item in requests if item["path"] == "/pipeline/run-sequence"])
+        == 1
+    )
+    page.get_by_role("navigation", name="Workflow steps").get_by_role("button").filter(
+        has_text="Calculate, review, and publish"
+    ).click()
     expect(page.locator('input[value="eye_in_hand"]')).to_be_checked(timeout=6_000)
     expect(
         page.get_by_test_id("calibration-workflow").get_by_text(
@@ -4499,9 +4462,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         wait_until="networkidle",
     )
 
-    expect(
-        page.get_by_role("heading", name="Record an object dataset")
-    ).to_be_visible()
+    expect(page.get_by_role("heading", name="Record an object dataset")).to_be_visible()
     speed = page.get_by_label("Requested robot capture speed (m/s)")
     expect(speed).to_have_value("0.2")
     expect(speed).to_have_attribute("max", "1")
@@ -4570,9 +4531,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     ).click()
     expect(speed).to_have_value("0.15")
     expect(source_choice).to_have_attribute("aria-checked", "true")
-    expect(page.get_by_label("Trigger group ID")).to_have_value(
-        "research-mixed-rig"
-    )
+    expect(page.get_by_label("Trigger group ID")).to_have_value("research-mixed-rig")
     validate_and_save = page.get_by_role(
         "button", name="Validate and save setup", exact=True
     )
@@ -5144,9 +5103,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
     expect(processing).to_contain_text(
         "Calibration validation is automatic here; there is no second operator preflight."
     )
-    expect(processing).to_contain_text(
-        "Copy models and write the base BOP dataset"
-    )
+    expect(processing).to_contain_text("Copy models and write the base BOP dataset")
     process_action = page.get_by_role(
         "button", name="Process and export dataset", exact=True
     )
@@ -5166,9 +5123,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
     export_outcome = page.locator('[data-workflow-step="export"]')
     expect(export_outcome).to_contain_text("BOP export has not completed")
     expect(export_outcome).to_contain_text("Use the processing job in step 5")
-    expect(export_outcome).to_contain_text(
-        "before optional ground-truth generation"
-    )
+    expect(export_outcome).to_contain_text("before optional ground-truth generation")
 
     sync_step_button.click()
     process_action.click()
@@ -5310,9 +5265,7 @@ def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
             "cwd": "/repo",
             "status": status,
             "created_at": "2026-07-26T13:00:00Z",
-            "started_at": (
-                "2026-07-26T13:00:01Z" if status != "queued" else None
-            ),
+            "started_at": ("2026-07-26T13:00:01Z" if status != "queued" else None),
             "ended_at": "2026-07-26T13:04:00Z" if status == "succeeded" else None,
             "returncode": 0 if status == "succeeded" else None,
             "message": (
@@ -5366,10 +5319,10 @@ def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
         wait_until="networkidle",
     )
 
-    export_step_button = page.get_by_role(
-        "navigation", name="Workflow steps"
-    ).get_by_role("button").filter(
-        has_text="Add optional BOP ground-truth evidence"
+    export_step_button = (
+        page.get_by_role("navigation", name="Workflow steps")
+        .get_by_role("button")
+        .filter(has_text="Add optional BOP ground-truth evidence")
     )
     expect(export_step_button).to_contain_text("Optional")
     expect(export_step_button).to_contain_text("Ready")
@@ -5398,7 +5351,9 @@ def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
     expect(generator).to_contain_text(
         "official BOP Toolkit then renders full and visible masks against captured depth"
     )
-    expect(generator.get_by_role("button", name="Generate pose + masks")).to_be_disabled()
+    expect(
+        generator.get_by_role("button", name="Generate pose + masks")
+    ).to_be_disabled()
     expect(generator.get_by_test_id("bop-annotation-blockers")).to_contain_text(
         "The pinned BOP Toolkit runtime is unavailable."
     )
@@ -5427,13 +5382,13 @@ def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
     generator.get_by_role("button", name="Refresh readiness").click()
     full_choice.click()
     expect(full_choice).to_have_attribute("aria-checked", "true")
-    expect(generator.get_by_role("button", name="Generate pose + masks")).to_be_enabled()
+    expect(
+        generator.get_by_role("button", name="Generate pose + masks")
+    ).to_be_enabled()
 
     generator.get_by_role("button", name="Generate pose + masks").click()
     expect(page.get_by_text("Ground-truth generation queued")).to_be_visible()
-    assert annotation_requests == [
-        {"run_root": RUN_ROOT, "mode": "pose_and_masks"}
-    ]
+    assert annotation_requests == [{"run_root": RUN_ROOT, "mode": "pose_and_masks"}]
     job_status = generator.get_by_test_id("bop-annotation-job-status")
     expect(job_status).to_contain_text("Ground-truth generation is queued")
     expect(job_status).to_contain_text("continues after navigation")
@@ -5471,9 +5426,9 @@ def test_dataset_export_queues_selected_gt_version_and_recovers_render_job(
     expect(evidence).to_contain_text("1,621")
     expect(evidence).to_contain_text("1,621")
     expect(evidence).to_contain_text("full-frame instance masks")
-    expect(
-        evidence.get_by_role("link", name="Inspect BOP metrics")
-    ).to_have_attribute("href", "#/bop-evaluation")
+    expect(evidence.get_by_role("link", name="Inspect BOP metrics")).to_have_attribute(
+        "href", "#/bop-evaluation"
+    )
     expect(export_step_button).to_contain_text("Complete", timeout=5_000)
 
 
@@ -5497,9 +5452,7 @@ def test_run_setup_keeps_and_edits_the_run_owned_camera_alias(
     )
     status = selected_sensor_status()
     status["families"][0]["devices"][0]["alias"] = "New lab-wide wrist"
-    status["families"][0]["devices"][0][
-        "effective_display_name"
-    ] = "New lab-wide wrist"
+    status["families"][0]["devices"][0]["effective_display_name"] = "New lab-wide wrist"
     install_common_mocks(page, requests=requests, config_payload=configured)
     page.route("**/sensors/status", lambda route: fulfill_json(route, status))
 
@@ -5660,12 +5613,10 @@ def test_devices_show_typed_connection_state_and_visible_disabled_reasons(
 
     page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
 
-    card = page.locator(
-        '[data-testid="sensor-card"][data-sensor-key="zed_2i:zed-lab"]'
+    card = page.locator('[data-testid="sensor-card"][data-sensor-key="zed_2i:zed-lab"]')
+    expect(card.locator('[data-status-tone="informational"]').first).to_contain_text(
+        "Capture-ready"
     )
-    expect(
-        card.locator('[data-status-tone="informational"]').first
-    ).to_contain_text("Capture-ready")
     preview = card.get_by_test_id("sensor-preview-toggle")
     expect(preview).to_be_disabled()
     reason = card.get_by_test_id("sensor-disabled-action-reason")
@@ -5902,8 +5853,10 @@ def test_dashboard_prioritizes_monitor_storage_and_job_activity(
     expect(activity).to_be_visible()
     assert monitor_start_requests == []
     with page.expect_response(
-        lambda response: response.request.method == "POST"
-        and response.url.endswith("/monitoring/webcam")
+        lambda response: (
+            response.request.method == "POST"
+            and response.url.endswith("/monitoring/webcam")
+        )
     ):
         monitor.get_by_role("button", name="Start monitor").click()
     assert monitor_start_requests == [{}]
@@ -5922,9 +5875,7 @@ def test_dashboard_prioritizes_monitor_storage_and_job_activity(
     expect(activity.get_by_text("Generate BOP annotations", exact=True)).to_be_visible()
     expect(activity.get_by_role("heading", name="Recent failures")).to_be_visible()
     expect(activity.get_by_text("Calibration validation", exact=True)).to_be_visible()
-    expect(activity).to_contain_text(
-        "Residual threshold exceeded for wrist camera."
-    )
+    expect(activity).to_contain_text("Residual threshold exceeded for wrist camera.")
     selected_run_job = activity.get_by_role(
         "link", name="Open Synchronize selected run in Jobs"
     )
@@ -6172,9 +6123,7 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
         cursor = parameters.get("cursor", [None])[0]
         page_jobs = terminal[20:40] if cursor else [*active, *terminal[:20]]
         next_cursor = (
-            "opaque-terminal-page-2"
-            if cursor is None and len(terminal) > 20
-            else None
+            "opaque-terminal-page-2" if cursor is None and len(terminal) > 20 else None
         )
         fulfill_json(
             route,
@@ -6209,28 +6158,24 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
         )
     ).to_be_visible()
     expect(
-        page.get_by_test_id("job-card-history-20").get_by_text(
-            "Lab-wide", exact=True
-        )
+        page.get_by_test_id("job-card-history-20").get_by_text("Lab-wide", exact=True)
     ).to_be_visible()
     expect(page.get_by_role("button", name="Log")).to_have_count(21)
     expect(
-        page.get_by_test_id("job-card-active-1").locator(
-            '[data-status-tone="warning"]'
-        ).first
+        page.get_by_test_id("job-card-active-1")
+        .locator('[data-status-tone="warning"]')
+        .first
     ).to_contain_text("running")
-    expect(page.get_by_test_id("job-card-active-1")).to_contain_text(
-        "non-cancelable"
-    )
+    expect(page.get_by_test_id("job-card-active-1")).to_contain_text("non-cancelable")
     expect(
         page.get_by_test_id("job-card-active-1").get_by_role(
             "button", name="Cancel", exact=True
         )
     ).to_have_count(0)
     expect(
-        page.get_by_test_id("job-card-history-22").locator(
-            '[data-status-tone="success"]'
-        ).first
+        page.get_by_test_id("job-card-history-22")
+        .locator('[data-status-tone="success"]')
+        .first
     ).to_contain_text("succeeded")
     expect(
         unscoped_entry.locator('[data-status-tone="destructive"]').first
@@ -6238,9 +6183,9 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
     page.get_by_role("button", name="Load older jobs").click()
     expect(page.get_by_role("button", name="Log")).to_have_count(26)
     expect(
-        page.get_by_test_id("job-card-history-19").locator(
-            '[data-status-tone="neutral"]'
-        ).first
+        page.get_by_test_id("job-card-history-19")
+        .locator('[data-status-tone="neutral"]')
+        .first
     ).to_contain_text("canceled")
 
     page.get_by_role("combobox", name="Filter jobs by scope").click()
@@ -6258,7 +6203,9 @@ def test_jobs_filters_and_progressively_reveals_history(console_server, page) ->
     expect(page.get_by_role("heading", name="No matching jobs")).to_be_visible()
     page.get_by_role("button", name="Clear filters").click()
     expect(page.get_by_role("button", name="Log")).to_have_count(26)
-    assert any(request.get("cursor") == ["opaque-terminal-page-2"] for request in requests)
+    assert any(
+        request.get("cursor") == ["opaque-terminal-page-2"] for request in requests
+    )
     assert any(request.get("scope_kind") == ["library"] for request in requests)
     assert any(request.get("status") == ["failed"] for request in requests)
 
@@ -6367,7 +6314,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 },
             ],
             "synchronization": {
-                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_cv.v2",
+                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_warn_fallback.v3",
                 "default_policy": "auto_offset",
                 "policies": [
                     {
@@ -6382,9 +6329,13 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                     },
                 ],
                 "search": {
-                    "minimum_robot_pose_time_offset_ms": -150.0,
-                    "maximum_robot_pose_time_offset_ms": 150.0,
+                    "minimum_robot_pose_time_offset_ms": -300.0,
+                    "maximum_robot_pose_time_offset_ms": 300.0,
                     "step_ms": 5.0,
+                    "max_nearest_pose_delta_ms": 150.0,
+                    "warning_nearest_pose_delta_ms": 20.0,
+                    "warning_absolute_robot_pose_time_offset_ms": 150.0,
+                    "time_offset_failure_policy": "warn_keep_zero",
                     "minimum_motion_count_per_cross_validation_fold": 4,
                     "maximum_leave_one_motion_out_search_adjusted_sign_p_value": 0.05,
                 },
@@ -6408,7 +6359,8 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 "min_translation_span_mm": 20.0,
                 "min_rotation_span_deg": 5.0,
                 "min_rotation_axis_second_to_first_ratio": 0.15,
-                "max_nearest_pose_delta_ms": 20.0,
+                "max_nearest_pose_delta_ms": 150.0,
+                "warning_nearest_pose_delta_ms": 20.0,
             },
         },
         "latest_attempt": None,
@@ -6614,7 +6566,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 ],
             },
             "time_offset_search": {
-                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_cv.v2",
+                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_warn_fallback.v3",
                 "policy": "auto_offset",
                 "status": "complete",
                 "sign_convention": {
@@ -6623,9 +6575,13 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                     "conversion": "sync_delta_ms = -robot_pose_time_offset_ms",
                 },
                 "search": {
-                    "minimum_robot_pose_time_offset_ms": -150.0,
-                    "maximum_robot_pose_time_offset_ms": 150.0,
+                    "minimum_robot_pose_time_offset_ms": -300.0,
+                    "maximum_robot_pose_time_offset_ms": 300.0,
                     "step_ms": 5.0,
+                    "max_nearest_pose_delta_ms": 150.0,
+                    "warning_nearest_pose_delta_ms": 20.0,
+                    "warning_absolute_robot_pose_time_offset_ms": 150.0,
+                    "time_offset_failure_policy": "warn_keep_zero",
                 },
                 "sensors": [
                     {
@@ -6678,7 +6634,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                             "strategy": "leave_one_motion_out_candidate_consistency_bonferroni.v1",
                             "motion_count": 17,
                             "candidate_search_adjustment": "bonferroni",
-                            "candidate_search_hypothesis_count": 60,
+                            "candidate_search_hypothesis_count": 120,
                             "methods": {
                                 "shah": {
                                     "status": "ok",
@@ -6870,9 +6826,12 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     expect(page.get_by_test_id("calibration-synchronization-policy")).to_contain_text(
         "It does not synchronize hardware clocks or rewrite raw frame or robot timestamps"
     )
-    page.get_by_text("Time-alignment search limits and acceptance rule").click()
+    page.get_by_text("Time-alignment search limits and warning policy").click()
     expect(page.get_by_test_id("calibration-synchronization-policy")).to_contain_text(
-        "At least 12 eligible motion groups are required"
+        "At least 12 eligible motion groups are requested"
+    )
+    expect(page.get_by_test_id("calibration-synchronization-policy")).to_contain_text(
+        "above 20 ms are warnings; matches remain usable through 150 ms"
     )
     page.get_by_test_id("calibration-synchronization-policy").get_by_role(
         "button", name="About robot-pose time-offset sign"
@@ -6915,9 +6874,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     expect(attempt_job.get_by_test_id("calibration-duration-guidance")).to_contain_text(
         "three-camera comparison usually takes 10–20 minutes"
     )
-    expect(attempt_job).to_contain_text(
-        "background work continues after navigation"
-    )
+    expect(attempt_job).to_contain_text("background work continues after navigation")
     expect(attempt_job.get_by_role("link", name="Open Jobs")).to_have_attribute(
         "href", "#/jobs"
     )
@@ -6925,6 +6882,9 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     alignment = page.get_by_test_id("calibration-time-alignment")
     expect(alignment).to_contain_text(
         "not evidence that the hardware clocks are synchronized"
+    )
+    expect(page.get_by_test_id("calibration-time-alignment-warning")).to_contain_text(
+        "Calibration continued with timing warnings"
     )
     page.mouse.move(0, 0)
     alignment.get_by_role(
@@ -6954,7 +6914,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         "timing-motion-consistency-realsense_d435:wrist-1"
     )
     expect(motion_consistency).to_contain_text("Bonferroni-corrected")
-    expect(motion_consistency).to_contain_text("60 nonzero offset candidates")
+    expect(motion_consistency).to_contain_text("120 nonzero offset candidates")
     expect(motion_consistency).to_contain_text("16/17")
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
@@ -7010,7 +6970,7 @@ def calibration_time_alignment_setup(
     latest_attempt_id: str | None,
     latest_status: str = "complete",
     implementation_revision: str | None = (
-        "constant_latency_nearest_pose_motion_lomo_cv.v2"
+        "constant_latency_nearest_pose_motion_lomo_warn_fallback.v3"
     ),
 ) -> dict:
     latest_attempt = (
@@ -7075,9 +7035,13 @@ def calibration_time_alignment_setup(
                     },
                 ],
                 "search": {
-                    "minimum_robot_pose_time_offset_ms": -150.0,
-                    "maximum_robot_pose_time_offset_ms": 150.0,
+                    "minimum_robot_pose_time_offset_ms": -300.0,
+                    "maximum_robot_pose_time_offset_ms": 300.0,
                     "step_ms": 5.0,
+                    "max_nearest_pose_delta_ms": 150.0,
+                    "warning_nearest_pose_delta_ms": 20.0,
+                    "warning_absolute_robot_pose_time_offset_ms": 150.0,
+                    "time_offset_failure_policy": "warn_keep_zero",
                 },
             },
             "thresholds": {
@@ -7095,7 +7059,8 @@ def calibration_time_alignment_setup(
                 "min_translation_span_mm": 20.0,
                 "min_rotation_span_deg": 5.0,
                 "min_rotation_axis_second_to_first_ratio": 0.15,
-                "max_nearest_pose_delta_ms": 20.0,
+                "max_nearest_pose_delta_ms": 150.0,
+                "warning_nearest_pose_delta_ms": 20.0,
             },
         },
         "latest_attempt": latest_attempt,
@@ -7122,7 +7087,9 @@ def test_calibration_workflow_blocks_stale_backend_timing_revision(
     expect(warning).to_be_visible()
     expect(warning).to_contain_text("Backend restart required")
     expect(warning).to_contain_text("constant_latency_nearest_pose_motion_cv.v1")
-    expect(warning).to_contain_text("constant_latency_nearest_pose_motion_lomo_cv.v2")
+    expect(warning).to_contain_text(
+        "constant_latency_nearest_pose_motion_lomo_warn_fallback.v3"
+    )
     expect(page.get_by_role("button", name="Analyze recording")).to_be_disabled()
     expect(
         page.get_by_text(
@@ -7434,6 +7401,111 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
     )
 
 
+def test_degraded_auto_sync_warning_keeps_zero_and_shows_solver_results(
+    console_server,
+    page,
+) -> None:
+    attempt_id = "d" * 32
+    setup = calibration_time_alignment_setup(latest_attempt_id=attempt_id)
+    install_common_mocks(page)
+    page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
+    attempt = {
+        "schema_version": "calibration_attempt.v1",
+        "attempt_id": attempt_id,
+        "request": {
+            "mode": "eye_in_hand",
+            "sensor_keys": ["realsense_d435:wrist-1"],
+            "target_id": setup["saved_targets"][0]["target_id"],
+            "solver_policy": "auto_compare",
+            "intrinsics_policy": "compare_factory_opencv",
+            "synchronization_policy": "auto_offset",
+        },
+        "progress": calibration_attempt_progress(
+            status="complete",
+            time_alignment_status="complete",
+            message=(
+                "Calibration calculations are complete with timing warnings "
+                "and are awaiting review."
+            ),
+        ),
+        "results": calibration_failed_results(setup["cameras"][0]),
+        "intrinsic_comparison": None,
+        "time_offset_search": {
+            "implementation_revision": (
+                "constant_latency_nearest_pose_motion_lomo_warn_fallback.v3"
+            ),
+            "policy": "auto_offset",
+            "status": "complete",
+            "warning_sensor_keys": ["realsense_d435:wrist-1"],
+            "warning_sensor_count": 1,
+            "sign_convention": {
+                "operator_equation": "robot_pose_query_time = frame_time + offset",
+                "positive_operator_value": (
+                    "pair the frame with a robot pose recorded later"
+                ),
+                "conversion": "sync_delta_ms = -robot_pose_time_offset_ms",
+            },
+            "search": setup["solver"]["synchronization"]["search"],
+            "sensors": [
+                {
+                    "sensor_key": "realsense_d435:wrist-1",
+                    "sensor_name": "realsense_wrist-1",
+                    "display_name": "Wrist RGB-D",
+                    "status": "kept_zero",
+                    "decision_reason": "time_offset_search_warning_fallback",
+                    "selected_robot_pose_time_offset_ms": 0.0,
+                    "selected_sync_delta_ms": 0.0,
+                    "candidate_robot_pose_time_offset_ms": 0.0,
+                    "evidence_strength": "degraded",
+                    "warning_fallback_used": True,
+                    "boundary_hit": False,
+                    "checks": [
+                        {
+                            "name": "time_offset_search_execution",
+                            "status": "warning",
+                            "actual": (
+                                "ValueError: auto sync requires at least 12 "
+                                "motion groups"
+                            ),
+                        },
+                        {
+                            "name": "nearest_pose_delta_warning",
+                            "status": "warning",
+                            "actual": {
+                                "maximum_abs_nearest_pose_delta_ms": 100.0,
+                            },
+                            "warning_threshold": 20.0,
+                            "failure_threshold": 150.0,
+                        },
+                    ],
+                    "curve": [],
+                }
+            ],
+        },
+        "promotion": None,
+    }
+    page.route(
+        f"**/calibration/attempts/{attempt_id}?**",
+        lambda route: fulfill_json(route, attempt),
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=calculate",
+        wait_until="networkidle",
+    )
+
+    warning = page.get_by_test_id("calibration-time-alignment-warning")
+    expect(warning).to_be_visible()
+    expect(warning).to_contain_text("Calibration continued with timing warnings")
+    expect(page.get_by_test_id("calibration-time-alignment-failed")).to_have_count(0)
+    expect(page.get_by_test_id("calibration-results")).to_be_visible()
+    row = page.locator('[data-time-offset-sensor="realsense_d435:wrist-1"]')
+    expect(row).to_contain_text("Recorded timing kept with warning")
+    expect(row).to_contain_text("Applied +0.0 ms")
+    expect(row).to_contain_text("time offset search execution")
+    expect(row).to_contain_text("nearest pose delta warning")
+
+
 def test_fixed_zero_policy_is_submitted_and_reported(
     console_server,
     page,
@@ -7620,7 +7692,12 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
             route,
             {
                 "schema_version": "posegridgen_capabilities.v1",
-                "paper_sizes_mm": {"A4": [210, 297], "A3": [297, 420]},
+                "paper_sizes_mm": {
+                    "A4": [210, 297],
+                    "A3": [297, 420],
+                    "A5": [148, 210],
+                    "A6": [105, 148],
+                },
                 "dictionaries": {"DICT_5X5_50": 50},
                 "defaults": configuration,
             },
@@ -7810,6 +7887,20 @@ def test_calibration_target_preview_fit_generate_download_select_and_run_switch(
         "element => { const box = element.getBoundingClientRect(); return box.width / box.height }"
     )
     assert preview_page_ratio == pytest.approx(297 / 210, abs=0.002)
+
+    paper = page.get_by_role("combobox", name="Paper")
+    paper.click()
+    expect(page.get_by_role("option", name="A5", exact=True)).to_be_visible()
+    expect(page.get_by_role("option", name="A6", exact=True)).to_be_visible()
+    page.get_by_role("option", name="A5", exact=True).click()
+    expect(page.get_by_text("210 × 148 mm", exact=True)).to_be_visible()
+    paper.click()
+    page.get_by_role("option", name="A6", exact=True).click()
+    expect(page.get_by_text("148 × 105 mm", exact=True)).to_be_visible()
+    paper.click()
+    page.get_by_role("option", name="A4", exact=True).click()
+    expect(page.get_by_text("297 × 210 mm", exact=True)).to_be_visible()
+
     assert any(item["path"] == "/calibration-targets/preview" for item in requests)
     assert library_preview_urls
 
@@ -8184,9 +8275,7 @@ def cell_scene_payload(
                             if camera_frames_available
                             else None
                         ),
-                        "depth_scale_to_mm": (
-                            1.0 if camera_frames_available else None
-                        ),
+                        "depth_scale_to_mm": (1.0 if camera_frames_available else None),
                         "visualization": "turbo_near_warm_fixed_range",
                         "preview_min_depth_mm": 200.0,
                         "preview_max_depth_mm": 3000.0,
@@ -8345,10 +8434,9 @@ def test_cell_canvas_local_frames_flange_axis_and_camera_hit_target(
     screen_positive_z = flange_positive_z - flange_origin
     screen_positive_z /= np.linalg.norm(screen_positive_z)
     rows, columns = np.indices(green.shape)
-    flange_roi = (
-        (columns - flange_origin[0]) ** 2 + (rows - flange_origin[1]) ** 2
-        < 80**2
-    )
+    flange_roi = (columns - flange_origin[0]) ** 2 + (
+        rows - flange_origin[1]
+    ) ** 2 < 80**2
     flange_body = (
         flange_roi
         & (green_i > 65)
@@ -8443,11 +8531,9 @@ def test_cell_canvas_print_surfaces_clear_reference_grid(console_server, page) -
     target_interior = np.zeros(target_white.shape, dtype=bool)
     target_interior[top + 4 : top + height - 4, left + 4 : left + width - 4] = True
     dark = target_image.max(axis=2) < 55
-    dark_components, _labels, dark_stats, _centroids = (
-        cv2.connectedComponentsWithStats(
-            (dark & target_interior).astype(np.uint8),
-            connectivity=8,
-        )
+    dark_components, _labels, dark_stats, _centroids = cv2.connectedComponentsWithStats(
+        (dark & target_interior).astype(np.uint8),
+        connectivity=8,
     )
     printed_markers = [
         index
@@ -8599,6 +8685,7 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     calibration["extrinsics"]["translation_mm"] = ["10", "20", "30"]
     calibration["quality"]["mean_reprojection_error_px"] = "0.321"
     page.route("**/ui/cell-scene?**", lambda route: fulfill_json(route, scene))
+
     def timeline_handler(route) -> None:
         timeline_id = parse_qs(urlparse(route.request.url).query)["timeline_id"][0]
         selected_timeline = next(
@@ -8717,9 +8804,7 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     expect(camera_section).to_contain_text("2 cameras retain image data")
     page.get_by_role("button", name="Show frames").click()
     expect(page.get_by_role("checkbox", name="Show Wrist D435")).to_be_checked()
-    expect(
-        page.get_by_role("checkbox", name="Show Static D435")
-    ).not_to_be_checked()
+    expect(page.get_by_role("checkbox", name="Show Static D435")).not_to_be_checked()
     page.get_by_role("checkbox", name="Show Static D435").check()
 
     camera_columns = page.get_by_test_id("cell-camera-column")
@@ -8728,12 +8813,8 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     static_column = camera_columns.filter(has_text="Static D435")
     wrist_image = wrist_column.get_by_test_id("cell-camera-frame-image")
     static_image = static_column.get_by_test_id("cell-camera-frame-image")
-    expect(wrist_image).to_have_attribute(
-        "alt", "Wrist D435 RGB frame 000000.png"
-    )
-    expect(static_image).to_have_attribute(
-        "alt", "Static D435 RGB frame 100000.png"
-    )
+    expect(wrist_image).to_have_attribute("alt", "Wrist D435 RGB frame 000000.png")
+    expect(static_image).to_have_attribute("alt", "Static D435 RGB frame 100000.png")
     assert "frame_id=000000.png" in (wrist_image.get_attribute("src") or "")
     assert "frame_id=100000.png" in (static_image.get_attribute("src") or "")
     expect(wrist_image).to_have_attribute("data-display-rotation-degrees", "180")
@@ -8768,19 +8849,13 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
     ).to_be_visible()
     page.get_by_role("slider", name="Frame scrubber").fill("1")
     expect(page.get_by_text("Exact 3D pose frame 000001.png · arc")).to_be_visible()
-    expect(wrist_image).to_have_attribute(
-        "alt", "Wrist D435 RGB frame 000001.png"
-    )
-    expect(static_image).to_have_attribute(
-        "alt", "Static D435 RGB frame 100001.png"
-    )
+    expect(wrist_image).to_have_attribute("alt", "Wrist D435 RGB frame 000001.png")
+    expect(static_image).to_have_attribute("alt", "Static D435 RGB frame 100001.png")
     assert "frame_id=000001.png" in (wrist_image.get_attribute("src") or "")
     assert "timeline_id=sensor%3Arealsense_456" in (
         static_image.get_attribute("src") or ""
     )
-    expect(static_column).to_contain_text(
-        "realsense_456 · Realsense D435 · Static"
-    )
+    expect(static_column).to_contain_text("realsense_456 · Realsense D435 · Static")
 
     page.get_by_role("button", name="Show Depth").click()
     depth_images = page.locator(
@@ -8792,9 +8867,7 @@ def test_cell_canvas_layers_inspection_and_exact_seeking(console_server, page) -
         "alt", "Wrist D435 Depth frame 000001.png"
     )
     assert "modality=depth" in (depth_images.first.get_attribute("src") or "")
-    expect(depth_images.first).to_have_attribute(
-        "data-display-rotation-degrees", "180"
-    )
+    expect(depth_images.first).to_have_attribute("data-display-rotation-degrees", "180")
 
     page.get_by_role("button", name="Show RGB + depth").click()
     expect(page.get_by_test_id("cell-camera-frame-image")).to_have_count(4)

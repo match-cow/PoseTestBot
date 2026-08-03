@@ -16,7 +16,7 @@ uv run posetestbot-web
 ```
 
 The required revision is
-`ad152e369e8d2746d0cf66cb1455f2371b0ec0f0`. A missing, dirty, mismatched, or
+`9e6975901fe096bf65f7b7b599d7b82461d2e67c`. A missing, dirty, mismatched, or
 wheel-only checkout disables generation. Existing `calibration_target.v1` and
 `calibration_target.v2` artifacts remain readable in that state. The status and
 the direct `/calibration-targets` route explain the concrete failure. Navigation,
@@ -27,8 +27,10 @@ generation is disabled.
 
 Open **Calibration Targets** in the operator console:
 
-1. Choose the ArUco dictionary, rows/columns, marker size, gap, paper,
-   orientation, annotations, and independent X/Y print compensation.
+1. Choose the ArUco dictionary, rows/columns, marker size, gap, paper (DIN A1
+   through A6, Letter, or Legal), orientation, annotations, and independent X/Y
+   print compensation. A 100 mm ruler cannot fit within A6 portrait's printable
+   width, so disable the ruler or use landscape orientation for that case.
 2. Optionally attach a board-to-base pose and use **Fit to page** when needed.
 3. Inspect the debounced PNG preview, enter a display name, and queue
    **Generate bundle**.
@@ -65,7 +67,9 @@ working_data/calibration_targets/<opaque-uuid>/
 pinned generator revision, configuration/geometry hashes, and fixed file paths,
 media types, sizes, and SHA-256 values. Generation stages every file and
 promotes the complete directory atomically. Confirmed deletion is allowed only
-for an inactive library bundle.
+for an inactive library bundle. Bundles from the preceding
+`ad152e369e8d2746d0cf66cb1455f2371b0ec0f0` pin remain compatible and retain
+their original generator provenance; they are never regenerated in place.
 
 Selection copies the unchanged bundle to
 `<run>/calibration_targets/<target_id>/`, writes the placement-aware root
@@ -101,7 +105,7 @@ rectification, or BOP output exists. The API returns the concrete blocker paths;
 create a new run rather than deleting calibration evidence.
 
 Preflight verifies bundle containment, absence of symlinks, file hashes,
-canonical target agreement, pinned generator compatibility, run-config hashes,
+canonical target agreement, compatible generator provenance, run-config hashes,
 and placement when the solver uses `known_target` or `compare`. Target selection
 changes `run_config.json`, so older run-preflight evidence becomes stale
 automatically.

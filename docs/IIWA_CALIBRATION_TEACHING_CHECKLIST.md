@@ -29,6 +29,7 @@ relative-motion contract is in
 | Sunrise.OS version | |
 | Workbench project revision | |
 | PoseTestBot repository revision | |
+| Pose-stream task / Workbench registration revision | |
 | Enabled camera set / retained disabled cameras | |
 | Operator | |
 | Reviewer | |
@@ -99,6 +100,12 @@ and LL/LC/LR = lower-left/lower-center/lower-right.
 
 - [ ] Compile the exact controller project's Sunrise.OS API level and confirm
   `Transformation.ofDeg(...)` plus `linRel(offset, calibrationCenter)` resolve.
+- [ ] Add `PoseTestBot_PoseStreamTask` through Workbench's background-task
+  workflow, configure automatic start, compile its task-function provider, and
+  confirm exactly one `PoseTestBotPoseStreamFunction` provider exists.
+- [ ] Confirm the cyclic task requests a 10 ms `BestEffort` period, contains no
+  motion command or motion-parameter mutation, and contains/exposes failures
+  instead of terminating silently.
 - [ ] Confirm the controller API accepts the 3% relative joint-acceleration and
   joint-jerk limits on all motion types and the 3% relative joint-velocity
   limit on every orientation `LIN_REL` motion.
@@ -156,6 +163,11 @@ and LL/LC/LR = lower-left/lower-center/lower-right.
   functions.
 - [ ] Confirm each dwell is followed by `_settled` robot-pose samples and that
   synchronized camera frames include sharp, stationary calibration views.
+- [ ] Retain `processed/robot_pose_cadence_report.json` from the supervised
+  run. Target at least 50 Hz median end-to-end in-motion cadence, p95 gap no
+  more than 25 ms, and maximum gap no more than 40 ms; compare sender and host
+  cadence evidence when any target warns, without rejecting calibration solely
+  for a cadence miss.
 - [ ] For unexpected joint branches, position drift, cable tension, clearance
   loss, target loss, vibration, or other unreviewed behavior, use the
   controller's approved safety response—not the UDP `STOP` message.
@@ -243,24 +255,23 @@ campaign.
     outliers within any repeated motion; retain raw outlier density as evidence,
     not a promotion gate;
   - [ ] RealSense color `sensor_timestamp_ns` in SDK `global_time`, paired to
-    robot `host_wall_timestamp_ns`, with no timestamp fallback and at most
-    20 ms nearest-pose delta.
+    robot `host_wall_timestamp_ns`, with no timestamp fallback. Retain nearest
+    poses through the 150 ms hard boundary and review every value above the
+    20 ms advisory level.
 - [ ] Select and retain an explicit synchronization policy. For the recommended
-  `auto_offset` policy, require at least 12 eligible motion groups, three
-  fixed motion-disjoint folds, an interior/stable optimum, identifiable timing,
-  aggregate translation improvement of at least 0.25 mm and 10%, and a passing
-  rotation guard. Then hold out every selected motion in turn, refit the
-  robot-camera transform from the other motions, and require both Shah and Li
-  to retain at least 0.25 mm / 10% median improvement. Their one-sided
-  positive-motion sign probability, Bonferroni-corrected for every nonzero
-  offset tested, must be no greater than 0.05. A single arbitrary three-fold
-  bucket below materiality is retained as a warning; it is not a partition-
-  dependent veto when the aggregate and corrected leave-one-motion-out gates
-  pass. Fold-optimum instability, inadequate aggregate improvement, failed
-  leave-one-motion-out evidence, a boundary optimum, excessive method
-  sensitivity, or rotation degradation still blocks the attempt. Review the
-  complete `time_offset_search.json`; a failed search must block the attempt.
-  Use `fixed_zero` only as a deliberate captured-timestamp baseline.
+  `auto_offset` policy, search -300 to +300 ms in recorded 5 ms steps. Strong
+  offset evidence still uses at least 12 eligible motion groups, three fixed
+  motion-disjoint folds, an interior/stable optimum, aggregate translation
+  improvement of at least 0.25 mm and 10%, and a passing rotation guard. Then
+  hold out every selected motion in turn, refit from the other motions, and
+  require both Shah and Li to retain at least 0.25 mm / 10% median improvement
+  with search-corrected one-sided probability no greater than 0.05. Review
+  offsets beyond ±150 ms as warnings. A weak/ambiguous search, boundary
+  optimum, insufficient motion support, or inconsistent timing evidence keeps
+  the recorded 0 ms timing with a degraded warning and lets robot-camera
+  geometry validation continue; it no longer fails the attempt by itself.
+  Missing/corrupt robot-pose input remains blocking. Use `fixed_zero` only as
+  a deliberate captured-timestamp baseline.
 - [ ] Verify the time-offset sign before promotion:
   `robot_pose_query_time = frame_time + robot_pose_time_offset_ms` and
   `sync_delta_ms = -robot_pose_time_offset_ms`. Positive operator values use a

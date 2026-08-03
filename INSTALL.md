@@ -199,11 +199,16 @@ bash scripts/install.sh --check-only \
 ```
 
 The required revision is
-`ad152e369e8d2746d0cf66cb1455f2371b0ec0f0`. Generation is disabled if the
+`9e6975901fe096bf65f7b7b599d7b82461d2e67c`. Generation is disabled if the
 checkout is missing, dirty, at another revision, lacks the required backend
 files, or cannot provide the renderer/OpenCV capabilities. PoseTestBot loads
 only PoseGridGen's backend models, errors, fitting, scene, and rendering modules
 under a private namespace; FastAPI and Uvicorn are not runtime dependencies.
+
+The generator supports DIN A1 through A6 (including A5 and A6), Letter, and
+Legal paper. Immutable bundles created with the preceding pinned PoseGridGen
+revision remain valid and selectable; only new generation requires the current
+checkout.
 
 Use the operator console's **Calibration Targets** page to preview, fit, and
 generate immutable source/spec/PDF bundles, then select one for a configured

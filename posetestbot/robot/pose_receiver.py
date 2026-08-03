@@ -349,7 +349,7 @@ def _packet_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
         raise PoseReceiverPacketError(
             "Malformed robot pose packet: packet_kind is inconsistent with motion."
         )
-    return {
+    metadata = {
         "schema_version": schema_version,
         "packet_kind": packet_kind,
         "sequence": sequence,
@@ -360,6 +360,52 @@ def _packet_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
         "to_frame": "template_base",
         "sunrise_reference_frame_path": reference_path,
     }
+    timing_fields = (
+        "sender_target_period_ms",
+        "sender_previous_pose_delta_ns",
+        "sender_pose_query_duration_ns",
+    )
+    present_timing_fields = [field for field in timing_fields if field in value]
+    if present_timing_fields and len(present_timing_fields) != len(timing_fields):
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: sender cadence evidence must include "
+            + ", ".join(timing_fields)
+            + "."
+        )
+    if present_timing_fields:
+        target_period_ms = value["sender_target_period_ms"]
+        previous_pose_delta_ns = value["sender_previous_pose_delta_ns"]
+        pose_query_duration_ns = value["sender_pose_query_duration_ns"]
+        if (
+            isinstance(target_period_ms, bool)
+            or not isinstance(target_period_ms, int)
+            or target_period_ms <= 0
+        ):
+            raise PoseReceiverPacketError(
+                "Malformed robot pose packet: sender_target_period_ms must be "
+                "a positive integer."
+            )
+        for field, field_value in (
+            ("sender_previous_pose_delta_ns", previous_pose_delta_ns),
+            ("sender_pose_query_duration_ns", pose_query_duration_ns),
+        ):
+            if (
+                isinstance(field_value, bool)
+                or not isinstance(field_value, int)
+                or field_value < 0
+            ):
+                raise PoseReceiverPacketError(
+                    f"Malformed robot pose packet: {field} must be a "
+                    "non-negative integer."
+                )
+        metadata.update(
+            {
+                "sender_target_period_ms": target_period_ms,
+                "sender_previous_pose_delta_ns": previous_pose_delta_ns,
+                "sender_pose_query_duration_ns": pose_query_duration_ns,
+            }
+        )
+    return metadata
 
 
 def _decode_packet(

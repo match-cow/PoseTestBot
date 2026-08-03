@@ -13,6 +13,7 @@ import pytest
 from posetestbot.calibration import posegridgen as loader
 from posetestbot.calibration import target_library
 from posetestbot.calibration.posegridgen import (
+    POSEGRIDGEN_COMPATIBLE_BUNDLE_REVISIONS,
     POSEGRIDGEN_REVISION,
     posegridgen_capabilities,
     posegridgen_status,
@@ -79,6 +80,8 @@ def test_pinned_loader_is_private_and_reports_renderer_capabilities() -> None:
     assert status["clean"] is True
     assert capabilities["board_types"] == ["aruco"]
     assert capabilities["defaults"]["board"]["type"] == "aruco"
+    assert capabilities["paper_sizes_mm"]["A5"] == (148.0, 210.0)
+    assert capabilities["paper_sizes_mm"]["A6"] == (105.0, 148.0)
     assert sys.path == original_path
     assert "backend.app" not in sys.modules
     assert any(name.startswith("_posetestbot_posegridgen_") for name in sys.modules)
@@ -108,6 +111,83 @@ def test_loader_reports_missing_wrong_and_dirty_checkouts(
     assert dirty["available"] is False
     assert dirty["clean"] is False
     assert "local modifications" in dirty["reason"]
+
+
+@pytest.mark.parametrize(
+    ("paper_size", "expected_page_mm"),
+    (("A5", (148.0, 210.0)), ("A6", (105.0, 148.0))),
+)
+def test_din_a5_and_a6_generate_through_the_immutable_bundle_pipeline(
+    tmp_path: Path,
+    paper_size: str,
+    expected_page_mm: tuple[float, float],
+) -> None:
+    configuration = aruco_configuration()
+    configuration["page"] = {
+        "paper_size": paper_size,
+        "orientation": "portrait",
+    }
+    configuration["board"].update(
+        {
+            "rows": 2,
+            "columns": 2,
+            "marker_size_mm": 20.0,
+            "separation_mm": 5.0,
+        }
+    )
+
+    bundle = generate_target_bundle(
+        display_name=f"DIN {paper_size}",
+        configuration=configuration,
+        library_root=tmp_path,
+    )
+
+    bundle_path = Path(bundle["bundle_path"])
+    source = json.loads((bundle_path / "posegridgen_source.json").read_text())
+    assert source["request"]["page"] == configuration["page"]
+    assert source["page_bounds"]["width_mm"] == pytest.approx(expected_page_mm[0])
+    assert source["page_bounds"]["height_mm"] == pytest.approx(expected_page_mm[1])
+    assert bundle["target"]["posegridgen"]["configuration"]["page"] == configuration[
+        "page"
+    ]
+    assert (bundle_path / "calibration_target.pdf").read_bytes().startswith(b"%PDF")
+
+
+def test_previous_pinned_posegridgen_bundle_revision_remains_compatible(
+    tmp_path: Path,
+) -> None:
+    bundle = generate_target_bundle(
+        display_name="previous pin",
+        configuration=aruco_configuration(),
+        library_root=tmp_path,
+    )
+    bundle_path = Path(bundle["bundle_path"])
+    legacy_revision = next(
+        revision
+        for revision in POSEGRIDGEN_COMPATIBLE_BUNDLE_REVISIONS
+        if revision != POSEGRIDGEN_REVISION
+    )
+
+    target_path = bundle_path / target_library.TARGET_SPEC
+    target = json.loads(target_path.read_text())
+    target["posegridgen"]["revision"] = legacy_revision
+    target_library.atomic_write_json(target_path, target)
+
+    manifest_path = bundle_path / target_library.BUNDLE_MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    manifest["generator"]["revision"] = legacy_revision
+    target_bytes = target_path.read_bytes()
+    manifest["files"]["target"].update(
+        {
+            "size_bytes": len(target_bytes),
+            "sha256": hashlib.sha256(target_bytes).hexdigest(),
+        }
+    )
+    target_library.atomic_write_json(manifest_path, manifest)
+
+    validated = validate_target_bundle(bundle_path, library_root=tmp_path)
+    assert validated["generator"]["revision"] == legacy_revision
+    assert validated["target"]["posegridgen"]["revision"] == legacy_revision
 
 
 def test_anisotropic_geometry_is_authoritative_for_generic_opencv_board(

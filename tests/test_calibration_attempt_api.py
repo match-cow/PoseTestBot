@@ -182,9 +182,15 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "auto_offset",
         "fixed_zero",
     ]
-    assert synchronization["search"]["minimum_robot_pose_time_offset_ms"] == -150.0
-    assert synchronization["search"]["maximum_robot_pose_time_offset_ms"] == 150.0
+    assert synchronization["search"]["minimum_robot_pose_time_offset_ms"] == -300.0
+    assert synchronization["search"]["maximum_robot_pose_time_offset_ms"] == 300.0
     assert synchronization["search"]["step_ms"] == 5.0
+    assert synchronization["search"]["max_nearest_pose_delta_ms"] == 150.0
+    assert synchronization["search"]["warning_nearest_pose_delta_ms"] == 20.0
+    assert (
+        synchronization["search"]["warning_absolute_robot_pose_time_offset_ms"] == 150.0
+    )
+    assert synchronization["search"]["time_offset_failure_policy"] == ("warn_keep_zero")
     assert (
         synchronization["search"]["minimum_motion_count_per_cross_validation_fold"] == 4
     )
@@ -223,7 +229,8 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "min_rotation_axis_angle_deg": 2.0,
         "min_rotation_axis_second_to_first_ratio": 0.15,
         "max_observations_per_motion": 5,
-        "max_nearest_pose_delta_ms": 20.0,
+        "max_nearest_pose_delta_ms": 150.0,
+        "warning_nearest_pose_delta_ms": 20.0,
         "max_mean_translation_mm": 10.0,
         "max_mean_rotation_deg": 5.0,
         "max_outlier_ratio": 0.25,

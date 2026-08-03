@@ -30,22 +30,29 @@ from posetestbot.calibration.candidates import _robot_ee_to_reference
 
 SCHEMA_VERSION = "calibration_time_offset_search.v1"
 LEGACY_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_cv.v1"
-IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_cv.v2"
+LOMO_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_cv.v2"
+IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_warn_fallback.v3"
 # Promotion and queued-attempt replay validate against this compatibility set,
 # not just the revision used for newly created attempts.  Keep an older revision
 # here only while its exact recorded configuration and execution semantics
 # remain supported.
 SUPPORTED_IMPLEMENTATION_REVISIONS = frozenset(
-    {LEGACY_IMPLEMENTATION_REVISION, IMPLEMENTATION_REVISION}
+    {
+        LEGACY_IMPLEMENTATION_REVISION,
+        LOMO_IMPLEMENTATION_REVISION,
+        IMPLEMENTATION_REVISION,
+    }
 )
 POLICIES = ("auto_offset", "fixed_zero")
 DEFAULT_POLICY = "fixed_zero"
-DEFAULT_MIN_OFFSET_MS = -150.0
-DEFAULT_MAX_OFFSET_MS = 150.0
+DEFAULT_MIN_OFFSET_MS = -300.0
+DEFAULT_MAX_OFFSET_MS = 300.0
 DEFAULT_STEP_MS = 5.0
 DEFAULT_REFERENCE_METHODS = ("shah", "li")
 DEFAULT_REFERENCE_PNP_METHOD = "IPPE"
-DEFAULT_MAX_NEAREST_POSE_DELTA_MS = 20.0
+DEFAULT_MAX_NEAREST_POSE_DELTA_MS = 150.0
+DEFAULT_WARNING_NEAREST_POSE_DELTA_MS = 20.0
+DEFAULT_WARNING_ABS_OFFSET_MS = 150.0
 DEFAULT_MAX_OBSERVATIONS_PER_MOTION = 6
 DEFAULT_MAX_SEARCH_MOTIONS = 18
 DEFAULT_MIN_MOTIONS_PER_FOLD = 4
@@ -57,6 +64,8 @@ DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE = 0.05
 LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY = "every_cross_validation_fold"
 IMPROVEMENT_EVIDENCE_STRATEGY = "leave_one_motion_out_consistency"
 LOMO_CONSISTENCY_STRATEGY = "leave_one_motion_out_candidate_consistency_bonferroni.v1"
+FAILURE_POLICY_FAIL_CLOSED = "fail_closed"
+FAILURE_POLICY_WARN_KEEP_ZERO = "warn_keep_zero"
 
 
 def offset_values(
@@ -702,6 +711,96 @@ def failed_sensor_result(
     }
 
 
+def nearest_pose_delta_summary(
+    observations: Sequence[Mapping[str, Any]],
+) -> dict[str, float | int | None]:
+    """Summarize retained nearest-pose deltas without changing any matches."""
+
+    values_ms: list[float] = []
+    for observation in observations:
+        alignment = observation.get("timestamp_alignment")
+        if not isinstance(alignment, Mapping):
+            continue
+        value = alignment.get("nearest_robot_delta_ns")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        number = float(value)
+        if math.isfinite(number):
+            values_ms.append(abs(number) / 1_000_000.0)
+    if not values_ms:
+        return {
+            "observation_count": 0,
+            "mean_abs_nearest_pose_delta_ms": None,
+            "maximum_abs_nearest_pose_delta_ms": None,
+        }
+    return {
+        "observation_count": len(values_ms),
+        "mean_abs_nearest_pose_delta_ms": float(sum(values_ms) / len(values_ms)),
+        "maximum_abs_nearest_pose_delta_ms": float(max(values_ms)),
+    }
+
+
+def warning_fallback_sensor_result(
+    *,
+    sensor_key: str,
+    observation_count: int,
+    adjusted_observations: Sequence[Mapping[str, Any]],
+    error: Exception,
+    warning_nearest_pose_delta_ms: float,
+    max_nearest_pose_delta_ms: float,
+) -> dict[str, Any]:
+    """Retain a visible warning when auto-sync falls back to recorded timing."""
+
+    delta_summary = nearest_pose_delta_summary(adjusted_observations)
+    checks: list[dict[str, Any]] = [
+        {
+            "name": "time_offset_search_execution",
+            "status": "warning",
+            "original_status": "error",
+            "actual": f"{type(error).__name__}: {error}",
+            "threshold": "search completes with strong offset evidence",
+            "fallback": "recorded timing retained at 0 ms",
+        }
+    ]
+    maximum_delta_ms = delta_summary["maximum_abs_nearest_pose_delta_ms"]
+    if maximum_delta_ms is not None:
+        checks.append(
+            {
+                "name": "nearest_pose_delta_warning",
+                "status": (
+                    "warning"
+                    if float(maximum_delta_ms) > warning_nearest_pose_delta_ms
+                    else "ok"
+                ),
+                "actual": delta_summary,
+                "warning_threshold": warning_nearest_pose_delta_ms,
+                "failure_threshold": max_nearest_pose_delta_ms,
+                "unit": "ms",
+            }
+        )
+    return {
+        "sensor_key": sensor_key,
+        "status": "kept_zero",
+        "decision": "recorded_timing_kept",
+        "decision_reason": "time_offset_search_warning_fallback",
+        "selected_robot_pose_time_offset_ms": 0.0,
+        "selected_sync_delta_ms": 0.0,
+        "candidate_robot_pose_time_offset_ms": 0.0,
+        "candidate_sync_delta_ms": 0.0,
+        "evidence_strength": "degraded",
+        "warning_fallback_used": True,
+        "boundary_hit": False,
+        "reference_pnp_method": DEFAULT_REFERENCE_PNP_METHOD,
+        "reference_extrinsic_methods": list(DEFAULT_REFERENCE_METHODS),
+        "improvement_evidence_strategy": IMPROVEMENT_EVIDENCE_STRATEGY,
+        "input_observation_count": int(observation_count),
+        "output_observation_count": len(adjusted_observations),
+        "nearest_pose_delta_summary": delta_summary,
+        "checks": checks,
+        "curve": [],
+    }
+
+
 def apply_sensor_time_offset(
     observations: Sequence[Mapping[str, Any]],
     *,
@@ -739,6 +838,8 @@ def estimate_sensor_time_offset(
     offsets_ms: Sequence[float] | None = None,
     methods: Sequence[str] = DEFAULT_REFERENCE_METHODS,
     max_nearest_pose_delta_ms: float = DEFAULT_MAX_NEAREST_POSE_DELTA_MS,
+    warning_nearest_pose_delta_ms: float = DEFAULT_WARNING_NEAREST_POSE_DELTA_MS,
+    warning_abs_offset_ms: float | None = DEFAULT_WARNING_ABS_OFFSET_MS,
     max_observations_per_motion: int = DEFAULT_MAX_OBSERVATIONS_PER_MOTION,
     max_search_motions: int = DEFAULT_MAX_SEARCH_MOTIONS,
     min_motions_per_fold: int = DEFAULT_MIN_MOTIONS_PER_FOLD,
@@ -747,6 +848,7 @@ def estimate_sensor_time_offset(
     max_rotation_degradation_deg: float = DEFAULT_MAX_ROTATION_DEGRADATION_DEG,
     minimum_offset_stability_ms: float = DEFAULT_MIN_OFFSET_STABILITY_MS,
     improvement_evidence_strategy: str = IMPROVEMENT_EVIDENCE_STRATEGY,
+    failure_policy: str = FAILURE_POLICY_WARN_KEEP_ZERO,
     max_leave_one_motion_out_search_adjusted_sign_p_value: float = (
         DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE
     ),
@@ -767,6 +869,26 @@ def estimate_sensor_time_offset(
             "Unsupported time-offset improvement evidence strategy: "
             f"{improvement_evidence_strategy}"
         )
+    if failure_policy not in {
+        FAILURE_POLICY_FAIL_CLOSED,
+        FAILURE_POLICY_WARN_KEEP_ZERO,
+    }:
+        raise ValueError(f"Unsupported time-offset failure policy: {failure_policy}")
+    if (
+        not math.isfinite(max_nearest_pose_delta_ms)
+        or max_nearest_pose_delta_ms <= 0.0
+        or not math.isfinite(warning_nearest_pose_delta_ms)
+        or warning_nearest_pose_delta_ms <= 0.0
+        or warning_nearest_pose_delta_ms > max_nearest_pose_delta_ms
+    ):
+        raise ValueError(
+            "nearest-pose warning threshold must be positive and no greater "
+            "than the maximum nearest-pose delta"
+        )
+    if warning_abs_offset_ms is not None and (
+        not math.isfinite(warning_abs_offset_ms) or warning_abs_offset_ms <= 0.0
+    ):
+        raise ValueError("offset warning threshold must be finite and positive")
     if not 0.0 < max_leave_one_motion_out_search_adjusted_sign_p_value <= 1.0:
         raise ValueError(
             "leave-one-motion-out maximum search-adjusted sign p-value "
@@ -1077,6 +1199,23 @@ def estimate_sensor_time_offset(
             "threshold": [min(values), max(values)],
             "unit": "ms",
         },
+        *(
+            [
+                {
+                    "name": "candidate_offset_magnitude_warning",
+                    "status": (
+                        "warning"
+                        if abs(candidate_offset_ms) > warning_abs_offset_ms
+                        else "ok"
+                    ),
+                    "actual": abs(candidate_offset_ms),
+                    "warning_threshold": warning_abs_offset_ms,
+                    "unit": "ms",
+                }
+            ]
+            if warning_abs_offset_ms is not None
+            else []
+        ),
         {
             "name": "cross_validated_translation_improvement",
             "status": (
@@ -1172,13 +1311,28 @@ def estimate_sensor_time_offset(
     blocking = [item for item in checks if item["status"] == "error"]
     apply_candidate = materially_better and not blocking
     selected_offset_ms = candidate_offset_ms if apply_candidate else 0.0
-    status = (
+    strict_status = (
         "applied"
         if apply_candidate
         else "kept_zero"
         if zero_offset_identified and not blocking
         else "failed"
     )
+    warning_fallback_used = bool(
+        strict_status == "failed" and failure_policy == FAILURE_POLICY_WARN_KEEP_ZERO
+    )
+    status = "kept_zero" if warning_fallback_used else strict_status
+    if warning_fallback_used:
+        checks = [
+            {
+                **item,
+                "status": "warning",
+                "original_status": "error",
+            }
+            if item["status"] == "error"
+            else item
+            for item in checks
+        ]
     reason = (
         (
             (
@@ -1190,7 +1344,9 @@ def estimate_sensor_time_offset(
         )
         if status == "applied"
         else (
-            "candidate_failed_safety_or_stability_checks"
+            "timing_evidence_warning_fallback_to_recorded_timing"
+            if warning_fallback_used
+            else "candidate_failed_safety_or_stability_checks"
             if status == "failed"
             else "zero_offset_identified_by_all_cross_validation_folds"
         )
@@ -1202,8 +1358,27 @@ def estimate_sensor_time_offset(
         robot_pose_time_offset_ms=selected_offset_ms,
         max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
     )
+    delta_summary = nearest_pose_delta_summary(adjusted)
+    maximum_delta_ms = delta_summary["maximum_abs_nearest_pose_delta_ms"]
+    if maximum_delta_ms is not None:
+        checks.append(
+            {
+                "name": "nearest_pose_delta_warning",
+                "status": (
+                    "warning"
+                    if float(maximum_delta_ms) > warning_nearest_pose_delta_ms
+                    else "ok"
+                ),
+                "actual": delta_summary,
+                "warning_threshold": warning_nearest_pose_delta_ms,
+                "failure_threshold": max_nearest_pose_delta_ms,
+                "unit": "ms",
+            }
+        )
     evidence_strength = (
-        "strong"
+        "degraded"
+        if warning_fallback_used
+        else "strong"
         if status == "applied"
         and float(cross_validated_relative or 0.0) >= 0.15
         and fold_candidate_spread_ms <= DEFAULT_STEP_MS * 2.0
@@ -1225,6 +1400,7 @@ def estimate_sensor_time_offset(
         "candidate_robot_pose_time_offset_ms": candidate_offset_ms,
         "candidate_sync_delta_ms": -candidate_offset_ms,
         "evidence_strength": evidence_strength,
+        "warning_fallback_used": warning_fallback_used,
         "boundary_hit": boundary_hit,
         "reference_pnp_method": DEFAULT_REFERENCE_PNP_METHOD,
         "reference_extrinsic_methods": list(methods),
@@ -1255,6 +1431,7 @@ def estimate_sensor_time_offset(
         "motion_consistency": motion_consistency,
         "input_observation_count": len(observations),
         "output_observation_count": len(adjusted),
+        "nearest_pose_delta_summary": delta_summary,
         "checks": checks,
         "curve": curve,
     }
@@ -1270,6 +1447,9 @@ def search_configuration() -> dict[str, Any]:
         "reference_pnp_method": DEFAULT_REFERENCE_PNP_METHOD,
         "reference_extrinsic_methods": list(DEFAULT_REFERENCE_METHODS),
         "max_nearest_pose_delta_ms": DEFAULT_MAX_NEAREST_POSE_DELTA_MS,
+        "warning_nearest_pose_delta_ms": DEFAULT_WARNING_NEAREST_POSE_DELTA_MS,
+        "warning_absolute_robot_pose_time_offset_ms": (DEFAULT_WARNING_ABS_OFFSET_MS),
+        "time_offset_failure_policy": FAILURE_POLICY_WARN_KEEP_ZERO,
         "max_observations_per_motion": DEFAULT_MAX_OBSERVATIONS_PER_MOTION,
         "maximum_search_motion_count": DEFAULT_MAX_SEARCH_MOTIONS,
         "minimum_motion_count_per_cross_validation_fold": (

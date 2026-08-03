@@ -9,6 +9,24 @@ Its Workbench contract is reduced to exactly nine persistent 3 × 3 raster
 frames below `/PoseTestBot/TemplateBase`. `CalibrationCenter` is one of those
 nine frames and anchors both phases.
 
+The earlier deployed/attested revision remains historical acceptance evidence.
+The repository source now contains a prospective high-rate pose-stream
+revision that has not been deployed or physically commissioned: blocking
+motions are sampled by the separate automatic-compatible read-only
+`PoseTestBot_PoseStreamTask` at a 10 ms best-effort target. This new revision
+must not be represented as the accepted deployed program until the exact
+Workbench project is compiled and a supervised cadence trial passes. See
+[IIWA pose-stream cadence](IIWA_POSE_STREAM_CADENCE.md).
+
+Calibration analysis does not confuse that commissioning target with a hard
+dataset cutoff. Current timing revision v3 retains nearest robot poses through
+150 ms, warns above 20 ms, searches effective offset from -300 to +300 ms, and
+warns above ±150 ms. If the statistical offset search is weak or cannot be
+evaluated, it retains recorded 0 ms timing and continues to the existing
+geometric validation gates. At the 30 mm/s capture-motion cap, 100 ms is about
+3 mm of first-order translation; this bounded-error argument motivates a
+warning, not an automatic claim that the resulting calibration is valid.
+
 A separate retained 2026-07-23 guided campaign captured three independent
 eye-in-hand calibration attempts for all three RealSense cameras; see the
 [dated validation record](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
@@ -137,6 +155,13 @@ settled robot-pose samples after each dwell so stable camera frames retain
 synchronization candidates. These limits do not replace the reduced pendant
 override and T1 checks required during commissioning.
 
+Captured LIN and LIN_REL motions no longer use a
+`moveAsync()`/`isFinished()` pose loop. Each motion is blocking while the
+separate read-only cyclic task streams sequenced `robot_pose.v1` packets. The
+three post-dwell samples use that same v1 stream at 50 ms spacing. Host receive
+timestamps remain synchronization authority, while the retained sender target,
+delta, query duration, and sequence are cadence diagnostics.
+
 The UDP stop message is read only while waiting for another start command. It
 cannot interrupt active motion and is not a safety control. In the current
 application it exits the wait loop and requires a manual application restart,
@@ -178,6 +203,8 @@ MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
 Use the [printable checklist](IIWA_CALIBRATION_TEACHING_CHECKLIST.md) for frame
 creation, touch-up read-back, per-frame reviewer sign-off, Workbench endpoint
 and swept-path checks, T1 single-stepping, and the supervised capture trial.
+The checklist now also covers automatic background-task registration and the
+50 Hz / 25 ms p95 / 40 ms maximum end-to-end cadence targets.
 
 The repository source keeps `ENABLE_AFTER_OFFLINE_VALIDATION=false`, so the
 application exits before motion until offline review and supervised

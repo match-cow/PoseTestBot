@@ -1,6 +1,6 @@
 # Acquisition Rewrite Remaining Work
 
-Last reviewed: 2026-07-27
+Last reviewed: 2026-08-03
 
 This is the only repository-owned list of unfinished rewrite work. The
 software-only rewrite is complete. Exactly five operator-run physical
@@ -47,15 +47,35 @@ retained capture and calibration artifacts closes the calibration-program
 rewrite milestone. The teaching checklist remains a reusable procedure for
 future recommissioning or cell changes, not an unfinished rewrite gate.
 
+That acceptance applies to the attested earlier controller revision. The
+repository's 2026-08-03 high-rate pose-stream source is a prospective
+improvement and has not been deployed or physically measured. It does not
+invalidate retained calibration evidence, but it must be compiled and
+recommissioned before replacing the accepted controller program.
+
 The ordinary full-capture Sunrise application is separate from the accepted
 calibration program and remains open under milestone 1.
 
-## 1 — Ordinary-Capture Controller Commissioning
+## 1 — IIWA Controller Commissioning and Cadence Rollout
 
 Follow
-[IIWA_FULL_CAPTURE_APPLICATION.md](IIWA_FULL_CAPTURE_APPLICATION.md). This
-milestone concerns the ordinary pose-template capture application, not the
-accepted nine-frame calibration program.
+[IIWA_FULL_CAPTURE_APPLICATION.md](IIWA_FULL_CAPTURE_APPLICATION.md). The
+gating dataset outcome remains ordinary pose-template capture, not the
+accepted earlier nine-frame calibration revision. The shared high-rate task is
+coupled to this controller commissioning work and does not add a sixth rewrite
+outcome.
+
+- [ ] In the exact Workbench project, create the shared
+  `PoseTestBot_PoseStreamTask` as an automatic cyclic background task, include
+  its task-function interface, and compile the ordinary and calibration
+  application revisions against the installed Sunrise.OS API.
+- [ ] Before replacing the accepted calibration deployment, revalidate its
+  unchanged motion/frame contract and retain a supervised cadence report.
+  Target at least 50 Hz median host receive rate, no more than 25 ms p95 gap,
+  and no more than 40 ms maximum in-motion gap; retain and investigate any
+  miss without treating cadence alone as a calibration-attempt failure. Follow
+  [IIWA_POSE_STREAM_CADENCE.md](IIWA_POSE_STREAM_CADENCE.md); never send UDP
+  `STOP` between repeated calibration captures.
 
 - [ ] Identify and record the exact Sunrise application deployed for ordinary
   capture. `iiwa/PoseTestBot_Test.java` remains a repository candidate, not
