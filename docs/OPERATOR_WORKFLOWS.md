@@ -22,6 +22,11 @@ newer lab default. Capture planning carries the label into `capture_plan.json`
 and `dataset_manifest.json`, but sensor type and device ID remain the durable
 physical identity.
 
+The Devices mounting default follows the same rule. A newly configured run
+copies each selected camera's explicit `static` or `eye_in_hand` value into its
+own `capture.sensors[]` entry in `run_config.json`; an existing run keeps its
+saved value even if the reusable Devices default changes later.
+
 ## Required and optional work
 
 - **Required** steps form the required workflow spine. A later untouched step
@@ -93,17 +98,20 @@ calibration has been promoted.
 
 1. **Configure cameras and select calibration — required.** Choose the enabled
    cameras, their run-owned operator aliases, and acquisition settings, then
-   select a promoted calibration that covers every camera identity and
-   mounting mode. PoseTestBot copies the exact selected
-   `calibration_profiles.json` and
-   `intrinsic_calibration_profiles.json` into
+   assign a promoted calibration source to every camera identity and mounting
+   mode. Static and robot-mounted cameras may use different source runs. When
+   one source covers the complete setup, PoseTestBot retains that exact pair;
+   when several sources are assigned, it deterministically combines only the
+   selected camera/lens profile pairs. The resulting
+   `calibration_profiles.json` and `intrinsic_calibration_profiles.json` live in
    `processed/calibration_inputs/<bundle_sha256>/`. The run-owned
-   `calibration_profile_selection.json` binds the source bundle, copied-file
-   hashes, and per-camera profile mapping. Later changes to the source run
-   cannot silently alter this dataset run. Switching an existing selection
-   requires an explicit confirmation and a matching current bundle hash. Once
-   capture or derived dataset material exists, start a new run instead of
-   rebinding that evidence to another calibration. The selected profiles must
+   `calibration_profile_selection.json` binds the combined bundle and
+   per-camera mapping. Its v2 form also records every source-run bundle hash
+   and the cameras assigned to it. Later changes to any source run cannot
+   silently alter this dataset run. Switching an existing selection requires
+   an explicit confirmation and a matching current bundle hash. Once capture
+   or derived dataset material exists, start a new run instead of rebinding
+   that evidence to another calibration. The selected profiles must
    also contain a verified per-camera robot-pose time offset, timestamp pair,
    clock-domain/fallback rule, and maximum pose gap.
    Choose the capture synchronization policy in the same setup. The general

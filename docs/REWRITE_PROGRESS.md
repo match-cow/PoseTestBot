@@ -44,6 +44,37 @@ The code rewrite is implemented across:
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
 
+## 2026-08-03 Run Creation and Mixed Calibration Reuse
+
+The active-run dialog now represents the server's direct-child storage
+contract explicitly: the operator chooses one approved storage root and one
+run-folder name. Each acquisition therefore gets a distinct sibling folder,
+while the editable run name inside Workflow remains clearly identified as
+metadata. This removes the former full-path field that reopened the current
+folder by default and made creating several runs under one storage root easy to
+miss.
+
+The Devices-to-run mounting path was audited rather than replaced. Sensor
+status already merges the reusable Devices `mounting_mode`, and first-time run
+setup already writes that per-camera value into `capture.sensors[]`; existing
+runs intentionally retain their saved mount. The unit contract now exercises
+`static` explicitly, and the desktop workflow regression verifies the mixed
+`eye_in_hand`/`static` request written to `run_config.json`.
+
+Dataset setup now assigns a promoted calibration source per enabled camera.
+One source may still cover the complete rig, while static and robot-mounted
+cameras can be drawn from separate calibration runs. The server revalidates
+every explicit assignment and source hash, creates a deterministic combined
+camera/intrinsic collection when needed, and publishes it through the existing
+read-only snapshot and replacement/CAS gates. The new
+`calibration_profile_selection.v2` record retains every source bundle and its
+assigned sensors; existing v1 selections remain loadable and unchanged.
+Source changes after publication cannot alter the combined run-owned bytes.
+All 1,030 default tests and all 58 desktop Playwright regressions pass,
+including the six focused contracts for these fixes. Ruff, frontend type
+checking, the Vite production build, and `git diff --check` also pass. No
+camera, robot, or physical capture was accessed for this work.
+
 ## 2026-08-03 DIN A5/A6 Calibration Targets
 
 The pinned PoseGridGen checkout now includes DIN A5 (148 × 210 mm) and A6
@@ -57,6 +88,10 @@ Previously generated immutable bundles from the `ad152e369e` pin remain valid
 and selectable with their exact original hashes and provenance. New generation
 requires the current `9e6975901f` checkout; no saved bundle is rewritten or
 silently rerendered during the pin transition.
+
+Focused renderer/bundle, Flask API, and desktop Playwright regressions pass,
+including both new selector options and their physical page dimensions. The
+complete 1,029-test default suite also passes without hardware access.
 
 ## 2026-08-03 IIWA High-Rate Pose-Stream Source
 
@@ -99,7 +134,7 @@ because the unchanged continuous image-centroid coverage gates failed (x span
 0.435/0.450, y span 0.318/0.350, hull area 0.088/0.100), not because of timing.
 
 The four Java sources compile against a public Sunrise 1.15.1 API set, and all
-1,026 default (non-Playwright) tests pass without hardware access. This is not
+1,029 default (non-Playwright) tests pass without hardware access. This is not
 lab deployment evidence: exact Workbench background-task registration,
 installed-API compilation, controller deployment, path recommissioning, and
 supervised cadence measurement remain operator work under remaining milestone

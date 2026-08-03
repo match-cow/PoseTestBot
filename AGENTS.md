@@ -210,11 +210,15 @@ Do not expand the Inspect-only exception into downstream behavior:
   `calibration_validation_report.json`, and promoted
   `calibration_profiles.json` (`calibration.v2`; v1 remains loadable).
 - Run-owned reusable-calibration selection is recorded in
-  `calibration_profile_selection.json`. Exact copied
+  `calibration_profile_selection.json`. One or more promoted source runs may
+  supply explicit per-sensor profiles. Exact single-source or deterministic
+  combined
   `calibration_profiles.json` and `intrinsic_calibration_profiles.json`
   snapshots live below `processed/calibration_inputs/<bundle_sha256>/`; the
-  selection manifest binds their hashes and per-sensor profile mapping so a
-  later source-run change cannot alter the dataset run.
+  selection manifest binds their hashes, every source bundle, and the
+  per-sensor profile mapping so a later source-run change cannot alter the
+  dataset run. Selection schema v1 remains loadable; multi-source provenance
+  uses `calibration_profile_selection.v2`.
 - Intent-level calibration attempts live under
   `processed/calibration/<attempt_id>/` and retain `request.json`,
   `progress.json`, `intrinsic_comparison.json`, `time_offset_search.json`,

@@ -615,25 +615,25 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         "old-run"
     )
     page.get_by_role("combobox", name="Active run folder").click()
-    page.get_by_role("option", name="Enter a new or unlisted folder…").click()
+    page.get_by_role("option", name="Create or open a run folder…").click()
     expect(
-        page.get_by_role("heading", name="Change the active run folder")
+        page.get_by_role("heading", name="Create or open a run folder")
     ).to_be_visible()
     expect(
         page.get_by_text(
-            "This is the context for the entire operator workflow",
+            "Each acquisition run is a separate folder",
             exact=False,
         )
     ).to_be_visible()
-    expect(
-        page.get_by_text("Confirm the acquisition run before continuing.")
-    ).to_be_visible()
-    expect(page.locator("#new-run-path")).to_have_value(
-        "/tmp/posetestbot-console/old-run"
+    expect(page.get_by_text("Choose one folder per acquisition run.")).to_be_visible()
+    expect(page.get_by_role("combobox", name="Run storage root")).to_contain_text(
+        "/tmp/posetestbot-console"
     )
+    expect(page.locator("#new-run-name")).to_have_value("")
     custom_run = "/tmp/posetestbot-console/unlisted-run"
-    page.locator("#new-run-path").fill(custom_run)
-    page.get_by_role("button", name="Switch active folder", exact=True).click()
+    page.locator("#new-run-name").fill("unlisted-run")
+    expect(page.get_by_test_id("new-run-path-preview")).to_have_text(custom_run)
+    page.get_by_role("button", name="Use run folder", exact=True).click()
     expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
         custom_run
     )
@@ -1800,9 +1800,9 @@ def test_new_run_path_renders_guided_setup_when_run_config_is_missing(
 
     page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
     page.get_by_role("combobox", name="Active run folder").click()
-    page.get_by_role("option", name="Enter a new or unlisted folder…").click()
-    page.locator("#new-run-path").fill(fresh_run)
-    page.get_by_role("button", name="Switch active folder", exact=True).click()
+    page.get_by_role("option", name="Create or open a run folder…").click()
+    page.locator("#new-run-name").fill("fresh-calibration-run")
+    page.get_by_role("button", name="Use run folder", exact=True).click()
     page.goto(
         f"{console_server.url}/#/workflow/calibration?step=configure",
         wait_until="networkidle",
@@ -1881,9 +1881,9 @@ def test_switching_active_run_clears_setup_draft_before_unconfigured_save(
     page.get_by_label("Run name").fill("unsaved values from the previous run")
     page.locator("#fps").fill("41")
     page.get_by_role("combobox", name="Active run folder").click()
-    page.get_by_role("option", name="Enter a new or unlisted folder…").click()
-    page.locator("#new-run-path").fill(fresh_run)
-    page.get_by_role("button", name="Switch active folder", exact=True).click()
+    page.get_by_role("option", name="Create or open a run folder…").click()
+    page.locator("#new-run-name").fill("empty-new-run")
+    page.get_by_role("button", name="Use run folder", exact=True).click()
 
     expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
         fresh_run
@@ -1895,9 +1895,9 @@ def test_switching_active_run_clears_setup_draft_before_unconfigured_save(
     expect(setup.get_by_role("button", name="Save setup")).to_be_enabled()
 
     page.get_by_role("combobox", name="Active run folder").click()
-    page.get_by_role("option", name="Enter a new or unlisted folder…").click()
-    page.locator("#new-run-path").fill(unavailable_run)
-    page.get_by_role("button", name="Switch active folder", exact=True).click()
+    page.get_by_role("option", name="Create or open a run folder…").click()
+    page.locator("#new-run-name").fill("unavailable-run")
+    page.get_by_role("button", name="Use run folder", exact=True).click()
     setup = page.get_by_test_id("camera_calibration-run-setup")
     expect(
         setup.get_by_text("The active run’s setup could not be loaded")
@@ -4350,8 +4350,11 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         "master_sensor_key": "realsense_d435:wrist-1",
         "max_depth_timestamp_skew_ms": 2,
     }
-    source_run_root = "/tmp/posetestbot-console/calibration-july-21"
-    source_bundle_sha256 = "a" * 64
+    mobile_source_run_root = "/tmp/posetestbot-console/calibration-mobile-july-21"
+    static_source_run_root = "/tmp/posetestbot-console/calibration-static-july-21"
+    mobile_source_bundle_sha256 = "a" * 64
+    static_source_bundle_sha256 = "d" * 64
+    combined_bundle_sha256 = "e" * 64
     selected_calibration_path = (
         "processed/calibration_selection/calibration_profiles.json"
     )
@@ -4359,28 +4362,61 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         "processed/calibration_selection/intrinsic_calibration_profiles.json"
     )
     selection_artifact = calibration_selection_artifact(
-        bundle_sha256=source_bundle_sha256,
+        bundle_sha256=combined_bundle_sha256,
         calibration_profiles=selected_calibration_path,
         intrinsic_calibration_profiles=selected_intrinsics_path,
-        source_run_root=source_run_root,
-        source_run_name="Calibration run July 21",
+        source_run_root=mobile_source_run_root,
+        source_run_name="Combined calibration from 2 source runs",
     )
-    source = {
-        "source_run_root": source_run_root,
-        "source_run_name": "Calibration run July 21",
-        "bundle_sha256": source_bundle_sha256,
+    selection_artifact["schema_version"] = "calibration_profile_selection.v2"
+    selection_artifact["source"] = {
+        "kind": "composite",
+        "run_name": "Combined calibration from 2 source runs",
+        "bundle_sha256": combined_bundle_sha256,
+    }
+    selection_artifact["sources"] = [
+        {
+            "run_root": mobile_source_run_root,
+            "run_name": "Mobile calibration July 21",
+            "bundle_sha256": mobile_source_bundle_sha256,
+            "selected_sensor_keys": ["realsense_d435:wrist-1"],
+        },
+        {
+            "run_root": static_source_run_root,
+            "run_name": "Static calibration July 21",
+            "bundle_sha256": static_source_bundle_sha256,
+            "selected_sensor_keys": ["realsense_d435:static-1"],
+        },
+    ]
+    selection_artifact["sensor_profiles"] = {
+        "realsense_d435:wrist-1": "profile-wrist-1",
+        "realsense_d435:static-1": "profile-static-1",
+    }
+    mobile_source = {
+        "source_run_root": mobile_source_run_root,
+        "source_run_name": "Mobile calibration July 21",
+        "bundle_sha256": mobile_source_bundle_sha256,
         "valid": True,
-        "compatible": True,
-        "issues": [],
+        "compatible": False,
+        "issues": [
+            {
+                "code": "sensor_identity_not_calibrated",
+                "message": "No calibration profile matches realsense_d435:static-1.",
+                "sensor_key": "realsense_d435:static-1",
+            }
+        ],
         "calibration_profiles": {
             "sha256": "b" * 64,
-            "valid_profile_count": 2,
+            "valid_profile_count": 1,
             "profiles": [
                 {
                     "profile_id": "profile-wrist-1",
                     "sensor_type": "realsense_d435",
                     "sensor_id": "wrist-1",
                     "mounting_mode": "eye_in_hand",
+                    "status": "valid",
+                    "resolution": [1280, 720],
+                    "intrinsic_profile_id": "intrinsic-wrist-1",
                     "method": "IPPE + park",
                     "quality": {
                         "num_observations": 18,
@@ -4388,23 +4424,66 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
                         "mean_reprojection_error_px": 0.31,
                     },
                 },
+            ],
+        },
+        "intrinsic_calibration_profiles": {
+            "sha256": "c" * 64,
+            "profile_count": 1,
+            "profiles": [
+                {
+                    "profile_id": "intrinsic-wrist-1",
+                    "sensor_id": "wrist-1",
+                    "resolution": [1280, 720],
+                    "orientation": "normal",
+                }
+            ],
+        },
+    }
+    static_source = {
+        "source_run_root": static_source_run_root,
+        "source_run_name": "Static calibration July 21",
+        "bundle_sha256": static_source_bundle_sha256,
+        "valid": True,
+        "compatible": False,
+        "issues": [
+            {
+                "code": "sensor_identity_not_calibrated",
+                "message": "No calibration profile matches realsense_d435:wrist-1.",
+                "sensor_key": "realsense_d435:wrist-1",
+            }
+        ],
+        "calibration_profiles": {
+            "sha256": "7" * 64,
+            "valid_profile_count": 1,
+            "profiles": [
                 {
                     "profile_id": "profile-static-1",
                     "sensor_type": "realsense_d435",
                     "sensor_id": "static-1",
                     "mounting_mode": "static",
+                    "status": "valid",
+                    "resolution": [1280, 720],
+                    "intrinsic_profile_id": "intrinsic-static-1",
                     "method": "IPPE + park",
                     "quality": {
                         "num_observations": 18,
                         "num_inliers": 17,
                         "mean_reprojection_error_px": 0.29,
                     },
-                },
+                }
             ],
         },
         "intrinsic_calibration_profiles": {
-            "sha256": "c" * 64,
-            "profile_count": 2,
+            "sha256": "8" * 64,
+            "profile_count": 1,
+            "profiles": [
+                {
+                    "profile_id": "intrinsic-static-1",
+                    "sensor_id": "static-1",
+                    "resolution": [1280, 720],
+                    "orientation": "inverted",
+                }
+            ],
         },
     }
     install_common_mocks(page, requests=requests, config_payload=configured)
@@ -4415,7 +4494,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         "**/ui/calibrations?**",
         lambda route: fulfill_json(
             route,
-            {"selected": None, "calibrations": [source]},
+            {"selected": None, "calibrations": [mobile_source, static_source]},
         ),
     )
 
@@ -4489,11 +4568,24 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     readiness_action = page.get_by_role("button", name="Check readiness", exact=True)
     expect(readiness_action).to_have_count(0)
 
-    source_choice = page.get_by_role("radio").filter(has_text="Calibration run July 21")
-    expect(source_choice).to_have_count(1)
-    expect(source_choice).to_contain_text("Camera settings match")
-    source_choice.click()
-    expect(source_choice).to_have_attribute("aria-checked", "true")
+    assignments = page.get_by_test_id("calibration-source-assignments")
+    expect(assignments.get_by_test_id("calibration-source-assignment")).to_have_count(2)
+    mobile_source_choice = page.get_by_role(
+        "combobox", name="Calibration source for Wrist RGB-D"
+    )
+    static_source_choice = page.get_by_role(
+        "combobox", name="Calibration source for Static RGB-D"
+    )
+    mobile_source_choice.click()
+    page.get_by_role("option").filter(has_text="Mobile calibration July 21").click()
+    expect(mobile_source_choice).to_contain_text("Mobile calibration July 21")
+    expect(
+        page.get_by_role("button", name="Validate and save setup", exact=True)
+    ).to_be_disabled()
+    static_source_choice.click()
+    page.get_by_role("option").filter(has_text="Static calibration July 21").click()
+    expect(static_source_choice).to_contain_text("Static calibration July 21")
+    expect(page.get_by_text("Ready to combine and validate")).to_be_visible()
     synchronization_mode = page.get_by_role("combobox", name="Synchronization mode")
     expect(synchronization_mode).to_contain_text(
         "Hardware-triggered RealSense depth exposure"
@@ -4530,7 +4622,8 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
         has_text="Configure cameras and select calibration"
     ).click()
     expect(speed).to_have_value("0.15")
-    expect(source_choice).to_have_attribute("aria-checked", "true")
+    expect(mobile_source_choice).to_contain_text("Mobile calibration July 21")
+    expect(static_source_choice).to_contain_text("Static calibration July 21")
     expect(page.get_by_label("Trigger group ID")).to_have_value("research-mixed-rig")
     validate_and_save = page.get_by_role(
         "button", name="Validate and save setup", exact=True
@@ -4542,8 +4635,18 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     assert selection_requests == [
         {
             "run_root": RUN_ROOT,
-            "source_run_root": source_run_root,
-            "expected_bundle_sha256": source_bundle_sha256,
+            "source_selections": [
+                {
+                    "source_run_root": mobile_source_run_root,
+                    "expected_bundle_sha256": mobile_source_bundle_sha256,
+                    "sensor_keys": ["realsense_d435:wrist-1"],
+                },
+                {
+                    "source_run_root": static_source_run_root,
+                    "expected_bundle_sha256": static_source_bundle_sha256,
+                    "sensor_keys": ["realsense_d435:static-1"],
+                },
+            ],
             "expected_current_bundle_sha256": None,
             "confirm_replace": False,
             "resolution": "720p",
@@ -4569,7 +4672,7 @@ def test_dataset_setup_requires_and_snapshots_a_prior_calibration(
     assert written["velocity"] == 0.15
     assert written["sequence"] == "calibrated_capture_to_bop_dataset_dry_run"
     assert written["calibration_profiles"] == selected_calibration_path
-    assert written["expected_calibration_bundle_sha256"] == source_bundle_sha256
+    assert written["expected_calibration_bundle_sha256"] == combined_bundle_sha256
     assert written["sequence_options"] == {
         "camera_rectification": {"intrinsic_profiles": selected_intrinsics_path}
     }
@@ -4658,6 +4761,14 @@ def test_dataset_setup_requires_confirmation_to_replace_selected_calibration(
             "sha256": "5" * 64,
             "profile_count": 1,
         },
+        "sensor_profile_mapping": [
+            {
+                "sensor_key": "realsense_d435:wrist-1",
+                "profile_id": "profile-wrist-1",
+                "intrinsic_profile_id": "intrinsic-wrist-1",
+                "mounting_mode": "eye_in_hand",
+            }
+        ],
     }
     replacement_selection = calibration_selection_artifact(
         bundle_sha256=replacement_bundle_sha256,
@@ -4723,14 +4834,12 @@ def test_dataset_setup_requires_confirmation_to_replace_selected_calibration(
     expect(
         page.get_by_text("A verified calibration snapshot is selected")
     ).to_be_visible()
-    replacement_choice = page.get_by_role("radio").filter(
-        has_text="Replacement calibration"
-    )
-    expect(replacement_choice).to_contain_text("Review camera settings")
-    expect(replacement_choice).to_contain_text(
-        "The saved setup differs; current choices will be checked when saved."
+    replacement_choice = page.get_by_role(
+        "combobox", name="Calibration source for Wrist RGB-D"
     )
     replacement_choice.click()
+    page.get_by_role("option").filter(has_text="Replacement calibration").click()
+    expect(replacement_choice).to_contain_text("Replacement calibration")
 
     validate_and_save = page.get_by_role(
         "button", name="Validate and save setup", exact=True
@@ -4749,8 +4858,13 @@ def test_dataset_setup_requires_confirmation_to_replace_selected_calibration(
     assert selection_requests == [
         {
             "run_root": RUN_ROOT,
-            "source_run_root": replacement_source_root,
-            "expected_bundle_sha256": replacement_bundle_sha256,
+            "source_selections": [
+                {
+                    "source_run_root": replacement_source_root,
+                    "expected_bundle_sha256": replacement_bundle_sha256,
+                    "sensor_keys": ["realsense_d435:wrist-1"],
+                }
+            ],
             "expected_current_bundle_sha256": current_bundle_sha256,
             "confirm_replace": True,
             "resolution": "720p",

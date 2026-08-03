@@ -99,6 +99,25 @@ def test_status_capabilities_preview_fit_and_pydantic_details(target_client) -> 
     assert preview.mimetype == "image/png"
     assert len(preview.headers["X-Configuration-Hash"]) == 64
 
+    a6_portrait_with_ruler = configuration()
+    a6_portrait_with_ruler["page"] = {
+        "paper_size": "A6",
+        "orientation": "portrait",
+    }
+    a6_portrait_with_ruler["board"].update(
+        {"rows": 1, "columns": 1, "marker_size_mm": 20.0}
+    )
+    a6_portrait_with_ruler["annotations"]["show_ruler"] = True
+    ruler_rejected = client.post(
+        "/calibration-targets/preview",
+        json=a6_portrait_with_ruler,
+    )
+    assert ruler_rejected.status_code == 422
+    assert ruler_rejected.get_json()["errors"][0]["path"] == [
+        "annotations",
+        "ruler",
+    ]
+
     too_large = configuration()
     too_large["board"]["columns"] = 7
     too_large["board"]["rows"] = 7

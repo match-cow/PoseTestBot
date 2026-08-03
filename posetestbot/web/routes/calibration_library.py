@@ -7,6 +7,7 @@ from flask import Blueprint, jsonify, request
 from posetestbot.calibration.profile_library import (
     CalibrationSelectionConflict,
     list_calibration_library,
+    select_calibration_profile_composite_snapshot,
     select_calibration_profile_snapshot,
 )
 
@@ -33,23 +34,33 @@ def _select_calibration_response():
         return jsonify({"output": "JSON object required"}), 400
     if not data.get("run_root"):
         return jsonify({"output": "run_root is required"}), 400
-    if not data.get("source_run_root"):
-        return jsonify({"output": "source_run_root is required"}), 400
-    if not data.get("expected_bundle_sha256"):
-        return jsonify({"output": "expected_bundle_sha256 is required"}), 400
     try:
-        result = select_calibration_profile_snapshot(
-            data["run_root"],
-            source_run_root=data["source_run_root"],
-            expected_bundle_sha256=data["expected_bundle_sha256"],
-            sensors=data.get("sensors"),
-            resolution=data.get("resolution"),
-            operator=data.get("operator"),
-            expected_current_bundle_sha256=data.get(
+        common = {
+            "sensors": data.get("sensors"),
+            "resolution": data.get("resolution"),
+            "operator": data.get("operator"),
+            "expected_current_bundle_sha256": data.get(
                 "expected_current_bundle_sha256"
             ),
-            confirm_replace=data.get("confirm_replace", False),
-        )
+            "confirm_replace": data.get("confirm_replace", False),
+        }
+        if "source_selections" in data:
+            result = select_calibration_profile_composite_snapshot(
+                data["run_root"],
+                source_selections=data["source_selections"],
+                **common,
+            )
+        else:
+            if not data.get("source_run_root"):
+                return jsonify({"output": "source_run_root is required"}), 400
+            if not data.get("expected_bundle_sha256"):
+                return jsonify({"output": "expected_bundle_sha256 is required"}), 400
+            result = select_calibration_profile_snapshot(
+                data["run_root"],
+                source_run_root=data["source_run_root"],
+                expected_bundle_sha256=data["expected_bundle_sha256"],
+                **common,
+            )
     except CalibrationSelectionConflict as exc:
         return jsonify({"output": str(exc), "issues": exc.issues}), 409
     except FileNotFoundError as exc:

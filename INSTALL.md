@@ -117,8 +117,12 @@ normal checkout enables both:
 - `<repository>/working_data`; and
 - `/mnt/working_data_ssd`, the lab acquisition SSD.
 
-The run chooser lists direct run folders from both roots and may accept a new
-folder below either root; Workflow writes its `run_config.json`. The
+The run chooser lists direct run folders from both roots. To create or open a
+run, choose an approved storage root and one folder name; the console derives
+the direct child `<root>/<run-folder>`, and Workflow writes its
+`run_config.json` when setup is saved. Use a different sibling folder for each
+acquisition (`<root>/run-a`, `<root>/run-b`, and so on). The editable **Run
+name** inside setup is metadata and does not select or rename that folder. The
 **Inspect → Run folders** page inventories runs across these exact roots,
 including recursively measured size, saved sensor/object setup, and evidence.
 It never opens cameras or contacts the robot.

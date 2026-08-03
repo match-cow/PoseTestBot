@@ -60,6 +60,22 @@ interface WorkflowRuntimeStatus {
   label: string
 }
 
+function runRootForPath(path: string, allowedRoots: string[]) {
+  return [...allowedRoots]
+    .sort((left, right) => right.length - left.length)
+    .find((root) => path === root || path.startsWith(`${root.replace(/\/+$/, "")}/`))
+    ?? allowedRoots[0]
+}
+
+function runFolderPath(root: string, name: string) {
+  return `${root.replace(/\/+$/, "")}/${name.trim()}`
+}
+
+function validRunFolderName(name: string) {
+  const value = name.trim()
+  return Boolean(value) && value !== "." && value !== ".." && !/[\\/\0]/.test(value)
+}
+
 function workflowRuntimePresentation(runtime: WorkflowRuntimeStatus) {
   if (["failed", "canceled", "cancelled"].includes(runtime.value)) {
     return { label: runtime.label, className: "border-destructive/30 bg-destructive/10 text-destructive", icon: LockKeyhole }
@@ -97,7 +113,8 @@ export function AppShell() {
   const { theme, setTheme } = useTheme()
   const location = useLocation()
   const [newRunOpen, setNewRunOpen] = useState(false)
-  const [newRun, setNewRun] = useState(bootstrap.default_run_root)
+  const [newRunRoot, setNewRunRoot] = useState(() => runRootForPath(bootstrap.default_run_root, bootstrap.allowed_run_roots))
+  const [newRunName, setNewRunName] = useState("")
   const [guideOpen, setGuideOpen] = useState(false)
   const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
   const captureState = useQuery({
@@ -154,13 +171,18 @@ export function AppShell() {
   }, [location.pathname])
 
   const openRunDialog = () => {
-    setNewRun(selectedRun)
+    setNewRunRoot(runRootForPath(selectedRun, bootstrap.allowed_run_roots))
+    setNewRunName("")
     setNewRunOpen(true)
   }
 
   const applyNewRun = () => {
-    if (!selectRun(newRun.trim())) {
-      toast.error("Run path must stay inside an allowed run root")
+    if (!validRunFolderName(newRunName)) {
+      toast.error("Run folder name must be one folder, not a path")
+      return
+    }
+    if (!selectRun(runFolderPath(newRunRoot, newRunName))) {
+      toast.error("Run folder must stay inside an allowed run root")
       return
     }
     setNewRunOpen(false)
@@ -229,7 +251,7 @@ export function AppShell() {
                     <SelectContent className="min-w-[var(--radix-select-trigger-width)] max-w-[min(720px,calc(100vw-2rem))]">
                       {!runs.some((run) => run.path === selectedRun) && <SelectItem value="__custom">{selectedRun}</SelectItem>}
                       {runs.map((run) => <SelectItem value={run.path} textValue={`${run.name} · ${run.config_valid ? run.sequence ?? "configured" : "not configured"} · ${run.path}`} key={run.path}><span className="flex min-w-0 flex-col gap-0.5 py-0.5"><span className="font-medium">{run.name} · {run.config_valid ? run.sequence ?? "configured" : "not configured"}</span><span className="truncate font-mono text-[10px] text-muted-foreground">{run.path}</span></span></SelectItem>)}
-                      <SelectItem value="__new"><span className="flex items-center gap-2"><Plus className="size-3.5" />Enter a new or unlisted folder…</span></SelectItem>
+                      <SelectItem value="__new"><span className="flex items-center gap-2"><Plus className="size-3.5" />Create or open a run folder…</span></SelectItem>
                     </SelectContent>
                   </Select>
                 </section>
@@ -256,19 +278,26 @@ export function AppShell() {
         <DialogContent>
           <form onSubmit={(event) => { event.preventDefault(); applyNewRun() }} className="space-y-4">
             <DialogHeader>
-              <DialogTitle>Change the active run folder</DialogTitle>
-              <DialogDescription>This is the context for the entire operator workflow, not only a file destination. Every run-owned page, configuration, evidence file, and action uses the selected folder.</DialogDescription>
+              <DialogTitle>Create or open a run folder</DialogTitle>
+              <DialogDescription>Each acquisition run is a separate folder directly below an approved storage root. The run name saved during setup is metadata and does not choose this folder.</DialogDescription>
             </DialogHeader>
             <div className="flex gap-3 rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed">
               <FolderOpen className="mt-0.5 size-4 shrink-0 text-primary-strong" aria-hidden="true" />
               <div>
-                <strong>Confirm the acquisition run before continuing.</strong>
-                <p className="mt-1 text-muted-foreground">A new folder starts unconfigured. Switching folders does not copy setup or evidence from the current run.</p>
+                <strong>Choose one folder per acquisition run.</strong>
+                <p className="mt-1 text-muted-foreground">A new folder starts unconfigured. Creating another sibling folder preserves the configuration and evidence of every earlier run.</p>
               </div>
             </div>
-            <div className="space-y-2"><Label htmlFor="new-run-path">Run folder path</Label><Input id="new-run-path" autoFocus value={newRun} onChange={(event) => setNewRun(event.target.value)} /></div>
-            <div className="rounded-lg bg-muted p-3 text-xs text-muted-foreground"><strong className="text-foreground">Allowed roots</strong>{bootstrap.allowed_run_roots.map((root) => <div className="mt-1 font-mono" key={root}>{root}</div>)}</div>
-            <DialogFooter><Button type="button" variant="outline" onClick={() => setNewRunOpen(false)}>Cancel</Button><Button type="submit">Switch active folder</Button></DialogFooter>
+            <div className="space-y-2">
+              <Label htmlFor="new-run-root">Storage root</Label>
+              <Select value={newRunRoot} onValueChange={setNewRunRoot}>
+                <SelectTrigger id="new-run-root" aria-label="Run storage root"><SelectValue /></SelectTrigger>
+                <SelectContent>{bootstrap.allowed_run_roots.map((root) => <SelectItem value={root} key={root}>{root}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2"><Label htmlFor="new-run-name">Run folder name</Label><Input id="new-run-name" autoFocus value={newRunName} onChange={(event) => setNewRunName(event.target.value)} placeholder="e.g. object_capture_20260803" /></div>
+            <div className="rounded-lg bg-muted p-3 text-xs text-muted-foreground"><strong className="text-foreground">Resulting run folder</strong><div className="mt-1 break-all font-mono" data-testid="new-run-path-preview">{validRunFolderName(newRunName) ? runFolderPath(newRunRoot, newRunName) : `${newRunRoot.replace(/\/+$/, "")}/…`}</div><p className="mt-2">The folder is created when its setup is saved.</p></div>
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setNewRunOpen(false)}>Cancel</Button><Button type="submit" disabled={!validRunFolderName(newRunName)}>Use run folder</Button></DialogFooter>
           </form>
         </DialogContent>
       </Dialog>

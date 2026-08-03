@@ -46,9 +46,19 @@ type CalibrationProfileSummary = {
   mounting_mode: string
   status?: string
   resolution?: [number, number]
+  intrinsic_profile_id?: string | null
   calibrated_at?: string | null
   method?: string | null
   quality?: { num_observations?: number; num_inliers?: number; mean_reprojection_error_px?: number | null }
+}
+
+type CalibrationSensorMapping = {
+  sensor_key: string
+  profile_id: string
+  intrinsic_profile_id: string
+  mounting_mode: string
+  resolution?: string
+  orientation?: string
 }
 
 type CalibrationSource = {
@@ -68,16 +78,25 @@ type CalibrationSource = {
     profile_count: number
     profiles?: Array<{ profile_id: string; sensor_id: string; resolution: [number, number]; orientation: string }>
   }
+  sensor_profile_mapping?: CalibrationSensorMapping[]
+  sensor_profiles?: Record<string, string>
 }
 
 type CalibrationSelectionArtifact = {
   schema_version: string
   selected_at: string
   source: {
-    run_root: string
+    kind?: "composite"
+    run_root?: string
     run_name: string
     bundle_sha256: string
   }
+  sources?: Array<{
+    run_root: string
+    run_name: string
+    bundle_sha256: string
+    selected_sensor_keys: string[]
+  }>
   snapshot: {
     calibration_profiles: { relative_path: string; sha256: string }
     intrinsic_calibration_profiles: { relative_path: string; sha256: string }
@@ -105,6 +124,49 @@ type CalibrationSelectionResponse = {
 }
 
 const sensorKey = (sensor: { sensor_type: string; device_id: string }) => `${sensor.sensor_type}:${sensor.device_id}`
+const CALIBRATION_RESOLUTION_SIZES: Record<string, [number, number]> = {
+  "720p": [1280, 720],
+  "360p": [672, 376],
+}
+
+function calibrationMappingFor(
+  source: CalibrationSource,
+  sensor: RunSensor,
+  resolution: string,
+): CalibrationSensorMapping | null {
+  const key = sensorKey(sensor)
+  const orientation = sensor.inverted ? "inverted" : "normal"
+  const listed = source.sensor_profile_mapping?.find((mapping) => mapping.sensor_key === key)
+  if (listed
+    && listed.mounting_mode === sensor.mounting_mode
+    && (!listed.resolution || listed.resolution === resolution)
+    && (!listed.orientation || listed.orientation === orientation)) return listed
+
+  const imageSize = CALIBRATION_RESOLUTION_SIZES[resolution]
+  if (!imageSize) return null
+  const profiles = source.calibration_profiles.profiles.filter((profile) => profile.status === "valid"
+    && profile.sensor_type === sensor.sensor_type
+    && profile.sensor_id === sensor.device_id
+    && profile.mounting_mode === sensor.mounting_mode
+    && profile.resolution?.[0] === imageSize[0]
+    && profile.resolution?.[1] === imageSize[1])
+  if (profiles.length !== 1) return null
+  const profile = profiles[0]
+  const intrinsicProfiles = source.intrinsic_calibration_profiles.profiles?.filter((intrinsic) => intrinsic.sensor_id === sensor.device_id
+    && intrinsic.resolution[0] === imageSize[0]
+    && intrinsic.resolution[1] === imageSize[1]
+    && intrinsic.orientation === orientation
+    && (!profile.intrinsic_profile_id || intrinsic.profile_id === profile.intrinsic_profile_id)) ?? []
+  if (intrinsicProfiles.length !== 1) return null
+  return {
+    sensor_key: key,
+    profile_id: profile.profile_id,
+    intrinsic_profile_id: intrinsicProfiles[0].profile_id,
+    mounting_mode: sensor.mounting_mode,
+    resolution,
+    orientation,
+  }
+}
 const TIMESTAMP_SYNCHRONIZATION: CaptureSynchronization = {
   schema_version: "capture_synchronization.v1",
   mode: "timestamp_aligned",
@@ -226,7 +288,10 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   })
   const [enabledOverrides, setEnabledOverrides] = useState<Record<string, Record<string, boolean>>>({})
   const [operatorAliasDrafts, setOperatorAliasDrafts] = useState<Record<string, string>>({})
-  const [sourceSelection, setSourceSelection] = useState<{ runRoot: string; sourceRunRoot: string } | null>(null)
+  const [calibrationAssignments, setCalibrationAssignments] = useState<{
+    runRoot: string
+    sourceBySensor: Record<string, string>
+  } | null>(null)
   const [confirmReplacement, setConfirmReplacement] = useState(false)
   const setupLookupPending = existing.isPending
   const setupNotFound = existing.isError && existing.error instanceof ApiError && existing.error.status === 404
@@ -311,9 +376,23 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
         maxDepthTimestampSkewMs,
       )
     : []
+  const selectedResolution = useWatch({ control: form.control, name: "resolution" })
   const resolutionOptions = sharedResolutions(sensors.data, enabledSensors)
-  const activeSourceRun = sourceSelection?.runRoot === selectedRun ? sourceSelection.sourceRunRoot : ""
-  const activeSource = calibrationSources.find((source) => source.source_run_root === activeSourceRun) ?? null
+  const activeSourceBySensor = calibrationAssignments?.runRoot === selectedRun
+    ? calibrationAssignments.sourceBySensor
+    : {}
+  const calibrationAssignmentRows = enabledSensors.map((sensor) => {
+    const key = sensorKey(sensor)
+    const eligibleSources = calibrationSources.filter((source) => source.valid
+      && Boolean(source.bundle_sha256)
+      && Boolean(calibrationMappingFor(source, sensor, selectedResolution)))
+    const selectedSource = eligibleSources.find((source) => source.source_run_root === activeSourceBySensor[key]) ?? null
+    const selectedMapping = selectedSource ? calibrationMappingFor(selectedSource, sensor, selectedResolution) : null
+    return { sensor, key, eligibleSources, selectedSource, selectedMapping }
+  })
+  const hasCalibrationDraft = calibrationAssignmentRows.some((row) => Boolean(activeSourceBySensor[row.key]))
+  const calibrationAssignmentsComplete = calibrationAssignmentRows.length > 0
+    && calibrationAssignmentRows.every((row) => Boolean(row.selectedSource && row.selectedMapping))
   const existingConfig = intent === "object_dataset" ? existing.data?.config : undefined
   const existingCalibration = existingConfig?.calibration_profiles ?? null
   const existingIntrinsicCalibration = existingConfig?.intrinsic_calibration_profiles ?? null
@@ -330,16 +409,13 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const hasInvalidExistingSelection = existingSelectionComplete
     && !calibrations.isPending
     && (!librarySelection || librarySelection.valid === false || currentSelectedBundleHash !== configuredSelectionHash)
-  const activeSourceSelectable = Boolean(activeSource?.valid && activeSource.bundle_sha256)
-  const replacingSelection = Boolean(activeSource?.bundle_sha256
-    && currentSelectedBundleHash
-    && activeSource.bundle_sha256 !== currentSelectedBundleHash)
+  const replacingSelection = Boolean(hasCalibrationDraft && currentSelectedBundleHash)
   const replacementBlockers = calibrations.data?.replacement_blockers ?? []
   const replacementBlocked = replacingSelection && replacementBlockers.length > 0
   const replacementConfirmed = !replacingSelection || confirmReplacement
   const calibrationReady = intent === "camera_calibration"
-    || (activeSource
-      ? activeSourceSelectable && replacementConfirmed && !replacementBlocked
+    || (hasCalibrationDraft
+      ? calibrationAssignmentsComplete && replacementConfirmed && !replacementBlocked
       : existingCalibrationReady)
 
   useEffect(() => {
@@ -388,16 +464,30 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
       let sensorProfiles: Record<string, string> = {}
       let expectedCalibrationBundleSha256 = existingCalibrationReady ? configuredSelectionHash : null
 
-      if (intent === "object_dataset" && activeSource) {
-        if (!activeSource.bundle_sha256) throw new Error("This calibration bundle has no valid identity hash")
-        if (!activeSource.valid) throw new Error("This calibration bundle is not valid")
+      if (intent === "object_dataset" && hasCalibrationDraft) {
+        if (!calibrationAssignmentsComplete) throw new Error("Choose a calibration source for every enabled camera")
         if (replacingSelection && !confirmReplacement) throw new Error("Confirm that you want to replace the current calibration selection")
+        const selectionsBySource = new Map<string, { source: CalibrationSource; sensorKeys: string[] }>()
+        for (const row of calibrationAssignmentRows) {
+          if (!row.selectedSource?.bundle_sha256 || !row.selectedMapping) {
+            throw new Error(`Choose a valid calibration source for ${row.key}`)
+          }
+          const grouped = selectionsBySource.get(row.selectedSource.source_run_root)
+          if (grouped) grouped.sensorKeys.push(row.key)
+          else selectionsBySource.set(row.selectedSource.source_run_root, {
+            source: row.selectedSource,
+            sensorKeys: [row.key],
+          })
+        }
         const selected = await api<CalibrationSelectionResponse>("/ui/calibrations/select", {
           method: "POST",
           body: JSON.stringify({
             run_root: selectedRun,
-            source_run_root: activeSource.source_run_root,
-            expected_bundle_sha256: activeSource.bundle_sha256,
+            source_selections: [...selectionsBySource.values()].map(({ source, sensorKeys }) => ({
+              source_run_root: source.source_run_root,
+              expected_bundle_sha256: source.bundle_sha256,
+              sensor_keys: sensorKeys,
+            })),
             expected_current_bundle_sha256: currentSelectedBundleHash,
             confirm_replace: replacingSelection && confirmReplacement,
             resolution: values.resolution,
@@ -460,7 +550,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     },
     onSuccess: () => {
       toast.success(intent === "camera_calibration" ? "Calibration recording setup saved" : "Object dataset setup saved")
-      setSourceSelection(null)
+      setCalibrationAssignments(null)
       setConfirmReplacement(false)
       void queryClient.invalidateQueries({ queryKey: ["run-config", selectedRun] })
       void queryClient.invalidateQueries({ queryKey: ["calibration-library", selectedRun] })
@@ -512,27 +602,26 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
         </section>}
 
         {intent === "object_dataset" && <section className="space-y-3" aria-labelledby="saved-calibration-heading">
-          <div><h3 id="saved-calibration-heading" className="text-sm font-semibold">Saved camera calibration <span className="text-destructive">Required</span></h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Select a saved profile set for these cameras. PoseTestBot copies it into this run, then verifies its geometry, lens models, and time-alignment policy.</p></div>
-          {existingCalibrationReady && !activeSource && <div className="flex items-start gap-2 rounded-lg border border-success/35 bg-success/5 p-3 text-xs"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success" /><div><div className="font-semibold">A verified calibration snapshot is selected</div><div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{existingCalibration}</div><p className="mt-1 text-muted-foreground">Both profile files and the selection record agree on bundle <span className="font-mono">{configuredSelectionHash?.slice(0, 16)}…</span>. Choose another source only if you intend to replace it.</p></div></div>}
-          {hasUnverifiedLegacyCalibration && !activeSource && <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Unverified legacy calibration path</div>{existingCalibration && <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">Camera profiles: {existingCalibration}</div>}{existingIntrinsicCalibration && <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">Lens profiles: {existingIntrinsicCalibration}</div>}<p className="mt-1 text-muted-foreground">These paths are not backed by a complete, hash-verified selection and do not satisfy this workflow. Choose a saved calibration below.</p></div></div>}
-          {hasInvalidExistingSelection && !activeSource && <div className="flex items-start gap-2 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold">Saved calibration selection needs attention</div><p className="mt-1 text-muted-foreground">{librarySelection?.valid === false && librarySelection.issues[0] ? librarySelection.issues[0].message : "The selected snapshot does not match the bundle recorded in run_config.json."} Choose and validate a saved calibration before recording.</p></div></div>}
-          {calibrations.isPending ? <div className="flex items-center gap-2 rounded-lg border p-4 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading promoted calibrations…</div> : calibrationSources.length === 0 ? <div className="rounded-lg border border-dashed p-4 text-xs text-muted-foreground">No reusable promoted calibrations were found. Complete and save the camera-calibration workflow first.</div> : <div className="grid gap-3 md:grid-cols-2" role="radiogroup" aria-label="Saved camera calibration">{calibrationSources.map((source) => {
-            const selected = activeSourceRun === source.source_run_root
-            const current = Boolean(source.bundle_sha256 && source.bundle_sha256 === currentSelectedBundleHash)
-            const badge = !source.valid ? "Unavailable" : source.compatible ? "Camera settings match" : "Review camera settings"
-            const badgeClass = !source.valid ? "bg-destructive/10 text-destructive" : source.compatible ? "bg-success/10 text-success" : "bg-warning/10 text-warning"
-            return <button type="button" role="radio" aria-checked={selected} disabled={!source.valid || !source.bundle_sha256} key={source.source_run_root} onClick={() => { setSourceSelection({ runRoot: selectedRun, sourceRunRoot: source.source_run_root }); setConfirmReplacement(false) }} className={`rounded-lg border p-4 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${selected ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "hover:bg-muted/30"}`}>
-              <div className="flex items-start justify-between gap-3"><div><div className="font-semibold">{source.source_run_name}</div><div className="mt-0.5 max-w-72 truncate font-mono text-[9px] text-muted-foreground" title={source.source_run_root}>{source.source_run_root}</div></div><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${badgeClass}`}>{badge}</span></div>
-              <div className="mt-3 text-[11px] text-muted-foreground">{source.calibration_profiles.valid_profile_count} saved camera profile{source.calibration_profiles.valid_profile_count === 1 ? "" : "s"} · {source.intrinsic_calibration_profiles.profile_count} lens profile{source.intrinsic_calibration_profiles.profile_count === 1 ? "" : "s"}</div>
-              {current && <div className="mt-2 text-[10px] font-semibold text-primary-strong">Current snapshot selection</div>}
-              {!source.compatible && source.issues[0] && <div className={`mt-2 text-[10px] ${source.valid ? "text-muted-foreground" : "text-destructive"}`}>{source.issues[0].message}</div>}
-              <div className="mt-2 truncate font-mono text-[9px] text-muted-foreground" title={source.bundle_sha256 ?? undefined}>{source.bundle_sha256 ? `Bundle SHA-256 ${source.bundle_sha256.slice(0, 16)}…` : "No valid bundle hash"}</div>
-            </button>
+          <div><h3 id="saved-calibration-heading" className="text-sm font-semibold">Saved camera calibration <span className="text-destructive">Required</span></h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Choose a promoted source for each enabled camera. Static and robot-mounted cameras may come from different calibration runs; PoseTestBot combines only the assigned profile pairs into one immutable, run-owned snapshot.</p></div>
+          {existingCalibrationReady && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-success/35 bg-success/5 p-3 text-xs"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success" /><div><div className="font-semibold">A verified calibration snapshot is selected</div><div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{existingCalibration}</div><p className="mt-1 text-muted-foreground">Both profile files and the selection record agree on bundle <span className="font-mono">{configuredSelectionHash?.slice(0, 16)}…</span>. Assign sources below only if you intend to replace it.</p></div></div>}
+          {hasUnverifiedLegacyCalibration && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Unverified legacy calibration path</div>{existingCalibration && <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">Camera profiles: {existingCalibration}</div>}{existingIntrinsicCalibration && <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">Lens profiles: {existingIntrinsicCalibration}</div>}<p className="mt-1 text-muted-foreground">These paths are not backed by a complete, hash-verified selection and do not satisfy this workflow. Assign a saved calibration to every camera below.</p></div></div>}
+          {hasInvalidExistingSelection && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold">Saved calibration selection needs attention</div><p className="mt-1 text-muted-foreground">{librarySelection?.valid === false && librarySelection.issues[0] ? librarySelection.issues[0].message : "The selected snapshot does not match the bundle recorded in run_config.json."} Assign and validate saved calibrations before recording.</p></div></div>}
+          {calibrations.isPending ? <div className="flex items-center gap-2 rounded-lg border p-4 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading promoted calibrations…</div> : calibrationSources.length === 0 ? <div className="rounded-lg border border-dashed p-4 text-xs text-muted-foreground">No reusable promoted calibrations were found. Complete and promote the camera-calibration workflow first.</div> : <div className="space-y-3" data-testid="calibration-source-assignments">{calibrationAssignmentRows.map(({ sensor, key, eligibleSources, selectedSource, selectedMapping }) => {
+            const selectId = `calibration-source-${key.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`
+            const relevantIssues = calibrationSources.flatMap((source) => source.issues.filter((issue) => issue.sensor_key === key))
+            return <div className="rounded-lg border p-3" data-testid="calibration-source-assignment" data-sensor-key={key} key={key}>
+              <div className="flex flex-wrap items-start justify-between gap-2"><div><Label htmlFor={selectId} className="font-semibold">{cameraLabel(sensor)}</Label><div className="mt-0.5 font-mono text-[9px] text-muted-foreground">{key}</div></div><span className="rounded-full bg-muted px-2 py-1 text-[10px] font-semibold">{sensor.mounting_mode === "static" ? "Static" : "Robot-mounted"}</span></div>
+              {eligibleSources.length ? <div className="mt-3 space-y-2"><Select value={selectedSource?.source_run_root ?? ""} onValueChange={(sourceRunRoot) => { setCalibrationAssignments((current) => ({ runRoot: selectedRun, sourceBySensor: { ...(current?.runRoot === selectedRun ? current.sourceBySensor : {}), [key]: sourceRunRoot } })); setConfirmReplacement(false) }}><SelectTrigger id={selectId} aria-label={`Calibration source for ${cameraLabel(sensor)}`}><SelectValue placeholder="Choose a promoted calibration run" /></SelectTrigger><SelectContent>{eligibleSources.map((source) => {
+                const mapping = calibrationMappingFor(source, sensor, selectedResolution)
+                return <SelectItem value={source.source_run_root} key={source.source_run_root}><span className="flex min-w-0 flex-col"><span>{source.source_run_name}</span><span className="truncate font-mono text-[9px] text-muted-foreground">{mapping?.profile_id} · {source.source_run_root}</span></span></SelectItem>
+              })}</SelectContent></Select>{selectedMapping && <p className="text-[10px] text-muted-foreground">Profile <span className="font-mono">{selectedMapping.profile_id}</span> · lens <span className="font-mono">{selectedMapping.intrinsic_profile_id}</span></p>}</div> : <div className="mt-3 rounded border border-destructive/30 bg-destructive/5 p-2 text-[11px] text-destructive">No promoted source matches this camera identity, {sensor.mounting_mode === "static" ? "static" : "robot-mounted"} mount, orientation, and selected resolution.{relevantIssues[0] ? ` ${relevantIssues[0].message}` : ""}</div>}
+            </div>
           })}</div>}
-          {calibrationSources.length > 0 && <p className="text-[11px] leading-relaxed text-muted-foreground">The badge compares camera settings only; it is not a readiness result. Saving verifies the complete profile set, and the workflow remains blocked if its time-alignment evidence is missing.</p>}
-          {activeSource && <div className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-xs"><div className="font-semibold">Ready to check and save</div><p className="mt-1 text-muted-foreground">The server will verify this profile set against every enabled camera and the selected resolution before changing the run configuration.</p></div>}
+          {calibrationSources.length > 0 && <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-[11px] font-semibold">Available source-run provenance</summary><div className="space-y-2 border-t p-3">{calibrationSources.map((source) => <div className="text-[10px]" key={source.source_run_root}><div className="font-semibold">{source.source_run_name}</div><div className="break-all font-mono text-muted-foreground">{source.source_run_root}</div><div className="mt-0.5 text-muted-foreground">{source.calibration_profiles.valid_profile_count} valid camera profile{source.calibration_profiles.valid_profile_count === 1 ? "" : "s"} · bundle {source.bundle_sha256?.slice(0, 16) ?? "unavailable"}…</div></div>)}</div></details>}
+          {hasCalibrationDraft && calibrationAssignmentsComplete && <div className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-xs"><div className="font-semibold">Ready to combine and validate</div><p className="mt-1 text-muted-foreground">The server will recheck every assignment, build a deterministic profile collection, and preserve each source run and sensor mapping in the selection record.</p></div>}
+          {hasCalibrationDraft && !calibrationAssignmentsComplete && <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><div className="font-semibold">A source is still required for every enabled camera</div><p className="mt-1 text-muted-foreground">Partial selections are kept as a browser-local draft and cannot change the run.</p></div>}
           {replacementBlocked && <div className="flex items-start gap-2 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold">This run can no longer change calibration</div><p className="mt-1 text-muted-foreground">Derived dataset evidence already depends on the current snapshot. Start a new run to use another calibration.</p><ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">{replacementBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div></div>}
-          {replacingSelection && !replacementBlocked && <Label className="flex cursor-pointer items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><Checkbox aria-label="Confirm replacing the current calibration selection" checked={confirmReplacement} onCheckedChange={(checked) => setConfirmReplacement(checked === true)} /><span><span className="block font-semibold">Replace the current calibration selection</span><span className="mt-1 block font-normal text-muted-foreground">I understand this changes the calibration bundle used by this run from <span className="font-mono">{currentSelectedBundleHash?.slice(0, 12)}…</span> to <span className="font-mono">{activeSource?.bundle_sha256?.slice(0, 12)}…</span>. The server will reject the change if the current selection changed since this page loaded.</span></span></Label>}
+          {replacingSelection && !replacementBlocked && <Label className="flex cursor-pointer items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><Checkbox aria-label="Confirm replacing the current calibration selection" checked={confirmReplacement} onCheckedChange={(checked) => setConfirmReplacement(checked === true)} /><span><span className="block font-semibold">Replace the current calibration selection</span><span className="mt-1 block font-normal text-muted-foreground">I understand this replaces bundle <span className="font-mono">{currentSelectedBundleHash?.slice(0, 12)}…</span> with the camera-by-camera combination above. The server will reject the change if the current selection changed since this page loaded.</span></span></Label>}
         </section>}
 
         <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">Advanced pipeline details</summary><div className="border-t px-3 py-3 text-xs text-muted-foreground"><div>Preset: <code>{sequenceFor(intent)}</code></div><div className="mt-1">{intent === "camera_calibration" ? "The reusable preset is stored in prepare-only mode. Physical recording is always a separate, freshly authorized action." : "After recording, this preset synchronizes, rectifies, and prepares a BOP dataset using the selected calibration."}</div></div></details>
@@ -543,7 +632,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
             : setupLookupFailed
               ? <div className="flex min-w-0 items-start gap-2 text-xs" role="alert"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">The active run’s setup could not be loaded</div><p className="mt-1 text-muted-foreground">{errorMessage(existing.error)} Existing setup may still be present, so saving remains disabled.</p><Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => existing.refetch()} disabled={existing.isFetching}><RefreshCw className={existing.isFetching ? "animate-spin" : undefined} />Retry setup lookup</Button></div></div>
               : <p className="text-xs text-muted-foreground">Saving setup never authorizes a camera or robot action.</p>}
-          <Button type="submit" disabled={setupControlsDisabled || save.isPending || sensors.isPending || !calibrationReady || hardwareBlockers.length > 0}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (activeSource ? "Validating and saving…" : "Saving…") : (activeSource ? "Validate and save setup" : "Save setup")}</Button>
+          <Button type="submit" disabled={setupControlsDisabled || save.isPending || sensors.isPending || !calibrationReady || hardwareBlockers.length > 0}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (hasCalibrationDraft ? "Validating and saving…" : "Saving…") : (hasCalibrationDraft ? "Validate and save setup" : "Save setup")}</Button>
         </div>
       </form></CardContent>
     </Card>

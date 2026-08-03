@@ -68,7 +68,13 @@ def _rectified_intrinsics() -> CameraIntrinsics:
     )
 
 
-def _profile(*, mounting_mode: MountingMode = MountingMode.EYE_IN_HAND) -> CalibrationProfile:
+def _profile(
+    *,
+    mounting_mode: MountingMode = MountingMode.EYE_IN_HAND,
+    sensor_id: str = SENSOR_ID,
+    profile_id: str = PROFILE_ID,
+    intrinsic_id: str = INTRINSIC_ID,
+) -> CalibrationProfile:
     to_frame = (
         TransformFrame.ROBOT_FLANGE
         if mounting_mode == MountingMode.EYE_IN_HAND
@@ -76,8 +82,8 @@ def _profile(*, mounting_mode: MountingMode = MountingMode.EYE_IN_HAND) -> Calib
     )
     return CalibrationProfile(
         schema_version="calibration.v2",
-        profile_id=PROFILE_ID,
-        sensor_id=SENSOR_ID,
+        profile_id=profile_id,
+        sensor_id=sensor_id,
         sensor_type=SensorType.REALSENSE_D435,
         mounting_mode=mounting_mode,
         rig_position="wrist" if mounting_mode == MountingMode.EYE_IN_HAND else "cell",
@@ -100,11 +106,13 @@ def _profile(*, mounting_mode: MountingMode = MountingMode.EYE_IN_HAND) -> Calib
         ),
         operator="calibration-operator",
         calibrated_at="2026-07-20T10:00:00+00:00",
-        metadata={"intrinsic_profile_id": INTRINSIC_ID},
+        metadata={"intrinsic_profile_id": intrinsic_id},
     )
 
 
-def _intrinsic_profile() -> dict:
+def _intrinsic_profile(
+    *, sensor_id: str = SENSOR_ID, intrinsic_id: str = INTRINSIC_ID
+) -> dict:
     native = {
         "cam_K": list(_camera_intrinsics().cam_k),
         "width": 1280,
@@ -123,9 +131,9 @@ def _intrinsic_profile() -> dict:
     }
     return {
         "schema_version": "intrinsic_calibration.v1",
-        "profile_id": INTRINSIC_ID,
-        "sensor_id": SENSOR_ID,
-        "sensor_name": f"realsense_{SENSOR_ID}",
+        "profile_id": intrinsic_id,
+        "sensor_id": sensor_id,
+        "sensor_name": f"realsense_{sensor_id}",
         "resolution": [1280, 720],
         "orientation": "normal",
         "native": native,
@@ -139,10 +147,12 @@ def _intrinsic_profile() -> dict:
     }
 
 
-def _sensor(*, mounting_mode: str = "eye_in_hand") -> SensorRunConfig:
+def _sensor(
+    *, mounting_mode: str = "eye_in_hand", sensor_id: str = SENSOR_ID
+) -> SensorRunConfig:
     return SensorRunConfig(
         sensor_type="realsense_d435",
-        device_id=SENSOR_ID,
+        device_id=sensor_id,
         display_name="Front D435",
         mounting_mode=mounting_mode,
     )
@@ -153,10 +163,19 @@ def _write_source(
     *,
     legacy: bool = False,
     bundle_marker: str | None = None,
+    mounting_mode: MountingMode = MountingMode.EYE_IN_HAND,
+    sensor_id: str = SENSOR_ID,
+    profile_id: str = PROFILE_ID,
+    intrinsic_id: str = INTRINSIC_ID,
 ) -> None:
     source.mkdir(parents=True)
-    profile = _profile()
-    intrinsic = _intrinsic_profile()
+    profile = _profile(
+        mounting_mode=mounting_mode,
+        sensor_id=sensor_id,
+        profile_id=profile_id,
+        intrinsic_id=intrinsic_id,
+    )
+    intrinsic = _intrinsic_profile(sensor_id=sensor_id, intrinsic_id=intrinsic_id)
     if legacy:
         value = profile_to_dict(profile)
         value["schema_version"] = "calibration.v1"
@@ -184,12 +203,19 @@ def _write_source(
         create_run_config(
             run_root=source,
             run_name="Reusable camera calibration",
-            sensors=(_sensor(),),
+            sensors=(
+                _sensor(
+                    mounting_mode=mounting_mode.value,
+                    sensor_id=sensor_id,
+                ),
+            ),
         ),
     )
 
 
-def _write_destination(destination: Path, *, mounting_mode: str = "eye_in_hand") -> None:
+def _write_destination(
+    destination: Path, *, mounting_mode: str = "eye_in_hand"
+) -> None:
     destination.mkdir(parents=True)
     write_run_config(
         destination,
@@ -305,6 +331,159 @@ def test_library_selection_snapshots_both_files_and_drives_sequence_options(
     assert "blenderproc_render" not in steps
 
 
+def test_composite_selection_combines_static_and_robot_mounted_source_runs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runs = tmp_path / "runs"
+    mobile_source = runs / "mobile_calibration"
+    static_source = runs / "static_calibration"
+    destination = runs / "object_run"
+    static_sensor_id = "D435-STATIC-456"
+    static_profile_id = "d435_static_456_valid"
+    static_intrinsic_id = "D435-STATIC-456_1280x720_normal_opencv"
+    _write_source(mobile_source)
+    _write_source(
+        static_source,
+        mounting_mode=MountingMode.STATIC,
+        sensor_id=static_sensor_id,
+        profile_id=static_profile_id,
+        intrinsic_id=static_intrinsic_id,
+    )
+    destination_sensors = (
+        _sensor(),
+        _sensor(mounting_mode="static", sensor_id=static_sensor_id),
+    )
+    intended_setup = {
+        "resolution": "720p",
+        "sensors": [sensor.to_dict() for sensor in destination_sensors],
+    }
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
+    client = create_app().test_client()
+
+    library = client.get(
+        "/ui/calibrations", query_string={"run_root": destination}
+    ).get_json()
+    mobile = _candidate(library, mobile_source)
+    static = _candidate(library, static_source)
+    mobile_key = f"realsense_d435:{SENSOR_ID}"
+    static_key = f"realsense_d435:{static_sensor_id}"
+    assert mobile["valid"] is True and mobile["compatible"] is False
+    assert static["valid"] is True and static["compatible"] is False
+    assert mobile["issues"][0]["code"] == "destination_setup_required"
+    assert static["issues"][0]["code"] == "destination_setup_required"
+    assert mobile["sensor_profiles"] == {}
+    assert static["sensor_profiles"] == {}
+    assert (
+        mobile["calibration_profiles"]["profiles"][0]["intrinsic_profile_id"]
+        == INTRINSIC_ID
+    )
+    assert (
+        static["calibration_profiles"]["profiles"][0]["intrinsic_profile_id"]
+        == static_intrinsic_id
+    )
+
+    incomplete = client.post(
+        "/ui/calibrations/select",
+        json={
+            "run_root": destination.as_posix(),
+            "source_selections": [
+                {
+                    "source_run_root": mobile_source.as_posix(),
+                    "expected_bundle_sha256": mobile["bundle_sha256"],
+                    "sensor_keys": [mobile_key],
+                }
+            ],
+            **intended_setup,
+        },
+    )
+    assert incomplete.status_code == 409
+    assert incomplete.get_json()["issues"] == [
+        {
+            "code": "calibration_source_assignment_missing",
+            "message": f"Select a calibration source for {static_key}.",
+            "sensor_key": static_key,
+        }
+    ]
+
+    selected = client.post(
+        "/ui/calibrations/select",
+        json={
+            "run_root": destination.as_posix(),
+            "operator": "mixed-rig-operator",
+            "source_selections": [
+                {
+                    "source_run_root": mobile_source.as_posix(),
+                    "expected_bundle_sha256": mobile["bundle_sha256"],
+                    "sensor_keys": [mobile_key],
+                },
+                {
+                    "source_run_root": static_source.as_posix(),
+                    "expected_bundle_sha256": static["bundle_sha256"],
+                    "sensor_keys": [static_key],
+                },
+            ],
+            **intended_setup,
+        },
+    )
+
+    assert selected.status_code == 201, selected.get_json()
+    result = selected.get_json()
+    selection = result["selection"]
+    assert result["schema_version"] == "calibration_profile_selection.v2"
+    assert selection["source"]["kind"] == "composite"
+    assert selection["source"]["source_count"] == 2
+    assert {
+        item["run_root"]: item["selected_sensor_keys"] for item in selection["sources"]
+    } == {
+        mobile_source.as_posix(): [mobile_key],
+        static_source.as_posix(): [static_key],
+    }
+    assert result["sensor_profiles"] == {
+        mobile_key: PROFILE_ID,
+        static_key: static_profile_id,
+    }
+    combined_profiles = json.loads(
+        (destination / result["calibration_profiles"]).read_text()
+    )["profiles"]
+    assert {
+        (item["sensor_id"], item["mounting_mode"], item["profile_id"])
+        for item in combined_profiles
+    } == {
+        (SENSOR_ID, "eye_in_hand", PROFILE_ID),
+        (static_sensor_id, "static", static_profile_id),
+    }
+
+    saved = client.post(
+        "/run-config",
+        json={
+            "run_root": destination.as_posix(),
+            "run_name": "mixed-camera-object-run",
+            "resolution": "720p",
+            "fps": 6,
+            "velocity_m_s": 0.2,
+            "sensors": [sensor.to_dict() for sensor in destination_sensors],
+            "dataset_mode": "objectless",
+            "calibration_profiles": result["calibration_profiles"],
+            "expected_calibration_bundle_sha256": selection["source"]["bundle_sha256"],
+            "sequence_id": "calibrated_capture_to_bop_dataset_dry_run",
+            "plan_only": True,
+        },
+    )
+    assert saved.status_code == 201, saved.get_json()
+    config = load_run_config_for_run_root(destination)
+    assert {
+        sensor["device_id"]: sensor["calibration_profile_id"]
+        for sensor in config["capture"]["sensors"]
+    } == {
+        SENSOR_ID: PROFILE_ID,
+        static_sensor_id: static_profile_id,
+    }
+
+    atomic_write_json(mobile_source / CALIBRATION_PROFILES, {"changed": True})
+    verified = verify_calibration_profile_selection(destination)
+    assert verified["schema_version"] == "calibration_profile_selection.v2"
+
+
 def test_selection_accepts_intended_setup_before_destination_config(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -334,9 +513,12 @@ def test_selection_accepts_intended_setup_before_destination_config(
     )
 
     assert selected.status_code == 201, selected.get_json()
-    assert selected.get_json()["selection"]["source"]["calibration_profiles"][
-        "schema_version"
-    ] == "calibration.v1"
+    assert (
+        selected.get_json()["selection"]["source"]["calibration_profiles"][
+            "schema_version"
+        ]
+        == "calibration.v1"
+    )
 
 
 def test_selection_rejects_incompatible_override_and_stale_hash(
@@ -394,9 +576,7 @@ def test_library_does_not_follow_symlinked_profile_artifacts(
     safe_source = runs / "safe_calibration"
     _write_source(safe_source)
     source.mkdir(parents=True)
-    (source / CALIBRATION_PROFILES).symlink_to(
-        safe_source / CALIBRATION_PROFILES
-    )
+    (source / CALIBRATION_PROFILES).symlink_to(safe_source / CALIBRATION_PROFILES)
     (source / INTRINSIC_CALIBRATION_PROFILES).symlink_to(
         safe_source / INTRINSIC_CALIBRATION_PROFILES
     )
@@ -408,7 +588,9 @@ def test_library_does_not_follow_symlinked_profile_artifacts(
         "/ui/calibrations", query_string={"run_root": destination}
     ).get_json()
     unsafe = next(
-        item for item in payload["calibrations"] if item["source_run_root"] == source.as_posix()
+        item
+        for item in payload["calibrations"]
+        if item["source_run_root"] == source.as_posix()
     )
     assert unsafe["valid"] is False
     assert unsafe["compatible"] is False

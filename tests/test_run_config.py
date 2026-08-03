@@ -37,8 +37,7 @@ def test_default_run_config_uses_real_robot_and_lab_sensors(tmp_path: Path) -> N
     assert data["robot_profile"]["mode"] == "real"
     assert data["robot_profile"]["robot_ip"] == "172.31.1.147"
     assert (
-        data["robot_profile"]["cartesian_velocity_m_s"]
-        == DEFAULT_CAPTURE_VELOCITY_M_S
+        data["robot_profile"]["cartesian_velocity_m_s"] == DEFAULT_CAPTURE_VELOCITY_M_S
     )
     assert data["capture"]["velocity_m_s"] == DEFAULT_CAPTURE_VELOCITY_M_S
     assert data["dataset_mode"] == "objectless"
@@ -169,7 +168,7 @@ def test_sensor_configs_from_status_uses_alias_defaults() -> None:
                             "display_name": "Intel RealSense 123",
                             "alias": "Wrist Camera",
                             "effective_display_name": "Wrist Camera",
-                            "mounting_mode": "eye_in_hand",
+                            "mounting_mode": "static",
                             "inverted": True,
                             "metadata": {"model": "D435"},
                         }
@@ -183,6 +182,7 @@ def test_sensor_configs_from_status_uses_alias_defaults() -> None:
     assert sensors[0].device_id == "123"
     assert sensors[0].display_name == "Wrist Camera"
     assert sensors[0].operator_alias == "Wrist Camera"
+    assert sensors[0].mounting_mode == "static"
     assert sensors[0].inverted is True
     assert sensors[0].metadata == {"model": "D435"}
 
