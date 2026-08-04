@@ -19,8 +19,8 @@ import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 
 /**
- * Proposal for an ArUco calibration capture with more image-space and
- * orientation variance than PoseTestBot_Test's single-axis A1 sweep.
+ * Nine-frame ArUco calibration capture with more image-space and orientation
+ * variance than PoseTestBotFullCaptureApplication's single-axis A1 sweep.
  *
  * IMPORTANT: This repository revision is enabled for lab validation, but the
  * exact deployed controller application and revision must be independently
@@ -34,7 +34,7 @@ import org.json.simple.parser.JSONParser;
  * dither is implemented as program-owned relative rotations from the taught
  * CalibrationCenter; no numeric absolute target is created at runtime.
  */
-public class PoseTestBot_CalibrationVarianceProposal
+public class PoseTestBotNineFrameCalibrationApplication
 		extends RoboticsAPIApplication {
 
 	/* Motion waypoints stay under the commissioned calibration teaching frame. */
@@ -54,8 +54,6 @@ public class PoseTestBot_CalibrationVarianceProposal
 	private static final String DEFAULT_RECEIVER_IP = "172.31.1.169";
 	private static final Charset UTF_8 = Charset.forName("UTF-8");
 
-	/* Disabled until offline review and supervised Workbench commissioning pass. */
-	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = false;
 	/* Commission one phase at a time before enabling both together. */
 	private static final boolean RUN_COVERAGE_RASTER = true;
 	private static final boolean RUN_ORIENTATION_DITHER = true;
@@ -126,12 +124,6 @@ public class PoseTestBot_CalibrationVarianceProposal
 
 	@Override
 	public void run() {
-		if (!ENABLE_AFTER_OFFLINE_VALIDATION) {
-			getLogger().error("Calibration variance proposal is disabled. "
-					+ "Commission all frames and motions before enabling it.");
-			return;
-		}
-
 		getLogger().warn("Before the first start command, manually position the "
 				+ "robot at or near the taught CalibrationCenter pose. This is an "
 				+ "operator commissioning requirement, not an enforced safety check.");

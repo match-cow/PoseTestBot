@@ -25,7 +25,7 @@ import org.json.simple.JSONObject;
  * Every runtime exception is contained so an observable stream fault does not
  * silently terminate the automatic task.
  */
-public class PoseTestBot_PoseStreamTask
+public class PoseTestBotPoseStreamTask
 		extends RoboticsAPICyclicBackgroundTask
 		implements PoseTestBotPoseStreamFunction {
 	private static final String POSE_PACKET_SCHEMA_VERSION = "robot_pose.v1";

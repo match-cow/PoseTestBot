@@ -2,12 +2,12 @@
 
 ## Status
 
-`iiwa/PoseTestBot_Test.java` is the repository candidate for an ordinary
-pose-template capture. It is not evidence of the application or revision
-currently deployed on the Sunrise controller. The repository candidate is
-deliberately disabled with `ENABLE_AFTER_OFFLINE_VALIDATION=false`.
+`iiwa/PoseTestBotFullCaptureApplication.java` is the repository candidate for
+an ordinary pose-template capture. It is not evidence of the application or
+revision currently deployed on the Sunrise controller. After launch, it waits
+without motion for an accepted UDP START command.
 
-Before enabling it, compile and simulate the source in the exact
+Before deploying it, compile and simulate the source in the exact
 Sunrise.Workbench controller project, create and verify the Application Data
 frame below, and commission both A1 paths in T1 with the installed tool/load,
 camera rig, fixtures, and cables. Repository validation does not perform any
@@ -22,6 +22,7 @@ ambiguously retaught frame.
 | Use | Persistent Sunrise frame | Repository frame role |
 | --- | --- | --- |
 | Nine-frame calibration motion waypoints | `/PoseTestBot/TemplateBase` | Motion planning only; not a run transform endpoint |
+| Single-frame static-calibration anchor | `/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter` | Motion anchor for the bounded relative grid |
 | Static-calibration and ordinary-capture pose stream | `/PoseTestBot/PoseTemplateBase` | Run `template_base` and static `camera → template_base` result |
 | Calibration board geometry, static cameras | Target bundle `aruco_grid` | Unknown rigid `aruco_grid → robot_flange`, estimated as support evidence |
 | Calibration board geometry, eye-in-hand cameras | Target bundle `aruco_grid` | Explicit or estimated `aruco_grid → template_base` placement |
@@ -32,6 +33,9 @@ Create `/PoseTestBot/PoseTemplateBase` as a persistent Application Data
 origin and axes against the physical pose-template datum. Record its
 relationship to `/PoseTestBot/TemplateBase` as commissioning evidence for the
 motion plan. That relationship is not needed by the static-camera solver.
+The [single-frame static-camera alternative](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md)
+instead places its sole taught motion anchor below `PoseTemplateBase`; it does
+not change the pose-stream endpoint.
 
 The word `template_base` in run artifacts is a semantic role, not a Sunrise
 path. Both static-camera calibration and ordinary dataset capture map that role
@@ -143,7 +147,7 @@ new, independently authorized start command.
 
 The motion application no longer polls `IMotionContainer.isFinished()` before
 every sample. It starts the shared read-only
-`PoseTestBot_PoseStreamTask`, executes the A1 motion as a blocking PTP, and
+`PoseTestBotPoseStreamTask`, executes the A1 motion as a blocking PTP, and
 stops sampling only after that motion returns. The automatic-compatible cyclic
 task requests a 10 ms `BestEffort` period (100 Hz nominal); this is a measured
 commissioning target, not a KLI real-time guarantee. See the dedicated
@@ -198,7 +202,7 @@ condition.
 - Compile the exact project and resolve `getRootFrame()`, PTP acceleration/jerk
   setters, JSON-simple, the task-function provider, and all three persistent
   frames.
-- Create `PoseTestBot_PoseStreamTask` through the Workbench background-task
+- Create `PoseTestBotPoseStreamTask` through the Workbench background-task
   workflow, configure automatic start, and confirm exactly one
   `PoseTestBotPoseStreamFunction` provider is registered.
 - Simulate the PTP path to `/PoseTestBot/CaptureStart`, the repositioning path
@@ -206,7 +210,7 @@ condition.
   `/PoseTestBot/CaptureEnd`, including every joint/redundancy branch, joint and
   singularity margin, collision clearance, and cable motion.
 - With explicit operator authorization, single-step the complete
-  PTP/A1/PTP sequence in T1 at reduced override before enabling the source.
+  PTP/A1/PTP sequence in T1 at reduced override before deploying the source.
 - Verify the start-frame plus A1-minimum positioning finishes inside the
   receiver's first-packet timeout and the end-frame PTP finishes inside its
   inter-packet timeout.

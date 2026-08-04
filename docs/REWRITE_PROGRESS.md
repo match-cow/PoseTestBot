@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-08-03
+Last updated: 2026-08-04
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -43,6 +43,44 @@ The code rewrite is implemented across:
   `processed/bop_evaluation/`; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
+
+## 2026-08-04 Descriptive IIWA Applications and Single-Frame Static Calibration
+
+The repository Sunrise sources now use role-specific Java names:
+`PoseTestBotFullCaptureApplication`,
+`PoseTestBotNineFrameCalibrationApplication`,
+`PoseTestBotSingleFrameStaticCameraCalibrationApplication`, and the shared
+`PoseTestBotPoseStreamTask`. The rename is repository-side only; Workbench
+application/background-task metadata and any deployed controller selection
+must be updated and recorded independently.
+
+The new static-camera alternative requires one additional taught frame at the
+operator-specified path
+`/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter`. After an accepted START
+it PTP-anchors there, visits the eight non-center points of a 3 x 3 relative
+grid with ±65 mm center-frame axes, adds independent ±50 mm depth and ±10°
+A/B/C dithers, and returns to the absolute center before sending the terminal
+marker. Every grid point is below the literal 100 mm center-radius limit; the
+corner radius is approximately 92 mm. Before the initial center PTP, a read-only
+pose check rejects START unless the flange is already within 25 mm of the taught
+center. Each generated point is visited from and returned directly to center,
+and runtime envelope checks reject an out-of-range translation before it is
+commanded.
+
+All motion applications now start by resolving their shared pose-stream
+provider and waiting without robot motion for an accepted UDP START. The former
+repository-only offline-validation Boolean and its test assumptions were
+removed. This does not replace Workbench compile, offline path simulation,
+frame read-back, T1 commissioning, deployment identity, or physical execution
+authorization. No robot, camera, or lab service was accessed while making this
+repository change.
+
+Repository validation passed all 25 focused iiwa source-contract tests and the
+complete default non-hardware suite at 1,107 passed / 66 deselected. Ruff checks
+for the affected Python tests and `git diff --check` also passed. The host does
+not contain the authoritative Sunrise.Workbench project/classpath, so the
+five-source Workbench compile and every controller motion check remain
+operator-run commissioning work.
 
 ## 2026-08-03 Run Creation and Mixed Calibration Reuse
 
@@ -302,11 +340,15 @@ milestones: ordinary-capture controller commissioning, camera-service
 acceptance, current five-sensor capture, the RealSense metric depth-scale
 recheck, and physical pose-template review.
 
-The nine-frame calibration Sunrise program is operationally accepted. The
-operator confirms that `PoseTestBot_CalibrationVarianceProposal` compiled in
-Workbench, all nine persistent frames were taught, the application was
-commissioned, and the guided captures succeeded. The repository independently
-retains the three completed guided runs and explicitly promoted attempt
+The earlier nine-frame calibration Sunrise deployment is operationally
+accepted. The operator confirms that the controller class then named
+`PoseTestBot_CalibrationVarianceProposal` compiled in Workbench, all nine
+persistent frames were taught, that application was commissioned, and the
+guided captures succeeded. The renamed repository counterpart is now
+`PoseTestBotNineFrameCalibrationApplication`; the historical acceptance does
+not by itself establish that the renamed/high-rate source was deployed. The
+repository independently retains the three completed guided runs and
+explicitly promoted attempt
 `268c897e1baf49e7bd78a434a4569b99`; its common `IPPE + Shah` result passes the
 calibration-validation rewrite gate at 3/3. The exact Workbench project,
 controller revision record, and completed frame-teaching worksheet were not
@@ -556,10 +598,11 @@ pose-estimator performance.
 Final validation passed 160 focused GT/export/evaluation/web tests, 43 pipeline
 registry/sequence tests, all 50 packaged Playwright contracts, frontend type
 checking and lint, the production Vite build, Ruff, and diff checks. The final
-default suite reports 969 passed and 50 deselected. Both tracked iiwa
-applications retain `ENABLE_AFTER_OFFLINE_VALIDATION=false`, and their tests
-assert that inert repository state. No validation command altered or executed
-either robot application.
+default suite reports 969 passed and 50 deselected. At that checkpoint, both
+tracked iiwa applications still used repository-local inerting guards and the
+tests asserted that state. The 2026-08-04 iiwa update above supersedes those
+guards with an operational no-motion-before-START contract. No
+validation command altered or executed either robot application.
 
 The feature is deliberately not an estimator wrapper, proprietary-result
 converter, general evaluator bridge, or pipeline sequence. Imported/simulated
@@ -871,10 +914,10 @@ The repository's still-unconfirmed ordinary Sunrise candidate now uses the
 persistent `/PoseTestBot/PoseTemplateBase` instead of the historical HRC
 reference. Static-camera calibration pose streaming uses that same result
 frame; only the calibration motion waypoints remain below the separate
-`/PoseTestBot/TemplateBase`. The candidate remains disabled pending exact
-Sunrise.Workbench compilation, frame/path simulation, T1 commissioning, and
-deployed-application identification. The accompanying operator note explains
-how the moving calibration board, pose-template, and dataset reference
+`/PoseTestBot/TemplateBase`. At that checkpoint the candidate was held pending
+exact Sunrise.Workbench compilation, frame/path simulation, T1 commissioning,
+and deployed-application identification. The accompanying operator note
+explains how the moving calibration board, pose-template, and dataset reference
 transforms remain explicit. Preexisting wrong-frame static profiles remain
 non-portable and are not relabelled.
 

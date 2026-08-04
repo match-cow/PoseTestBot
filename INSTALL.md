@@ -431,9 +431,13 @@ profiles retain the exact `sunrise_reference_frame_path` observed in
 object capture use `/PoseTestBot/PoseTemplateBase`, so a promoted static
 profile directly locates that camera in the frame of the printed pose template
 and its objects. `/PoseTestBot/TemplateBase` remains only the parent of the
-calibration application's taught motion waypoints; it is not the pose-stream
-reference or static-calibration result frame. The same setting is available
-from the CLI:
+nine-frame calibration application's taught motion waypoints; it is not the
+pose-stream reference or static-calibration result frame. The single-frame
+static-camera alternative instead teaches
+`/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter` and generates its
+bounded grid relative to that one anchor. See
+[the controller contract](docs/IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md).
+The same setting is available from the CLI:
 
 ```bash
 uv run python scripts/create_run_config.py working_data/object_run \

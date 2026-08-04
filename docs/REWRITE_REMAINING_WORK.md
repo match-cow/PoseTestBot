@@ -1,6 +1,6 @@
 # Acquisition Rewrite Remaining Work
 
-Last reviewed: 2026-08-03
+Last reviewed: 2026-08-04
 
 This is the only repository-owned list of unfinished rewrite work. The
 software-only rewrite is complete. Exactly five operator-run physical
@@ -32,10 +32,13 @@ packaged operator-console contracts are implemented and covered by the
 non-hardware validation recorded in
 [REWRITE_PROGRESS.md](REWRITE_PROGRESS.md).
 
-The calibration Sunrise program is operationally accepted. The operator
-attests that `PoseTestBot_CalibrationVarianceProposal` compiled in Workbench,
-its nine persistent frames were taught, the program was physically
-commissioned, and the guided captures completed successfully. The repository
+The earlier nine-frame calibration Sunrise deployment is operationally
+accepted. The operator attests that the controller class then named
+`PoseTestBot_CalibrationVarianceProposal` compiled in Workbench, its nine
+persistent frames were taught, the program was physically commissioned, and
+the guided captures completed successfully. Its renamed repository counterpart
+is `PoseTestBotNineFrameCalibrationApplication`; that historical acceptance
+does not establish deployment of the renamed/high-rate source. The repository
 also retains three completed guided calibration runs and promoted attempt
 `268c897e1baf49e7bd78a434a4569b99`; its common `IPPE + Shah` profiles pass
 `rewrite_calibration_validation.v1` at 3/3.
@@ -55,20 +58,31 @@ recommissioned before replacing the accepted controller program.
 
 The ordinary full-capture Sunrise application is separate from the accepted
 calibration program and remains open under milestone 1.
+The additional `PoseTestBotSingleFrameStaticCameraCalibrationApplication` is a
+repository candidate with one taught center and a bounded relative grid. It
+does not inherit the nine-frame program's historical physical acceptance.
 
 ## 1 — IIWA Controller Commissioning and Cadence Rollout
 
 Follow
-[IIWA_FULL_CAPTURE_APPLICATION.md](IIWA_FULL_CAPTURE_APPLICATION.md). The
-gating dataset outcome remains ordinary pose-template capture, not the
+[IIWA_FULL_CAPTURE_APPLICATION.md](IIWA_FULL_CAPTURE_APPLICATION.md) and the
+[single-frame static-camera calibration contract](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md).
+The gating dataset outcome remains ordinary pose-template capture, not the
 accepted earlier nine-frame calibration revision. The shared high-rate task is
 coupled to this controller commissioning work and does not add a sixth rewrite
 outcome.
 
 - [ ] In the exact Workbench project, create the shared
-  `PoseTestBot_PoseStreamTask` as an automatic cyclic background task, include
-  its task-function interface, and compile the ordinary and calibration
-  application revisions against the installed Sunrise.OS API.
+  `PoseTestBotPoseStreamTask` as an automatic cyclic background task, include
+  its task-function interface, and compile the full-capture, nine-frame, and
+  single-frame calibration application revisions against the installed
+  Sunrise.OS API.
+- [ ] For the single-frame static-camera alternative, create and read back only
+  `/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter` beyond the existing
+  `/PoseTestBot/PoseTemplateBase`; then simulate and T1-commission every
+  relative grid, depth, orientation, and return path inside its 100 mm center
+  envelope. Verify the read-only 25 mm start-proximity rejection, and record
+  target visibility and swept target/arm/cable clearance.
 - [ ] Before replacing the accepted calibration deployment, revalidate its
   unchanged motion/frame contract and retain a supervised cadence report.
   Target at least 50 Hz median host receive rate, no more than 25 ms p95 gap,
@@ -89,17 +103,19 @@ outcome.
   an older run whose saved camera mounting or pose reference is wrong.
 
 - [ ] Identify and record the exact Sunrise application deployed for ordinary
-  capture. `iiwa/PoseTestBot_Test.java` remains a repository candidate, not
-  proof of the deployed application or revision.
+  capture. `iiwa/PoseTestBotFullCaptureApplication.java` remains a repository
+  candidate, not proof of the deployed application or revision.
 - [ ] Compile and simulate the exact ordinary-capture controller project before
-  enabling it or reconciling the repository source with the deployed source.
+  deploying it or reconciling the repository source with the deployed source.
 - [ ] Create, teach, and read back the distinct persistent frames
   `/PoseTestBot/PoseTemplateBase`, `/PoseTestBot/CaptureStart`, and
   `/PoseTestBot/CaptureEnd`. Retain `/PoseTestBot/TemplateBase` only as the
-  calibration application's commissioned motion-waypoint parent. Confirm that
-  the calibration pose-stream task queries the flange relative to
-  `/PoseTestBot/PoseTemplateBase`; the static solver does not require a measured
-  transform between the waypoint parent and result frame.
+  nine-frame calibration application's commissioned motion-waypoint parent;
+  the single-frame alternative anchors its relative motions below
+  `/PoseTestBot/PoseTemplateBase`. Confirm that the calibration pose-stream
+  task queries the flange relative to `/PoseTestBot/PoseTemplateBase`; the
+  static solver does not require a measured transform between the waypoint
+  parent and result frame.
   The software now retains and compares exact v1
   `sunrise_reference_frame_path` values and refuses legacy, undeclared, or
   mismatched static-profile reuse. Equal path strings are not evidence that a

@@ -96,17 +96,18 @@ old loop delivered roughly 16 Hz, not 100 Hz.
 
 The shared implementation consists of:
 
-- `iiwa/PoseTestBot_PoseStreamTask.java`, an automatic-compatible
+- `iiwa/PoseTestBotPoseStreamTask.java`, an automatic-compatible
   `RoboticsAPICyclicBackgroundTask` initialized at 10 ms with
   `CycleBehavior.BestEffort`;
 - `iiwa/PoseTestBotPoseStreamFunction.java`, the task-function interface used
   by the motion applications;
-- `iiwa/PoseTestBot_Test.java` and
-  `iiwa/PoseTestBot_CalibrationVarianceProposal.java`, which now execute
-  blocking robot motions while independently starting and stopping the cyclic
-  sampler.
+- `iiwa/PoseTestBotFullCaptureApplication.java`,
+  `iiwa/PoseTestBotNineFrameCalibrationApplication.java`, and
+  `iiwa/PoseTestBotSingleFrameStaticCameraCalibrationApplication.java`, which
+  execute blocking robot motions while independently starting and stopping the
+  cyclic sampler.
 
-There is no `moveAsync()`/`isFinished()` sampling loop left in either motion
+There is no `moveAsync()`/`isFinished()` sampling loop in any motion
 application. The background task contains no motion command. It only resolves
 the selected Application Data reference frame, queries the current flange
 pose, constructs a packet, and sends UDP.
@@ -126,24 +127,26 @@ to terminate it silently, stops that sampling segment, and exposes fatal and
 send-failure counters to the motion application. A motion that produces zero
 poses or a fatal sampler fault does not emit a successful end marker.
 
-The four sources compile against a Sunrise 1.15.1 public API set. That is a
-useful syntax/API check, not controller acceptance. The installed Workbench
-Javadoc and exact project remain authoritative.
+The pre-existing task, interface, full-capture, and nine-frame sources compiled
+against a Sunrise 1.15.1 public API set. The later single-frame application
+uses the same API patterns but still requires an exact Workbench compile. The
+earlier check is useful syntax/API evidence, not controller acceptance. The
+installed Workbench Javadoc and exact project remain authoritative.
 
 ## Workbench and Physical Commissioning
 
-Before enabling either motion application:
+Before deploying any motion application:
 
-1. Add `PoseTestBot_PoseStreamTask` to the exact controller project through
+1. Add `PoseTestBotPoseStreamTask` to the exact controller project through
    Workbench's background-task workflow and configure it for automatic start.
    Do not merely copy the Java class and assume the project metadata was
    created.
 2. Include the task-function interface and exactly one provider for it.
-3. Compile all four shared/application sources against the installed
+3. Compile all five shared/application sources against the installed
    Sunrise.OS API. Record the exact project, controller, source revision, and
    compile result.
-4. Keep both repository application gates false until the applicable frame,
-   endpoint, swept-path, tool/load, cable, and T1 checks pass.
+4. Do not deploy or select an application until its frame, endpoint,
+   swept-path, tool/load, cable, and T1 checks pass.
 5. With explicit operator authorization and both physical execution gates,
    retain a supervised trial. Do not send UDP `STOP` during repeated
    calibration.

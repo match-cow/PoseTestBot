@@ -22,18 +22,17 @@ import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 
 /**
- * Candidate ordinary full-capture application for the PoseTestBot iiwa.
+ * Ordinary full-capture application for the PoseTestBot iiwa.
  *
  * IMPORTANT: This source does not establish which application is deployed on
  * the lab controller. Compile and simulate it in the exact Sunrise.Workbench
  * project, teach and verify PoseTemplateBase, CaptureStart, and CaptureEnd,
- * and commission the complete PTP/A1/PTP path in T1 before setting
- * ENABLE_AFTER_OFFLINE_VALIDATION to true.
+ * and commission the complete PTP/A1/PTP path in T1 before deployment.
  *
  * The UDP command is read only while the application is idle. A UDP STOP
  * cannot interrupt an active motion and is not a safety stop.
  */
-public class PoseTestBot_Test extends RoboticsAPIApplication {
+public class PoseTestBotFullCaptureApplication extends RoboticsAPIApplication {
 	private static final String POSE_TEMPLATE_BASE_PATH =
 			"/PoseTestBot/PoseTemplateBase";
 	private static final String CAPTURE_START_FRAME_PATH =
@@ -42,13 +41,6 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 			"/PoseTestBot/CaptureEnd";
 	private static final String DEFAULT_RECEIVER_IP = "172.31.1.169";
 	private static final Charset UTF_8 = Charset.forName("UTF-8");
-
-	/*
-	 * This repository source is intentionally inert until the exact controller
-	 * project, frame, endpoints, joint branches, swept paths, tool/load, camera
-	 * rig, and cables have been validated offline and commissioned in T1.
-	 */
-	private static final boolean ENABLE_AFTER_OFFLINE_VALIDATION = false;
 
 	private static final int SETTLE_TIME_MS = 1500;
 	private static final int COMMAND_BUFFER_BYTES = 4096;
@@ -113,12 +105,6 @@ public class PoseTestBot_Test extends RoboticsAPIApplication {
 
 	@Override
 	public void run() {
-		if (!ENABLE_AFTER_OFFLINE_VALIDATION) {
-			getLogger().error("Ordinary full-capture application is disabled. "
-					+ "Complete Workbench and T1 commissioning before enabling it.");
-			return;
-		}
-
 		getLogger().warn("UDP STOP is not a safety stop and cannot interrupt "
 				+ "active motion. Use only the controller's approved safety "
 				+ "response for an unsafe condition.");
