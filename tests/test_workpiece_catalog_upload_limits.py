@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from posetestbot.web.app import create_app
-from posetestbot.web.routes import pose_templates as legacy_routes
 from posetestbot.web.routes import workpieces as routes
 
 
@@ -56,45 +55,6 @@ def test_workpiece_upload_enforces_streamed_request_limit_before_queueing(
     assert "size limit" in response.get_json()["output"]
     assert runner.submissions == []
     assert not request_root.exists()
-
-
-@pytest.mark.parametrize(
-    "environ_overrides",
-    [
-        {},
-        {"CONTENT_LENGTH": "", "wsgi.input_terminated": True},
-    ],
-    ids=["declared-content-length", "unknown-content-length"],
-)
-def test_legacy_catalog_upload_enforces_the_same_streamed_limit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    environ_overrides: dict[str, object],
-) -> None:
-    runner = RecordingRunner()
-    monkeypatch.setattr(legacy_routes, "MAX_UPLOAD_BATCH_BYTES", 1)
-    monkeypatch.setattr(
-        legacy_routes, "WORKPIECE_REQUEST_ROOT", tmp_path / "legacy-requests"
-    )
-    monkeypatch.setattr(legacy_routes, "job_runner", runner)
-    client = create_app().test_client()
-
-    response = client.post(
-        "/pose-templates/catalog/upload",
-        data={
-            "cad": (
-                io.BytesIO(b"x" * (1024 * 1024 + 64 * 1024)),
-                "oversized.stl",
-            )
-        },
-        content_type="multipart/form-data",
-        environ_overrides=environ_overrides,
-    )
-
-    assert response.status_code == 413
-    assert "100 MiB" in response.get_json()["output"]
-    assert runner.submissions == []
-    assert not (tmp_path / "legacy-requests").exists()
 
 
 @pytest.mark.parametrize(

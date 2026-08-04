@@ -10,6 +10,13 @@ annotation-bearing BOP dataset plus an immutable standard BOP19 result CSV (or
 a deterministic test-only GT perturbation), invokes the pinned official BOP
 Toolkit, and writes derived evidence only below `processed/bop_evaluation/`.
 It is not an estimator, converter, or acquisition-pipeline stage.
+The separate `match-cow/posetestbot-cluster` companion may own SSH transfer,
+durable SLURM orchestration, a pinned FoundationPose runtime, and canonical
+BOP19 CSV generation. PoseTestBot may expose only a loopback controller client,
+browser-safe proxy APIs, cluster/archive status, immutable standard-result
+import/download, and Inspect-page handoffs. Cluster credentials, estimator
+code, estimator-specific conversion, remote paths, and arbitrary scheduler
+arguments must never enter this repository or a browser response.
 
 ## Operating Rules
 
@@ -166,13 +173,20 @@ Keep or extend these areas:
   import already compatible BOP19 CSVs or create deterministic test-only
   slight-offset results from GT, but must write only below
   `processed/bop_evaluation/` and must never become a pipeline stage.
+- The thin `posetestbot.cluster` loopback client and `/cluster/*` web proxies
+  for the separately deployed `posetestbot-cluster` companion. Result import
+  must rerun the local standard BOP19 validator, bind the controller and staged
+  dataset hashes, and retain immutable provenance below
+  `processed/bop_evaluation/results/`.
 - Flask operator APIs for jobs, capture status, hardware/sensor/runtime
   status, run config, preflight, calibration, the `/workpieces` catalogue,
   sync quality, Inspect-only BOP evaluation, and pipeline sequence submission.
 
 Do not expand the Inspect-only exception into downstream behavior:
 
-- No FoundationPose/MegaPose/SAM6D stages or wrappers.
+- No FoundationPose/MegaPose/SAM6D estimator code, runtime, stages, or direct
+  SSH/SLURM wrappers in PoseTestBot. The typed external-controller client is
+  the only FoundationPose orchestration boundary.
 - No BOP19 result CSV conversion stage.
 - No general evaluator bridge or evaluation pipeline stage beyond the
   run-scoped official BOP19 metrics described above.
@@ -189,17 +203,12 @@ Do not expand the Inspect-only exception into downstream behavior:
 - Run configuration artifact: `run_config.json`.
 - Run preflight artifact: `run_preflight_report.json`.
 - Hardware snapshot artifact: `hardware_status_report.json`.
-- Run/config-bound physical depth-sync qualification:
-  `hardware_sync_qualification.json`, with copied evidence below
-  `hardware_sync_qualification_evidence/`.
 - Capture artifacts: `capture_plan.json`,
   `capture_plan_preflight_report.json`, `capture_execution_plan.json`,
   `capture_execution_status.json`, `capture_execution_report.json`,
   and `capture_execution_logs/`.
 - Derived sync report: `sync_report.json`.
 - Run-level sync quality report: `sync_quality_report.json`.
-- Authoritative complete mixed-mount hardware-sync groups:
-  `processed/synchronized/multiview_frame_groups.json`.
 - Calibration artifacts: `calibration_preflight_report.json`,
   `calibration_target.json`, `intrinsic_calibration_profiles.json`,
   attempt-level `intrinsic_comparison.json`,
@@ -208,7 +217,7 @@ Do not expand the Inspect-only exception into downstream behavior:
   `calibration_profiles_from_observations.json`,
   `calibration_solver_report.json`, `calibration_profiles_solved.json`,
   `calibration_validation_report.json`, and promoted
-  `calibration_profiles.json` (`calibration.v2`; v1 remains loadable).
+  `calibration_profiles.json` (`calibration.v2`).
 - Run-owned reusable-calibration selection is recorded in
   `calibration_profile_selection.json`. One or more promoted source runs may
   supply explicit per-sensor profiles. Exact single-source or deterministic
@@ -242,11 +251,10 @@ Do not expand the Inspect-only exception into downstream behavior:
   `.pose_template_selection.transaction.json` journal while replacement is in
   progress, and `object_instances.json`.
 - BOP export artifacts: `bop/bop_export_manifest.json`,
-  `bop/posetestbot_bop_frame_map.json`, `bop/posetestbot_frame_sets.json`,
-  `bop/test_targets_bop19.json`,
+  `bop/posetestbot_bop_frame_map.json`, `bop/test_targets_bop19.json`,
   `bop/models/models_info.json`, pose-template
-  `bop/posetestbot_pose_template.json` and `bop/posetestbot_instance_map.json`, optional
-  `bop/posetestbot_multiview_targets.json`, and optional
+  `bop/posetestbot_pose_template.json` and
+  `bop/posetestbot_instance_map.json`, and optional
   `bop/posetestbot_coco_annotations.json`.
 - Optional BOP annotation evidence:
   `processed/bop_annotations/generation_report.json`; pose mode adds
@@ -291,9 +299,9 @@ canonical PLY, or texture bytes, and import updates matching local UUIDs while
 reporting records whose managed assets are absent as skipped. Preserve or move
 the complete managed asset tree separately when binary portability is needed.
 Queue CAD inspection/conversion through `LocalJobRunner`; it is CPU/disk work
-and must not open cameras or command the robot. The legacy
-`/pose-templates/catalog` APIs remain supported for compatibility, while new
-operator work belongs under `/workpieces`.
+and must not open cameras or command the robot. Catalogue APIs belong under
+`/workpieces`; `/pose-templates` owns immutable template authoring and
+selection only.
 
 Treat metre/millimetre correction as a new canonical geometry revision. It
 requires an archived workpiece, explicit confirmation/operator provenance, and
@@ -329,32 +337,12 @@ changes must not rename an existing run. Capture planning mirrors the alias
 into `capture_plan.json` and `dataset_manifest.json`; physical identity and
 sensor-folder naming remain bound to sensor type and device ID.
 
-`run_config.v3` owns the explicit `capture.synchronization` contract.
-`timestamp_aligned` remains the general default. The only supported
-`hardware_trigger` implementation on the current lab inventory is
-`realsense_inter_cam_sync` with `scope=depth_exposure`, across exact-ID D435
-cameras that include at least one `static` and one `eye_in_hand` view. Exactly
-one is the master and the others are subordinates. This does not certify D435
-RGB exposure synchronization. The USB OAK-D Pro and USB ZED 2i cannot join that
-trigger group; reject such configurations instead of silently falling back.
-Hardware-trigger capture and synchronization require a current
-`hardware_sync_qualification.json` produced from operator-confirmed external
-exposure-timing evidence. The recorder must never open cameras or contact the
-robot. Changing the resolution, FPS, trigger policy, camera membership, mount,
-orientation, or role invalidates qualification. Publish or replace
-qualification only before acquisition starts; once capture status/report/logs,
-raw camera data, or raw robot-pose evidence exists, it is immutable and a
-different qualification requires a new run.
-During supervised capture, require append-only camera metadata progress using
-the independent default of 12 planned frame periods clamped to 2–5 seconds,
-regardless of the robot UDP timeout. Preserve partial raw evidence on failure.
-A successful hardware-sync capture report must bind the exact configuration
-and qualification hashes after immediate pre-receiver revalidation. Carry that
-binding through authoritative groups and BOP frame sets, and require the BOP
-rewrite gate to compare it with the capture report and current qualification.
-Preserve early and incomplete raw frames, and treat only the complete groups in
-`processed/synchronized/multiview_frame_groups.json` as authoritative combined
-views.
+`run_config.v3` owns the exact `capture.synchronization` contract. The only
+supported mode is `timestamp_aligned`; every enabled camera records its own
+timestamp evidence and is paired non-destructively with the robot pose stream.
+Reject other modes, implementations, scopes, roles, group identifiers, or
+trigger settings instead of silently coercing them. Preserve partial and
+unmatched raw evidence on failure.
 
 When reporting timestamp-aligned synchronization quality, do not treat
 camera frames recorded before or after a pose-streamed robot motion interval

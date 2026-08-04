@@ -235,7 +235,7 @@ def _capture_job_summary(job) -> dict:
         "kind": _capture_job_kind(job),
         "stage": parameters.get("pipeline_stage"),
         "sequence": parameters.get("pipeline_sequence"),
-        "run_root": getattr(job, "run_root", parameters.get("run_root")),
+        "run_root": job.run_root,
         "resources": list(job.resources or []),
         "message": job.message,
         "created_at": job.created_at,
@@ -902,20 +902,7 @@ def list_jobs():
     except ValueError as exc:
         return jsonify({"output": str(exc)}), 400
     jobs = page.jobs
-    resource_holders = getattr(job_runner, "resource_holders", None)
-    resources = {}
-    if callable(resource_holders):
-        try:
-            resources = resource_holders(include_services=include_services)
-        except TypeError:
-            resources = resource_holders()
-            if not include_services:
-                visible_ids = {job.id for job in jobs}
-                resources = {
-                    resource: job_id
-                    for resource, job_id in resources.items()
-                    if job_id in visible_ids
-                }
+    resources = job_runner.resource_holders(include_services=include_services)
     return jsonify(
         {
             "jobs": [job.to_dict() for job in jobs],
@@ -970,8 +957,7 @@ def cancel_job(job_id):
 def list_capture_jobs():
     run_root = request.args.get("run_root") or None
     jobs = _capture_jobs_for_run(run_root)
-    resource_holders = getattr(job_runner, "resource_holders", None)
-    resources = resource_holders() if callable(resource_holders) else {}
+    resources = job_runner.resource_holders()
     status_artifact = None
     if run_root:
         try:

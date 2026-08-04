@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-
 DEFAULT_SENSOR_PREVIEW_ROOT = Path("working_data") / "sensor_previews"
 PREVIEW_STATUS_NAME = "preview_status.json"
 PREVIEW_IMAGE_NAME = "latest.jpg"
@@ -75,11 +74,12 @@ def preview_status_health(
 
     if status is None:
         return False, "Preview worker has not published status."
+    if status.get("schema_version") != PREVIEW_STATUS_SCHEMA:
+        return False, "Preview worker status schema is not supported."
     if status.get("status") in {"failed", "stopped", "error"}:
         return False, str(status.get("error") or "Preview worker is not running.")
-    path = Path(preview_root) / PREVIEW_STATUS_NAME
     heartbeat_epoch: float | None = None
-    heartbeat = status.get("heartbeat_at") or status.get("generated_at")
+    heartbeat = status.get("heartbeat_at")
     if isinstance(heartbeat, str):
         try:
             from datetime import datetime
@@ -90,10 +90,7 @@ def preview_status_health(
         except ValueError:
             heartbeat_epoch = None
     if heartbeat_epoch is None:
-        try:
-            heartbeat_epoch = path.stat().st_mtime
-        except OSError:
-            return False, "Preview heartbeat is missing."
+        return False, "Preview heartbeat is missing or malformed."
     age = max(0.0, (now_epoch_s or time.time()) - heartbeat_epoch)
     if age > PREVIEW_HEARTBEAT_STALE_S:
         return False, f"Preview heartbeat is stale ({age:.1f}s old)."

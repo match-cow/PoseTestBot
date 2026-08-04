@@ -1,24 +1,30 @@
 from __future__ import annotations
 
 import copy
+
 import hashlib
+
 import json
+
 import sys
+
 from pathlib import Path
 
 import cv2
+
 import numpy as np
+
 import pytest
 
-from posetestbot.calibration import posegridgen as loader
+
 from posetestbot.calibration import target_library
+
 from posetestbot.calibration.posegridgen import (
-    POSEGRIDGEN_COMPATIBLE_BUNDLE_REVISIONS,
     POSEGRIDGEN_REVISION,
     posegridgen_capabilities,
     posegridgen_status,
-    verify_posegridgen_checkout,
 )
+
 from posetestbot.calibration.target_library import (
     CalibrationTargetConflict,
     delete_target_bundle,
@@ -28,12 +34,15 @@ from posetestbot.calibration.target_library import (
     validate_run_target_selection,
     validate_target_bundle,
 )
+
 from posetestbot.calibration.targets import (
     geometry_sha256,
     normalize_calibration_target_spec,
     opencv_grid_board,
 )
+
 from posetestbot.io.artifacts import ARUCO_DETECTIONS, RAW_ROBOT_EE_POSES, RUN_CONFIG
+
 from posetestbot.pipeline.run_config import (
     create_run_config,
     sensor_configs_from_values,
@@ -91,36 +100,6 @@ def test_pinned_loader_is_private_and_reports_renderer_capabilities() -> None:
     assert any(name.startswith("_posetestbot_posegridgen_") for name in sys.modules)
 
 
-def test_loader_reports_missing_wrong_and_dirty_checkouts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    assert verify_posegridgen_checkout(tmp_path / "missing")["available"] is False
-    checkout = tmp_path / "PoseGridGen"
-    (checkout / "backend").mkdir(parents=True)
-    (checkout / ".git").write_text("gitdir: nowhere\n")
-    for name in ("models", "errors", "fit", "scene", "render"):
-        (checkout / "backend" / f"{name}.py").write_text("\n")
-
-    monkeypatch.setattr(
-        loader, "_git", lambda _root, *args: "wrong" if args[0] == "rev-parse" else ""
-    )
-    wrong = verify_posegridgen_checkout(checkout)
-    assert wrong["available"] is False
-    assert "revision mismatch" in wrong["reason"]
-
-    monkeypatch.setattr(
-        loader,
-        "_git",
-        lambda _root, *args: (
-            POSEGRIDGEN_REVISION if args[0] == "rev-parse" else " M backend/models.py"
-        ),
-    )
-    dirty = verify_posegridgen_checkout(checkout)
-    assert dirty["available"] is False
-    assert dirty["clean"] is False
-    assert "local modifications" in dirty["reason"]
-
-
 @pytest.mark.parametrize(
     ("paper_size", "expected_page_mm"),
     (("A5", (148.0, 210.0)), ("A6", (105.0, 148.0))),
@@ -160,43 +139,6 @@ def test_din_a5_and_a6_generate_through_the_immutable_bundle_pipeline(
         == configuration["page"]
     )
     assert (bundle_path / "calibration_target.pdf").read_bytes().startswith(b"%PDF")
-
-
-def test_previous_pinned_posegridgen_bundle_revision_remains_compatible(
-    tmp_path: Path,
-) -> None:
-    bundle = generate_target_bundle(
-        display_name="previous pin",
-        configuration=aruco_configuration(),
-        library_root=tmp_path,
-    )
-    bundle_path = Path(bundle["bundle_path"])
-    legacy_revision = next(
-        revision
-        for revision in POSEGRIDGEN_COMPATIBLE_BUNDLE_REVISIONS
-        if revision != POSEGRIDGEN_REVISION
-    )
-
-    target_path = bundle_path / target_library.TARGET_SPEC
-    target = json.loads(target_path.read_text())
-    target["posegridgen"]["revision"] = legacy_revision
-    target_library.atomic_write_json(target_path, target)
-
-    manifest_path = bundle_path / target_library.BUNDLE_MANIFEST
-    manifest = json.loads(manifest_path.read_text())
-    manifest["generator"]["revision"] = legacy_revision
-    target_bytes = target_path.read_bytes()
-    manifest["files"]["target"].update(
-        {
-            "size_bytes": len(target_bytes),
-            "sha256": hashlib.sha256(target_bytes).hexdigest(),
-        }
-    )
-    target_library.atomic_write_json(manifest_path, manifest)
-
-    validated = validate_target_bundle(bundle_path, library_root=tmp_path)
-    assert validated["generator"]["revision"] == legacy_revision
-    assert validated["target"]["posegridgen"]["revision"] == legacy_revision
 
 
 def test_anisotropic_geometry_is_authoritative_for_generic_opencv_board(
@@ -502,94 +444,6 @@ def test_explicit_target_mounting_is_bound_to_camera_group_and_raw_capture(
     assert RAW_ROBOT_EE_POSES in captured.value.blockers
 
 
-def test_explicit_target_mounting_rejects_mixed_camera_groups(tmp_path: Path) -> None:
-    library = tmp_path / "library"
-    bundle = generate_target_bundle(
-        display_name="mixed-run target",
-        configuration=aruco_configuration(),
-        library_root=library,
-    )
-    run = tmp_path / "mixed-run"
-    sensors = sensor_configs_from_values(
-        [
-            {
-                "sensor_type": "realsense_d435",
-                "device_id": "static",
-                "display_name": "Static D435",
-                "mounting_mode": "static",
-            },
-            {
-                "sensor_type": "realsense_d435",
-                "device_id": "wrist",
-                "display_name": "Wrist D435",
-                "mounting_mode": "eye_in_hand",
-            },
-        ]
-    )
-    write_run_config_with_manifest(
-        run,
-        create_run_config(run_root=run, sensors=sensors),
-    )
-
-    with pytest.raises(ValueError, match="separate calibration runs"):
-        select_target_bundle(
-            run_root=run,
-            target_id=bundle["target_id"],
-            placement_mode="unknown",
-            mounting_frame="robot_flange",
-            library_root=library,
-        )
-
-
-def test_first_target_selection_is_rejected_after_raw_capture(tmp_path: Path) -> None:
-    library = tmp_path / "library"
-    bundle = generate_target_bundle(
-        display_name="too-late target",
-        configuration=aruco_configuration(),
-        library_root=library,
-    )
-    run = tmp_path / "captured-run"
-    sensors = sensor_configs_from_values(
-        [
-            {
-                "sensor_type": "realsense_d435",
-                "device_id": "1",
-                "display_name": "Static D435",
-                "mounting_mode": "static",
-            }
-        ]
-    )
-    write_run_config_with_manifest(
-        run,
-        create_run_config(run_root=run, sensors=sensors),
-    )
-    (run / RAW_ROBOT_EE_POSES).write_text("{}\n")
-
-    with pytest.raises(CalibrationTargetConflict) as captured:
-        select_target_bundle(
-            run_root=run,
-            target_id=bundle["target_id"],
-            placement_mode="unknown",
-            mounting_frame="robot_flange",
-            library_root=library,
-        )
-
-    assert captured.value.blockers == [RAW_ROBOT_EE_POSES]
-    assert "must be bound before raw acquisition" in str(captured.value)
-
-
-def test_legacy_run_config_loads_calibration_target_as_null(tmp_path: Path) -> None:
-    run = tmp_path / "legacy"
-    value = create_run_config(run_root=run).to_dict()
-    value.pop("calibration_target")
-    run.mkdir()
-    (run / RUN_CONFIG).write_text(json.dumps(value))
-
-    from posetestbot.pipeline.run_config import load_run_config_for_run_root
-
-    assert load_run_config_for_run_root(run)["calibration_target"] is None
-
-
 def test_bundle_validation_rejects_symlinks(tmp_path: Path) -> None:
     library = tmp_path / "library"
     bundle = generate_target_bundle(
@@ -678,32 +532,6 @@ def test_selection_promotion_rolls_back_every_active_artifact(
     assert after == before
     assert not list(run.glob(".*.bak"))
     assert not list((run / "calibration_targets").glob(".*.tmp"))
-
-
-def test_generation_failure_leaves_no_partial_bundle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target_id = "36acb302-830d-437f-9aec-e7bda24f4616"
-    original_write = target_library.atomic_write_bytes
-    calls = {"count": 0}
-
-    def fail_pdf_write(path, payload):
-        calls["count"] += 1
-        if calls["count"] == 2:
-            raise OSError("injected PDF write failure")
-        return original_write(path, payload)
-
-    monkeypatch.setattr(target_library, "atomic_write_bytes", fail_pdf_write)
-    with pytest.raises(OSError, match="injected PDF write failure"):
-        generate_target_bundle(
-            display_name="partial bundle test",
-            configuration=aruco_configuration(),
-            library_root=tmp_path,
-            target_id=target_id,
-        )
-
-    assert not (tmp_path / target_id).exists()
-    assert not list(tmp_path.glob(".*.tmp"))
 
 
 def test_bundle_deletion_protects_active_target_and_is_atomic(

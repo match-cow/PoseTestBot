@@ -18,10 +18,9 @@ The code rewrite is implemented across:
 - RealSense, OAK-D Pro, and ZED 2i sensor adapters and status contracts, with
   run-scoped aliases and enable/disable selection that preserve disabled camera
   metadata;
-- transactional synchronization and sync-quality reporting, including strict
-  hash-bound reuse of each selected calibration profile's saved timing policy;
-- explicit `run_config.v3` mixed-mount D435 depth-exposure triggering, complete
-  cross-camera frame grouping, and BOP frame-set provenance;
+- timestamp-only transactional synchronization and sync-quality reporting,
+  including strict hash-bound reuse of each selected calibration profile's
+  saved timing policy;
 - PoseGridGen targets, including immutable-library card previews rendered from
   stored marker geometry, and attempt-scoped factory-vs-OpenCV intrinsic
   evidence, whole-board PnP support gates, global-sensor-time RealSense
@@ -43,6 +42,48 @@ The code rewrite is implemented across:
   `processed/bop_evaluation/`; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
+
+## 2026-08-04 Research Simplification
+
+The acquisition contract now accepts only `run_config.v3` with exact
+`timestamp_aligned` synchronization. Hardware-trigger configuration,
+qualification, continuous metadata-watchdog, complete-view grouping, BOP
+frame-set bindings, related scripts/APIs/UI, and their dedicated tests were
+removed. Raw camera frames and timestamp evidence remain preserved; processing
+produces independent per-camera frame-to-pose matches and never claims
+simultaneous cross-camera exposure.
+
+Current data formats are `calibration.v2`, `calibration_target.v2`, and
+`sync_report.v3`. The v1/v2 run-config and sync readers, calibration-v1
+migration, ArUcoGridGen fallback importer, standalone single-folder sync and
+object-instance entry points, `web_interface.py`, and compatibility catalogue
+routes were retired. Historical calibration attempts remain readable for
+scientific inspection, but a retired request/timing revision cannot be rerun or
+promoted.
+
+Calibration attempt creation now accepts only the run, mode, selected sensors,
+target, and timing policy. Intrinsic/solver choices and thresholds are
+server-owned. Automatic timing fails closed for weak, ambiguous, inconsistent,
+boundary, or unevaluable evidence; zero milliseconds passes only when the
+search identifies it, while `fixed_zero` remains a separate explicit policy.
+Candidate ordering uses one deterministic six-decimal ranking tuple without
+tolerance bands.
+
+The external cluster boundary uses one `POSETESTBOT_CLUSTER_ENABLED` switch.
+PoseTestBot retains browser-safe status, pose-job submission/logs/cancellation,
+immutable result import/download, and archive copy/restore; idempotency keys are
+server-generated. Imported controller evidence is validated and rewritten as a
+compact allowlisted provenance record; raw scheduler accounting, failure text,
+copy details, remote paths, credentials, and unknown fields are not retained.
+Remote-source deletion and two-phase move preparation are not exposed.
+
+Final non-hardware validation collected 702 tests: 686 default contracts and
+16 desktop Playwright journeys passed, with 34,997 Python test-source lines.
+Ruff, frontend typecheck/lint, the production Vite build, installer check-only,
+shell syntax, package build, and diff checks passed. Read-only evidence checks
+remain ready at 11/11 for `working_data/test20260726_BOPv5` and 3/3 for
+`/mnt/working_data_ssd/calib00_test20260724`. No physical hardware or real
+cluster controller was exercised.
 
 ## 2026-08-04 Descriptive IIWA Applications and Single-Frame Static Calibration
 
@@ -215,25 +256,24 @@ and exposes them to the motion application. The receiver validates and retains
 the new optional evidence. A non-destructive cadence reporter applies the
 commissioning targets of 50 Hz median, 25 ms p95 gap, and 40 ms maximum gap.
 
-Calibration timing revision
-`constant_latency_nearest_pose_motion_lomo_warn_fallback.v3` now separates
-advisory timing quality from unusable input. New attempts search -300 to
-+300 ms, warn when an applied candidate exceeds ±150 ms, retain nearest-pose
-matches through 150 ms, and warn above 20 ms. Weak, ambiguous, boundary, or
-otherwise unevaluable offset-search evidence keeps recorded timing at 0 ms
-with explicit degraded checks and continues into the unchanged robot-camera
-geometry validation. Missing/corrupt robot pose evidence still fails, and
+The current calibration timing revision searches -300 to +300 ms, warns when a
+passing candidate exceeds ±150 ms, retains nearest-pose matches through 150 ms,
+and warns above 20 ms. Weak, ambiguous, boundary, inconsistent, or otherwise
+unevaluable offset-search evidence fails closed before extrinsic geometry.
+Automatic 0 ms timing passes only when all required identification and
+stability checks support it. Missing/corrupt robot-pose evidence also fails;
 reprojection, held-out residual, outlier, coverage, motion-diversity, and
-multi-camera closure gates still govern promotion. Historical v1/v2 attempts
-remain immutable and keep their recorded fail-closed semantics.
+multi-camera closure gates still govern a current attempt's promotion.
 
-A fresh v3 attempt on the same retained run,
+A historical v3 attempt on the same retained run,
 `6a02e06bacbf4242b20ca50baa6bca8c`, completed all calculation phases with
 exit status 0. It retained recorded timing for all 514 observations, reported
 the weak +20 ms candidate and 33.363 ms maximum nearest-pose delta as degraded
 warnings, and reached geometric validation. It produced no recommendation
 because the unchanged continuous image-centroid coverage gates failed (x span
 0.435/0.450, y span 0.318/0.350, hull area 0.088/0.100), not because of timing.
+That immutable result remains inspection evidence only; the retired timing
+rule cannot be rerun or promoted.
 
 The four Java sources compile against a public Sunrise 1.15.1 API set, and all
 1,029 default (non-Playwright) tests pass without hardware access. This is not
@@ -387,13 +427,10 @@ previews, snapshots, monitoring, and manual robot commands are global.
 Existing parameter dictionaries remain command provenance but are no longer
 used to guess UI scope.
 
-Legacy data readers, `web_interface.py`, and the direct non-destructive sync
-CLI are retained compatibility surfaces rather than undecided tasks. Optional
-D435 physical-sync research, regeneration of the old v4 derived export,
-physical duplicate repetition, external estimator-result acceptance, bundle
-size tuning, and a one-file binary catalogue format were removed from the
-active backlog without removing their already supported software contracts or
-historical documentation.
+The current-format saved-data readers remain supported. The Research
+Simplification milestone above supersedes this earlier compatibility decision:
+`web_interface.py`, the direct non-destructive sync CLI, retired schema readers,
+and the former catalogue aliases are no longer production surfaces.
 
 Non-hardware acceptance for this pass completed with:
 
@@ -614,6 +651,67 @@ flag `--with-bop-toolkit` initializes the pinned checkout and synchronizes this
 separate NumPy-below-2 toolkit environment without changing PoseTestBot's
 NumPy-2 main environment.
 
+## 2026-08-04 External Cluster Storage and FoundationPose Companion
+
+Implemented the separate `match-cow/posetestbot-cluster` companion boundary.
+The companion is a loopback-only authenticated FastAPI controller with
+SQLite-journaled archive, restore, transfer, SLURM, collection, cancellation,
+and restart-reconciliation states. It pins the LUIS transfer/login host split,
+generated PROJECT/BIGWORK layouts, strict host-key and unattended-key policy,
+server-owned GPU profiles, a FoundationPose SIF/weights/runtime qualification
+contract, seven-day failed-stage retention, and exact recorded-ID
+cancellation. Full-run archives reject links, special files, nested mounts,
+device crossings, traversal, and changing sources; verified restore extracts
+manifest-listed regular files only. FoundationPose consumes only complete BOP
+v5 `pose_and_masks` exports, uses `mask_visib` as an explicit oracle GT mask,
+runs independent per-target registration without tracking, preserves partial
+failures, and emits a pinned-loader-validated standard BOP19 CSV.
+
+PoseTestBot gained only the thin external boundary: typed loopback calls,
+`/cluster/*` proxies behind one enable switch, visible readiness blockers,
+durable pose-job/archive presentation, and immutable result import. **Inspect →
+Pose Estimation** shows the dataset/runtime/profile/oracle-mask contract and
+states that work continues through **Jobs**. Run folders can create archive
+copies and restore verified remote-only runs; PoseTestBot does not prepare an
+archive move or request source deletion. Imported controller CSVs are
+revalidated locally and retain compact allowlisted scientific provenance plus
+the digest of the original controller evidence while browser responses expose
+only essential provider/job/scheduler identity. Intact
+historical CSVs remain downloadable after dataset drift while evaluation
+correctly remains incompatible.
+
+No FoundationPose code, SSH credential, arbitrary remote path/SLURM argument,
+estimator converter, or pipeline stage entered PoseTestBot. The browser sees
+neither the controller token, credentials, nor remote paths. The production Vite
+bundle includes the new desktop pages, and focused controller/proxy/archive/
+result-import regressions cover authentication, containment, idempotency,
+restart state, exact cancellation, stale-dataset refusal, retention, and
+historical download integrity.
+
+Final non-hardware validation passed all 30 companion-controller tests, its
+Ruff and lock checks, and reproducible wheel/source builds whose source
+archive includes the offline runtime and qualification assets. PoseTestBot's
+full default suite passed 1,115 tests; a final 32-test cluster/result-import
+focus passed after the archive-drift hardening; and all 68 packaged desktop
+Playwright contracts passed at the required viewports. Frontend lint, the
+production Vite build, installer check-only validation, shell syntax, Ruff,
+and diff checks also passed. No command contacted LUIS, opened a camera, or
+commanded the robot.
+
+A follow-up aligned the runtime deployment with the lab's early-stage research
+workflow. The human/controller FoundationPose license-approval boolean and CLI
+acknowledgement were removed end to end, including the browser presentation.
+The companion now retains the exact license file from its pinned FoundationPose
+commit, copies it into the SIF, and records its SHA-256 as ordinary runtime
+provenance. The companion remains MIT-licensed without relicensing
+FoundationPose. Its documented build path now stages a private context through
+the transfer host, builds with Apptainer `--fakeroot` on a LUIS login node, and
+stores the unpublished SIF under the fixed BIGWORK runtime root. Focused
+follow-up validation passed 35 companion tests and Ruff, 29 PoseTestBot cluster
+and BOP-evaluation tests, both pose-estimation Playwright contracts, frontend
+lint, and the production Vite build. No command built a SIF, submitted a SLURM
+job, opened a camera, or commanded the robot.
+
 ## 2026-07-26 Object-Dataset Research Speed Range
 
 The guided **Record an object dataset** setup now accepts requested
@@ -753,9 +851,9 @@ below the scene, and moves visibility, selection provenance, and the component
 list into a final evidence row. Operators can select multiple named camera
 timelines and compare them side by side as RGB, fixed-range colourized metric
 depth, or both. Each tile applies the shared slider ordinal to that camera's own
-exact matched timeline without interpolation; visible copy explicitly avoids
-claiming simultaneous exposure unless separate authoritative hardware-sync
-group evidence exists. Inverted RealSense mounts use capture metadata to avoid
+exact matched timeline without interpolation; visible copy explicitly states
+that cross-camera views are timestamp aligned, not simultaneous exposures.
+Inverted RealSense mounts use capture metadata to avoid
 double rotation: already corrected stored frames are shown directly, while
 older frames lacking that evidence receive the configured 180-degree display
 correction. Depth previews use a stable 200–3000 mm near-warm/far-cool scale,
@@ -801,9 +899,11 @@ grid at 0.05. Per-fold materiality remains recorded as a warning rather than
 allowing one arbitrary three-fold partition to veto stronger motion-level
 evidence. Promotion recalculates the saved per-motion improvements, medians,
 sign probability, and search correction instead of trusting saved `ok` labels.
-Current v3 retains that strong-evidence path while converting statistical
-search rejection into the explicit 0 ms warning fallback described above.
-Immutable v1/v2 attempts retain their original replay and promotion semantics.
+The current fail-closed revision retains that strong-evidence path and rejects
+weak, ambiguous, inconsistent, boundary, or unevaluable search evidence. An
+automatic 0 ms result is accepted only when all required folds identify zero.
+Earlier attempts retain their immutable evidence for inspection only; they
+cannot be replayed or promoted.
 
 Real retained-data attempt `1c6b0c9d00dc49ce8d0c14c18d43336b` completed
 under v2 with all three required D435 cameras. It selected +70 ms, +85 ms, and
@@ -813,13 +913,12 @@ three-camera companion closure of 3.172 mm / 0.450°, and 15 common bundles
 pass.
 
 An operator retry, `e588682f5ad64e9aaf8ed39e7b02c623`, revealed that the
-still-running web backend had not been restarted after the implementation
-change. It created an immutable v1 request and the worker correctly replayed
-that recorded contract, reproducing the old `923322072633` rejection. The
-setup API now reports its loaded timing revision; the packaged workflow blocks
-Auto attempt creation when that value is missing or differs from the revision
-expected by the UI, identifies the required backend restart, and labels
-already-created legacy attempts accurately.
+still-running web backend had not been restarted after an implementation
+change. Its immutable historical evidence remains inspectable but is not a
+current rerun or promotion source. The setup API reports its loaded timing
+revision; the packaged workflow blocks Auto attempt creation when that value is
+missing or differs from the revision expected by the UI, identifies the
+required backend restart, and labels historical attempts accurately.
 
 Fresh-process attempt `268c897e1baf49e7bd78a434a4569b99` repeated the exact
 recordings under v2 and reproduced all three offsets, residuals, the common
@@ -853,15 +952,16 @@ full-capture gate accepts the immutable pre-START preflight embedded in an
 execution plan when the standalone report is absent, and rejects mismatched
 embedded status.
 
-## 2026-07-25 Object-Dataset Capture Watchdog Validation
+## 2026-07-25 Object-Dataset Capture Validation
 
 The guided physical-capture request and the canonical
-`real_full_capture_validation` sequence now explicitly select the supported
-five-second maximum live camera-metadata pause. The authorization dialog shows
-that value alongside the independent robot packet timeouts. Frame metadata
-still becomes visible to the supervisor after every complete JSONL record, but
-the storage durability barrier is deferred from the per-frame hot path to one
-`fsync` during each adapter's shutdown.
+`real_full_capture_validation` sequence require each camera to publish three
+valid committed metadata records before robot reception starts. The
+authorization dialog shows the per-camera startup deadline alongside the
+independent robot packet timeouts. Frame metadata becomes visible to the
+supervisor after every complete JSONL record, while the storage durability
+barrier is deferred from the per-frame hot path to one `fsync` during each
+adapter's shutdown.
 
 Authorized retry `working_data/test20260725_03` reused the exact verified
 calibration and pose-template snapshots from the failed object-dataset attempt
@@ -869,9 +969,9 @@ in a fresh run root. Its two enabled D435 cameras completed 1,503 and 1,480
 balanced RGB/depth/metadata tuples, with maximum host-receipt gaps of 0.347055
 and 0.339562 seconds. The iiwa receiver committed 12,226 poses, both camera
 processes exited cleanly after the receiver, capture execution succeeded with
-the explicit five-second watchdog, and `rewrite_full_capture.v1` is ready at
-9/9. This validates the current two-camera object-dataset capture path; it does
-not close the separate five-sensor acceptance milestone.
+the raw evidence preserved, and `rewrite_full_capture.v1` is ready at 9/9. This
+validates the current two-camera object-dataset capture path; it does not close
+the separate five-sensor acceptance milestone.
 
 ## 2026-07-25 Annotation-Free Real BOP Export (v4 checkpoint)
 
@@ -1006,82 +1106,6 @@ Validation completed on 2026-07-23:
   including every primary page, both guided journeys, the global guide,
   handoffs, long job history, and cross-page scroll restoration; and
 - no robot command, physical capture, or rewrite acceptance gate was executed.
-
-## 2026-07-23 Combined Mixed-Mount Hardware Synchronization
-
-- Added the explicit `run_config.v3` `capture.synchronization` contract.
-  `timestamp_aligned` remains the general default. `hardware_trigger` accepts
-  only `realsense_inter_cam_sync` with `scope=depth_exposure`, a safe group ID,
-  a selected exact master key, and a bounded earliest-to-latest depth-timestamp
-  span across the complete camera group.
-  Legacy v1/v2 configs remain loadable as timestamp-aligned evidence and cannot
-  claim hardware synchronization.
-- Hardware-trigger validation fails closed unless every enabled device is an
-  exact-ID D435 and the run includes at least one `static` and one
-  `eye_in_hand` camera. Exactly one is the master and all others are
-  subordinates. The current USB OAK-D Pro and USB ZED 2i are rejected from this
-  mode; an invalid group never silently falls back.
-- Capture planning starts the internal D435 master before its subordinates.
-  RealSense acquisition configures and reads back each SDK
-  `inter_cam_sync_mode`, requires global depth timestamps, and records the
-  group, role, scope, depth frame number, and depth exposure timestamp with each
-  raw frame. D435 RGB is retained as the associated device frameset but is
-  explicitly not certified as a simultaneous cross-camera exposure.
-- The capture supervisor now requires append-only frame-metadata progress from
-  every camera throughout sequential startup, all-camera overlap, and robot
-  receiver execution. An alive process whose metadata stalls, is truncated, is
-  rewritten, or becomes non-monotonic aborts local capture while preserving raw
-  evidence. Its independent FPS-derived freshness limit spans 12 planned frames
-  and is clamped to 2–5 seconds; an explicit execution override cannot exceed
-  five seconds, and receiver completion performs the same final check. The
-  exact hardware contract and qualification are also rebound
-  immediately before receiver startup, so a changed config or replacement
-  qualification refuses robot `START`. A successful full-capture report
-  persists the exact configuration SHA-256, qualification-artifact SHA-256,
-  and immediate-revalidation result.
-- Added a fail-closed `hardware_sync_qualification.v1` artifact and evidence
-  recorder. It copies operator-supplied pulsed-light or equivalent
-  exposure-timing evidence without accessing hardware, verifies file hashes,
-  and binds the pass to the exact run, resolution, FPS, trigger policy, camera
-  identities, mounts, and roles. Capture preflight, synchronization, and BOP
-  consumption reject missing, tampered, or stale qualifications. Publication
-  and replacement are blocked once capture status/report/logs, raw
-  RGB-D/metadata, or raw robot-pose evidence exists; changing the qualification
-  after acquisition requires a new run.
-- Non-destructive synchronization preserves every early, incomplete, and
-  unmatched raw frame. It publishes only complete cross-camera sets within the
-  configured full earliest-to-latest depth-timestamp span to
-  `processed/synchronized/multiview_frame_groups.json`, with mounting, source,
-  timestamp, skew, and robot-pose references. The artifact also hashes the
-  current hardware contract, metadata, matched poses, and every referenced raw
-  and synchronized RGB-D file so later mutation invalidates it. Durable writes,
-  loads, and downstream consumption rebuild the canonical grouping from those
-  inputs, require exact payload equality, and require the exact current physical
-  qualification, so self-consistent edits to the derived group JSON are also
-  rejected. Authoritative grouping additionally requires a succeeded
-  full-capture report with both execution gates and carries its exact
-  configuration/qualification binding.
-- Transactional BOP v4 export maps those authoritative complete groups across
-  the per-camera scenes in `bop/posetestbot_frame_sets.json` and propagates the
-  capture-report binding. Its claims state that depth exposures are
-  hardware-synchronized, RGB exposures are not certified, and synthetic robot
-  occlusion is not modeled. `rewrite_bop_export_readiness.v1` compares the
-  binding across the capture report, authoritative groups, and BOP frame sets,
-  and also requires the current qualification and exported mapping/bytes to
-  agree.
-- The dataset setup UI exposes the timing choice, exact master selection, and
-  capability/claim blockers while preserving an existing policy when unrelated
-  fields are saved.
-
-This work implemented and tested the software contract only. No camera, robot,
-lab service, sync harness, or physical capture was accessed. Operator-run
-electrical and pulsed-LED/exposure qualification remains required before the
-feature becomes real research evidence; the implemented recorder and gates
-make that operator step durable and mandatory. Complete real depth observations
-share the synchronized exposure instant and depth-visible occlusion; their
-associated RGB images are not certified to share a moving-robot or illumination
-instant.
-Current BlenderProc GT/masks do not render the articulated iiwa.
 
 ## 2026-07-24 Pose-Template Orientation Preview Fidelity
 

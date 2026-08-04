@@ -51,7 +51,6 @@ EXPECTED_DIRECT_SUBMISSIONS = {
 }
 
 EXPECTED_POSE_TEMPLATE_HELPER_SCOPES = {
-    "catalog_upload": "library",
     "analyze_workpiece_orientations": "library",
     "generate": "library",
     "library_action": "library",

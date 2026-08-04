@@ -109,6 +109,9 @@ def test_synchronous_bundle_routes_hash_only_the_requested_artifact(
             return {"id": self.id, "status": "queued"}
 
     class FakeRunner:
+        def list(self, *, include_services: bool = True) -> list[Any]:
+            return []
+
         def submit(self, **_kwargs: Any) -> FakeJob:
             return FakeJob()
 
@@ -141,9 +144,7 @@ def test_synchronous_bundle_routes_hash_only_the_requested_artifact(
     hashed.clear()
 
     assert (
-        client.get(
-            f"/pose-templates/library/{template_uuid}/download/pdf"
-        ).status_code
+        client.get(f"/pose-templates/library/{template_uuid}/download/pdf").status_code
         == 200
     )
     assert hashed == ["pose_template.pdf"]
@@ -172,17 +173,13 @@ def test_synchronous_bundle_routes_hash_only_the_requested_artifact(
     assert archived.get_json()["archive"]["state"] == "archived"
     assert hashed == []
 
-    clone = client.post(
-        f"/pose-templates/library/{template_uuid}/clone", json={}
-    )
+    clone = client.post(f"/pose-templates/library/{template_uuid}/clone", json={})
     assert clone.status_code == 202
     assert hashed == []
 
     # The reusable library operations have the same bounded behavior when used
     # by scripts or future synchronous callers.
-    set_template_archive_state(
-        template_uuid, state="active", library_root=library
-    )
+    set_template_archive_state(template_uuid, state="active", library_root=library)
     cloned = clone_template_configuration(
         template_uuid,
         library_root=library,
@@ -215,9 +212,7 @@ def test_oversized_legacy_manifest_uses_one_strict_integrity_fallback(
         return original_hash(path)
 
     monkeypatch.setattr(library_module, "_sha256", recording_hash)
-    loaded = load_template_bundle_detail(
-        bundle["template_uuid"], library_root=library
-    )
+    loaded = load_template_bundle_detail(bundle["template_uuid"], library_root=library)
 
     assert loaded["template_uuid"] == bundle["template_uuid"]
     assert hashed == [

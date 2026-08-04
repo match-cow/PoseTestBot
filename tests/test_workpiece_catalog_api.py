@@ -49,6 +49,9 @@ class FakeRunner:
         self.submissions.append(kwargs)
         return FakeJob(f"workpiece-job-{len(self.submissions)}")
 
+    def list(self, *, include_services: bool = True):
+        return []
+
 
 class FakeMeshBackend:
     constants = SimpleNamespace(MAX_UPLOAD_BYTES=50 * 1024 * 1024)

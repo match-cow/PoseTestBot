@@ -77,14 +77,27 @@ visibility data for evaluation-ready datasets.
 
 ## Repository Boundary
 
-PoseTestBot ends at a validated BOP dataset. It does not run pose estimators or
-convert estimator-specific results.
+PoseTestBot's acquisition pipeline ends at a validated BOP dataset. It does
+not contain or execute pose-estimator code and does not convert proprietary
+estimator output.
 
 The **Inspect → BOP Evaluation** page is intentionally limited to dataset
 validation. It can apply the pinned official BOP19 metrics to an already
 compatible result CSV, or to a clearly labelled deterministic test result
 derived from ground truth. Evaluation evidence remains run-scoped and is never
 an acquisition-pipeline stage.
+
+The optional **Inspect → Pose Estimation** page is a thin integration with the
+separate [`match-cow/posetestbot-cluster`](https://github.com/match-cow/posetestbot-cluster)
+companion. That loopback-only controller owns SSH credentials, immutable run
+archives, BIGWORK staging, durable SLURM state, the pinned FoundationPose SIF,
+and standard BOP19 CSV generation. PoseTestBot revalidates the active run,
+proxies browser-safe requests, imports a completed CSV through its existing
+BOP19 validator, and retains external-job/container/input/output provenance.
+It never becomes a pipeline stage. The browser never receives a controller
+token or cluster credential. The private SIF is built with Apptainer on a LUIS
+login node and retained on BIGWORK; the exact pinned upstream FoundationPose
+license is bundled as runtime provenance, with no PoseTestBot approval gate.
 
 ## Lab Context and Safety
 

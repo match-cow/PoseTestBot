@@ -398,11 +398,7 @@ def _build_pose_setup(run_root: Path) -> dict[str, Any]:
 
 
 def _all_local_jobs():
-    runner = get_job_runner()
-    try:
-        return runner.list(include_services=True)
-    except TypeError:
-        return runner.list()
+    return get_job_runner().list(include_services=True)
 
 
 def _assert_no_active_run_jobs(run_root: Path) -> None:
@@ -603,6 +599,7 @@ def import_cluster_result(job_id: str):
             result_path,
             external_job_id=job_id,
             expected_dataset_sha256=expected_dataset,
+            source_provenance_sha256=result["provenance_sha256"],
             controller_provenance=provenance,
         )
         result_id = registered["result_id"]

@@ -176,11 +176,15 @@ def monitor_status_health(
         return False, str(error_reason or "Monitor signaling is not ready.")
     pending_age = _timestamp_age_s(status.get("peer_connect_started_at"), now=now)
     if (
-        int(status.get("peer_count") or 0) > int(status.get("connected_peer_count") or 0)
+        int(status.get("peer_count") or 0)
+        > int(status.get("connected_peer_count") or 0)
         and pending_age is not None
         and pending_age > PEER_CONNECT_TIMEOUT_S
     ):
-        return False, f"A monitor peer did not connect within {PEER_CONNECT_TIMEOUT_S:.0f}s."
+        return (
+            False,
+            f"A monitor peer did not connect within {PEER_CONNECT_TIMEOUT_S:.0f}s.",
+        )
     if int(status.get("connected_peer_count") or 0) > 0:
         media_age = _timestamp_age_s(status.get("last_media_frame_at"), now=now)
         if media_age is None:
@@ -473,9 +477,7 @@ class BrightnessAutoCalibrator:
                 self._finish_closest()
                 return
             if not self._set_value(candidate):
-                self._fail(
-                    f"Camera rejected brightness value {candidate}."
-                )
+                self._fail(f"Camera rejected brightness value {candidate}.")
                 return
             self._current = candidate
             self._status["attempts"] = attempts + 1
@@ -658,21 +660,18 @@ class MonitorWebRTCServer:
 
     def __init__(
         self,
-        track: VideoStreamTrack | None = None,
         *,
-        track_factory: Callable[[], VideoStreamTrack] | None = None,
+        track_factory: Callable[[], OpenCVVideoTrack],
         on_peers_changed: Callable[[int, int], None] | None = None,
         on_camera_open_changed: Callable[[bool], None] | None = None,
         on_error: Callable[[str], None] | None = None,
         peer_connect_timeout_s: float = PEER_CONNECT_TIMEOUT_S,
         camera_idle_release_s: float = CAMERA_IDLE_RELEASE_S,
     ) -> None:
-        if track is None and track_factory is None:
-            raise ValueError("track or track_factory is required")
         configure_vp8_packet_size()
-        self.track = track
+        self.track: OpenCVVideoTrack | None = None
         self._track_factory = track_factory
-        self.relay = MediaRelay() if track is not None else None
+        self.relay: MediaRelay | None = None
         self._peers: set[RTCPeerConnection] = set()
         self._peer_started: dict[RTCPeerConnection, float] = {}
         self._on_peers_changed = on_peers_changed
@@ -725,30 +724,20 @@ class MonitorWebRTCServer:
         track = self.track
         if track is None or track.readyState != "live":
             return web.json_response(
-                {"error": "Open the room-monitor stream before calibrating brightness."},
-                status=409,
-            )
-        request_calibration = getattr(
-            track,
-            "request_brightness_autocalibration",
-            None,
-        )
-        if not callable(request_calibration):
-            return web.json_response(
-                {"error": "This monitor track does not support brightness calibration."},
+                {
+                    "error": "Open the room-monitor stream before calibrating brightness."
+                },
                 status=409,
             )
         try:
-            brightness = request_calibration()
+            brightness = track.request_brightness_autocalibration()
         except RuntimeError as exc:
             return web.json_response({"error": str(exc)}, status=409)
         return web.json_response({"brightness": brightness}, status=202)
 
-    async def _ensure_track(self) -> VideoStreamTrack:
+    async def _ensure_track(self) -> OpenCVVideoTrack:
         if self.track is not None and self.track.readyState == "live":
             return self.track
-        if self._track_factory is None:
-            raise RuntimeError("Monitor media track is no longer available.")
         # Camera creation occurs in the dedicated managed worker, never in the
         # Flask request process.  Keeping it here also avoids an executor whose
         # threads could outlive worker shutdown while a V4L2 open is pending.
@@ -761,15 +750,13 @@ class MonitorWebRTCServer:
 
     async def _release_track(self) -> None:
         track = self.track
-        if track is None or self._track_factory is None:
+        if track is None:
             return
         track.stop()
-        wait_stopped = getattr(track, "wait_stopped", None)
-        if callable(wait_stopped):
-            try:
-                await asyncio.wait_for(wait_stopped(), timeout=2)
-            except TimeoutError:
-                pass
+        try:
+            await asyncio.wait_for(track.wait_stopped(), timeout=2)
+        except TimeoutError:
+            pass
         self.track = None
         self.relay = None
         self._without_connected_since = None
@@ -797,10 +784,13 @@ class MonitorWebRTCServer:
 
                 if self.connected_peer_count:
                     self._without_connected_since = None
-                elif self.track is not None and self._track_factory is not None:
+                elif self.track is not None:
                     if self._without_connected_since is None:
                         self._without_connected_since = now
-                    if now - self._without_connected_since >= self._camera_idle_release_s:
+                    if (
+                        now - self._without_connected_since
+                        >= self._camera_idle_release_s
+                    ):
                         for peer in list(self._peers):
                             await self._discard_peer(peer)
                         await self._release_track()
@@ -813,11 +803,15 @@ class MonitorWebRTCServer:
         except (json.JSONDecodeError, web.HTTPException):
             return web.json_response({"error": "Malformed JSON offer"}, status=400)
         if not isinstance(payload, Mapping):
-            return web.json_response({"error": "Offer must be a JSON object"}, status=400)
+            return web.json_response(
+                {"error": "Offer must be a JSON object"}, status=400
+            )
         offer_type = payload.get("type")
         sdp = payload.get("sdp")
         if offer_type != "offer" or not isinstance(sdp, str) or not sdp.strip():
-            return web.json_response({"error": "Expected a non-empty SDP offer"}, status=400)
+            return web.json_response(
+                {"error": "Expected a non-empty SDP offer"}, status=400
+            )
         if len(sdp.encode("utf-8")) > MAX_SDP_BYTES:
             return web.json_response({"error": "SDP offer is too large"}, status=400)
         try:
@@ -848,7 +842,9 @@ class MonitorWebRTCServer:
             assert self.relay is not None
             peer.addTrack(self.relay.subscribe(track, buffered=False))
             prefer_vp8(peer)
-            await peer.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+            await peer.setRemoteDescription(
+                RTCSessionDescription(sdp=sdp, type="offer")
+            )
             answer = await peer.createAnswer()
             await peer.setLocalDescription(answer)
             if peer.localDescription is None:
@@ -875,17 +871,17 @@ class MonitorWebRTCServer:
             self._maintenance_task = None
         if self.track is not None:
             self.track.stop()
-            wait_stopped = getattr(self.track, "wait_stopped", None)
-            if callable(wait_stopped):
-                try:
-                    await asyncio.wait_for(wait_stopped(), timeout=2)
-                except TimeoutError:
-                    pass
+            try:
+                await asyncio.wait_for(self.track.wait_stopped(), timeout=2)
+            except TimeoutError:
+                pass
         await asyncio.sleep(0)
         peers = list(self._peers)
         self._peers.clear()
         if peers:
-            await asyncio.gather(*(peer.close() for peer in peers), return_exceptions=True)
+            await asyncio.gather(
+                *(peer.close() for peer in peers), return_exceptions=True
+            )
         self._notify_peers_changed()
         if self._runner is not None:
             await self._runner.cleanup()
@@ -912,7 +908,6 @@ async def run_monitor_webrtc(
 ) -> int:
     status = MonitorStatusWriter(monitor_root)
     server: MonitorWebRTCServer | None = None
-    compatibility_track: OpenCVVideoTrack | None = None
     stun_transport: asyncio.DatagramTransport | None = None
     heartbeat_task: asyncio.Task[Any] | None = None
     fatal_event = asyncio.Event()
@@ -1029,9 +1024,7 @@ async def run_monitor_webrtc(
                     "brightness",
                 )
                 if brightness_control is None:
-                    brightness_unavailable_reason = (
-                        "This camera does not expose an integer V4L2 brightness control."
-                    )
+                    brightness_unavailable_reason = "This camera does not expose an integer V4L2 brightness control."
             except Exception as exc:
                 brightness_unavailable_reason = (
                     f"Could not inspect camera brightness: {type(exc).__name__}: {exc}"
@@ -1061,29 +1054,18 @@ async def run_monitor_webrtc(
                 capture.release()
                 raise
 
-        try:
-            server = MonitorWebRTCServer(
-                track_factory=track_factory,
-                on_peers_changed=on_peers_changed,
-                on_camera_open_changed=on_camera_open_changed,
-                on_error=on_track_error,
-            )
-        except TypeError as exc:
-            # Retain compatibility with small injected server doubles used by
-            # smoke/integration callers written against the v1 constructor.
-            if "unexpected keyword" not in str(exc):
-                raise
-            compatibility_track = track_factory()
-            server = MonitorWebRTCServer(
-                compatibility_track,
-                on_peers_changed=on_peers_changed,
-            )
+        server = MonitorWebRTCServer(
+            track_factory=track_factory,
+            on_peers_changed=on_peers_changed,
+            on_camera_open_changed=on_camera_open_changed,
+            on_error=on_track_error,
+        )
         port = await server.start()
-        bound_stun_port: int | None = None
-        if compatibility_track is None:
-            stun_transport, _stun_protocol, bound_stun_port = (
-                await start_stun_binding_responder(stun_port)
-            )
+        (
+            stun_transport,
+            _stun_protocol,
+            bound_stun_port,
+        ) = await start_stun_binding_responder(stun_port)
         status.update(
             status="ready",
             signaling_ready=True,
@@ -1125,8 +1107,6 @@ async def run_monitor_webrtc(
             await asyncio.gather(heartbeat_task, return_exceptions=True)
         if server is not None:
             await server.stop()
-        if compatibility_track is not None:
-            compatibility_track.stop()
         if stun_transport is not None:
             stun_transport.close()
         if status.value["status"] != "failed":

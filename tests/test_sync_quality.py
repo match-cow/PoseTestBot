@@ -26,7 +26,7 @@ def write_sync_report(
     timestamp_source: str = "host_received",
     robot_timestamp_source: str = "host_received",
     max_delta_ns: int = 10_000_000,
-    schema_version: str = "sync_report.v2",
+    schema_version: str = "sync_report.v3",
     calibration_sync: dict | None = None,
 ) -> Path:
     report_path = run_root / "processed" / "synchronized" / sensor_name / SYNC_REPORT
@@ -46,6 +46,10 @@ def write_sync_report(
         "total_frames": total_frames,
         "matched_frames": matched_frames,
         "dropped_frames": dropped_frames,
+        "dropped": [
+            {"motion": "circ_far", "reason": "nearest pose delta exceeded"}
+            for _ in range(dropped_frames)
+        ],
         "outside_motion_interval_frame_count": 0,
         "eligible_in_motion_frames": total_frames,
         "matched_eligible_frames": matched_frames,
@@ -249,21 +253,6 @@ def test_quality_ignores_preserved_frames_outside_robot_motion(
     assert coverage["details"]["denominator"] == "eligible_in_motion_frames"
 
 
-def test_v1_sync_report_cannot_prove_required_timestamp_source(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "run"
-    write_sync_report(run_root, schema_version="sync_report.v1")
-
-    report = build_sync_quality_report(
-        run_root,
-        require_timestamp_source="host_received",
-    )
-
-    assert report["overall_status"] == "error"
-    assert report["sensors"][0]["timestamp_provenance_audited"] is False
-
-
 def test_v3_sync_report_audits_frame_and_robot_timestamp_pair(
     tmp_path: Path,
 ) -> None:
@@ -294,21 +283,6 @@ def test_v3_sync_report_audits_frame_and_robot_timestamp_pair(
         if item["name"] == "sync_robot_timestamp_source:realsense_123"
     )
     assert check["status"] == "ok"
-
-
-def test_v2_sync_report_cannot_prove_robot_timestamp_source(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "run"
-    write_sync_report(run_root, schema_version="sync_report.v2")
-
-    report = build_sync_quality_report(
-        run_root,
-        require_robot_timestamp_source="host_received",
-    )
-
-    assert report["overall_status"] == "error"
-    assert report["sensors"][0]["timestamp_pair_provenance_audited"] is False
 
 
 def test_profile_bound_quality_requires_exact_timing_and_coverage(

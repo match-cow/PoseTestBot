@@ -12,10 +12,12 @@ import numpy as np
 from posetestbot.io.artifacts import (
     ARUCO_POSE_ESTIMATION,
     CAM_K,
+    CALIBRATION_TARGET,
     DATASET_MANIFEST,
     MATCH_ROBOT_EE_POSES,
     RGB_DIR,
 )
+from posetestbot.calibration.targets import DEFAULT_TARGET_SPEC
 from posetestbot.pipeline.run_config import (
     SensorRunConfig,
     create_run_config,
@@ -50,6 +52,7 @@ def test_run_aruco_stage_updates_manifest_for_synchronized_sensor(
             }
         },
     )
+    write_json(run_root / CALIBRATION_TARGET, DEFAULT_TARGET_SPEC)
 
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
@@ -106,6 +109,7 @@ def test_run_wide_aruco_stage_ignores_disabled_configured_sensor(
             }
         },
     )
+    write_json(run_root / CALIBRATION_TARGET, DEFAULT_TARGET_SPEC)
     disabled = enabled.parent / "realsense_999"
     shutil.copytree(enabled, disabled)
     write_run_config(

@@ -17,6 +17,10 @@ from posetestbot.calibration.extrinsics import (
     write_grid_extrinsic_solver_with_manifest,
 )
 from posetestbot.calibration.profiles import load_profile_collection
+from posetestbot.calibration.targets import (
+    DEFAULT_TARGET_SPEC,
+    normalize_calibration_target_spec,
+)
 from posetestbot.calibration.validation import (
     build_calibration_validation,
     write_calibration_validation_with_manifest,
@@ -27,28 +31,18 @@ from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
 
 
 def target() -> dict:
-    return {
-        "schema_version": "calibration_target.v1",
-        "target_type": "aruco_grid",
-        "dictionary": "DICT_5X5_50",
-        "grid_size": [3, 2],
-        "marker_length": 30.0,
-        "marker_separation": 10.0,
-        "marker_ids": list(range(6)),
-        "unit": "mm",
-        "frame": {
-            "name": "aruco_grid",
-            "origin": "marker_0_outer_top_left",
-            "axes": {"x": "right", "y": "down", "z": "into_board"},
-        },
-        "placement": {
-            "from": "aruco_grid",
-            "to": "template_base",
-            "rotation_quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
-            "translation_mm": [0.0, 0.0, 0.0],
-            "source": "test_aligned_identity",
-        },
-    }
+    return normalize_calibration_target_spec(
+        {
+            **DEFAULT_TARGET_SPEC,
+            "placement": {
+                "from": "aruco_grid",
+                "to": "template_base",
+                "rotation_quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                "translation_mm": [0.0, 0.0, 0.0],
+                "source": "test_aligned_identity",
+            },
+        }
+    )
 
 
 def write_eye_in_hand_observations(run_root: Path) -> np.ndarray:
@@ -69,8 +63,14 @@ def write_eye_in_hand_observations(run_root: Path) -> np.ndarray:
         np.array([35.0, -20.0, 80.0]),
     )
     robot_poses = [
-        {"X": 50.0 + 15 * i, "Y": -40.0 + 8 * (i % 3), "Z": 500.0 + 10 * (i % 4),
-         "A": -0.18 + 0.05 * (i % 4), "B": 0.12 - 0.04 * (i % 5), "C": -0.25 + 0.07 * i}
+        {
+            "X": 50.0 + 15 * i,
+            "Y": -40.0 + 8 * (i % 3),
+            "Z": 500.0 + 10 * (i % 4),
+            "A": -0.18 + 0.05 * (i % 4),
+            "B": 0.12 - 0.04 * (i % 5),
+            "C": -0.25 + 0.07 * i,
+        }
         for i in range(10)
     ]
     observations = []
@@ -115,7 +115,9 @@ def write_eye_in_hand_observations(run_root: Path) -> np.ndarray:
     return camera_to_flange
 
 
-def test_compare_recovers_known_camera_to_flange_and_derives_tcp(tmp_path: Path) -> None:
+def test_compare_recovers_known_camera_to_flange_and_derives_tcp(
+    tmp_path: Path,
+) -> None:
     run_root = tmp_path / "run"
     run_root.mkdir()
     expected = write_eye_in_hand_observations(run_root)
@@ -200,18 +202,22 @@ def test_known_target_solves_static_camera_to_template_base(tmp_path: Path) -> N
     assert np.allclose(profile["extrinsics"]["translation_mm"], [-100, -200, -300])
 
 
-def test_comparison_requires_explicit_selection_before_promotion(tmp_path: Path) -> None:
+def test_comparison_requires_explicit_selection_before_promotion(
+    tmp_path: Path,
+) -> None:
     run_root = tmp_path / "run"
     run_root.mkdir()
     write_eye_in_hand_observations(run_root)
-    _report_path, _profiles_path, solver_report = write_grid_extrinsic_solver_with_manifest(
-        run_root,
-        target=target(),
-        mode="compare",
-        max_mean_translation_mm=1.0,
-        max_mean_rotation_deg=1.0,
-        max_cross_translation_mm=1.0,
-        max_cross_rotation_deg=1.0,
+    _report_path, _profiles_path, solver_report = (
+        write_grid_extrinsic_solver_with_manifest(
+            run_root,
+            target=target(),
+            mode="compare",
+            max_mean_translation_mm=1.0,
+            max_mean_rotation_deg=1.0,
+            max_cross_translation_mm=1.0,
+            max_cross_rotation_deg=1.0,
+        )
     )
 
     missing = build_calibration_validation(run_root)

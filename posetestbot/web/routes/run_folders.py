@@ -78,9 +78,7 @@ def _expected_destination_root_identity(
 ) -> Mapping[str, Any]:
     expected = value.get("expected_destination_root_identity")
     if not isinstance(expected, Mapping):
-        raise ValueError(
-            "expected_destination_root_identity must be an object"
-        )
+        raise ValueError("expected_destination_root_identity must be an object")
     return expected
 
 
@@ -89,11 +87,7 @@ def _inventory_cache_path() -> Path:
 
 
 def _all_jobs():
-    runner = get_job_runner()
-    try:
-        return runner.list(include_services=True)
-    except TypeError:
-        return runner.list()
+    return get_job_runner().list(include_services=True)
 
 
 def _active_inventory_job():
@@ -119,7 +113,11 @@ def _active_operation_job():
 def _assert_no_active_run_jobs(run_root: Path) -> None:
     active = []
     for job in _all_jobs():
-        if job.status in TERMINAL_STATUSES or job.scope_kind != "run" or not job.run_root:
+        if (
+            job.status in TERMINAL_STATUSES
+            or job.scope_kind != "run"
+            or not job.run_root
+        ):
             continue
         try:
             same_run = Path(job.run_root).resolve() == run_root.resolve()
@@ -148,9 +146,7 @@ def _inventory_is_stale(value: Mapping[str, Any] | None) -> bool:
     configured = [root.as_posix() for root in web_run_roots()]
     if value.get("run_roots") != configured:
         return True
-    if value.get("root_identities") != run_root_identity_snapshot(
-        web_run_roots()
-    ):
+    if value.get("root_identities") != run_root_identity_snapshot(web_run_roots()):
         return True
     maintenance = value.get("maintenance")
     if not isinstance(maintenance, Mapping):
@@ -225,10 +221,7 @@ def _require_current_inventory_selection(
         for item in cached["runs"]
         if isinstance(item, Mapping) and item.get("path") == source.as_posix()
     ]
-    if (
-        len(matching_runs) != 1
-        or matching_runs[0].get("identity") != selected_identity
-    ):
+    if len(matching_runs) != 1 or matching_runs[0].get("identity") != selected_identity:
         raise RuntimeError(
             "Run selection no longer matches the current inventory; refresh "
             "inventory before changing run storage"
@@ -313,9 +306,7 @@ def run_folder_inventory():
                 "path": root.as_posix(),
                 "exists": exists,
                 "identity": (
-                    cached_identity
-                    if cached_identity == current_identity
-                    else None
+                    cached_identity if cached_identity == current_identity else None
                 ),
                 "storage": run_storage_status(root),
             }

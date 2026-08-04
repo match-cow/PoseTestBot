@@ -17,8 +17,8 @@ uv run posetestbot-web
 
 The required revision is
 `9e6975901fe096bf65f7b7b599d7b82461d2e67c`. A missing, dirty, mismatched, or
-wheel-only checkout disables generation. Existing `calibration_target.v1` and
-`calibration_target.v2` artifacts remain readable in that state. The status and
+wheel-only checkout disables generation. Existing `calibration_target.v2`
+artifacts remain readable in that state. The status and
 the direct `/calibration-targets` route explain the concrete failure. Navigation,
 saved-bundle browsing, downloads, and run selection remain available even when
 generation is disabled.
@@ -92,7 +92,7 @@ Selection copies the unchanged bundle to
 fields to the run config. New guided selections also record
 `placement.mounting_frame` as `robot_flange` or `template_base`. The bundle,
 root target, run config, and dataset manifest are promoted together with
-rollback on failure. Legacy selections without `mounting_frame` remain
+rollback on failure. Earlier v2 selections without `mounting_frame` remain
 readable for inspection: a known placement still implies `template_base`, but
 an unknown placement is intentionally not inferred from mutable camera setup.
 Readiness, attempt creation, and promotion require the operator to reselect the
@@ -133,20 +133,15 @@ hashes, one homogeneous calibration camera group, and agreement between camera
 mounting, target mounting, and solver interpretation. Target selection changes
 `run_config.json`, so older run-preflight evidence becomes stale automatically.
 
-## Legacy import
+## Run-owned validation
 
-The `calibration_target_import` stage first resolves the run-config selection.
-Without one, it accepts PoseGridGen schema 2.0 source JSON through the exact
-pinned checkout or the legacy ArUcoGridGen 1.0 format:
+The `calibration_target_import` stage validates the current run-owned bundle,
+root target, hashes, and selection contract. It does not convert older target
+formats or infer a target from loose source files:
 
 ```bash
-uv run python scripts/run_calibration_target_import.py working_data/example_run \
-  --source working_data/example_run/aruco_grid_config.json \
-  --aligned-to-template-base
+uv run python scripts/run_calibration_target_import.py working_data/example_run
 ```
-
-All new imports write v2. Legacy v1 target specs remain loadable and expand to
-explicit marker corners in memory.
 
 ## API and jobs
 

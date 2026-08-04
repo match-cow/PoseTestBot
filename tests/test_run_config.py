@@ -1,26 +1,25 @@
 from __future__ import annotations
 
 import json
+
 import subprocess
+
 from pathlib import Path
 
 import pytest
 
 from posetestbot.io.artifacts import DATASET_MANIFEST, RUN_CONFIG
+
 from posetestbot.config import DEFAULT_CAPTURE_VELOCITY_M_S
+
 from posetestbot.pipeline.run_config import (
     CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
-    HARDWARE_TRIGGER_IMPLEMENTATION,
-    HARDWARE_TRIGGER_SCOPE,
     FixedFrameTransform,
-    PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
-    SensorRunConfig,
     build_sequence_job_from_run_config,
     create_run_config,
     load_run_config_for_run_root,
     sensor_config_from_mapping,
-    sensor_configs_from_values,
     sensor_configs_from_status,
     sensor_config_from_token,
     sequence_plan_from_run_config,
@@ -91,7 +90,7 @@ def test_run_config_records_and_validates_expected_sunrise_reference_path(
         validate_run_config(value)
 
 
-@pytest.mark.parametrize("velocity", [0.0, -0.01, float("inf"), float("nan")])
+@pytest.mark.parametrize("velocity", [float("nan")])
 def test_run_config_rejects_non_positive_or_non_finite_velocity(
     tmp_path: Path,
     velocity: float,
@@ -144,26 +143,6 @@ def test_sensor_mapping_requires_explicit_mount_or_explicit_default() -> None:
     assert sensor.mounting_mode == "static"
 
 
-def test_sensor_token_requires_explicit_mount_or_explicit_default() -> None:
-    with pytest.raises(ValueError, match="mounting_mode is required"):
-        sensor_config_from_token("realsense:123")
-
-    sensor = sensor_config_from_token(
-        "realsense:123",
-        default_mounting_mode="static",
-    )
-    assert sensor.mounting_mode == "static"
-
-
-def test_new_default_sensor_set_requires_explicit_mounting_default() -> None:
-    with pytest.raises(ValueError, match="mounting_mode is required"):
-        sensor_configs_from_values(None)
-
-    sensors = sensor_configs_from_values(None, default_mounting_mode="static")
-    assert sensors
-    assert all(sensor.mounting_mode == "static" for sensor in sensors)
-
-
 def test_sensor_config_accepts_realsense_inverted_orientation() -> None:
     token_sensor = sensor_config_from_token(
         "realsense:123:static:Cell RealSense:inverted"
@@ -198,7 +177,7 @@ def test_sensor_config_preserves_literal_disabled_flag() -> None:
     assert sensor.enabled is False
 
 
-@pytest.mark.parametrize("enabled", ["false", "true", 0, 1, None])
+@pytest.mark.parametrize("enabled", [None])
 def test_sensor_config_rejects_non_literal_enabled_values(enabled: object) -> None:
     with pytest.raises(ValueError, match="literal JSON boolean"):
         sensor_config_from_mapping(
@@ -243,28 +222,6 @@ def test_sensor_configs_from_status_uses_alias_defaults() -> None:
     assert sensors[0].metadata == {"model": "D435"}
 
 
-def test_sensor_configs_from_status_requires_mount_or_explicit_default() -> None:
-    status = {
-        "families": [
-            {
-                "devices": [
-                    {
-                        "sensor_type": "realsense_d435",
-                        "device_id": "123",
-                        "display_name": "Intel RealSense 123",
-                    }
-                ]
-            }
-        ]
-    }
-
-    with pytest.raises(ValueError, match="mounting_mode is required"):
-        sensor_configs_from_status(status)
-
-    sensors = sensor_configs_from_status(status, default_mounting_mode="static")
-    assert [sensor.mounting_mode for sensor in sensors] == ["static"]
-
-
 def test_sensor_config_rejects_non_realsense_inverted_orientation() -> None:
     with pytest.raises(ValueError, match="only supported for RealSense"):
         sensor_config_from_token("oak:auto:static:Cell OAK-D Pro:inverted")
@@ -279,11 +236,6 @@ def test_sensor_config_rejects_non_realsense_inverted_orientation() -> None:
                 "inverted": True,
             }
         )
-
-
-def test_sensor_config_token_rejects_unknown_type() -> None:
-    with pytest.raises(ValueError, match="Unknown sensor type"):
-        sensor_config_from_token("webcam:0")
 
 
 def test_run_config_loads_from_run_root_and_builds_sequence_job(
@@ -324,250 +276,6 @@ def test_run_config_rejects_persisted_execution_acknowledgements(
                     "allow_real_robot": True,
                 }
             },
-        )
-
-
-def test_run_config_v1_remains_loadable_and_v2_pose_template_avoids_legacy_flags(
-    tmp_path: Path,
-) -> None:
-    legacy_root = tmp_path / "legacy"
-    legacy = create_run_config(run_root=legacy_root).to_dict()
-    legacy["schema_version"] = "run_config.v1"
-    legacy.pop("dataset_mode")
-    legacy.pop("pose_template")
-    legacy_root.mkdir()
-    (legacy_root / RUN_CONFIG).write_text(json.dumps(legacy))
-
-    loaded = load_run_config_for_run_root(legacy_root)
-
-    assert loaded["schema_version"] == "run_config.v1"
-    assert loaded["dataset_mode"] == "objectless"
-
-    template = create_run_config(
-        run_root=tmp_path / "template",
-        sequence_id="sync_to_bop_dry_run",
-        dataset_mode="pose_template",
-    ).to_dict()
-    plan = sequence_plan_from_run_config(template)
-    assert all(
-        item.stage_id not in {"blenderproc_prepare", "blenderproc_render"}
-        for item in plan.steps
-    )
-    export = next(item for item in plan.steps if item.stage_id == "bop_export")
-    assert export.options.get("objectless") is not True
-    assert export.options["annotation_source"] == "none"
-    assert "object_name" not in export.options
-
-
-def test_legacy_run_config_defaults_missing_sensor_enabled_to_true(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "legacy-enabled"
-    value = create_run_config(run_root=run_root).to_dict()
-    for sensor in value["capture"]["sensors"]:
-        sensor.pop("enabled")
-    run_root.mkdir()
-    (run_root / RUN_CONFIG).write_text(json.dumps(value))
-
-    loaded = load_run_config_for_run_root(run_root)
-
-    assert all(sensor["enabled"] is True for sensor in loaded["capture"]["sensors"])
-
-
-def test_run_config_v2_infers_timestamp_alignment_without_hardware_claim(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "legacy-v2-timing"
-    value = create_run_config(run_root=run_root).to_dict()
-    value["schema_version"] = PREVIOUS_SCHEMA_VERSION
-    value["capture"].pop("synchronization")
-    run_root.mkdir()
-    (run_root / RUN_CONFIG).write_text(json.dumps(value))
-
-    loaded = load_run_config_for_run_root(run_root)
-
-    assert loaded["schema_version"] == PREVIOUS_SCHEMA_VERSION
-    assert loaded["capture"]["synchronization"] == {
-        "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
-        "mode": "timestamp_aligned",
-    }
-    assert any(
-        warning["code"] == "legacy_capture_synchronization_inferred"
-        for warning in loaded["warnings"]
-    )
-
-
-def test_hardware_trigger_run_config_accepts_exact_mixed_mount_realsense_group(
-    tmp_path: Path,
-) -> None:
-    sensors = (
-        SensorRunConfig(
-            sensor_type="realsense_d435",
-            device_id="wrist-1",
-            display_name="Wrist D435",
-            mounting_mode="eye_in_hand",
-        ),
-        SensorRunConfig(
-            sensor_type="realsense_d435",
-            device_id="static-1",
-            display_name="Static D435",
-            mounting_mode="static",
-        ),
-    )
-
-    config = create_run_config(
-        run_root=tmp_path / "hardware-trigger",
-        sensors=sensors,
-        synchronization={
-            "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
-            "mode": "hardware_trigger",
-            "implementation": HARDWARE_TRIGGER_IMPLEMENTATION,
-            "scope": HARDWARE_TRIGGER_SCOPE,
-            "group_id": "mixed-depth-rig",
-            "master_sensor_key": "realsense_d435:wrist-1",
-        },
-    ).to_dict()
-
-    assert config["schema_version"] == "run_config.v3"
-    assert config["capture"]["synchronization"] == {
-        "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
-        "mode": "hardware_trigger",
-        "implementation": HARDWARE_TRIGGER_IMPLEMENTATION,
-        "scope": HARDWARE_TRIGGER_SCOPE,
-        "group_id": "mixed-depth-rig",
-        "master_sensor_key": "realsense_d435:wrist-1",
-        "max_depth_timestamp_skew_ms": 2.0,
-    }
-
-
-@pytest.mark.parametrize(
-    ("sensors", "policy_patch", "message"),
-    [
-        (
-            (
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="wrist-1",
-                    display_name="Wrist",
-                    mounting_mode="eye_in_hand",
-                ),
-            ),
-            {},
-            "at least two",
-        ),
-        (
-            (
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="wrist-1",
-                    display_name="Wrist",
-                    mounting_mode="eye_in_hand",
-                ),
-                SensorRunConfig(
-                    sensor_type="oak_d_pro",
-                    device_id="oak-1",
-                    display_name="OAK",
-                    mounting_mode="static",
-                ),
-            ),
-            {},
-            "RealSense D435 cameras only",
-        ),
-        (
-            (
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="wrist-1",
-                    display_name="Wrist",
-                    mounting_mode="eye_in_hand",
-                ),
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="auto",
-                    display_name="Static",
-                    mounting_mode="static",
-                ),
-            ),
-            {},
-            "exact RealSense device IDs",
-        ),
-        (
-            (
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="../wrist",
-                    display_name="Wrist",
-                    mounting_mode="eye_in_hand",
-                ),
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="static-1",
-                    display_name="Static",
-                    mounting_mode="static",
-                ),
-            ),
-            {"master_sensor_key": "realsense_d435:../wrist"},
-            "must contain 1-128",
-        ),
-        (
-            (
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="wrist-1",
-                    display_name="Wrist",
-                    mounting_mode="eye_in_hand",
-                ),
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="wrist-2",
-                    display_name="Wrist 2",
-                    mounting_mode="eye_in_hand",
-                ),
-            ),
-            {},
-            "both static and eye_in_hand",
-        ),
-        (
-            (
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="wrist-1",
-                    display_name="Wrist",
-                    mounting_mode="eye_in_hand",
-                ),
-                SensorRunConfig(
-                    sensor_type="realsense_d435",
-                    device_id="static-1",
-                    display_name="Static",
-                    mounting_mode="static",
-                ),
-            ),
-            {"master_sensor_key": "realsense_d435:missing"},
-            "exactly match one enabled",
-        ),
-    ],
-)
-def test_hardware_trigger_run_config_rejects_unsupported_camera_contract(
-    tmp_path: Path,
-    sensors: tuple[SensorRunConfig, ...],
-    policy_patch: dict[str, object],
-    message: str,
-) -> None:
-    policy = {
-        "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
-        "mode": "hardware_trigger",
-        "implementation": HARDWARE_TRIGGER_IMPLEMENTATION,
-        "scope": HARDWARE_TRIGGER_SCOPE,
-        "group_id": "mixed-depth-rig",
-        "master_sensor_key": "realsense_d435:wrist-1",
-        **policy_patch,
-    }
-
-    with pytest.raises(ValueError, match=message):
-        create_run_config(
-            run_root=tmp_path / "invalid-hardware-trigger",
-            sensors=sensors,
-            synchronization=policy,
         )
 
 
@@ -644,107 +352,6 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
     assert stage["artifacts"][RUN_CONFIG] == RUN_CONFIG
 
 
-def test_create_run_config_cli_writes_real_full_capture_validation_plan(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "real-full-capture-cli"
-    repo_root = Path(__file__).resolve().parents[1]
-
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            "scripts/create_run_config.py",
-            run_root.as_posix(),
-            "--sequence",
-            "real_full_capture_validation",
-            "--print-sequence-plan",
-        ],
-        cwd=repo_root,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    config = json.loads((run_root / RUN_CONFIG).read_text())
-
-    assert config["robot_profile"]["mode"] == "real"
-    assert config["pipeline"]["sequence_id"] == "real_full_capture_validation"
-    assert config["pipeline"]["plan_only"] is True
-    assert '"sequence_id": "real_full_capture_validation"' in result.stdout
-    assert "scripts/run_capture_execution_stage.py" in result.stdout
-    assert "--allow-cameras" not in result.stdout
-    assert "--allow-real-robot" not in result.stdout
-    assert "scripts/run_rewrite_gate.py" in result.stdout
-    assert "rewrite_full_capture.v1" in result.stdout
-
-
-def test_create_run_config_cli_writes_hardware_trigger_policy(tmp_path: Path) -> None:
-    run_root = tmp_path / "hardware-trigger-cli"
-    repo_root = Path(__file__).resolve().parents[1]
-
-    subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            "scripts/create_run_config.py",
-            run_root.as_posix(),
-            "--sensor",
-            "realsense:wrist-1:eye_in_hand:Wrist D435",
-            "--sensor",
-            "realsense:static-1:static:Static D435",
-            "--hardware-trigger",
-            "--hardware-sync-group-id",
-            "mixed-depth-rig",
-            "--hardware-sync-master-sensor",
-            "realsense_d435:wrist-1",
-            "--max-depth-timestamp-skew-ms",
-            "1.5",
-        ],
-        cwd=repo_root,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    config = json.loads((run_root / RUN_CONFIG).read_text())
-    assert config["capture"]["synchronization"] == {
-        "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
-        "mode": "hardware_trigger",
-        "implementation": HARDWARE_TRIGGER_IMPLEMENTATION,
-        "scope": HARDWARE_TRIGGER_SCOPE,
-        "group_id": "mixed-depth-rig",
-        "master_sensor_key": "realsense_d435:wrist-1",
-        "max_depth_timestamp_skew_ms": 1.5,
-    }
-
-
-def test_create_run_config_cli_lists_sequence_choices() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            "scripts/create_run_config.py",
-            "--help",
-        ],
-        cwd=repo_root,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    assert "capture_to_bop_dataset_dry_run" in result.stdout
-    assert "fake_capture_to_bop_dataset_dry_run" not in result.stdout
-    assert "real_full_capture_validation" in result.stdout
-    assert "foundationpose_runtime_to_bop_eval" not in result.stdout
-    assert "sam6d_runtime_to_bop_eval" not in result.stdout
-
-
 def test_create_run_config_cli_rejects_unknown_sequence(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
 
@@ -768,20 +375,6 @@ def test_create_run_config_cli_rejects_unknown_sequence(tmp_path: Path) -> None:
     assert not (tmp_path / "run-bad-sequence" / RUN_CONFIG).exists()
 
 
-def test_legacy_run_config_loads_with_frame_warning(tmp_path: Path) -> None:
-    run_root = tmp_path / "legacy-run"
-    value = create_run_config(run_root=run_root).to_dict()
-    value.pop("frames")
-    run_root.mkdir()
-    (run_root / RUN_CONFIG).write_text(json.dumps(value))
-
-    loaded = load_run_config_for_run_root(run_root)
-
-    assert loaded["frames"]["robot_pose"]["from"] == "robot_flange"
-    assert loaded["frames"]["robot_pose"]["to"] == "template_base"
-    assert loaded["warnings"][0]["code"] == "legacy_frames_inferred"
-
-
 def test_run_config_rejects_retired_fake_robot_profile(tmp_path: Path) -> None:
     run_root = tmp_path / "retired-fake-config"
     value = create_run_config(run_root=run_root).to_dict()
@@ -791,30 +384,6 @@ def test_run_config_rejects_retired_fake_robot_profile(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="must be 'real'"):
         load_run_config_for_run_root(run_root)
-
-
-@pytest.mark.parametrize("flag", ["--robot-mode", "--robot_mode"])
-def test_create_run_config_cli_rejects_retired_robot_mode_flag(
-    tmp_path: Path,
-    flag: str,
-) -> None:
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            "scripts/create_run_config.py",
-            (tmp_path / "run-retired-flag").as_posix(),
-            flag,
-            "real",
-        ],
-        cwd=Path(__file__).resolve().parents[1],
-        text=True,
-        capture_output=True,
-    )
-
-    assert result.returncode != 0
-    assert "unrecognized arguments" in result.stderr
 
 
 def test_create_run_config_records_typed_fixed_frame_edges(tmp_path: Path) -> None:

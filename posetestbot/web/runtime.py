@@ -1,8 +1,7 @@
 """Web-process settings and background-job ownership.
 
-Route modules resolve the runner from the active Flask application.  The
-module-level proxy keeps direct helper calls and older test doubles working
-without making an individual blueprint own process-wide state.
+Route modules resolve the runner from the active Flask application. The
+module-level proxy keeps blueprint imports independent of process-wide state.
 """
 
 from __future__ import annotations

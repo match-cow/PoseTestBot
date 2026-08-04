@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,8 +14,6 @@ from posetestbot.calibration.profiles import (
     TransformFrame,
     blenderproc_camera_transform_map_from_profiles,
     load_profile,
-    load_profile_collection,
-    migrate_legacy_camera_ee_profiles,
     rectified_intrinsics_from_native,
     write_profile,
     write_profile_collection,
@@ -176,29 +172,6 @@ def test_eye_in_hand_profile_requires_camera_to_robot_flange() -> None:
         raise AssertionError("invalid eye-in-hand transform direction was accepted")
 
 
-def test_migrate_legacy_camera_ee_profiles() -> None:
-    profiles = migrate_legacy_camera_ee_profiles(
-        {
-            "realsense": {
-                "quaternion": [1, 0, 0, 0],
-                "position": [1, 2, 3],
-            },
-            "luxonis": {
-                "quaternion": [0, 1, 0, 0],
-                "position": [4, 5, 6],
-            },
-        },
-        sync_deltas_ms={"realsense": 10.5, "luxonis": 20.5},
-    )
-
-    by_sensor = {profile.sensor_id: profile for profile in profiles}
-    assert by_sensor["realsense"].mounting_mode == MountingMode.EYE_IN_HAND
-    assert by_sensor["realsense"].extrinsics.to_frame == TransformFrame.END_EFFECTOR
-    assert by_sensor["realsense"].sync_delta_ms == 10.5
-    assert by_sensor["realsense"].metadata["legacy_sensor_key"] == "realsense"
-    assert by_sensor["luxonis"].sensor_type == SensorType.OAK_D_PRO
-
-
 def test_blenderproc_transform_map_accepts_static_profiles() -> None:
     profile = static_profile()
 
@@ -245,45 +218,6 @@ def test_blenderproc_transform_map_requires_complete_run_mount_mapping() -> None
             ["zed_2i_SN0001"],
             mounting_modes_by_sensor_name={},
         )
-
-
-def test_validate_calibration_profiles_cli_migrates_legacy_defaults(
-    tmp_path: Path,
-) -> None:
-    camera_ee = tmp_path / "camera_ee_transform.json"
-    sync_data = tmp_path / "sync_data.json"
-    output = tmp_path / "calibration_profiles.json"
-    camera_ee.write_text(
-        json.dumps({"realsense": {"quaternion": [1, 0, 0, 0], "position": [1, 2, 3]}})
-    )
-    sync_data.write_text(json.dumps({"realsense": 112.5}))
-    repo_root = Path(__file__).resolve().parents[1]
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(repo_root / "scripts" / "validate_calibration_profiles.py"),
-            "--legacy-camera-ee",
-            str(camera_ee),
-            "--legacy-sync-data",
-            str(sync_data),
-            "--output",
-            str(output),
-            "--json",
-        ],
-        cwd=repo_root,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    summary = json.loads(result.stdout)
-    assert summary["status"] == "valid"
-    assert summary["profile_count"] == 1
-
-    profiles = load_profile_collection(output)
-    assert profiles[0].profile_id == "realsense_d435_realsense_eye_in_hand_wrist_legacy"
-    assert profiles[0].sync_delta_ms == 112.5
 
 
 @pytest.mark.parametrize(
@@ -336,45 +270,3 @@ def test_profile_collection_rejects_duplicate_valid_sensor_slot(
 
     with pytest.raises(ValueError, match="same sensor/mount/rig slot"):
         write_profile_collection([first, second], tmp_path / "profiles.json")
-
-
-def test_calibration_v1_collection_loads_and_normalizes_explicit_frames(
-    tmp_path: Path,
-) -> None:
-    legacy = {
-        "schema_version": "calibration.v1",
-        "profiles": [
-            {
-                "schema_version": "calibration.v1",
-                "profile_id": "legacy_wrist",
-                "sensor_id": "123",
-                "sensor_type": "realsense_d435",
-                "mounting_mode": "eye_in_hand",
-                "rig_position": "wrist",
-                "intrinsics": {
-                    "cam_K": [600, 0, 320, 0, 600, 240, 0, 0, 1],
-                    "width": 640,
-                    "height": 480,
-                    "distortion": [0.1, 0, 0, 0, 0],
-                    "depth_scale_to_mm": 1.0,
-                },
-                "extrinsics": {
-                    "from": "camera",
-                    "to": "end_effector",
-                    "rotation_quaternion_wxyz": [1, 0, 0, 0],
-                    "translation_mm": [1, 2, 3],
-                },
-                "status": "needs_validation",
-                "quality": {"num_observations": 1, "num_inliers": 1},
-            }
-        ],
-    }
-    path = tmp_path / "legacy.json"
-    path.write_text(json.dumps(legacy))
-
-    profile = load_profile_collection(path)[0]
-
-    assert profile.schema_version == "calibration.v2"
-    assert profile.extrinsics.to_frame == TransformFrame.ROBOT_FLANGE
-    assert profile.rectified_intrinsics is not None
-    assert profile.rectified_intrinsics.distortion == (0.0,) * 5

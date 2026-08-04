@@ -49,7 +49,9 @@ def _json_payload() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _status_from_request() -> tuple[dict[str, Any] | None, tuple[dict[str, str], int] | None]:
+def _status_from_request() -> tuple[
+    dict[str, Any] | None, tuple[dict[str, str], int] | None
+]:
     try:
         expected_counts = (
             parse_expected_counts(request.args.getlist("expected"))
@@ -94,10 +96,14 @@ def put_sensor_aliases():
     return response
 
 
-def _requested_sensor_specs(data: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict]:
+def _requested_sensor_specs(
+    data: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict]:
     explicit_sensors = data.get("sensors")
     if isinstance(explicit_sensors, list) and explicit_sensors:
-        specs = [dict(sensor) for sensor in explicit_sensors if isinstance(sensor, Mapping)]
+        specs = [
+            dict(sensor) for sensor in explicit_sensors if isinstance(sensor, Mapping)
+        ]
         return specs, {"schema_version": "sensor_status.v1", "families": []}
 
     status = collect_sensor_status()
@@ -127,21 +133,15 @@ def _preview_job_health(job: Any) -> tuple[bool, str | None]:
     except (OSError, ValueError) as exc:
         return False, str(exc)
     if status is None:
-        started_at = getattr(job, "started_at", None)
-        if started_at is None:
-            # Compatibility for lightweight queued/running test doubles.
-            return True, None
-        try:
-            started = datetime.fromisoformat(
-                str(started_at).replace("Z", "+00:00")
-            )
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=UTC)
-            age = (datetime.now(UTC) - started).total_seconds()
-        except ValueError:
-            age = 6.0
-        if age <= 5.0:
-            return True, None
+        if job.started_at is not None:
+            try:
+                started = datetime.fromisoformat(job.started_at.replace("Z", "+00:00"))
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=UTC)
+                if (datetime.now(UTC) - started).total_seconds() <= 5.0:
+                    return True, None
+            except ValueError:
+                pass
     return preview_status_health(preview_root, status)
 
 
@@ -150,12 +150,10 @@ def _cancel_preview_in_background(job: Any) -> None:
         preview_root = job.parameters.get("preview_root")
         if preview_root:
             stop_preview(preview_root)
-        cancel_job = getattr(job_runner, "cancel", None)
-        if callable(cancel_job):
-            try:
-                cancel_job(job.id)
-            except KeyError:
-                pass
+        try:
+            job_runner.cancel(job.id)
+        except KeyError:
+            pass
 
     threading.Thread(
         target=cancel,
@@ -322,7 +320,9 @@ def _preview_submission(
     key = _sensor_key(spec)
     adapter = get_sensor_adapter(str(spec.get("sensor_type", "")))
     if not adapter.live_rgb_preview_supported:
-        raise ValueError(f"Live RGB preview is not supported for {adapter.display_name}.")
+        raise ValueError(
+            f"Live RGB preview is not supported for {adapter.display_name}."
+        )
     preview_root = preview_stream_root()
     command = build_preview_command(
         preview_root=preview_root,
@@ -433,7 +433,8 @@ def post_sensor_snapshots():
             parameters={
                 "snapshot_root": snapshot_root.as_posix(),
                 "sensor_keys": [
-                    f"{spec.get('sensor_type')}:{spec.get('device_id')}" for spec in specs
+                    f"{spec.get('sensor_type')}:{spec.get('device_id')}"
+                    for spec in specs
                 ],
                 "sensor_count": len(specs),
                 "sensor_snapshot": True,
