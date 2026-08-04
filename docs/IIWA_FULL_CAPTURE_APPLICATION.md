@@ -15,38 +15,45 @@ robot motion.
 
 ## Frame Contract
 
-The calibration target and the physical pose template do not have to share an
-origin or axis convention. They must not be represented by one ambiguously
-retaught frame.
+The calibration motion waypoints and the physical pose template do not have to
+share an origin or axis convention. They must not be represented by one
+ambiguously retaught frame.
 
 | Use | Persistent Sunrise frame | Repository frame role |
 | --- | --- | --- |
-| Nine-frame calibration program | `/PoseTestBot/TemplateBase` | Calibration run `template_base` |
-| Ordinary pose-template sweep | `/PoseTestBot/PoseTemplateBase` | Dataset run `template_base` |
-| Calibration board geometry | Target bundle `aruco_grid` | Explicit `aruco_grid → template_base` placement |
+| Nine-frame calibration motion waypoints | `/PoseTestBot/TemplateBase` | Motion planning only; not a run transform endpoint |
+| Static-calibration and ordinary-capture pose stream | `/PoseTestBot/PoseTemplateBase` | Run `template_base` and static `camera → template_base` result |
+| Calibration board geometry, static cameras | Target bundle `aruco_grid` | Unknown rigid `aruco_grid → robot_flange`, estimated as support evidence |
+| Calibration board geometry, eye-in-hand cameras | Target bundle `aruco_grid` | Explicit or estimated `aruco_grid → template_base` placement |
 | Selected pose-template geometry | Selection `pose_template` | Explicit `pose_template → template_base` placement |
 
 Create `/PoseTestBot/PoseTemplateBase` as a persistent Application Data
 `ObjectFrame`; do not construct a numeric replacement at runtime. Teach its
 origin and axes against the physical pose-template datum. Record its
-relationship to `/PoseTestBot/TemplateBase` as commissioning evidence.
+relationship to `/PoseTestBot/TemplateBase` as commissioning evidence for the
+motion plan. That relationship is not needed by the static-camera solver.
 
 The word `template_base` in run artifacts is a semantic role, not a Sunrise
-path. For an ordinary dataset run, the Java stream maps that role to
-`/PoseTestBot/PoseTemplateBase` and records the absolute path in every v1 pose
-packet. If the selected digital pose template is physically aligned with that
-frame, `template_base_from_pose_template` is identity. Otherwise, enter the
-measured rigid transform during pose-template selection; never compensate by
-silently retouching a calibration frame.
+path. Both static-camera calibration and ordinary dataset capture map that role
+to `/PoseTestBot/PoseTemplateBase` and record the absolute path in every v1
+pose packet. The nine-frame calibration application can command waypoints
+below `/PoseTestBot/TemplateBase` while querying and streaming the flange pose
+relative to `/PoseTestBot/PoseTemplateBase`; the motion parent does not define
+the solver's output frame. If the selected digital pose template is physically
+aligned with the latter frame, `template_base_from_pose_template` is identity.
+Otherwise, enter the measured rigid transform during pose-template selection;
+never compensate by silently retouching a calibration frame.
 
 An eye-in-hand `camera → robot_flange` calibration remains independent of the
 chosen world/reference frame as long as the camera mounting has not changed.
-A static `camera → template_base` calibration does not: a profile expressed
-against `/PoseTestBot/TemplateBase` must not be relabelled as if it targeted
-`/PoseTestBot/PoseTemplateBase`. Measure and validate the frame transform and
-produce a profile expressed in the dataset reference, or recalibrate. The
-current BOP path must receive camera, robot-pose, and object transforms in one
-consistent dataset `template_base`.
+Static-camera calibration instead uses a robot-attached moving grid to solve
+`camera → PoseTemplateBase` directly. The jointly estimated
+`aruco_grid → robot_flange` value is a nuisance/support transform for closure;
+there is no runtime hand-tracking product. A preexisting static profile
+expressed against `/PoseTestBot/TemplateBase` must not be relabelled as if it
+targeted `/PoseTestBot/PoseTemplateBase`; recalibrate it in the intended
+reference. The current BOP path must receive camera, robot-pose, and object
+transforms in one consistent dataset `template_base`.
 
 ## Command and Motion Contract
 
@@ -184,8 +191,10 @@ condition.
   `/PoseTestBot/PoseTemplateBase`, `/PoseTestBot/CaptureStart`, and
   `/PoseTestBot/CaptureEnd`; and read back their XYZABC values and parent-frame
   relationships.
-- Confirm the selected run and pose-template placement use the ordinary frame,
-  and reject any static calibration profile expressed in the wrong base.
+- Confirm calibration and ordinary-capture pose streams use
+  `/PoseTestBot/PoseTemplateBase`, the selected pose-template placement uses
+  that frame, and any preexisting static profile expressed in the motion-only
+  `/PoseTestBot/TemplateBase` is rejected rather than relabelled.
 - Compile the exact project and resolve `getRootFrame()`, PTP acceleration/jerk
   setters, JSON-simple, the task-function provider, and all three persistent
   frames.

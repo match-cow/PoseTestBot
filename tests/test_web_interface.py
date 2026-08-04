@@ -662,6 +662,147 @@ def test_run_config_endpoint_preserves_hardware_trigger_and_freezes_it_after_raw
     assert loaded["config"]["capture"]["synchronization"] == synchronization
 
 
+def test_run_config_freezes_timestamp_camera_contract_after_raw_evidence(
+    tmp_path: Path,
+) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "run-timestamp-contract"
+    sensor = {
+        "sensor_type": "realsense_d435",
+        "device_id": "static-1",
+        "mounting_mode": "static",
+        "display_name": "Static D435",
+        "operator_alias": "Static D435",
+        "enabled": True,
+        "inverted": False,
+    }
+
+    created = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "resolution": "720p",
+            "fps": 6,
+            "sensors": [sensor],
+            "robot_pose_sunrise_reference_frame_path": (
+                "/PoseTestBot/TemplateBase"
+            ),
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.get_json()["camera_contract"] == {
+        "mutable": True,
+        "blockers": [],
+    }
+
+    (run_root / "raw_robot_ee_poses.json").write_text("{}")
+    locked = client.get(
+        "/run-config", query_string={"run_root": run_root.as_posix()}
+    )
+    assert locked.status_code == 200
+    assert locked.get_json()["camera_contract"] == {
+        "mutable": False,
+        "blockers": ["raw_robot_ee_poses.json"],
+    }
+
+    relabeled = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "sensors": [
+                {
+                    **sensor,
+                    "display_name": "North static D435",
+                    "operator_alias": "North static D435",
+                }
+            ],
+        },
+    )
+    assert relabeled.status_code == 201
+
+    changed_mount = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "sensors": [{**sensor, "mounting_mode": "eye_in_hand"}],
+        },
+    )
+    changed_fps = client.post(
+        "/run-config",
+        json={"run_root": run_root.as_posix(), "fps": 12},
+    )
+    changed_reference = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "robot_pose_sunrise_reference_frame_path": (
+                "/PoseTestBot/PoseTemplateBase"
+            ),
+        },
+    )
+
+    assert changed_mount.status_code == 400
+    assert "Cannot change camera membership, mounting, orientation" in (
+        changed_mount.get_json()["output"]
+    )
+    assert "create a new run" in changed_mount.get_json()["output"]
+    assert changed_fps.status_code == 400
+    assert "frame rate" in changed_fps.get_json()["output"]
+    assert changed_reference.status_code == 400
+    assert "Cannot change the expected Sunrise" in (
+        changed_reference.get_json()["output"]
+    )
+    loaded = client.get(
+        "/run-config", query_string={"run_root": run_root.as_posix()}
+    ).get_json()["config"]
+    assert loaded["capture"]["sensors"][0]["mounting_mode"] == "static"
+    assert loaded["capture"]["sensors"][0]["operator_alias"] == (
+        "North static D435"
+    )
+    assert loaded["capture"]["fps"] == 6
+    assert loaded["frames"]["robot_pose"]["sunrise_reference_frame_path"] == (
+        "/PoseTestBot/TemplateBase"
+    )
+
+
+def test_run_config_freezes_camera_contract_for_partial_robot_pose_evidence(
+    tmp_path: Path,
+) -> None:
+    client = app.test_client()
+    run_root = tmp_path / "run-partial-pose-contract"
+    sensor = {
+        "sensor_type": "realsense_d435",
+        "device_id": "static-1",
+        "mounting_mode": "static",
+        "display_name": "Static D435",
+        "enabled": True,
+    }
+    created = client.post(
+        "/run-config",
+        json={"run_root": run_root.as_posix(), "sensors": [sensor]},
+    )
+    assert created.status_code == 201
+
+    partial_name = "raw_robot_ee_poses.partial.1234.test.json"
+    (run_root / partial_name).write_text("{}")
+
+    state = client.get(
+        "/run-config", query_string={"run_root": run_root.as_posix()}
+    ).get_json()["camera_contract"]
+    changed = client.post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "sensors": [{**sensor, "mounting_mode": "eye_in_hand"}],
+        },
+    )
+
+    assert state == {"mutable": False, "blockers": [partial_name]}
+    assert changed.status_code == 400
+    assert partial_name in changed.get_json()["output"]
+
+
 def test_run_config_endpoint_rejects_truthy_string_enabled(tmp_path: Path) -> None:
     response = app.test_client().post(
         "/run-config",
@@ -681,6 +822,109 @@ def test_run_config_endpoint_rejects_truthy_string_enabled(tmp_path: Path) -> No
 
     assert response.status_code == 400
     assert "literal JSON boolean" in response.get_json()["output"]
+
+
+def test_run_config_endpoint_requires_mount_for_new_sensor_mapping(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "missing-sensor-mount"
+    response = app.test_client().post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "sensors": [
+                {
+                    "sensor_type": "realsense_d435",
+                    "device_id": "123",
+                    "display_name": "Detected RealSense",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "mounting_mode is required" in response.get_json()["output"]
+    assert not (run_root / "run_config.json").exists()
+
+
+def test_run_config_endpoint_applies_explicit_top_level_mounting_default(
+    tmp_path: Path,
+) -> None:
+    response = app.test_client().post(
+        "/run-config",
+        json={
+            "run_root": (tmp_path / "default-static-mount").as_posix(),
+            "mounting_mode": "static",
+            "sensors": [
+                {
+                    "sensor_type": "realsense_d435",
+                    "device_id": "123",
+                    "display_name": "Detected RealSense",
+                },
+                {
+                    "sensor_type": "oak_d_pro",
+                    "device_id": "oak-1",
+                    "display_name": "Detected OAK-D Pro",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.get_json()
+    assert [
+        sensor["mounting_mode"]
+        for sensor in response.get_json()["config"]["capture"]["sensors"]
+    ] == ["static", "static"]
+
+
+def test_run_config_endpoint_rejects_implicit_mount_for_detected_sensor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "posetestbot.web.route_support.collect_sensor_status",
+        lambda: {
+            "families": [
+                {
+                    "devices": [
+                        {
+                            "sensor_type": "realsense_d435",
+                            "device_id": "new",
+                            "display_name": "Detected D435",
+                            "connected": True,
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+    run_root = tmp_path / "detected-without-mount"
+
+    response = app.test_client().post(
+        "/run-config",
+        json={
+            "run_root": run_root.as_posix(),
+            "from_detected_sensors": True,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "mounting_mode is required" in response.get_json()["output"]
+    assert not (run_root / "run_config.json").exists()
+
+
+def test_run_config_endpoint_requires_mount_for_new_default_sensor_set(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "default-sensors-without-mount"
+    response = app.test_client().post(
+        "/run-config",
+        json={"run_root": run_root.as_posix()},
+    )
+
+    assert response.status_code == 400
+    assert "mounting_mode is required" in response.get_json()["output"]
+    assert not (run_root / "run_config.json").exists()
 
 
 def test_run_config_explicit_redetection_replaces_preserved_sensors(
@@ -923,9 +1167,14 @@ def test_sensor_alias_endpoint_round_trips_lab_local_file(
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["aliases"]["realsense_d435:123"]["alias"] == "Wrist Camera"
+    assert payload["aliases"]["realsense_d435:123"]["mounting_mode"] == "eye_in_hand"
+    assert response.headers["Cache-Control"] == "no-store"
 
-    loaded = client.get("/sensors/aliases").get_json()
+    loaded_response = client.get("/sensors/aliases")
+    loaded = loaded_response.get_json()
     assert loaded["aliases"]["realsense_d435:123"]["inverted"] is True
+    assert loaded["aliases"]["realsense_d435:123"]["mounting_mode"] == "eye_in_hand"
+    assert loaded_response.headers["Cache-Control"] == "no-store"
 
 
 def test_overview_endpoint_reports_sequence_steps(tmp_path: Path) -> None:
@@ -1117,6 +1366,7 @@ def test_web_accepts_recognized_false_boolean_string(tmp_path: Path) -> None:
         json={
             "run_root": (tmp_path / "false-bool").as_posix(),
             "plan_only": "false",
+            "mounting_mode": "static",
         },
     )
 

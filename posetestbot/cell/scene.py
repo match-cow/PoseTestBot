@@ -19,11 +19,15 @@ from posetestbot.calibration.profiles import (
     load_profile_collection,
     select_valid_profile_for_sensor,
 )
+from posetestbot.calibration.static_reuse import (
+    verify_static_profile_destination_reference,
+)
 from posetestbot.calibration.targets import DEFAULT_TARGET_SPEC
 from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
     CALIBRATION_TARGET,
+    CALIBRATION_PROFILE_SELECTION,
     DEPTH_DIR,
     DEPTH_SCALE,
     FRAME_METADATA_JSONL,
@@ -573,6 +577,18 @@ def _profiles(
         )
         return [], path
     try:
+        if (
+            config.get("calibration_profile_selection") is not None
+            or (run_root / CALIBRATION_PROFILE_SELECTION).exists()
+        ):
+            from posetestbot.calibration.profile_library import (
+                verify_calibration_profile_selection,
+            )
+
+            verify_calibration_profile_selection(
+                run_root,
+                expected_calibration_profiles=path,
+            )
         return load_profile_collection(path), path
     except (OSError, ValueError) as exc:
         warnings.append({"code": "invalid_calibration_profiles", "message": str(exc)})
@@ -1128,14 +1144,54 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
     )
 
     profiles, profile_path = _profiles(root, config, warnings)
+    enabled_sensors = [
+        sensor
+        for sensor in config.get("capture", {}).get("sensors", [])
+        if isinstance(sensor, Mapping) and sensor.get("enabled", True) is True
+    ]
+    resolved_profiles: dict[str, CalibrationProfile] = {}
+    profile_errors: dict[str, str] = {}
+    for sensor in enabled_sensors:
+        key = _sensor_key(sensor)
+        try:
+            resolved_profiles[key] = _profile_for_sensor(profiles, sensor, key)
+        except (KeyError, ValueError) as exc:
+            profile_errors[key] = str(exc)
+
+    matched_pose_paths = {
+        str(camera["sensor_folder"]): Path(source["source"])
+        for source in timelines
+        if source.get("kind") == "synchronized"
+        and isinstance((camera := source.get("camera")), Mapping)
+        and isinstance(camera.get("sensor_folder"), str)
+    }
+    reference_error: str | None = None
+    try:
+        verify_static_profile_destination_reference(
+            root,
+            config,
+            resolved_profiles.values(),
+            matched_robot_pose_paths_by_sensor_name=matched_pose_paths,
+        )
+    except ValueError as exc:
+        reference_error = str(exc)
+        warnings.append(
+            {
+                "code": "invalid_calibration_world_reference",
+                "message": reference_error,
+            }
+        )
+
     selected_profiles: list[CalibrationProfile] = []
-    for sensor in config.get("capture", {}).get("sensors", []):
-        if not isinstance(sensor, Mapping) or sensor.get("enabled", True) is not True:
-            continue
+    for sensor in enabled_sensors:
         key = _sensor_key(sensor)
         label = str(sensor.get("display_name") or key)
         try:
-            profile = _profile_for_sensor(profiles, sensor, key)
+            if key in profile_errors:
+                raise ValueError(profile_errors[key])
+            if reference_error is not None:
+                raise ValueError(reference_error)
+            profile = resolved_profiles[key]
             selected_profiles.append(profile)
             parent = (
                 "robot_flange"

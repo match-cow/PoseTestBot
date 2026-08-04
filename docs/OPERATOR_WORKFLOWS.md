@@ -15,17 +15,33 @@ operator reviews another step in the same journey, but changing the active run
 folder clears run-setup and placement drafts instead of carrying them into the
 new run.
 
-Camera names follow the same scope boundary. **Devices** stores reusable lab
-defaults; step 1 snapshots an editable **Operator alias for this run** into
-`run_config.json`. Existing runs always hydrate that saved value rather than a
-newer lab default. Capture planning carries the label into `capture_plan.json`
-and `dataset_manifest.json`, but sensor type and device ID remain the durable
-physical identity.
+Camera identity controls follow one scope boundary. **Devices** stores reusable
+lab defaults: aliases have a nearby **Save alias** action, while mounting and
+supported orientation selectors save immediately. Each successful response is
+adopted as the displayed value, and disconnected-camera records are retained.
+The **Include in next run** checkbox is only a browser-local draft that helps
+seed setup; it does not mutate an active run.
 
-The Devices mounting default follows the same rule. A newly configured run
-copies each selected camera's explicit `static` or `eye_in_hand` value into its
-own `capture.sensors[]` entry in `run_config.json`; an existing run keeps its
-saved value even if the reusable Devices default changes later.
+Workflow step 1 owns the selected run. It snapshots editable **Operator alias
+for this run**, **Mounting for this run**, and **Image orientation for this
+run** values into `capture.sensors[]` in `run_config.json`, together with
+durable camera membership. It also exposes the required absolute **Robot-pose
+Sunrise reference** stored as
+`frames.robot_pose.sunrise_reference_frame_path`. Existing runs always hydrate those saved values
+rather than newer Devices defaults. Capture planning carries the alias into
+`capture_plan.json` and `dataset_manifest.json`, but sensor type and device ID
+remain the durable physical identity. Changing a dataset run's mount or image
+orientation requires a compatible promoted calibration for the new
+interpretation; the previous profile is never retained implicitly.
+
+The robot-pose Sunrise reference, camera membership, mounting, orientation,
+resolution, frame rate, and capture synchronization become immutable as soon
+as capture status/logs, raw camera data, or raw robot-pose evidence exists.
+Aliases may still be corrected because
+they do not reinterpret pixels or robot motion. If an acquired run records the
+wrong mounting, keep its raw evidence and create a fresh run; changing
+`eye_in_hand` to `static` after recording would select a different hand-eye
+equation for the same observations.
 
 ## Required and optional work
 
@@ -52,12 +68,21 @@ needs a new reusable calibration.
 1. **Configure the run and cameras — required.** Choose every camera to
    calibrate and confirm its serial/device identity, run-owned operator alias,
    mounting mode, orientation, resolution, frame rate, and supervised robot
-   speed. Saving setup does not open hardware.
-2. **Choose the printed calibration grid — required.** Select the immutable
-   target bundle that exactly matches the board in the cell. Its dictionary,
-   marker dimensions, spacing, printable PDF, geometry hash, and placement are
-   treated as one identity. Creating another grid is optional when a suitable
-   saved grid already exists.
+   speed. Confirm the exact absolute Sunrise path that the controller will
+   report in `robot_pose.v1`; static-camera calibration and ordinary object
+   capture both use `/PoseTestBot/PoseTemplateBase`. The separately taught
+   `/PoseTestBot/TemplateBase` frame only parents calibration motion waypoints.
+   One calibration recording contains one homogeneous mounting group: all
+   enabled cameras are either `static` or `eye_in_hand`. Saving setup does not
+   open hardware.
+2. **Choose the printed calibration grid and mounting — required.** Select the
+   immutable target bundle that exactly matches the board in the cell. Its
+   dictionary, marker dimensions, spacing, printable PDF, geometry hash,
+   physical mounting frame, and placement policy are treated as one identity.
+   For a static camera group the console binds an unknown placement mounted on
+   `robot_flange`; for an eye-in-hand group it binds the target to
+   `template_base`. Creating another grid is optional when a suitable saved
+   grid already exists.
 3. **Check readiness — required.** Run the single visible readiness check after
    setup and target selection. It validates saved configuration, target
    provenance, current sensor/runtime visibility, and the planned software
@@ -73,10 +98,10 @@ needs a new reusable calibration.
    solving, validation, and ranking. Review the recommended complete camera
    bundle, then explicitly publish only passing profiles. Calculation alone
    does not make a candidate reusable. The analysis inherits the hash-verified
-   grid from step 2 and preselects the mounting interpretation saved in step 1;
-   it cannot silently substitute another grid. Robot-mounted and static
-   cameras are calculated as separate mounting groups, and the server rejects
-   any camera/mode contradiction.
+   grid and mounting from step 2 and derives the solver mode from the mounting
+   saved in step 1. Step 5 cannot override either choice. Robot-mounted and
+   static cameras use separate calibration runs, and the server rejects any
+   camera/mode/target contradiction.
 
 The result is a promoted `calibration_profiles.json` collection, its intrinsic
 profiles, and retained attempt evidence. Per-view diagnostics and alternate
@@ -88,8 +113,43 @@ The two supported extrinsic interpretations are:
 - **Eye in hand:** the camera moves with `robot_flange`, the grid is stationary
   relative to `template_base`, and the primary result is
   `camera -> robot_flange`.
-- **Eye to hand:** the camera is static, the grid moves rigidly with
-  `robot_flange`, and the primary result is `camera -> template_base`.
+- **Static-camera world calibration** (internally the `eye_to_hand` equation):
+  the camera is static, the grid moves rigidly with `robot_flange`, and the
+  primary result is `camera -> template_base`, where `template_base` is the
+  physical `/PoseTestBot/PoseTemplateBase`. The moving grid supplies the
+  multiple robot poses needed to solve that result. The jointly estimated
+  `aruco_grid -> robot_flange` transform is a nuisance/support transform used
+  for closure and multi-camera consistency; it is not the calibration product
+  and the flange-to-grid attachment does not need to be measured. The board
+  must remain rigidly attached in the same pose for the complete recording.
+  Static cameras are not used to track the robot hand during later object
+  capture.
+
+For the current three-static-RealSense arrangement, create a fresh calibration
+run, enable the three exact D435 identities, save all three as **Static**, and
+select the printed grid in step 2. The console then records
+`mounting_frame=robot_flange` with `placement.mode=unknown`; readiness and
+attempt creation verify that contract. The calibration controller may still
+execute its taught raster below `/PoseTestBot/TemplateBase`, but every retained
+flange pose is expressed in `/PoseTestBot/PoseTemplateBase`. After supervised
+capture, step 5 solves all three `camera -> PoseTemplateBase` profiles together
+and checks that their independently estimated grid-to-flange support transforms
+agree before the profiles can be published.
+
+If robot-mounted cameras are added later, calibrate them in another fresh run
+with the grid fixed relative to `template_base`. Combining the resulting
+profiles in an object-dataset run is allowed only when every static profile's
+observed v1 `sunrise_reference_frame_path` exactly matches the destination
+run's explicit `frames.robot_pose.sunrise_reference_frame_path`. New guided
+calibration and dataset runs both use `/PoseTestBot/PoseTemplateBase`, so a
+static `camera -> PoseTemplateBase` profile can be combined directly with an
+eye-in-hand `camera -> robot_flange` profile for the same object-dataset run.
+PoseTestBot copies only those exact profile pairs into a single immutable
+run-owned snapshot; it does not merge recordings or treat two different
+Sunrise paths as one base. Preexisting static profiles whose captured poses
+used `/PoseTestBot/TemplateBase` remain wrong-frame evidence for this purpose
+and are not silently relabelled. Eye-in-hand `camera -> robot_flange` profiles
+remain independent of the world-frame choice.
 
 ## Journey 2: record an object dataset
 
@@ -98,6 +158,9 @@ calibration has been promoted.
 
 1. **Configure cameras and select calibration — required.** Choose the enabled
    cameras, their run-owned operator aliases, and acquisition settings, then
+   confirm the exact absolute Sunrise reference expected from the dataset pose
+   stream (the ordinary-capture default is
+   `/PoseTestBot/PoseTemplateBase`). Then
    assign a promoted calibration source to every camera identity and mounting
    mode. Static and robot-mounted cameras may use different source runs. When
    one source covers the complete setup, PoseTestBot retains that exact pair;
@@ -114,6 +177,17 @@ calibration has been promoted.
    that evidence to another calibration. The selected profiles must
    also contain a verified per-camera robot-pose time offset, timestamp pair,
    clock-domain/fallback rule, and maximum pose gap.
+   A selected static profile must additionally contain verified
+   `robot_pose.v1` Sunrise path provenance matching the exact path declared by
+   the dataset run. A legacy/no-path static profile, an undeclared destination
+   path, or a path mismatch blocks selection and preflight. Path equality is
+   software identity, not physical commissioning proof; retain controller and
+   persistent-frame read-back evidence separately.
+   In a mixed static/eye-in-hand dataset, BOP export, BlenderProc preparation,
+   and the Cell scene additionally verify the `source_packet` retained in each
+   moving camera's actual synchronized `match_robot_ee_poses.json`. A profile
+   label or run-config declaration cannot substitute for robot poses that were
+   really recorded in `/PoseTestBot/PoseTemplateBase`.
    Choose the capture synchronization policy in the same setup. The general
    choice is `timestamp_aligned`. The research combined-view choice is the
    exact `capture_synchronization.v1` contract

@@ -36,15 +36,30 @@ Open **Calibration Targets** in the operator console:
    **Generate bundle**.
 4. Download and inspect the source JSON, canonical target JSON, and printable
    PDF. Generation does not change the active run.
-5. Choose a configured run, select the bundle, and declare one placement:
-   `unknown`, `template_base_identity`, or `posegridgen_board_to_base`.
+5. Choose a configured run and select the bundle. The run's homogeneous camera
+   mounting group determines the physical board mounting: static cameras use
+   `robot_flange`, while eye-in-hand cameras use `template_base`. Then declare
+   the supported placement policy for that frame. The guided static path uses
+   `unknown`; the fixed-target path may use `unknown`,
+   `template_base_identity`, or `posegridgen_board_to_base`.
 
 The simplified **Workflow → Calibration** screen can also select any saved
-bundle directly for an immutable calculation attempt. Its two modes derive the
-target mounting per attempt: eye-in-hand estimates a target stationary relative
-to `template_base`, while eye-to-hand estimates a target attached to
-`robot_flange`. This does not require PoseGridGen to be available and does not
-initiate physical capture.
+bundle directly for an immutable calculation attempt. Camera mounting is saved
+in step 1, target mounting is saved in step 2, and step 5 derives rather than
+overrides the resulting mode. Eye-in-hand estimates a target stationary
+relative to `template_base`. Static-camera world calibration keeps the cameras
+fixed while the target moves rigidly with `robot_flange`; its internal
+`eye_to_hand` equation jointly estimates the primary
+`camera -> template_base` transform and the nuisance/support
+`aruco_grid -> robot_flange` transform. Here `template_base` is the physical
+`/PoseTestBot/PoseTemplateBase` used for object capture. The separate
+`/PoseTestBot/TemplateBase` may parent the controller's taught calibration
+motion waypoints, but it is not the pose-stream reference or the result frame.
+A measured flange-to-grid transform is therefore not required, but the
+physical attachment must remain rigid for the entire recording. The moving
+grid provides calibration observations; static cameras are not used for robot
+hand tracking after calibration. This does not require PoseGridGen to be
+available and does not initiate physical capture.
 
 `posegridgen_board_to_base` is available only when the source records that
 pose. Selection cross-checks PoseGridGen's matrix, translation, and quaternion,
@@ -74,8 +89,14 @@ their original generator provenance; they are never regenerated in place.
 Selection copies the unchanged bundle to
 `<run>/calibration_targets/<target_id>/`, writes the placement-aware root
 `<run>/calibration_target.json`, and adds calibration-target hash/provenance
-fields to the run config. The bundle, root target, run config, and dataset
-manifest are promoted together with rollback on failure.
+fields to the run config. New guided selections also record
+`placement.mounting_frame` as `robot_flange` or `template_base`. The bundle,
+root target, run config, and dataset manifest are promoted together with
+rollback on failure. Legacy selections without `mounting_frame` remain
+readable for inspection: a known placement still implies `template_base`, but
+an unknown placement is intentionally not inferred from mutable camera setup.
+Readiness, attempt creation, and promotion require the operator to reselect the
+target with an explicit physical mounting frame first.
 
 Intent-level calculation snapshots the bundle below
 `<run>/processed/calibration/<attempt_id>/target_bundle/`. Prior attempts and
@@ -97,18 +118,20 @@ print compensation again.
 
 ## Reselection and preflight
 
-Selecting the same target and placement again is idempotent. Capture and
-synchronization output alone do not block a change. A different target or
-placement is rejected once detections, calibrated intrinsics, poses, coverage,
-observations, candidates, solver/validation output, promoted profiles,
-rectification, or BOP output exists. The API returns the concrete blocker paths;
-create a new run rather than deleting calibration evidence.
+Selecting the same target, placement policy, and physical mounting frame again
+is idempotent. A different target, placement, or mounting frame is rejected as
+soon as capture status/logs, raw RGB-D/metadata, raw robot poses, detections,
+calibrated intrinsics, poses, coverage, observations, candidates,
+solver/validation output, promoted profiles, rectification, or BOP output
+exists. Those artifacts already encode which target moved relative to the
+robot, so relabelling them would change the hand-eye equation. The API returns
+the concrete blocker paths; preserve the evidence and create a new run.
 
 Preflight verifies bundle containment, absence of symlinks, file hashes,
-canonical target agreement, compatible generator provenance, run-config hashes,
-and placement when the solver uses `known_target` or `compare`. Target selection
-changes `run_config.json`, so older run-preflight evidence becomes stale
-automatically.
+canonical target agreement, compatible generator provenance, run-config
+hashes, one homogeneous calibration camera group, and agreement between camera
+mounting, target mounting, and solver interpretation. Target selection changes
+`run_config.json`, so older run-preflight evidence becomes stale automatically.
 
 ## Legacy import
 

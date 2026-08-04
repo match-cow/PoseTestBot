@@ -30,6 +30,7 @@ from posetestbot.io.artifacts import (
     CALIBRATION_VALIDATION_REPORT,
     DATASET_MANIFEST,
 )
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 
 
@@ -41,7 +42,21 @@ def candidate_profile(
     residual_translation_mm: float = 1.2,
     residual_rotation_deg: float = 0.4,
     outlier_count: int = 1,
+    include_static_reference: bool = True,
 ) -> CalibrationProfile:
+    metadata = {
+        "sensor_name": "realsense_123",
+        "outlier_count": outlier_count,
+    }
+    if include_static_reference:
+        metadata["robot_pose_reference"] = {
+            "schema_version": "robot_pose_reference.v1",
+            "status": "verified",
+            "packet_schema_version": "robot_pose.v1",
+            "from": "robot_flange",
+            "to": "template_base",
+            "sunrise_reference_frame_path": POSE_TEMPLATE_BASE_SUNRISE_PATH,
+        }
     return CalibrationProfile(
         schema_version=PROFILE_SCHEMA,
         profile_id=profile_id,
@@ -69,10 +84,7 @@ def candidate_profile(
             residual_translation_mm=residual_translation_mm,
             residual_rotation_deg=residual_rotation_deg,
         ),
-        metadata={
-            "sensor_name": "realsense_123",
-            "outlier_count": outlier_count,
-        },
+        metadata=metadata,
     )
 
 
@@ -148,6 +160,28 @@ def test_calibration_validation_blocks_low_inlier_profile(
         and check["status"] == "error"
         for check in report["checks"]
     )
+
+
+def test_calibration_validation_blocks_static_profile_without_world_provenance(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    write_candidate_fixture(
+        run_root,
+        profile=candidate_profile(include_static_reference=False),
+    )
+
+    report = build_calibration_validation(run_root)
+
+    assert report["overall_status"] == "error"
+    assert report["promotable_profile_count"] == 0
+    check = next(
+        item
+        for item in report["checks"]
+        if item["name"].startswith("profile_static_world_provenance:")
+    )
+    assert check["status"] == "error"
+    assert "guided static-camera workflow" in check["message"]
 
 
 def test_build_calibration_validation_accepts_solver_profile_collection(

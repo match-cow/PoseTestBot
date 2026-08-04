@@ -33,6 +33,7 @@ from posetestbot.calibration.candidates import (
     _target_transform,
     _transform_from_quaternion_translation,
 )
+from posetestbot.calibration.legacy_static import require_legacy_static_known_target
 from posetestbot.calibration.observations import SCHEMA_VERSION as OBSERVATION_SCHEMA
 from posetestbot.calibration.targets import target_identity, validate_target_identity
 from posetestbot.calibration.profiles import (
@@ -588,6 +589,12 @@ def build_calibration_solver(
             "Unsupported calibration observation schema: "
             f"{observations_report.get('schema_version')!r}"
         )
+    require_legacy_static_known_target(
+        root,
+        observations_report,
+        target_to_reference=target_to_reference,
+        stage_label="Legacy calibration solver",
+    )
     calibration_target = observations_report.get("target")
     calibration_target_evidence = (
         target_identity(calibration_target)

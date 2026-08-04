@@ -570,7 +570,9 @@ def test_saving_visible_alias_preserves_offline_alias_and_survives_reload(
         lambda response: response.request.method == "PUT"
         and response.url.endswith("/sensors/aliases")
     ) as response_info:
-        page.get_by_role("button", name="Save labels & mounts").click()
+        visible.get_by_role(
+            "button", name=f"Save alias for {SENSOR_A}"
+        ).click()
     assert response_info.value.status == 200
 
     saved = json.loads(alias_path.read_text())
@@ -998,7 +1000,7 @@ def test_three_live_realsense_previews_keep_lower_lab_sensors_reachable(
     oak_card = sensor_card(page, OAK_SENSOR)
     oak_card.scroll_into_view_if_needed()
     expect(oak_card).to_be_visible()
-    use_in_run = oak_card.get_by_text("Use in run").locator('[role="checkbox"]')
+    use_in_run = oak_card.get_by_text("Include in next run").locator('[role="checkbox"]')
     use_in_run.click()
     expect(use_in_run).to_be_checked()
     zed_card = sensor_card(page, ZED_SENSOR)
@@ -1096,7 +1098,11 @@ def test_oak_preview_toggle_keeps_full_devices_page_reachable(
     expect(zed_card).to_be_visible()
 
 
-def test_inverted_change_restarts_preview_in_waiting_state(preview_server, page) -> None:
+def test_inverted_change_persists_and_restarts_preview_in_waiting_state(
+    preview_server,
+    page,
+    tmp_path: Path,
+) -> None:
     server, runner = preview_server
     page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
     first = sensor_card(page, SENSOR_A)
@@ -1127,6 +1133,8 @@ def test_inverted_change_restarts_preview_in_waiting_state(preview_server, page)
     page.get_by_role("option", name="Inverted").click()
 
     wait_for(lambda: len(runner.submitted) == 2)
+    saved_aliases = json.loads((tmp_path / "aliases.json").read_text())
+    assert saved_aliases[SENSOR_A]["inverted"] is True
     assert runner.canceled == ["preview-1"]
     command = runner.submitted[1]["command"]
     sensor_spec = json.loads(command[command.index("--sensor-json") + 1])

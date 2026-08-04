@@ -11,6 +11,7 @@ from posetestbot.calibration.profiles import (
     CalibrationProfile,
     CalibrationStatus,
     load_profile_collection,
+    require_static_profile_pose_template_base,
     select_profile_for_sensor,
 )
 from posetestbot.calibration.target_library import validate_run_target_selection
@@ -177,9 +178,7 @@ def _sensor_match(
                 f"Configured profile {explicit_profile_id!r} belongs to sensor "
                 f"{profile.sensor_id!r}, not {device_id!r}"
             )
-        mounting_mode = MountingMode(
-            str(sensor.get("mounting_mode") or "eye_in_hand")
-        )
+        mounting_mode = MountingMode(str(sensor.get("mounting_mode") or "eye_in_hand"))
         if profile.mounting_mode != mounting_mode:
             raise ValueError(
                 f"Configured profile {explicit_profile_id!r} uses mounting mode "
@@ -288,7 +287,10 @@ def build_calibration_preflight(
 
     if config.get("calibration_target") is not None:
         try:
-            target_selection = validate_run_target_selection(run_root_path)
+            target_selection = validate_run_target_selection(
+                run_root_path,
+                require_mounting_frame=True,
+            )
             checks.append(
                 _check(
                     "calibration_target_selection",
@@ -331,7 +333,10 @@ def build_calibration_preflight(
                     "calibration_profiles_path",
                     "ok",
                     f"Loaded {len(profiles)} calibration profile(s).",
-                    details={"path": profile_path.as_posix(), "profile_count": len(profiles)},
+                    details={
+                        "path": profile_path.as_posix(),
+                        "profile_count": len(profiles),
+                    },
                 )
             )
         except Exception as exc:
@@ -353,6 +358,7 @@ def build_calibration_preflight(
         for sensor in sensors:
             try:
                 sensor_name, profile = _sensor_match(sensor, profiles)
+                require_static_profile_pose_template_base(profile)
                 matched_sensors.append(
                     {
                         "sensor_name": sensor_name,

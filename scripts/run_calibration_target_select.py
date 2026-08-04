@@ -22,6 +22,10 @@ def parse_args() -> argparse.Namespace:
             "posegridgen_board_to_base",
         ),
     )
+    parser.add_argument(
+        "--mounting-frame",
+        choices=("robot_flange", "template_base"),
+    )
     parser.add_argument("--library-root")
     return parser.parse_args()
 
@@ -32,6 +36,7 @@ def main() -> int:
         run_root=args.run_root,
         target_id=args.target_id,
         placement_mode=args.placement,
+        mounting_frame=args.mounting_frame,
         library_root=args.library_root,
     )
     print(json.dumps(result, sort_keys=True))

@@ -670,11 +670,12 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
     ),
     "sync_aruco_calibration_candidates": PipelineSequenceSpec(
         id="sync_aruco_calibration_candidates",
-        label="Synchronize ArUco Calibration Candidates",
+        label="Legacy Fixed-Target Calibration Candidates",
         description=(
             "Run synchronization, sync quality checks, ArUco pose estimation, "
-            "calibration observation extraction, then generate validation-gated "
-            "calibration profile candidates."
+            "calibration observation extraction, then generate compatibility "
+            "candidates. Static robot-carried-grid calibration belongs to guided "
+            "Workflow step 5."
         ),
         steps=(
             PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
@@ -702,11 +703,11 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
     ),
     "sync_aruco_calibration_solver": PipelineSequenceSpec(
         id="sync_aruco_calibration_solver",
-        label="Synchronize ArUco Calibration Solver",
+        label="Legacy Fixed-Target Calibration Solver",
         description=(
             "Run synchronization, sync quality checks, ArUco pose estimation, "
-            "calibration observation extraction, then solve needs-validation "
-            "calibration profiles."
+            "calibration observation extraction, then run the compatibility "
+            "solver. It is not the robot-carried-grid static-camera joint solve."
         ),
         steps=(
             PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
@@ -734,11 +735,12 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
     ),
     "sync_aruco_calibration_validation": PipelineSequenceSpec(
         id="sync_aruco_calibration_validation",
-        label="Synchronize ArUco Calibration Validation",
+        label="Legacy Fixed-Target Calibration Validation",
         description=(
             "Run synchronization, sync quality, ArUco pose estimation, "
-            "observation extraction, candidate generation, then validate "
-            "candidate profiles without promoting them."
+            "observation extraction, compatibility candidate generation, then "
+            "validate candidates without promoting them. Static profiles require "
+            "canonical PoseTemplateBase provenance."
         ),
         steps=(
             PipelineSequenceStepSpec(id="sync_run", stage_id="sync_run"),
@@ -851,10 +853,11 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
     ),
     "aruco_grid_full_calibration": PipelineSequenceSpec(
         id="aruco_grid_full_calibration",
-        label="Full ArUco Grid Calibration",
+        label="Legacy Fixed-Target ArUco Grid Calibration",
         description=(
             "Import the exact printed grid, synchronize, calibrate color intrinsics, "
-            "solve both wrist extrinsic methods, and require explicit validation selection."
+            "solve the fixed-target wrist-camera compatibility methods, and require "
+            "explicit validation selection. It is not the static moving-grid workflow."
         ),
         steps=(
             PipelineSequenceStepSpec(

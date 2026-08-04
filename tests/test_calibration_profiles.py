@@ -23,6 +23,7 @@ from posetestbot.calibration.profiles import (
     write_profile_collection,
 )
 import pytest
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 
 
@@ -63,6 +64,16 @@ def static_profile() -> CalibrationProfile:
             mean_reprojection_error_px=0.4,
         ),
         sync_delta_ms=2.5,
+        metadata={
+            "robot_pose_reference": {
+                "schema_version": "robot_pose_reference.v1",
+                "status": "verified",
+                "packet_schema_version": "robot_pose.v1",
+                "from": "robot_flange",
+                "to": "template_base",
+                "sunrise_reference_frame_path": POSE_TEMPLATE_BASE_SUNRISE_PATH,
+            }
+        },
     )
 
 
@@ -201,6 +212,39 @@ def test_blenderproc_transform_map_accepts_static_profiles() -> None:
     assert entry["to"] == "template_base"
     assert entry["profile_id"] == "zed_2i_SN0001_static_cell_top_v2026_01"
     assert entry["position"] == [100.0, 200.0, 300.0]
+
+
+def test_blenderproc_transform_map_requires_complete_run_mount_mapping() -> None:
+    static = static_profile()
+    eye_in_hand = replace(
+        static,
+        profile_id="zed_2i_SN0001_eye_in_hand_wrist_v2026_01",
+        mounting_mode=MountingMode.EYE_IN_HAND,
+        rig_position="wrist",
+        extrinsics=RigidTransform(
+            from_frame=TransformFrame.CAMERA,
+            to_frame=TransformFrame.ROBOT_FLANGE,
+            rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+            translation_mm=(10.0, 20.0, 30.0),
+        ),
+        metadata={},
+    )
+
+    with pytest.raises(KeyError, match="No static calibration profile"):
+        blenderproc_camera_transform_map_from_profiles(
+            [eye_in_hand],
+            ["zed_2i_SN0001"],
+            mounting_modes_by_sensor_name={
+                "zed_2i_SN0001": MountingMode.STATIC,
+            },
+        )
+
+    with pytest.raises(KeyError, match="no mounting mode"):
+        blenderproc_camera_transform_map_from_profiles(
+            [static],
+            ["zed_2i_SN0001"],
+            mounting_modes_by_sensor_name={},
+        )
 
 
 def test_validate_calibration_profiles_cli_migrates_legacy_defaults(

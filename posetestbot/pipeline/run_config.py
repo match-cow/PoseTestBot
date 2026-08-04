@@ -32,6 +32,9 @@ from posetestbot.pipeline.sequences import (
     build_sequence_plan,
 )
 from posetestbot.pipeline.stages import PipelineStageSpec
+from posetestbot.robot.reference_frames import (
+    normalize_sunrise_reference_frame_path,
+)
 from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
@@ -50,9 +53,7 @@ HARDWARE_TRIGGER_SCOPE = "depth_exposure"
 DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS = 2.0
 MAX_DEPTH_TIMESTAMP_SKEW_MS = 5.0
 _SAFE_SYNC_GROUP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-_SAFE_HARDWARE_DEVICE_ID = re.compile(
-    r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
-)
+_SAFE_HARDWARE_DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 DATASET_MODES = {"objectless", "pose_template"}
 CALIBRATION_PROFILE_OPTION_STAGES = ("blenderproc_prepare", "bop_export")
 INTRINSIC_CALIBRATION_PROFILE_OPTION_STAGES = ("camera_rectification",)
@@ -61,9 +62,7 @@ DATASET_MODE_OPTION_STAGES = (
     "blenderproc_render",
     "bop_export",
 )
-EXECUTION_GATE_OPTION_KEYS = frozenset(
-    {"allow_cameras", "allow_real_robot"}
-)
+EXECUTION_GATE_OPTION_KEYS = frozenset({"allow_cameras", "allow_real_robot"})
 RUN_CONFIG_LOCK = ".run_config.lock"
 
 _RUN_CONFIG_LOCK = threading.RLock()
@@ -182,9 +181,7 @@ class CaptureSynchronizationConfig:
                     "scope": self.scope,
                     "group_id": self.group_id,
                     "master_sensor_key": self.master_sensor_key,
-                    "max_depth_timestamp_skew_ms": (
-                        self.max_depth_timestamp_skew_ms
-                    ),
+                    "max_depth_timestamp_skew_ms": (self.max_depth_timestamp_skew_ms),
                 }
             )
         return result
@@ -289,7 +286,9 @@ class PoseTestBotRunConfig:
             "frames": self.frames.to_dict(),
             "calibration_profiles": self.calibration_profiles,
             "calibration_target": (
-                dict(self.calibration_target) if self.calibration_target is not None else None
+                dict(self.calibration_target)
+                if self.calibration_target is not None
+                else None
             ),
             "pipeline": self.pipeline.to_dict(),
         }
@@ -315,7 +314,9 @@ def normalize_sensor_type(value: str) -> SensorType:
         return SENSOR_TYPE_ALIASES[key]
     except KeyError as exc:
         choices = ", ".join(sorted(SENSOR_TYPE_ALIASES))
-        raise ValueError(f"Unknown sensor type {value!r}; use one of: {choices}") from exc
+        raise ValueError(
+            f"Unknown sensor type {value!r}; use one of: {choices}"
+        ) from exc
 
 
 def normalize_mounting_mode(value: str) -> MountingMode:
@@ -324,7 +325,9 @@ def normalize_mounting_mode(value: str) -> MountingMode:
         return MountingMode(key)
     except ValueError as exc:
         choices = ", ".join(mode.value for mode in MountingMode)
-        raise ValueError(f"Unknown mounting mode {value!r}; use one of: {choices}") from exc
+        raise ValueError(
+            f"Unknown mounting mode {value!r}; use one of: {choices}"
+        ) from exc
 
 
 def normalize_inverted(value: Any) -> bool:
@@ -536,15 +539,35 @@ def validate_capture_synchronization(
 
 
 def _validate_sensor_orientation(sensor_type: SensorType | str, inverted: bool) -> None:
-    normalized = sensor_type if isinstance(sensor_type, SensorType) else SensorType(sensor_type)
+    normalized = (
+        sensor_type if isinstance(sensor_type, SensorType) else SensorType(sensor_type)
+    )
     if inverted and normalized != SensorType.REALSENSE_D435:
         raise ValueError("Sensor inverted=true is only supported for RealSense D435")
+
+
+def _required_mounting_mode(
+    value: Any,
+    *,
+    default_mounting_mode: str | None,
+) -> str:
+    """Resolve an explicitly authored camera mount without guessing one."""
+
+    candidate = value
+    if candidate is None or not str(candidate).strip():
+        candidate = default_mounting_mode
+    if candidate is None or not str(candidate).strip():
+        raise ValueError(
+            "Sensor mounting_mode is required; set it per sensor or provide "
+            "an explicit default mounting mode"
+        )
+    return normalize_mounting_mode(str(candidate)).value
 
 
 def sensor_config_from_token(
     token: str,
     *,
-    default_mounting_mode: str = MountingMode.EYE_IN_HAND.value,
+    default_mounting_mode: str | None = None,
 ) -> SensorRunConfig:
     """Parse ``sensor_type:device_id[:mounting_mode[:display_name[:orientation]]]``."""
 
@@ -558,14 +581,11 @@ def sensor_config_from_token(
     device_id = parts[1].strip()
     if not device_id:
         raise ValueError("Sensor device_id must not be empty")
-    mounting_mode = normalize_mounting_mode(
-        parts[2] if len(parts) >= 3 and parts[2] else default_mounting_mode
+    mounting_mode = _required_mounting_mode(
+        parts[2] if len(parts) >= 3 else None,
+        default_mounting_mode=default_mounting_mode,
     )
-    operator_alias = (
-        parts[3].strip()
-        if len(parts) >= 4 and parts[3].strip()
-        else None
-    )
+    operator_alias = parts[3].strip() if len(parts) >= 4 and parts[3].strip() else None
     display_name = operator_alias or f"{sensor_type.value}:{device_id}"
     inverted = normalize_inverted(parts[4]) if len(parts) == 5 else False
     _validate_sensor_orientation(sensor_type, inverted)
@@ -573,7 +593,7 @@ def sensor_config_from_token(
         sensor_type=sensor_type.value,
         device_id=device_id,
         display_name=display_name,
-        mounting_mode=mounting_mode.value,
+        mounting_mode=mounting_mode,
         inverted=inverted,
         operator_alias=operator_alias,
     )
@@ -582,15 +602,16 @@ def sensor_config_from_token(
 def sensor_config_from_mapping(
     value: Mapping[str, Any],
     *,
-    default_mounting_mode: str = MountingMode.EYE_IN_HAND.value,
+    default_mounting_mode: str | None = None,
 ) -> SensorRunConfig:
     sensor_type = normalize_sensor_type(str(value.get("sensor_type", "")))
     device_id = str(value.get("device_id", "")).strip()
     if not device_id:
         raise ValueError("Sensor device_id must not be empty")
-    mounting_mode = normalize_mounting_mode(
-        str(value.get("mounting_mode") or default_mounting_mode)
-    ).value
+    mounting_mode = _required_mounting_mode(
+        value.get("mounting_mode"),
+        default_mounting_mode=default_mounting_mode,
+    )
     operator_alias = normalize_operator_alias(value.get("operator_alias"))
     display_name = str(
         operator_alias
@@ -621,24 +642,35 @@ def sensor_config_from_mapping(
 def sensor_configs_from_values(
     values: list[Any] | None,
     *,
-    default_mounting_mode: str = MountingMode.EYE_IN_HAND.value,
+    default_mounting_mode: str | None = None,
 ) -> tuple[SensorRunConfig, ...]:
+    normalized_default = (
+        normalize_mounting_mode(default_mounting_mode).value
+        if default_mounting_mode is not None
+        else None
+    )
+    if values is None:
+        mode = _required_mounting_mode(
+            None,
+            default_mounting_mode=normalized_default,
+        )
+        return default_lab_sensors(mounting_mode=mode)
     if not values:
-        return default_lab_sensors(mounting_mode=default_mounting_mode)
+        raise ValueError("At least one sensor entry is required")
     sensors = []
     for value in values:
         if isinstance(value, str):
             sensors.append(
                 sensor_config_from_token(
                     value,
-                    default_mounting_mode=default_mounting_mode,
+                    default_mounting_mode=normalized_default,
                 )
             )
         elif isinstance(value, Mapping):
             sensors.append(
                 sensor_config_from_mapping(
                     value,
-                    default_mounting_mode=default_mounting_mode,
+                    default_mounting_mode=normalized_default,
                 )
             )
         else:
@@ -649,12 +681,16 @@ def sensor_configs_from_values(
 def sensor_configs_from_status(
     sensor_status: Mapping[str, Any],
     *,
-    default_mounting_mode: str = MountingMode.EYE_IN_HAND.value,
+    default_mounting_mode: str | None = None,
 ) -> tuple[SensorRunConfig, ...]:
     """Build run-config sensor entries from discovered status devices."""
 
     sensors: list[SensorRunConfig] = []
-    mode = normalize_mounting_mode(default_mounting_mode).value
+    mode = (
+        normalize_mounting_mode(default_mounting_mode).value
+        if default_mounting_mode is not None
+        else None
+    )
     for family in sensor_status.get("families", []):
         if not isinstance(family, Mapping):
             continue
@@ -682,9 +718,10 @@ def sensor_configs_from_status(
                 or discovered_display_name
                 or f"{sensor_type.value}:{device_id}"
             )
-            mounting_mode = normalize_mounting_mode(
-                str(device.get("mounting_mode") or mode)
-            ).value
+            mounting_mode = _required_mounting_mode(
+                device.get("mounting_mode"),
+                default_mounting_mode=mode,
+            )
             inverted = normalize_inverted(device.get("inverted", False))
             _validate_sensor_orientation(sensor_type, inverted)
             metadata = device.get("metadata", {})
@@ -758,19 +795,31 @@ def create_run_config(
     sequence_options: Mapping[str, Any] | None = None,
     plan_only: bool = True,
     fixed_transforms: tuple[FixedFrameTransform, ...] = (),
-    synchronization: (
-        Mapping[str, Any] | CaptureSynchronizationConfig | None
-    ) = None,
+    robot_pose_sunrise_reference_frame_path: str | None = None,
+    synchronization: (Mapping[str, Any] | CaptureSynchronizationConfig | None) = None,
 ) -> PoseTestBotRunConfig:
     run_root_path = Path(run_root)
     sensor_configs = sensors if sensors is not None else default_lab_sensors()
     inferred_mode = dataset_mode or "objectless"
     if inferred_mode not in DATASET_MODES:
-        raise ValueError("dataset_mode must be one of: " + ", ".join(sorted(DATASET_MODES)))
+        raise ValueError(
+            "dataset_mode must be one of: " + ", ".join(sorted(DATASET_MODES))
+        )
     synchronization_config = validate_capture_synchronization(
         synchronization,
         sensor_configs,
     )
+    robot_pose = {
+        "from": "robot_flange",
+        "to": "template_base",
+        "convention": "kuka_abc_radians",
+    }
+    if robot_pose_sunrise_reference_frame_path is not None:
+        robot_pose["sunrise_reference_frame_path"] = (
+            normalize_sunrise_reference_frame_path(
+                robot_pose_sunrise_reference_frame_path
+            )
+        )
     config = PoseTestBotRunConfig(
         schema_version=SCHEMA_VERSION,
         run_name=run_name or run_root_path.name,
@@ -785,7 +834,10 @@ def create_run_config(
             sensors=tuple(sensor_configs),
             synchronization=synchronization_config,
         ),
-        frames=RunFramesConfig(fixed_transforms=fixed_transforms),
+        frames=RunFramesConfig(
+            robot_pose=robot_pose,
+            fixed_transforms=fixed_transforms,
+        ),
         dataset_mode=inferred_mode,
         pose_template=dict(pose_template) if pose_template is not None else None,
         calibration_profiles=calibration_profiles,
@@ -864,7 +916,10 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         if pose_template is not None:
             if not isinstance(pose_template, Mapping):
                 raise ValueError("Run config pose_template must be an object or null")
-            if pose_template.get("selection_artifact") != "pose_template_selection.json":
+            if (
+                pose_template.get("selection_artifact")
+                != "pose_template_selection.json"
+            ):
                 raise ValueError(
                     "Run config pose_template.selection_artifact must be "
                     "pose_template_selection.json"
@@ -946,17 +1001,23 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             "geometry_sha256",
             "placement",
         }
-        missing_target_fields = sorted(required_target_fields - calibration_target.keys())
+        missing_target_fields = sorted(
+            required_target_fields - calibration_target.keys()
+        )
         if missing_target_fields:
             raise ValueError(
                 "Run config calibration_target is missing: "
                 + ", ".join(missing_target_fields)
             )
         if not str(calibration_target.get("target_id", "")).strip():
-            raise ValueError("Run config calibration_target.target_id must not be empty")
+            raise ValueError(
+                "Run config calibration_target.target_id must not be empty"
+            )
         bundle_path = Path(str(calibration_target.get("bundle_path", "")))
         if bundle_path.is_absolute() or ".." in bundle_path.parts:
-            raise ValueError("Run config calibration_target.bundle_path must be run-relative")
+            raise ValueError(
+                "Run config calibration_target.bundle_path must be run-relative"
+            )
         for hash_key in (
             "source_sha256",
             "spec_sha256",
@@ -965,7 +1026,9 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             "geometry_sha256",
         ):
             digest = str(calibration_target.get(hash_key, ""))
-            if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
                 raise ValueError(
                     f"Run config calibration_target.{hash_key} must be a SHA-256 digest"
                 )
@@ -976,23 +1039,65 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             "posegridgen_board_to_base",
         }:
             raise ValueError("Run config calibration_target placement mode is invalid")
+        mounting_frame = placement.get("mounting_frame")
+        if "mounting_frame" in placement and mounting_frame not in {
+            "robot_flange",
+            "template_base",
+        }:
+            raise ValueError(
+                "Run config calibration_target placement mounting_frame must be "
+                "robot_flange or template_base"
+            )
+        if (
+            placement.get("mode") != "unknown"
+            and mounting_frame is not None
+            and mounting_frame != "template_base"
+        ):
+            raise ValueError(
+                "Run config known calibration-target placement requires "
+                "mounting_frame=template_base"
+            )
     if schema in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
-        if value["dataset_mode"] == "objectless" and value.get("pose_template") is not None:
+        if (
+            value["dataset_mode"] == "objectless"
+            and value.get("pose_template") is not None
+        ):
             raise ValueError("Objectless run config cannot reference a pose template")
-        if value["dataset_mode"] != "pose_template" and value.get("pose_template") is not None:
-            raise ValueError("Only pose_template dataset mode may reference a pose template")
+        if (
+            value["dataset_mode"] != "pose_template"
+            and value.get("pose_template") is not None
+        ):
+            raise ValueError(
+                "Only pose_template dataset mode may reference a pose template"
+            )
 
     frames = value.get("frames")
     if frames is not None:
         if not isinstance(frames, Mapping):
             raise ValueError("Run config frames must be an object")
         robot_pose = frames.get("robot_pose")
-        if not isinstance(robot_pose, Mapping) or robot_pose.get("from") != "robot_flange" or robot_pose.get("to") != "template_base":
+        if (
+            not isinstance(robot_pose, Mapping)
+            or robot_pose.get("from") != "robot_flange"
+            or robot_pose.get("to") != "template_base"
+        ):
             raise ValueError(
                 "Run config frames.robot_pose must map robot_flange to template_base"
             )
         if robot_pose.get("convention") != "kuka_abc_radians":
-            raise ValueError("Run config robot pose convention must be kuka_abc_radians")
+            raise ValueError(
+                "Run config robot pose convention must be kuka_abc_radians"
+            )
+        if "sunrise_reference_frame_path" in robot_pose:
+            try:
+                normalize_sunrise_reference_frame_path(
+                    robot_pose.get("sunrise_reference_frame_path")
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "Run config frames.robot_pose.sunrise_reference_frame_path "
+                    f"is invalid: {exc}"
+                ) from exc
         if frames.get("dataset_reference_frame") != "template_base":
             raise ValueError("Run config dataset_reference_frame must be template_base")
         fixed_transforms = frames.get("fixed_transforms", [])
@@ -1006,14 +1111,22 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             quaternion = transform.get("rotation_quaternion_wxyz")
             translation = transform.get("translation_mm")
             if not isinstance(quaternion, list) or len(quaternion) != 4:
-                raise ValueError(f"Fixed transform {index} quaternion must have 4 values")
+                raise ValueError(
+                    f"Fixed transform {index} quaternion must have 4 values"
+                )
             if not isinstance(translation, list) or len(translation) != 3:
-                raise ValueError(f"Fixed transform {index} translation must have 3 values")
+                raise ValueError(
+                    f"Fixed transform {index} translation must have 3 values"
+                )
             values = [float(item) for item in [*quaternion, *translation]]
             if not all(math.isfinite(item) for item in values):
                 raise ValueError(f"Fixed transform {index} must be finite")
-            if not math.isclose(sum(float(item) ** 2 for item in quaternion), 1.0, abs_tol=1e-3):
-                raise ValueError(f"Fixed transform {index} quaternion must be normalized")
+            if not math.isclose(
+                sum(float(item) ** 2 for item in quaternion), 1.0, abs_tol=1e-3
+            ):
+                raise ValueError(
+                    f"Fixed transform {index} quaternion must be normalized"
+                )
 
     sensors = capture.get("sensors")
     if not isinstance(sensors, list) or not sensors:
@@ -1035,7 +1148,9 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         try:
             enabled = normalize_sensor_enabled(sensor.get("enabled", True))
         except ValueError as exc:
-            raise ValueError(f"Run config sensor {index} enabled must be a boolean") from exc
+            raise ValueError(
+                f"Run config sensor {index} enabled must be a boolean"
+            ) from exc
         enabled_sensor_count += int(enabled)
         inverted = normalize_inverted(sensor.get("inverted", False))
         _validate_sensor_orientation(sensor_type, inverted)
@@ -1043,9 +1158,7 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         raise ValueError("Run config must enable at least one capture sensor")
     synchronization = capture.get("synchronization")
     if schema == SCHEMA_VERSION and synchronization is None:
-        raise ValueError(
-            "run_config.v3 requires capture.synchronization"
-        )
+        raise ValueError("run_config.v3 requires capture.synchronization")
     if schema in {LEGACY_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION}:
         legacy_policy = capture_synchronization_from_mapping(synchronization)
         if legacy_policy.mode != "timestamp_aligned":
@@ -1141,10 +1254,14 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
                     if operator_alias is not None:
                         sensor["operator_alias"] = operator_alias
                         sensor["display_name"] = operator_alias
-        if value.get("schema_version") in {
-            LEGACY_SCHEMA_VERSION,
-            PREVIOUS_SCHEMA_VERSION,
-        } and "synchronization" not in capture:
+        if (
+            value.get("schema_version")
+            in {
+                LEGACY_SCHEMA_VERSION,
+                PREVIOUS_SCHEMA_VERSION,
+            }
+            and "synchronization" not in capture
+        ):
             if not isinstance(capture, dict):
                 capture = dict(capture)
                 value["capture"] = capture
@@ -1219,7 +1336,10 @@ def _sequence_options_with_run_config_defaults(
         if group_name not in available_groups:
             continue
         group_options = dict(options.get(group_name, {}))
-        if "objectless" not in group_options and config.get("dataset_mode") == "objectless":
+        if (
+            "objectless" not in group_options
+            and config.get("dataset_mode") == "objectless"
+        ):
             group_options["objectless"] = True
         options[group_name] = group_options
     return options

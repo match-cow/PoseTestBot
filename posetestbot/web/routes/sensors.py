@@ -73,7 +73,9 @@ def sensor_status():
 
 @sensors_bp.get("/sensors/aliases")
 def get_sensor_aliases():
-    return jsonify(sensor_alias_file_state(DEFAULT_SENSOR_ALIASES_PATH))
+    response = jsonify(sensor_alias_file_state(DEFAULT_SENSOR_ALIASES_PATH))
+    response.cache_control.no_store = True
+    return response
 
 
 @sensors_bp.put("/sensors/aliases")
@@ -87,7 +89,9 @@ def put_sensor_aliases():
     except ValueError as exc:
         return jsonify({"output": str(exc)}), 400
     state = sensor_alias_file_state(path)
-    return jsonify({"output": f"Wrote {path}", **state})
+    response = jsonify({"output": f"Wrote {path}", **state})
+    response.cache_control.no_store = True
+    return response
 
 
 def _requested_sensor_specs(data: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict]:

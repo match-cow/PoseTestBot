@@ -6,12 +6,14 @@ import pytest
 
 from posetestbot.pipeline.preflight import (
     STAGE_RUNTIME_REQUIREMENTS,
+    _calibration_arrangement_check,
     build_run_preflight,
     run_preflight_queue_summary,
     write_run_preflight_report,
 )
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.pipeline.run_config import SensorRunConfig
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 
 
 def fake_robot_status() -> dict:
@@ -109,6 +111,99 @@ def test_run_preflight_counts_only_enabled_sensors(tmp_path: Path) -> None:
     assert check["details"]["sensor_counts"] == {"realsense_d435": 2}
 
 
+def test_calibration_arrangement_requires_one_mounting_group_and_matching_target_frame(
+    tmp_path: Path,
+) -> None:
+    static_config = create_run_config(
+        run_root=tmp_path / "static-calibration",
+        sensors=tuple(
+            SensorRunConfig(
+                "realsense_d435",
+                str(index),
+                f"Static {index}",
+                mounting_mode="static",
+            )
+            for index in range(1, 4)
+        ),
+        robot_pose_sunrise_reference_frame_path=(POSE_TEMPLATE_BASE_SUNRISE_PATH),
+    ).to_dict()
+
+    ready = _calibration_arrangement_check(
+        static_config,
+        {"placement_mode": "unknown", "mounting_frame": "robot_flange"},
+    )
+    wrong_target = _calibration_arrangement_check(
+        static_config,
+        {"placement_mode": "unknown", "mounting_frame": "template_base"},
+    )
+    legacy_target = _calibration_arrangement_check(
+        static_config,
+        {"placement_mode": "unknown", "mounting_frame": None},
+    )
+    wrong_reference_config = create_run_config(
+        run_root=tmp_path / "wrong-reference",
+        sensors=tuple(
+            SensorRunConfig(
+                "realsense_d435",
+                str(index),
+                f"Static {index}",
+                mounting_mode="static",
+            )
+            for index in range(1, 4)
+        ),
+        robot_pose_sunrise_reference_frame_path="/PoseTestBot/TemplateBase",
+    ).to_dict()
+    wrong_reference = _calibration_arrangement_check(
+        wrong_reference_config,
+        {"placement_mode": "unknown", "mounting_frame": "robot_flange"},
+    )
+    mixed_config = create_run_config(
+        run_root=tmp_path / "mixed-calibration",
+        sensors=(
+            SensorRunConfig(
+                "realsense_d435",
+                "static",
+                "Static",
+                mounting_mode="static",
+            ),
+            SensorRunConfig(
+                "realsense_d435",
+                "wrist",
+                "Wrist",
+                mounting_mode="eye_in_hand",
+            ),
+        ),
+    ).to_dict()
+    mixed = _calibration_arrangement_check(
+        mixed_config,
+        {"placement_mode": "unknown", "mounting_frame": "robot_flange"},
+    )
+
+    assert ready["status"] == "ok"
+    assert ready["details"] == {
+        "calibration_mode": "eye_to_hand",
+        "camera_mounting_mode": "static",
+        "target_mounting_frame": "robot_flange",
+        "target_transform_state": "estimated",
+        "placement_mode": "unknown",
+    }
+    assert wrong_target["status"] == "error"
+    assert "requires the target mounted in robot_flange" in wrong_target["message"]
+    assert legacy_target["status"] == "error"
+    assert "predates explicit physical mounting" in legacy_target["message"]
+    assert legacy_target["details"]["recorded_target_mounting_frame"] is None
+    assert wrong_reference["status"] == "error"
+    assert POSE_TEMPLATE_BASE_SUNRISE_PATH in wrong_reference["message"]
+    assert wrong_reference["details"] == {
+        "calibration_mode": "eye_to_hand",
+        "camera_mounting_mode": "static",
+        "required_sunrise_reference_frame_path": (POSE_TEMPLATE_BASE_SUNRISE_PATH),
+        "configured_sunrise_reference_frame_path": "/PoseTestBot/TemplateBase",
+    }
+    assert mixed["status"] == "error"
+    assert "separate runs" in mixed["message"]
+
+
 def test_preflight_warns_for_optional_missing_runtime_without_required_stage(
     tmp_path: Path,
 ) -> None:
@@ -193,12 +288,16 @@ def test_preflight_blocks_pose_template_gt_without_confirmed_selection(
         collect_runtimes=lambda: runtime_status(blenderproc_available=False),
     )
 
-    check = next(item for item in report["checks"] if item["name"] == "pose_template_selection")
+    check = next(
+        item for item in report["checks"] if item["name"] == "pose_template_selection"
+    )
     assert check["status"] == "error"
     assert "dataset export requires a valid confirmed pose template" in check["message"]
 
 
-def test_run_preflight_queue_summary_tracks_missing_ready_and_stale(tmp_path: Path) -> None:
+def test_run_preflight_queue_summary_tracks_missing_ready_and_stale(
+    tmp_path: Path,
+) -> None:
     run_root = tmp_path / "run"
     config = create_run_config(run_root=run_root).to_dict()
     write_run_config(run_root, create_run_config(run_root=run_root))

@@ -37,7 +37,12 @@ relative-motion contract is in
 
 - [ ] Back up and synchronize the Workbench project and Application Data.
 - [ ] Verify `/PoseTestBot/TemplateBase` origin, axes, persistence, and physical
-  relationship to the 420 × 297 mm template and ceiling-mounted robot.
+  relationship to the commissioned calibration motion envelope. It is the
+  parent of taught waypoints only, not the static-calibration result frame.
+- [ ] Verify `/PoseTestBot/PoseTemplateBase` origin, axes, persistence, and
+  physical relationship to the printed pose template and objects. Confirm the
+  pose-stream task reports `robot_flange -> template_base` relative to this
+  exact path during both static calibration and ordinary capture.
 - [ ] Do not copy old HRC-relative seeds unless base equivalence is proved or a
   measured transform is supplied.
 - [ ] Confirm the actual camera rig, tool/load, payload and center of gravity,
@@ -110,6 +115,9 @@ and LL/LC/LR = lower-left/lower-center/lower-right.
   joint-jerk limits on all motion types and the 3% relative joint-velocity
   limit on every orientation `LIN_REL` motion.
 - [ ] Resolve `/PoseTestBot/TemplateBase` and all nine child frames.
+- [ ] Resolve `/PoseTestBot/PoseTemplateBase` independently and confirm the
+  pose-stream task is configured with that path while motion still uses the
+  nine `/PoseTestBot/TemplateBase/...` waypoints.
 - [ ] Validate every raster endpoint and swept path:
   `Center → UL → UC → UR → MR → Center → ML → LL → LC → LR → Center`.
 - [ ] Confirm the center transits are PTP and the eight raster legs are LIN.
@@ -222,6 +230,12 @@ campaign.
   `15b49f67-7cf5-4c00-9e7f-914aa6ed5da0`, geometry SHA-256
   `3da681424ff77e55dc51c8c1c9bb58e0a425f7fa039b63d29c798aa2ad02b256`,
   and placement `unknown`; do not reuse detections from a different grid.
+- [ ] For a static-camera campaign, confirm the grid is rigidly attached to
+  `robot_flange` for the entire recording and the saved selection records
+  `placement.mounting_frame=robot_flange`. Treat the estimated
+  `aruco_grid -> robot_flange` value as nuisance/support evidence; the required
+  product is each `camera -> PoseTemplateBase` transform. Do not present this
+  capture as runtime robot-hand tracking.
 - [ ] For every required camera, verify:
   - [ ] at least 15 accepted views;
   - [ ] robot-camera field coverage with at least five views supporting each
@@ -276,10 +290,12 @@ campaign.
   `robot_pose_query_time = frame_time + robot_pose_time_offset_ms` and
   `sync_delta_ms = -robot_pose_time_offset_ms`. Positive operator values use a
   later robot record. Treat the result as constant effective pipeline latency,
-  not hardware-clock synchronization; it uses robot motion and
-  stationary-target closure and does not require a known target placement.
-- [ ] For two or more enabled cameras estimating the same stationary companion
-  frame, require one complete bundle with the same PnP and extrinsic methods
+  not hardware-clock synchronization; it uses robot motion and rigid-target
+  closure and does not require a known target placement. For static cameras
+  the target is rigid to `robot_flange`; for eye-in-hand cameras it is rigid to
+  `template_base`.
+- [ ] For two or more enabled cameras estimating the same rigid companion
+  transform, require one complete bundle with the same PnP and extrinsic methods
   for every camera. Require every candidate to pass and maximum pairwise
   companion closure no greater than 10 mm / 5°. Among bundles within 0.01 of
   the best normalized mean individual score, use normalized companion closure

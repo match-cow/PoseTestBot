@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { ArrowLeft, ArrowRight, Boxes, Camera, Database, Grid3X3, ListTree, RefreshCw, Settings2, Sparkles } from "lucide-react"
 import { HelpTip } from "@/components/help-tip"
+import { CalibrationArrangementCard, calibrationArrangementForSensors, effectiveCalibrationTargetMountingFrame } from "@/components/calibration-arrangement"
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { StatusBadge } from "@/components/status-badge"
@@ -75,7 +76,7 @@ function JourneyShell({ journey, steps, selectedStep, onSelectStep, children }: 
   const meta = journey === "calibration" ? {
     eyebrow: "Guided workflow · reusable camera geometry",
     title: "Calibrate cameras",
-    description: "Record a known printed ArUco grid, compare camera and robot-camera solutions, then explicitly publish reusable calibration profiles.",
+    description: "Record a known printed ArUco grid, compare camera extrinsic solutions, then explicitly publish reusable calibration profiles in the frame required by each physical mounting.",
   } : {
     eyebrow: "Guided workflow · acquisition dataset",
     title: "Record an object dataset",
@@ -234,7 +235,7 @@ export function WorkflowPage() {
   if (page === "setup") return <div className="space-y-6">
     <PageHeader eyebrow="Acquisition workflows" title="What do you want to do?" description="Choose the outcome first. Each guided workflow shows the required order, keeps optional work off the critical path, and exposes low-level stages only under Advanced tools." actions={<Button variant="outline" onClick={refresh}><RefreshCw aria-hidden="true" />Refresh evidence</Button>} />
     <div className="grid gap-5 lg:grid-cols-2">
-      <WorkflowChoice to="/workflow/calibration" icon={Camera} title="Calibrate cameras" description="Use a printed calibration grid to calculate and publish camera intrinsics and robot-camera transforms." steps={calibrationOutline} output="A reviewed, reusable calibration profile for every selected camera." />
+      <WorkflowChoice to="/workflow/calibration" icon={Camera} title="Calibrate cameras" description="Use a printed calibration grid to calculate and publish camera intrinsics and mounting-aware extrinsic transforms." steps={calibrationOutline} output="A reviewed, reusable calibration profile for every selected camera." />
       <WorkflowChoice to="/workflow/dataset" icon={Boxes} title="Record an object dataset" description="Select a prior calibration and a physical pose template, then record and export an acquisition dataset." steps={datasetOutline} output="Synchronized RGB-D evidence plus a BOP dataset with calibrated images, depth, models, and provenance." />
     </div>
     <Card className="border-dashed"><CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="text-sm font-semibold">Need an individual implementation stage?</div><p className="mt-1 text-xs text-muted-foreground">Advanced tools retain direct stage controls for diagnostics and recovery.</p></div><Button asChild variant="outline"><Link to="/workflow/advanced"><Settings2 aria-hidden="true" />Open Advanced tools</Link></Button></CardContent></Card>
@@ -246,7 +247,12 @@ export function WorkflowPage() {
   const preflight = config.data?.preflight
   const configSaved = Boolean(runConfig)
   const enabledCameras = runConfig?.capture.sensors.filter((sensor) => sensor.enabled !== false) ?? []
-  const targetSelected = Boolean(runConfig?.calibration_target)
+  const calibrationArrangement = calibrationArrangementForSensors(enabledCameras)
+  const targetGeometrySelected = Boolean(runConfig?.calibration_target)
+  const effectiveTargetMountingFrame = effectiveCalibrationTargetMountingFrame(runConfig?.calibration_target?.placement)
+  const targetMountingMatches = calibrationArrangement.status === "ready"
+    && effectiveTargetMountingFrame === calibrationArrangement.mountingFrame
+  const targetSelected = targetGeometrySelected && targetMountingMatches
   const templateSelected = Boolean(runConfig?.pose_template?.placement_confirmed)
   const localCalibration = artifactComplete(overview.data, "calibration_profiles.json")
   const captureComplete = artifactComplete(overview.data, "capture_execution_report.json")
@@ -279,7 +285,8 @@ export function WorkflowPage() {
   const calibrationRequirements: WorkflowRequirement[] = [
     { id: "config", label: "Run configuration", description: configSaved ? "The run configuration is saved." : "Save the run and camera configuration first.", status: configSaved ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Open step 1" },
     { id: "cameras", label: "At least one enabled camera", description: enabledCameras.length ? `${enabledCameras.length} camera${enabledCameras.length === 1 ? " is" : "s are"} enabled for this calibration.` : "No camera is enabled for capture and calibration.", status: enabledCameras.length ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Choose cameras" },
-    { id: "target", label: "Printed grid selected", description: targetSelected ? "The run records an immutable target bundle and geometry hash." : "Select the exact printed grid that will be mounted in the cell.", status: targetSelected ? "met" : "missing", onFix: () => navigate("/calibration-targets"), fixLabel: "Choose calibration grid" },
+    { id: "arrangement", label: "One calibration mounting group", description: calibrationArrangement.status === "ready" ? `${calibrationArrangement.title}. ${calibrationArrangement.targetSummary}` : calibrationArrangement.message, status: calibrationArrangement.status === "ready" ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Review camera mounting" },
+    { id: "target", label: "Printed grid and physical mounting selected", description: targetSelected ? `The run records the immutable grid and its ${calibrationArrangement.status === "ready" ? calibrationArrangement.mountingFrame.replaceAll("_", " ") : "physical"} mounting frame.` : targetGeometrySelected && !effectiveTargetMountingFrame ? "This legacy target selection does not record a physical mounting frame. Re-select the target arrangement before readiness or analysis." : targetGeometrySelected ? "The selected grid's saved mounting frame does not match the enabled cameras. Re-select it after correcting Workflow step 1." : "Select the exact printed grid and record how it is mounted for this camera group.", status: targetSelected ? "met" : "missing", onFix: () => navigate("/calibration-targets"), fixLabel: targetGeometrySelected ? "Correct target mounting" : "Choose calibration grid" },
   ]
   const calibrationReady = readinessSatisfied(preflight, calibrationRequirements)
   const calibrationStatuses = stepStatuses([configSaved, targetSelected, calibrationReady, captureComplete, calibrationPublished])
@@ -310,22 +317,26 @@ export function WorkflowPage() {
       <RunSetup intent="camera_calibration" />
     </WorkflowStepCard>
 
-    <WorkflowStepCard id="target" number={2} title="Choose the printed calibration grid" description="Select the immutable grid bundle that exactly matches the board you will print and place in the workcell." status={calibrationStatuses[1]} help="The target UUID and geometry hash prevent detections from one printed grid being interpreted as another.">
-      <Card><CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-lg bg-muted"><Grid3X3 aria-hidden="true" className="size-5 text-primary-strong" /></span><div>{runConfig?.calibration_target ? <><div className="font-semibold">Calibration grid selected</div><div className="mt-1 font-mono text-[11px] text-muted-foreground">{runConfig.calibration_target.target_id}</div><div className="mt-1 text-xs text-muted-foreground">Placement: {runConfig.calibration_target.placement.mode.replaceAll("_", " ")}</div></> : <><div className="font-semibold text-destructive">No grid selected</div><p className="mt-1 text-xs text-muted-foreground">Choose the physical board before readiness and capture.</p></>}</div></div><Button asChild variant={targetSelected ? "outline" : "default"}><Link to="/calibration-targets">{targetSelected ? "Review selected grid" : "Choose grid"}<ArrowRight aria-hidden="true" /></Link></Button></CardContent></Card>
+    <WorkflowStepCard id="target" number={2} title="Choose the printed grid and its mounting" description="Select the immutable grid bundle that exactly matches the board, then record whether it is fixed or moves with the robot for this camera group." status={calibrationStatuses[1]} help="The target UUID, geometry hash, and physical mounting frame prevent detections from being interpreted with the wrong kinematic observation model.">
+      <CalibrationArrangementCard arrangement={calibrationArrangement} editHref="/workflow/calibration?step=configure" testId="workflow-target-arrangement" />
+      <Card><CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-lg bg-muted"><Grid3X3 aria-hidden="true" className="size-5 text-primary-strong" /></span><div>{runConfig?.calibration_target ? <><div className={targetSelected ? "font-semibold" : "font-semibold text-destructive"}>{targetSelected ? "Calibration grid and mounting selected" : !effectiveTargetMountingFrame ? "Legacy grid mounting is not recorded" : "Grid mounting does not match cameras"}</div><div className="mt-1 font-mono text-[11px] text-muted-foreground">{runConfig.calibration_target.target_id}</div><div className="mt-1 text-xs text-muted-foreground">Physical frame: {effectiveTargetMountingFrame?.replaceAll("_", " ") ?? "not recorded"} · Placement: {runConfig.calibration_target.placement.mode.replaceAll("_", " ")}{!runConfig.calibration_target.placement.mounting_frame && effectiveTargetMountingFrame ? " · safely resolved from its known placement" : ""}</div></> : <><div className="font-semibold text-destructive">No grid selected</div><p className="mt-1 text-xs text-muted-foreground">Choose the physical board and mounting before readiness and capture.</p></>}</div></div><Button asChild variant={targetSelected ? "outline" : "default"}><Link to="/calibration-targets">{targetSelected ? "Review selected grid" : targetGeometrySelected ? "Correct grid mounting" : "Choose grid"}<ArrowRight aria-hidden="true" /></Link></Button></CardContent></Card>
       <OptionalAction icon={Sparkles} title="Reuse or create a printable grid" description="Saved targets are global reusable library entries. A fresh calibration run can select the same board again after cameras move; generate a new target only when the physical grid changes." to="/calibration-targets" action="Open target library" />
     </WorkflowStepCard>
 
     <WorkflowStepCard id="readiness" number={3} title="Check readiness" description="Run one consolidated operator check after cameras and the exact printed grid are selected." status={calibrationStatuses[2]} help="The saved report proves which configuration was checked. Physical capture repeats the time-sensitive safety checks at startup.">
+      <CalibrationArrangementCard arrangement={calibrationArrangement} editHref="/workflow/calibration?step=configure" testId="workflow-readiness-arrangement" />
       <ReadinessCheck runRoot={selectedRun} intent="calibration" preflight={preflight} loading={config.isPending} requirements={calibrationRequirements} />
     </WorkflowStepCard>
 
-    <WorkflowStepCard id="capture" number={4} title="Record calibration images" description="Mount the selected grid as described for the calibration mode, clear the workcell, then authorize the supervised capture." status={calibrationStatuses[3]} help="Eye-in-hand means the camera moves with the robot while the grid remains stationary. Eye-to-hand means the camera is static while the grid moves rigidly with the robot.">
+    <WorkflowStepCard id="capture" number={4} title="Record calibration images" description="Mount the selected grid as described for the physical arrangement, clear the workcell, then authorize the supervised capture." status={calibrationStatuses[3]} help="For static-camera workcell calibration, the cameras stay fixed while the robot moves its attached grid through many views; the output places each camera in PoseTemplateBase. For robot-mounted cameras, the cameras move around a grid fixed in PoseTemplateBase.">
+      <CalibrationArrangementCard arrangement={calibrationArrangement} editHref="/workflow/calibration?step=configure" testId="workflow-capture-arrangement" />
       <CaptureGate intent="calibration" readiness={{ ready: calibrationReady, onReview: () => selectStep("readiness") }} />
     </WorkflowStepCard>
 
     <WorkflowStepCard id="calculate" number={5} title="Calculate, review, and publish" description="Estimate camera/robot time alignment, process the captured grid observations, review every camera, and explicitly publish only passing profiles." status={calibrationStatuses[4]} help="Publishing is deliberate: calculated candidates remain inactive until you accept the reviewed recommendations.">
+      <CalibrationArrangementCard arrangement={calibrationArrangement} editHref="/workflow/calibration?step=configure" testId="workflow-calculate-arrangement" />
       <Card className="border-primary/25 bg-primary/5"><CardContent className="py-4 text-xs leading-relaxed"><div className="flex items-center gap-2 font-semibold">Factory and OpenCV intrinsics <HelpTip label="Factory and OpenCV intrinsics">Factory is the per-camera projection supplied by the camera SDK. OpenCV is a new model fitted from this run's grid observations. Existing means an exact compatible profile was already available.</HelpTip></div><p className="mt-1 text-muted-foreground"><strong className="text-foreground">Factory</strong> stays selected when its projection is compatible. The fitted <strong className="text-foreground">OpenCV</strong> model is comparison and fallback evidence; it is activated only when factory projection is unusable and all coverage, held-out, plausibility, and error checks pass. A lower RMS alone does not make it the preferred model.</p></CardContent></Card>
-      <CalibrationWorkflow />
+      <CalibrationWorkflow referenceFramePath={runConfig?.frames?.robot_pose.sunrise_reference_frame_path} />
     </WorkflowStepCard>
   </JourneyShell>
 

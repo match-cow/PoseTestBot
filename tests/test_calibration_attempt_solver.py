@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import cv2
+import hashlib
 import json
 import numpy as np
 import pytest
@@ -80,6 +81,11 @@ def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
             }
         )
     )
+    verified_robot_poses = {
+        "raw_robot_ee_poses.json": json.loads(
+            (run_root / "raw_robot_ee_poses.json").read_text()
+        )
+    }
     output_folder = (
         attempt_root / "processed" / "preparation_synchronized" / "realsense_1"
     )
@@ -93,6 +99,10 @@ def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
         assert kwargs["timestamp_source"] == "sensor"
         assert kwargs["robot_timestamp_source"] == "host_wall"
         assert kwargs["max_nearest_pose_delta_ms"] == 150.0
+        assert (
+            kwargs["raw_robot_poses"]
+            is (verified_robot_poses["raw_robot_ee_poses.json"])
+        )
         return [
             SimpleNamespace(
                 sensor_folder=sensor_folder,
@@ -164,6 +174,7 @@ def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
                 }
             ]
         },
+        verified_robot_poses,
     )
     if should_fail:
         with pytest.raises(ValueError, match="strict eye-in-hand policy"):
@@ -241,6 +252,7 @@ def test_authoritative_sync_uses_selected_offset_without_replacing_preparation_e
             }
         },
     }
+    verified_robot_poses = {"raw_robot_ee_poses.json": {"0": {"pose": {}}}}
     monkeypatch.setattr(
         attempt_module,
         "_calibration_timestamp_preflight",
@@ -257,6 +269,10 @@ def test_authoritative_sync_uses_selected_offset_without_replacing_preparation_e
         assert kwargs["timestamp_source"] == "sensor"
         assert kwargs["robot_timestamp_source"] == "host_wall"
         assert kwargs["max_nearest_pose_delta_ms"] == 20.0
+        assert (
+            kwargs["raw_robot_poses"]
+            is (verified_robot_poses["raw_robot_ee_poses.json"])
+        )
         final_folder.mkdir(parents=True)
         (final_folder / "match_robot_ee_poses.json").write_text(
             json.dumps(
@@ -311,6 +327,7 @@ def test_authoritative_sync_uses_selected_offset_without_replacing_preparation_e
         request_value,
         time_offset_search,
         observations,
+        verified_robot_poses,
     )
 
     assert synchronized == {"realsense_d435:1": final_folder.resolve()}
@@ -361,18 +378,35 @@ def test_auto_sync_execution_problem_warns_and_keeps_recorded_timing(
         ),
     }
 
-    monkeypatch.setattr(attempt_module, "load_robot_poses", lambda *_args: {})
+    verified_robot_poses = {
+        "raw_robot_ee_poses.json": {
+            "0": {
+                "motion": "motion_0",
+                "pose": {"X": 0.0, "Y": 0.0, "Z": 0.0, "A": 0.0, "B": 0.0, "C": 0.0},
+            }
+        }
+    }
     monkeypatch.setattr(
         attempt_module,
-        "indexed_robot_poses",
-        lambda *_args, **_kwargs: [
+        "load_robot_poses",
+        lambda *_args: pytest.fail("verified raw robot poses must not be reopened"),
+    )
+
+    def fake_indexed_robot_poses(raw, **_kwargs):
+        assert raw is verified_robot_poses["raw_robot_ee_poses.json"]
+        return [
             {
                 "pose_index": 0,
                 "timestamp_ns": 1_000_000_000,
                 "motion": "motion_0",
                 "pose": {"X": 0.0, "Y": 0.0, "Z": 0.0, "A": 0.0, "B": 0.0, "C": 0.0},
             }
-        ],
+        ]
+
+    monkeypatch.setattr(
+        attempt_module,
+        "indexed_robot_poses",
+        fake_indexed_robot_poses,
     )
 
     report, adjusted = attempt_module._estimate_and_apply_time_offsets(
@@ -380,6 +414,7 @@ def test_auto_sync_execution_problem_warns_and_keeps_recorded_timing(
         attempt_root,
         request_value,
         {sensor_key: {"ITERATIVE": []}},
+        verified_robot_poses,
     )
 
     assert report == json.loads((attempt_root / "time_offset_search.json").read_text())
@@ -1804,6 +1839,34 @@ def test_candidate_ranking_has_stable_method_tie_breaks() -> None:
     assert ranked[0]["recommended"] is True
 
 
+def test_static_candidate_rejects_non_pose_template_base_reference() -> None:
+    candidate = {
+        "primary_transform": {
+            "rotation_quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+            "translation_mm": [0.0, 0.0, 0.0],
+        }
+    }
+    request_value = {
+        "mode": "eye_to_hand",
+        "robot_pose_reference": {
+            "schema_version": "robot_pose_reference.v1",
+            "status": "verified",
+            "packet_schema_version": "robot_pose.v1",
+            "from": "robot_flange",
+            "to": "template_base",
+            "sunrise_reference_frame_path": "/PoseTestBot/TemplateBase",
+        },
+    }
+
+    with pytest.raises(ValueError, match="PoseTemplateBase"):
+        attempt_module._candidate_profile(
+            candidate,
+            request_value=request_value,
+            sensor={},
+            intrinsic_profile={},
+        )
+
+
 def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1813,6 +1876,23 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
     attempt_id = "a" * 32
     attempt_root = run_root / "processed" / "calibration" / attempt_id
     attempt_root.mkdir(parents=True)
+    robot_pose_path = run_root / "raw_robot_ee_poses.json"
+    robot_pose_path.write_text(
+        json.dumps(
+            {
+                "0": {
+                    "pose": {},
+                    "source_packet": {
+                        "schema_version": "robot_pose.v1",
+                        "from_frame": "robot_flange",
+                        "to_frame": "template_base",
+                        "sunrise_reference_frame_path": "/PoseTestBot/TemplateBase",
+                    },
+                }
+            }
+        )
+    )
+    robot_pose_payload = robot_pose_path.read_bytes()
     sensor_key = "realsense_d435:1"
     request_value = {
         "schema_version": "calibration_attempt_request.v1",
@@ -1828,6 +1908,7 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
                 "sensor_type": "realsense_d435",
                 "device_id": "1",
                 "display_name": "D435",
+                "robot_pose_path": "raw_robot_ee_poses.json",
             }
         ],
         "target_id": "target-1",
@@ -1836,6 +1917,23 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
             "from": "aruco_grid",
             "to": "template_base",
             "state": "estimated",
+        },
+        "robot_pose_reference": {
+            "schema_version": "robot_pose_reference.v1",
+            "status": "verified",
+            "packet_schema_version": "robot_pose.v1",
+            "from": "robot_flange",
+            "to": "template_base",
+            "sunrise_reference_frame_path": "/PoseTestBot/TemplateBase",
+            "artifacts": ["raw_robot_ee_poses.json"],
+            "pose_counts": {"raw_robot_ee_poses.json": 1},
+            "artifact_bindings": [
+                {
+                    "path": "raw_robot_ee_poses.json",
+                    "size_bytes": len(robot_pose_payload),
+                    "sha256": hashlib.sha256(robot_pose_payload).hexdigest(),
+                }
+            ],
         },
         "solver_policy": "auto_compare",
         "pnp_methods": ["ITERATIVE"],
@@ -1858,10 +1956,16 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
         },
         "depth": {"scale_to_mm": 1.0},
     }
+    verified_snapshots = []
+
+    def fake_prepare_attempt_data(*args):
+        verified_snapshots.append(args[3])
+        return {sensor_key: attempt_root / "sensor"}, {sensor_key: intrinsic}
+
     monkeypatch.setattr(
         attempt_module,
         "_prepare_attempt_data",
-        lambda *_args: ({sensor_key: attempt_root / "sensor"}, {sensor_key: intrinsic}),
+        fake_prepare_attempt_data,
     )
     monkeypatch.setattr(
         attempt_module,
@@ -1885,6 +1989,7 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
     }
 
     def fake_time_offsets(*_args):
+        verified_snapshots.append(_args[4])
         attempt_module.atomic_write_json(
             attempt_root / "time_offset_search.json",
             time_offset_search,
@@ -1896,13 +2001,18 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
         "_estimate_and_apply_time_offsets",
         fake_time_offsets,
     )
+
+    def fake_authoritative_synchronization(*args):
+        verified_snapshots.append(args[5])
+        return (
+            {sensor_key: attempt_root / "sensor"},
+            {sensor_key: {"ITERATIVE": observations}},
+        )
+
     monkeypatch.setattr(
         attempt_module,
         "_materialize_authoritative_synchronization",
-        lambda *_args: (
-            {sensor_key: attempt_root / "sensor"},
-            {sensor_key: {"ITERATIVE": observations}},
-        ),
+        fake_authoritative_synchronization,
     )
 
     monkeypatch.chdir(tmp_path)
@@ -1911,6 +2021,9 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
     assert ranking["status"] == "complete"
     assert ranking["recommended_camera_count"] == 1
     assert ranking["results"][0]["recommendation"]["extrinsic_method"] == "park"
+    assert len(verified_snapshots) == 3
+    assert verified_snapshots[0] is verified_snapshots[1] is verified_snapshots[2]
+    assert set(verified_snapshots[0]) == {"raw_robot_ee_poses.json"}
     progress = json.loads((attempt_root / "progress.json").read_text())
     assert progress["status"] == "complete"
     assert [item["status"] for item in progress["phases"]] == [
@@ -1934,6 +2047,10 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
     )
     candidate_profile = candidate_profiles["profiles"][0]
     assert candidate_profile["sync_delta_ms"] == 0.0
+    assert (
+        candidate_profile["metadata"]["robot_pose_reference"]
+        == (request_value["robot_pose_reference"])
+    )
     assert candidate_profile["intrinsics"]["native"]["distortion_model"] == (
         "inverse_brown_conrady"
     )

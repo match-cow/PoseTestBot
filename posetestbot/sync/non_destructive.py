@@ -487,6 +487,7 @@ def synchronize_sensor_folder(
     required_frame_timestamp_domain: str | None = None,
     timestamp_fallback_allowed: bool = True,
     calibration_sync: Mapping[str, Any] | None = None,
+    raw_robot_poses: Mapping[str, Any] | None = None,
 ) -> SyncResult:
     sensor_path = Path(sensor_folder)
     run_path = Path(run_root) if run_root is not None else sensor_path.parent
@@ -526,9 +527,12 @@ def synchronize_sensor_folder(
         frame_records = load_frame_metadata(sensor_path)
         if not frame_records:
             raise ValueError(f"No frame metadata or RGB frames found in {sensor_path}")
-        raw_robot_poses = load_robot_poses(run_path, sensor_path)
+        if raw_robot_poses is None:
+            selected_robot_poses = load_robot_poses(run_path, sensor_path)
+        else:
+            selected_robot_poses = raw_robot_poses
         robot_records = indexed_robot_poses(
-            raw_robot_poses,
+            selected_robot_poses,
             timestamp_source=resolved_robot_timestamp_source,
         )
         intervals = motion_intervals(robot_records)
@@ -685,7 +689,7 @@ def synchronize_sensor_folder(
                 output_folder / DEPTH_DIR / output_frame_id, run_path
             )
 
-            matched[output_frame_id] = {
+            matched_record = {
                 "motion": motion,
                 "image_frame": timestamp_ns // 1_000_000,
                 "image_timestamp_ns": timestamp_ns,
@@ -712,6 +716,10 @@ def synchronize_sensor_folder(
                 "synchronized_depth": synchronized_depth,
                 "robot_ee_pose": closest_pose["pose"],
             }
+            source_packet = closest_pose.get("source_packet")
+            if isinstance(source_packet, Mapping):
+                matched_record["source_packet"] = dict(source_packet)
+            matched[output_frame_id] = matched_record
             derived_record = dict(frame_record)
             derived_record.update(
                 {
@@ -850,6 +858,7 @@ def synchronize_run(
     required_frame_timestamp_domain: str | None = None,
     timestamp_fallback_allowed: bool = True,
     calibration_sync: Mapping[str, Any] | None = None,
+    raw_robot_poses: Mapping[str, Any] | None = None,
 ) -> list[SyncResult]:
     """Synchronize discovered sensors or an explicit contained subset.
 
@@ -887,6 +896,11 @@ def synchronize_run(
             seen.add(resolved)
             selected.append(resolved)
 
+    if raw_robot_poses is not None and len(selected) != 1:
+        raise ValueError(
+            "A raw_robot_poses override requires exactly one selected sensor folder"
+        )
+
     for sensor_folder in selected:
         results.append(
             synchronize_sensor_folder(
@@ -901,6 +915,7 @@ def synchronize_run(
                 required_frame_timestamp_domain=required_frame_timestamp_domain,
                 timestamp_fallback_allowed=timestamp_fallback_allowed,
                 calibration_sync=calibration_sync,
+                raw_robot_poses=raw_robot_poses,
             )
         )
 

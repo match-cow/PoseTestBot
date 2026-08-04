@@ -54,12 +54,47 @@ metadata. This removes the former full-path field that reopened the current
 folder by default and made creating several runs under one storage root easy to
 miss.
 
-The Devices-to-run mounting path was audited rather than replaced. Sensor
-status already merges the reusable Devices `mounting_mode`, and first-time run
-setup already writes that per-camera value into `capture.sensors[]`; existing
-runs intentionally retain their saved mount. The unit contract now exercises
-`static` explicitly, and the desktop workflow regression verifies the mixed
-`eye_in_hand`/`static` request written to `run_config.json`.
+The Devices-to-run camera-settings path now has explicit persistence at both
+scopes. Devices aliases use a nearby per-camera save action; mounting and
+supported orientation selectors immediately write their reusable defaults.
+Every write adopts the server-returned file state, preserves disconnected
+records, and bypasses stale HTTP caches. Failed immediate saves visibly revert
+instead of leaving a false applied state. Desktop regressions change alias,
+robot-mounted/static mount, and normal/inverted orientation and prove all three
+survive a full reload. The page now labels those fields as reusable lab
+defaults and separates the browser-local next-run selection from the durable
+run handoff.
+
+Existing runs intentionally retain their own settings. Workflow step 1 exposes
+editable per-camera **Operator alias for this run**, **Mounting for this run**,
+and **Image orientation for this run** controls and writes them to
+`capture.sensors[]`. A mount or orientation change clears an incompatible
+per-camera profile and forces object-dataset setup to select compatible
+calibration evidence rather than silently reusing the old interpretation.
+Once capture status/logs, raw RGB-D/metadata, or raw robot poses exist, the
+camera identity, membership, mount, orientation, resolution, FPS, and
+synchronization contract and exact Sunrise robot-pose reference path are
+read-only; an alias-only correction remains safe.
+
+Static calibration now has one explicit end-to-end arrangement. A homogeneous
+static group selects a robot-carried target and records
+`placement.mounting_frame=robot_flange` with unknown attachment. The attempt
+uses the internal eye-to-hand equation without a second editable mounting
+choice, publishes `camera -> template_base` as its primary result, and jointly
+estimates `aruco_grid -> robot_flange` only as nuisance/support evidence. The
+robot-carried grid supplies multi-pose excitation; static cameras are not used
+to track the hand during object capture. The semantic `template_base` result is
+the physical `/PoseTestBot/PoseTemplateBase`. `/PoseTestBot/TemplateBase` is
+retained only as the calibration controller's motion-waypoint parent. A
+homogeneous eye-in-hand group records a fixed `template_base` target instead.
+Mixed calibration recordings are rejected
+with guidance to use separate runs. Preflight, attempt creation, and promotion
+recheck the saved camera/target frames, while promotion preserves the exact
+target selection rather than replacing it with a generic unknown placement.
+Legacy target selections without the new frame field remain loadable through
+the compatibility reader, but an unknown legacy placement is not inferred from
+mutable camera setup. Readiness, attempt creation, and promotion require an
+explicit target reselection.
 
 Dataset setup now assigns a promoted calibration source per enabled camera.
 One source may still cover the complete rig, while static and robot-mounted
@@ -70,10 +105,39 @@ read-only snapshot and replacement/CAS gates. The new
 `calibration_profile_selection.v2` record retains every source bundle and its
 assigned sensors; existing v1 selections remain loadable and unchanged.
 Source changes after publication cannot alter the combined run-owned bytes.
-All 1,030 default tests and all 58 desktop Playwright regressions pass,
-including the six focused contracts for these fixes. Ruff, frontend type
-checking, the Vite production build, and `git diff --check` also pass. No
-camera, robot, or physical capture was accessed for this work.
+Idempotence now compares the complete intended setup, exact sensor-to-profile
+mapping, and source provenance rather than bundle bytes alone. Managed BOP and
+BlenderProc preparation resolve every camera through that immutable mapping,
+so a composite collection cannot fall back to a heuristic profile choice.
+Static-profile reuse now also fails closed on physical-reference ambiguity.
+Calibration attempts extract the exact absolute Sunrise reference path from a
+coherent `robot_pose.v1` stream and retain `robot_pose_reference.v1` evidence in
+profile metadata without changing the `calibration.v2` schema. Workflow step 1
+visibly requires the expected path and stores it in dataset run configs at
+`frames.robot_pose.sunrise_reference_frame_path`; selection, immutable
+verification, preflight, and any existing destination raw pose stream require
+an exact match. New static calibration and dataset runs use
+`/PoseTestBot/PoseTemplateBase`, making their world-frame products directly
+compatible. Legacy/no-path static profiles and preexisting profiles captured
+relative to `/PoseTestBot/TemplateBase` remain readable but cannot be silently
+selected or relabelled for this dataset role. Eye-in-hand profiles remain
+base-independent. This path contract is software provenance only and does not
+replace commissioning evidence that the persistent Sunrise frame was not
+retaught.
+Attempt requests now hash- and size-bind every raw robot-pose artifact and
+rederive exact frame identity and per-artifact pose counts from those same
+bytes. Preparation, automatic offset estimation, and authoritative
+synchronization share that one verified in-memory snapshot, while synchronized
+matches retain their original `robot_pose.v1` `source_packet`. Mixed static and
+eye-in-hand BOP, BlenderProc, and Cell consumers verify those actual matched
+packets before using the static world frame.
+All 1,099 default tests and all 66 desktop Playwright regressions pass,
+including the alias/mount/orientation default reload, run-owned camera-setting,
+reference-frame provenance, three-static-camera arrangement, legacy fail-closed,
+and compatible-profile replacement contracts. Ruff, frontend type checking,
+the Vite production build, and `git diff --check` also pass. Read-only status
+commands were used; no camera was opened, robot command was sent, or physical
+capture was run.
 
 ## 2026-08-03 DIN A5/A6 Calibration Targets
 
@@ -803,14 +867,16 @@ interrupt active motion and exits the waiting calibration application.
 
 ## 2026-07-24 Ordinary IIWA Capture Candidate Hardening
 
-The repository's still-unconfirmed ordinary Sunrise candidate now uses a
-distinct persistent `/PoseTestBot/PoseTemplateBase` instead of the historical
-HRC or calibration reference. It remains disabled pending exact
+The repository's still-unconfirmed ordinary Sunrise candidate now uses the
+persistent `/PoseTestBot/PoseTemplateBase` instead of the historical HRC
+reference. Static-camera calibration pose streaming uses that same result
+frame; only the calibration motion waypoints remain below the separate
+`/PoseTestBot/TemplateBase`. The candidate remains disabled pending exact
 Sunrise.Workbench compilation, frame/path simulation, T1 commissioning, and
 deployed-application identification. The accompanying operator note explains
-how the calibration board, pose-template, and dataset reference transforms
-must remain explicit, including the non-portability of static-camera profiles
-between different bases.
+how the moving calibration board, pose-template, and dataset reference
+transforms remain explicit. Preexisting wrong-frame static profiles remain
+non-portable and are not relabelled.
 
 The candidate no longer moves before START or returns after its end marker. It
 converts `cartesian_velocity_m_s` into a bounded relative A1 speed from the

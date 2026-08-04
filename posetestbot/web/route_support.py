@@ -47,6 +47,8 @@ from posetestbot.config import (
 )
 from posetestbot.io.artifacts import (
     CAPTURE_EXECUTION_PLAN,
+    CAPTURE_EXECUTION_LOGS_DIR,
+    CAPTURE_EXECUTION_REPORT,
     CAPTURE_EXECUTION_STATUS,
     CAPTURE_PLAN,
     DEPTH_DIR,
@@ -284,17 +286,40 @@ def _persisted_capture_gate(value) -> str | None:
 
 
 def _raw_capture_evidence(run_root: str | Path) -> list[str]:
-    """Return material raw evidence that freezes hardware-sync semantics."""
+    """Return material raw evidence that freezes the recorded camera contract."""
 
     root = Path(run_root)
     evidence: list[str] = []
+    for artifact in (CAPTURE_EXECUTION_STATUS, CAPTURE_EXECUTION_REPORT):
+        if (root / artifact).is_file():
+            evidence.append(artifact)
+    logs = root / CAPTURE_EXECUTION_LOGS_DIR
+    if logs.is_dir() and any(logs.iterdir()):
+        evidence.append(CAPTURE_EXECUTION_LOGS_DIR)
     robot_poses = root / RAW_ROBOT_EE_POSES
     if robot_poses.is_file():
         evidence.append(RAW_ROBOT_EE_POSES)
     if not root.is_dir():
-        return evidence
+        return sorted(set(evidence))
+    raw_pose_stem = Path(RAW_ROBOT_EE_POSES).stem
+    for candidate in root.iterdir():
+        if (
+            candidate.name.startswith(raw_pose_stem)
+            and candidate.name != RAW_ROBOT_EE_POSES
+        ):
+            evidence.append(candidate.name)
+    root_metadata = root / FRAME_METADATA_JSONL
+    if root_metadata.is_file():
+        evidence.append(FRAME_METADATA_JSONL)
+    for directory in (RGB_DIR, DEPTH_DIR):
+        if any((root / directory).glob("*.png")):
+            evidence.append(directory)
     for child in sorted(root.iterdir()):
         if not child.is_dir() or child.name == "processed":
+            continue
+        child_robot_poses = child / RAW_ROBOT_EE_POSES
+        if child_robot_poses.is_file():
+            evidence.append(f"{child.name}/{RAW_ROBOT_EE_POSES}")
             continue
         metadata = child / FRAME_METADATA_JSONL
         if metadata.is_file():
@@ -305,10 +330,10 @@ def _raw_capture_evidence(run_root: str | Path) -> list[str]:
             continue
         if any((child / DEPTH_DIR).glob("*.png")):
             evidence.append(f"{child.name}/{DEPTH_DIR}")
-    return evidence
+    return sorted(set(evidence))
 
 
-def _hardware_sync_sensor_contract(sensors) -> list[tuple]:
+def _capture_sensor_contract(sensors) -> list[tuple]:
     """Return raw-data-relevant camera membership without mutable labels."""
 
     contract = []
@@ -326,6 +351,14 @@ def _hardware_sync_sensor_contract(sensors) -> list[tuple]:
             )
         )
     return sorted(contract)
+
+
+def _camera_contract_state(run_root: str | Path) -> dict:
+    blockers = _raw_capture_evidence(run_root)
+    return {
+        "mutable": not blockers,
+        "blockers": blockers,
+    }
 
 
 def _run_config_from_payload(data: dict):
@@ -354,6 +387,19 @@ def _run_config_from_payload(data: dict):
         and isinstance(existing_config.get("frames"), dict)
         else {}
     )
+    existing_robot_pose = (
+        existing_frames.get("robot_pose")
+        if isinstance(existing_frames.get("robot_pose"), dict)
+        else {}
+    )
+    existing_reference_path = existing_robot_pose.get(
+        "sunrise_reference_frame_path"
+    )
+    requested_reference_path = (
+        data.get("robot_pose_sunrise_reference_frame_path")
+        if "robot_pose_sunrise_reference_frame_path" in data
+        else existing_reference_path
+    )
     if "robot_mode" in data:
         raise ValueError("robot_mode is retired; run configs always use the real robot")
     if "sequence_options" in data:
@@ -375,7 +421,7 @@ def _run_config_from_payload(data: dict):
             f"{persisted_gate} is an execution gate and must not be persisted "
             "in run_config.json"
         )
-    mounting_mode = data.get("mounting_mode", "eye_in_hand")
+    mounting_mode = data.get("mounting_mode")
     if _truthy(data.get("from_detected_sensors"), default=False) and not data.get(
         "sensors"
     ):
@@ -389,7 +435,6 @@ def _run_config_from_payload(data: dict):
     elif "sensors" not in data and existing_capture.get("sensors"):
         sensors = sensor_configs_from_values(
             existing_capture["sensors"],
-            default_mounting_mode=mounting_mode,
         )
     else:
         sensors = sensor_configs_from_values(
@@ -415,15 +460,39 @@ def _run_config_from_payload(data: dict):
     requested_policy = capture_synchronization_from_mapping(
         requested_synchronization
     )
+    camera_contract_changed = existing_config is not None and (
+        _capture_sensor_contract(existing_capture.get("sensors", []))
+        != _capture_sensor_contract(sensors)
+        or str(existing_capture.get("resolution")) != str(resolution)
+        or int(existing_capture.get("fps", 0)) != requested_fps
+    )
+    if camera_contract_changed:
+        evidence = _raw_capture_evidence(run_root)
+        if evidence:
+            raise ValueError(
+                "Cannot change camera membership, mounting, orientation, "
+                "resolution, or frame rate after raw capture or robot-pose "
+                "evidence exists; create a new run: "
+                + ", ".join(evidence)
+            )
+    if requested_reference_path != existing_reference_path:
+        evidence = _raw_capture_evidence(run_root)
+        if evidence:
+            raise ValueError(
+                "Cannot change the expected Sunrise robot-pose reference frame "
+                "after raw capture or robot-pose evidence exists; create a new "
+                "run: "
+                + ", ".join(evidence)
+            )
     hardware_contract_changed = (
         existing_policy.to_dict() != requested_policy.to_dict()
         or (
             existing_policy.mode == "hardware_trigger"
             and (
-                _hardware_sync_sensor_contract(
+                _capture_sensor_contract(
                     existing_capture.get("sensors", [])
                 )
-                != _hardware_sync_sensor_contract(sensors)
+                != _capture_sensor_contract(sensors)
                 or str(existing_capture.get("resolution")) != str(resolution)
                 or int(existing_capture.get("fps", 0)) != requested_fps
             )
@@ -470,6 +539,7 @@ def _run_config_from_payload(data: dict):
         ),
         infer_when_omitted="calibration_profiles" not in data,
         expected_bundle_sha256=expected_calibration_bundle,
+        robot_pose_sunrise_reference_frame_path=requested_reference_path,
     )
     if selection_defaults is not None:
         selected_by_key = {
@@ -577,6 +647,7 @@ def _run_config_from_payload(data: dict):
             default=bool(existing_pipeline.get("plan_only", True)),
         ),
         fixed_transforms=fixed_transforms,
+        robot_pose_sunrise_reference_frame_path=requested_reference_path,
         synchronization=requested_policy,
     )
 
@@ -1118,6 +1189,7 @@ def run_config():
                 'config': config_dict,
                 'sequence_plan': plan.to_dict(),
                 'preflight': preflight,
+                'camera_contract': _camera_contract_state(run_root_value),
             }
         ), 201
 
@@ -1138,6 +1210,7 @@ def run_config():
             'config': config,
             'sequence_plan': plan.to_dict(),
             'preflight': preflight,
+            'camera_contract': _camera_contract_state(run_root),
         }
     )
 

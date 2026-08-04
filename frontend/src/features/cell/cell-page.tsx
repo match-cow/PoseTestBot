@@ -127,6 +127,12 @@ function entityStatusTone(status: CellEntity["status"]): StatusTone {
 function SelectionDetails({ entity }: { entity: CellEntity | null }) {
   if (!entity) return <div className="py-6 text-center text-sm text-muted-foreground"><Box className="mx-auto mb-2 size-5" />Nothing selected</div>
   const calibration = entity.calibration
+  const staticWorkcellCalibration = calibration?.mounting_mode === "static"
+  const calibrationFrameLabel = staticWorkcellCalibration
+    && calibration?.extrinsics.from === "camera"
+    && calibration.extrinsics.to === "template_base"
+    ? "camera → PoseTemplateBase"
+    : calibration ? `${calibration.extrinsics.from} → ${calibration.extrinsics.to}` : ""
   const solver = calibration?.evidence.promotion_solver_provenance
   const solverLabel = solver?.pnp_method || solver?.extrinsic_method
     ? [solver.pnp_method, solver.extrinsic_method].filter(Boolean).join(" + ")
@@ -145,14 +151,14 @@ function SelectionDetails({ entity }: { entity: CellEntity | null }) {
       {pdfUrl && <a className="inline-flex text-primary underline underline-offset-4" href={pdfUrl} target="_blank" rel="noreferrer">Open exact calibration-target PDF</a>}
     </div>}
     {calibration && <div data-testid="cell-calibration-evidence" className="space-y-4 rounded border border-success/30 p-3">
-      <div className="flex items-center justify-between gap-2"><div><div className="font-semibold">Calibration extrinsic</div><div className="mt-1 font-mono text-[10px]" data-testid="cell-calibration-transform-frames">{calibration.extrinsics.from} → {calibration.extrinsics.to}</div></div><StatusBadge status={calibration.status} tone="success" /></div>
+      <div className="flex items-center justify-between gap-2"><div><div className="font-semibold">{staticWorkcellCalibration ? "Reusable object-capture transform" : "Calibration extrinsic"}</div><div className="mt-1 font-mono text-[10px]" data-testid="cell-calibration-transform-frames">{calibrationFrameLabel}</div>{staticWorkcellCalibration && <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Primary static-camera profile for placing later object observations in PoseTemplateBase.</p>}</div><StatusBadge status={calibration.status} tone="success" /></div>
       <Matrix values={calibration.extrinsics.matrix} />
       <div className="grid grid-cols-1 gap-3">
         <Detail label="Quaternion WXYZ" value={vector(calibration.extrinsics.rotation_quaternion_wxyz, 7)} />
         <Detail label="Translation mm" value={vector(calibration.extrinsics.translation_mm, 4)} />
       </div>
       {calibration.companion_transform && <div data-testid="cell-calibration-companion" className="space-y-3 border-t pt-3">
-        <div><div className="font-semibold">Companion transform estimate</div><div className="mt-1 font-mono text-[10px]" data-testid="cell-calibration-companion-frames">{calibration.companion_transform.from} → {calibration.companion_transform.to}</div></div>
+        <div><div className="font-semibold">{staticWorkcellCalibration ? "Moving-grid attachment estimate · supporting evidence" : "Fixed-grid placement estimate · supporting evidence"}</div><div className="mt-1 font-mono text-[10px]" data-testid="cell-calibration-companion-frames">{calibration.companion_transform.from} → {calibration.companion_transform.to}</div>{staticWorkcellCalibration && <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Required to use the robot-carried grid's many poses, but not the reusable camera output or a hand-tracking result.</p>}</div>
         <Matrix values={calibration.companion_transform.matrix} testId="cell-calibration-companion-matrix" />
         <Detail label="Quaternion WXYZ" value={vector(calibration.companion_transform.rotation_quaternion_wxyz, 7)} />
         <Detail label="Translation mm" value={vector(calibration.companion_transform.translation_mm, 4)} />

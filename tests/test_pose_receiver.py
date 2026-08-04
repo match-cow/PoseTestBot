@@ -11,6 +11,7 @@ import pytest
 
 from posetestbot.config import RobotProfile
 from posetestbot.io.artifacts import DATASET_MANIFEST, RAW_ROBOT_EE_POSES
+from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.robot.pose_receiver import (
     CLAIM_SCHEMA_VERSION,
     PARTIAL_SCHEMA_VERSION,
@@ -443,6 +444,34 @@ def test_receiver_retains_v1_frame_identity_and_packet_loss_evidence(
     }
     assert saved["1"]["source_packet"]["sequence_delta"] == 2
     assert saved["1"]["source_packet"]["estimated_packets_lost"] == 1
+
+
+def test_receiver_rejects_stream_that_differs_from_run_reference_expectation(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "reference-mismatch"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            robot_pose_sunrise_reference_frame_path="/PoseTestBot/TemplateBase",
+        ),
+    )
+
+    with pytest.raises(PoseReceiverPacketError, match="does not match run_config"):
+        run_pose_receiver(
+            run_root,
+            profile=profile(),
+            allow_real_robot=True,
+            allow_cameras=True,
+            socket_factory=FakeSocketFactory(
+                FakeDatagramSocket(
+                    [(v1_packet(sequence=1), ("192.0.2.10", 40001))]
+                )
+            ),
+            send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
+            install_signal_handlers=False,
+        )
 
 
 def test_receiver_retains_complete_sender_cadence_evidence(tmp_path: Path) -> None:

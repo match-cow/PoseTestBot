@@ -24,6 +24,10 @@ from posetestbot.pipeline.run_config import (
     load_run_config_for_run_root,
     sequence_plan_from_run_config,
 )
+from posetestbot.robot.reference_frames import (
+    POSE_TEMPLATE_BASE_SUNRISE_PATH,
+    configured_sunrise_reference_frame_path,
+)
 from posetestbot.robot.status import collect_robot_status
 from posetestbot.runtime.status import collect_runtime_status
 from posetestbot.sensors.status import collect_sensor_status
@@ -144,12 +148,118 @@ def _enabled_sensor_count(config: Mapping[str, Any]) -> int:
     )
 
 
-def _non_dry_run_steps(plan) -> list[str]:
-    return [
-        step.id
-        for step in plan.steps
-        if step.options.get("dry_run") is False
+def _calibration_arrangement_check(
+    config: Mapping[str, Any],
+    target_selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    enabled = [
+        sensor
+        for sensor in config["capture"]["sensors"]
+        if sensor.get("enabled", True) is True
     ]
+    mountings = {str(sensor.get("mounting_mode") or "") for sensor in enabled}
+    if not enabled:
+        return _check(
+            "calibration_arrangement",
+            "error",
+            "Calibration recording requires at least one enabled camera.",
+        )
+    if not mountings.issubset({"eye_in_hand", "static"}) or len(mountings) != 1:
+        return _check(
+            "calibration_arrangement",
+            "error",
+            (
+                "A calibration recording must contain one camera mounting group. "
+                "Record static and robot-mounted cameras in separate runs."
+            ),
+            details={"camera_mounting_modes": sorted(mountings)},
+        )
+
+    camera_mounting = next(iter(mountings))
+    calibration_mode = "eye_to_hand" if camera_mounting == "static" else "eye_in_hand"
+    if camera_mounting == "static":
+        configured_reference = configured_sunrise_reference_frame_path(config)
+        if configured_reference != POSE_TEMPLATE_BASE_SUNRISE_PATH:
+            return _check(
+                "calibration_arrangement",
+                "error",
+                (
+                    "Static camera calibration must stream robot_flange poses in "
+                    f"{POSE_TEMPLATE_BASE_SUNRISE_PATH} so the solved camera "
+                    "extrinsics are expressed in the PoseTemplateBase dataset "
+                    "frame. Update Workflow step 1 before recording."
+                ),
+                details={
+                    "calibration_mode": calibration_mode,
+                    "camera_mounting_mode": camera_mounting,
+                    "required_sunrise_reference_frame_path": (
+                        POSE_TEMPLATE_BASE_SUNRISE_PATH
+                    ),
+                    "configured_sunrise_reference_frame_path": configured_reference,
+                },
+            )
+    expected_target_frame = (
+        "robot_flange" if camera_mounting == "static" else "template_base"
+    )
+    placement_mode = str(target_selection.get("placement_mode") or "")
+    recorded_target_frame = target_selection.get("mounting_frame")
+    if recorded_target_frame is None:
+        return _check(
+            "calibration_arrangement",
+            "error",
+            (
+                "The selected calibration target predates explicit physical "
+                "mounting. Reselect the target arrangement before recording or "
+                "calibration analysis; camera mounting must not reinterpret legacy "
+                "target evidence."
+            ),
+            details={
+                "calibration_mode": calibration_mode,
+                "camera_mounting_mode": camera_mounting,
+                "expected_target_mounting_frame": expected_target_frame,
+                "recorded_target_mounting_frame": None,
+                "placement_mode": placement_mode,
+            },
+        )
+    if recorded_target_frame != expected_target_frame:
+        return _check(
+            "calibration_arrangement",
+            "error",
+            (
+                f"{calibration_mode} calibration requires the target mounted in "
+                f"{expected_target_frame}, but the selected target records "
+                f"{recorded_target_frame}. Return to target selection or create "
+                "a new run."
+            ),
+            details={
+                "calibration_mode": calibration_mode,
+                "camera_mounting_mode": camera_mounting,
+                "expected_target_mounting_frame": expected_target_frame,
+                "recorded_target_mounting_frame": recorded_target_frame,
+                "placement_mode": placement_mode,
+            },
+        )
+    transform_state = "estimated" if placement_mode == "unknown" else "known"
+    return _check(
+        "calibration_arrangement",
+        "ok",
+        (
+            f"{calibration_mode} arrangement is explicit: {camera_mounting} "
+            f"camera group, target mounted in {expected_target_frame}, and "
+            f"grid-to-mount transform {transform_state}."
+        ),
+        details={
+            "calibration_mode": calibration_mode,
+            "camera_mounting_mode": camera_mounting,
+            "target_mounting_frame": expected_target_frame,
+            "target_transform_state": transform_state,
+            "placement_mode": placement_mode,
+        },
+    )
+
+
+def _non_dry_run_steps(plan) -> list[str]:
+    return [step.id for step in plan.steps if step.options.get("dry_run") is False]
 
 
 def _runtime_lookup(runtimes: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
@@ -169,7 +279,10 @@ def _runtime_requirements(plan, runtimes: Mapping[str, Any]) -> list[dict[str, A
     for step in plan.steps:
         if step.options.get("dry_run") is not False:
             continue
-        if step.stage_id == "blenderproc_render" and step.options.get("objectless") is True:
+        if (
+            step.stage_id == "blenderproc_render"
+            and step.options.get("objectless") is True
+        ):
             # Objectless rendering writes a successful skipped plan without
             # invoking BlenderProc, so its executable is not a requirement.
             continue
@@ -204,9 +317,7 @@ def _calibration_profile_inputs(
     inputs: list[dict[str, Any]] = []
     configured = config.get("calibration_profiles")
     if isinstance(configured, str) and configured.strip():
-        inputs.append(
-            {"source": "run_config.calibration_profiles", "path": configured}
-        )
+        inputs.append({"source": "run_config.calibration_profiles", "path": configured})
 
     has_calibration_preflight = False
     for step in plan.steps:
@@ -342,6 +453,8 @@ def build_run_preflight(
                     details=target_selection,
                 )
             )
+            if config.get("dataset_mode") == "objectless":
+                checks.append(_calibration_arrangement_check(config, target_selection))
         except Exception as exc:
             checks.append(
                 _check(
@@ -409,7 +522,8 @@ def build_run_preflight(
                 _check(
                     "calibration_profile_selection",
                     "ok",
-                    "Reusable calibration snapshots, hashes, and camera mapping are verified.",
+                    "Reusable calibration snapshots, hashes, camera mapping, and "
+                    "required static-camera Sunrise reference provenance are verified.",
                     details=selection,
                 )
             )
@@ -529,9 +643,7 @@ def build_run_preflight(
                     )
                 ),
             )
-            calibration_status = str(
-                calibration_report.get("overall_status", "error")
-            )
+            calibration_status = str(calibration_report.get("overall_status", "error"))
             checks.append(
                 _check(
                     "calibration_readiness",
@@ -567,7 +679,9 @@ def build_run_preflight(
             )
 
     if sensors is not None:
-        expected_counts_requested = bool(sensors.get("expected_counts_requested")) or any(
+        expected_counts_requested = bool(
+            sensors.get("expected_counts_requested")
+        ) or any(
             isinstance(family, Mapping) and family.get("expected_count") is not None
             for family in sensors.get("families", [])
         )
@@ -600,9 +714,7 @@ def build_run_preflight(
     if runtimes is not None:
         requirements = _runtime_requirements(plan, runtimes)
         missing_requirements = [
-            requirement
-            for requirement in requirements
-            if not requirement["available"]
+            requirement for requirement in requirements if not requirement["available"]
         ]
         runtime_status = "ok" if runtimes["all_available"] else "warning"
         if missing_requirements and not plan_only:

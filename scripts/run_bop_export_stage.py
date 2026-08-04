@@ -36,6 +36,7 @@ from posetestbot.bop.writer import (
     write_bop_targets,
 )
 from posetestbot.calibration.profiles import (
+    CalibrationProfile,
     load_profile_collection,
     select_valid_profile_for_sensor,
 )
@@ -43,6 +44,9 @@ from posetestbot.calibration.rectification import (
     RECTIFIED_DIR,
     rgbd_camera_artifact_fingerprint,
     validate_rectification_provenance,
+)
+from posetestbot.calibration.static_reuse import (
+    verify_static_profile_destination_reference,
 )
 from posetestbot.io.atomic import replace_directory
 from posetestbot.io.artifacts import (
@@ -58,6 +62,7 @@ from posetestbot.io.artifacts import (
     CALIBRATION_PROFILES,
     CALIBRATION_PROFILE_SELECTION,
     DEPTH_DIR,
+    MATCH_ROBOT_EE_POSES,
     MODELS_DIR,
     MODELS_EVAL_DIR,
     OBJECT_INSTANCES,
@@ -75,12 +80,16 @@ from posetestbot.pipeline.run_config import (
     capture_synchronization_from_mapping,
     load_run_config_for_run_root,
 )
-from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
+from posetestbot.pipeline.sensor_selection import (
+    enabled_sensor_mounting_modes_by_folder,
+    filter_enabled_sensor_folders,
+)
 from posetestbot.pose_templates.selection import (
     load_pose_template_selection,
     prepare_object_instances,
 )
 from posetestbot.sync.hardware import load_hardware_sync_frame_groups
+from posetestbot.sensors.contracts import MountingMode
 from posetestbot.sensors.registry import sensor_folder_name
 from posetestbot.sensors.hardware_sync_qualification import (
     validate_hardware_sync_qualification,
@@ -200,6 +209,39 @@ def _selected_calibration_configured(run_root: Path, run_config: dict | None) ->
     return (run_config or {}).get("calibration_profile_selection") is not None or (
         run_root / CALIBRATION_PROFILE_SELECTION
     ).exists()
+
+
+def calibration_profile_for_sensor(
+    profiles: list[CalibrationProfile],
+    sensor_name: str,
+    *,
+    profile_ids_by_sensor_name: Mapping[str, str] | None = None,
+    mounting_modes_by_sensor_name: Mapping[str, MountingMode] | None = None,
+) -> CalibrationProfile:
+    """Resolve a BOP camera profile, honoring managed selection when present."""
+
+    profile_id = None
+    if profile_ids_by_sensor_name is not None:
+        try:
+            profile_id = profile_ids_by_sensor_name[sensor_name]
+        except KeyError as exc:
+            raise KeyError(
+                f"Calibration selection has no profile for {sensor_name!r}"
+            ) from exc
+    mounting_mode = None
+    if mounting_modes_by_sensor_name is not None:
+        try:
+            mounting_mode = mounting_modes_by_sensor_name[sensor_name]
+        except KeyError as exc:
+            raise KeyError(
+                f"Run configuration has no mounting mode for {sensor_name!r}"
+            ) from exc
+    return select_valid_profile_for_sensor(
+        profiles,
+        sensor_name,
+        mounting_mode=mounting_mode,
+        profile_id=profile_id,
+    )
 
 
 def _load_required_hardware_frame_groups(
@@ -591,6 +633,9 @@ def main() -> None:
             run_config = load_run_config_for_run_root(run_root)
         except FileNotFoundError:
             run_config = None
+        mounting_modes_by_sensor_name = enabled_sensor_mounting_modes_by_folder(
+            run_config
+        )
         hardware_frame_groups = _load_required_hardware_frame_groups(
             run_root,
             run_config,
@@ -605,6 +650,7 @@ def main() -> None:
             if hardware_frame_groups is not None and run_config is not None
             else {}
         )
+        calibration_profile_ids_by_sensor_name = None
         if _selected_calibration_configured(run_root, run_config):
             if calibration_profiles_path is None:
                 raise ValueError(
@@ -612,12 +658,19 @@ def main() -> None:
                     "calibration_profiles snapshot to BOP export"
                 )
             from posetestbot.calibration.profile_library import (
+                selected_calibration_profile_ids_by_sensor_folder,
                 verify_calibration_profile_selection,
             )
 
-            verify_calibration_profile_selection(
+            calibration_selection = verify_calibration_profile_selection(
                 run_root,
                 expected_calibration_profiles=calibration_profiles_path,
+            )
+            calibration_profile_ids_by_sensor_name = (
+                selected_calibration_profile_ids_by_sensor_folder(
+                    run_root,
+                    selection=calibration_selection,
+                )
             )
             from posetestbot.sync.calibration_policy import (
                 resolve_calibration_profile_sync_policy,
@@ -654,6 +707,30 @@ def main() -> None:
         )
         if calibration_profiles_path is not None and not calibration_profiles:
             raise ValueError("Calibration profile collection must not be empty")
+        calibration_profiles_by_sensor_name = (
+            {
+                sensor_folder.name: calibration_profile_for_sensor(
+                    calibration_profiles,
+                    sensor_folder.name,
+                    profile_ids_by_sensor_name=(
+                        calibration_profile_ids_by_sensor_name
+                    ),
+                    mounting_modes_by_sensor_name=mounting_modes_by_sensor_name,
+                )
+                for sensor_folder in sensor_folders
+            }
+            if calibration_profiles_path is not None
+            else {}
+        )
+        verify_static_profile_destination_reference(
+            run_root,
+            run_config,
+            calibration_profiles_by_sensor_name.values(),
+            matched_robot_pose_paths_by_sensor_name={
+                sensor_folder.name: sensor_folder / MATCH_ROBOT_EE_POSES
+                for sensor_folder in sensor_folders
+            },
+        )
 
         staging_folder.parent.mkdir(parents=True, exist_ok=True)
         staging_folder.mkdir(parents=False, exist_ok=False)
@@ -705,12 +782,8 @@ def main() -> None:
                     "Hardware-sync BOP input does not exactly cover the "
                     f"authoritative sensor set: {sensor_folder.name}"
                 )
-            calibration_profile = (
-                select_valid_profile_for_sensor(
-                    calibration_profiles, sensor_folder.name
-                )
-                if calibration_profiles_path is not None
-                else None
+            calibration_profile = calibration_profiles_by_sensor_name.get(
+                sensor_folder.name
             )
             portable_sensor_folder = (
                 _portable_run_path(sensor_folder, run_root) or sensor_folder.name

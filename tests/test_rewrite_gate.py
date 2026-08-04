@@ -48,6 +48,7 @@ from posetestbot.pipeline.run_config import (
     create_run_config,
     write_run_config,
 )
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 from posetestbot.sensors.hardware_sync_qualification import (
     record_hardware_sync_qualification,
     validate_hardware_sync_qualification,
@@ -883,6 +884,77 @@ def test_bop_export_readiness_requires_matching_pose_template_instance_evidence(
     assert clean_checks["bop_targets"]["details"]["target_count"] == 1
 
 
+def _static_robot_pose_reference(
+    path: str = POSE_TEMPLATE_BASE_SUNRISE_PATH,
+) -> dict[str, str]:
+    return {
+        "schema_version": "robot_pose_reference.v1",
+        "status": "verified",
+        "packet_schema_version": "robot_pose.v1",
+        "from": "robot_flange",
+        "to": "template_base",
+        "sunrise_reference_frame_path": path,
+    }
+
+
+def _populate_static_calibration_validation_gate(
+    run_root: Path,
+    *,
+    robot_pose_reference: dict[str, str] | None,
+) -> None:
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "static-123",
+                    "Static RealSense",
+                    mounting_mode="static",
+                ),
+            ),
+        ),
+    )
+    write_json(
+        run_root / CALIBRATION_VALIDATION_REPORT,
+        {
+            "schema_version": "calibration_validation_report.v1",
+            "overall_status": "ok",
+            "profile_count": 1,
+            "promotable_profile_count": 1,
+            "promotion": {
+                "requested": True,
+                "promoted": True,
+                "profile_count": 1,
+                "promoted_profile_ids": ["profile-static"],
+                "path": CALIBRATION_PROFILES,
+            },
+        },
+    )
+    profile: dict[str, object] = {
+        "profile_id": "profile-static",
+        "sensor_id": "static-123",
+        "sensor_type": "realsense_d435",
+        "mounting_mode": "static",
+        "status": "valid",
+        "quality": {
+            "num_inliers": 8,
+            "residual_translation_mm": 1.0,
+            "residual_rotation_deg": 0.5,
+        },
+    }
+    if robot_pose_reference is not None:
+        profile["metadata"] = {"robot_pose_reference": robot_pose_reference}
+    write_json(
+        run_root / CALIBRATION_PROFILES,
+        {
+            "schema_version": "calibration_profiles.v1",
+            "profiles": [profile],
+        },
+    )
+
+
 def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> None:
     run_root = tmp_path / "calibration-run"
     write_run_config(
@@ -940,6 +1012,62 @@ def test_calibration_validation_gate_ready_after_promotion(tmp_path: Path) -> No
 
     assert report["gate_id"] == CALIBRATION_VALIDATION_GATE_ID
     assert report["overall_status"] == "ready"
+
+
+def test_calibration_validation_gate_accepts_canonical_static_reference(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "canonical-static-calibration-run"
+    _populate_static_calibration_validation_gate(
+        run_root,
+        robot_pose_reference=_static_robot_pose_reference(),
+    )
+
+    report = build_calibration_validation_gate_report(run_root)
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["overall_status"] == "ready"
+    assert checks["calibration_profiles"]["status"] == "ready"
+    assert checks["calibration_profiles"]["details"]["profiles"][0][
+        "static_reference_requirement_met"
+    ]
+    assert checks["calibration_profile_sensor_coverage"]["status"] == "ready"
+
+
+@pytest.mark.parametrize(
+    "robot_pose_reference",
+    [
+        None,
+        _static_robot_pose_reference("/PoseTestBot/TemplateBase"),
+        {
+            **_static_robot_pose_reference(),
+            "packet_schema_version": "robot_pose.v0",
+        },
+    ],
+    ids=("unprovenanced", "wrong-path", "malformed-verified-evidence"),
+)
+def test_calibration_validation_gate_blocks_noncanonical_static_reference(
+    tmp_path: Path,
+    robot_pose_reference: dict[str, str] | None,
+) -> None:
+    run_root = tmp_path / "noncanonical-static-calibration-run"
+    _populate_static_calibration_validation_gate(
+        run_root,
+        robot_pose_reference=robot_pose_reference,
+    )
+
+    report = build_calibration_validation_gate_report(run_root)
+
+    checks = {check["name"]: check for check in report["checks"]}
+    profile_check = checks["calibration_profiles"]
+    coverage_check = checks["calibration_profile_sensor_coverage"]
+    assert report["overall_status"] == "blocked"
+    assert profile_check["status"] == "blocked"
+    assert not profile_check["details"]["profiles"][0][
+        "static_reference_requirement_met"
+    ]
+    assert coverage_check["status"] == "blocked"
+    assert coverage_check["details"]["sensors"][0]["matching_profile_ids"] == []
 
 
 def test_calibration_validation_gate_allows_preserved_valid_profiles(

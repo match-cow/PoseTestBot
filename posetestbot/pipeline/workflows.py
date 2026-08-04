@@ -72,16 +72,14 @@ OPERATOR_WORKFLOWS: dict[str, OperatorWorkflow] = {
         label="Calibrate cameras",
         description=(
             "Record the printed calibration grid, calculate camera intrinsics and "
-            "camera-to-robot transforms, then review and save a reusable calibration."
+            "mount-aware camera extrinsics, then review and save a reusable "
+            "calibration."
         ),
         outcome=(
             "A promoted calibration profile set that can be selected by later object "
             "dataset runs."
         ),
-        recommended_sequence_ids=(
-            "real_full_capture_validation",
-            "aruco_grid_full_calibration",
-        ),
+        recommended_sequence_ids=("real_full_capture_validation",),
         steps=(
             OperatorWorkflowStep(
                 number=1,

@@ -714,11 +714,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
     ),
     "calibration_candidates": PipelineStageSpec(
         id="calibration_candidates",
-        label="Calibration Candidates",
+        label="Legacy Calibration Candidates",
         script="scripts/run_calibration_candidates.py",
         description=(
-            "Average calibration observations into validation-gated calibration "
-            "profile candidates."
+            "Known-target/compatibility path for averaging calibration observations. "
+            "It is not the guided moving-grid static-camera solve; use Workflow "
+            "step 5 to estimate camera-to-PoseTemplateBase with a robot-carried grid."
         ),
         resources=("disk_io",),
         parameters=(
@@ -761,12 +762,12 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
     ),
     "calibration_solver": PipelineStageSpec(
         id="calibration_solver",
-        label="Calibration Solver",
+        label="Legacy Known-Target Solver",
         script="scripts/run_calibration_solver.py",
         description=(
-            "Solve needs-validation calibration profiles from calibration "
-            "observations. Eye-in-hand sensors use OpenCV hand-eye solving; "
-            "static sensors use target/reference transform consistency."
+            "Compatibility solver for a fixed/known target-to-reference transform. "
+            "It cannot solve the guided static-camera arrangement with an unknown "
+            "robot-carried grid; use Workflow step 5 for that joint solve."
         ),
         resources=("disk_io",),
         parameters=(

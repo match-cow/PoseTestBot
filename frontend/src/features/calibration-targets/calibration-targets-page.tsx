@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/empty-state"
 import { HelpTip } from "@/components/help-tip"
 import { PageHeader } from "@/components/page-header"
 import { ProcessHandoff } from "@/components/process-handoff"
+import { CalibrationArrangementCard, calibrationArrangementForSensors, effectiveCalibrationTargetMountingFrame, POSE_TEMPLATE_BASE_SUNRISE_PATH, type CalibrationArrangement, type CalibrationTargetMountingFrame } from "@/components/calibration-arrangement"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -15,7 +16,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ApiError, api, errorMessage, query } from "@/lib/api"
-import type { Job } from "@/lib/contracts"
+import type { Job, RunConfig } from "@/lib/contracts"
 import { useOperator } from "@/providers/operator-provider"
 
 type GeneratorStatus = {
@@ -64,7 +65,7 @@ type Bundle = {
   valid: boolean
   error?: string
   selected: boolean
-  selected_placement?: { mode: string } | null
+  selected_placement?: { mode: string; mounting_frame?: CalibrationTargetMountingFrame } | null
   geometry_sha256?: string
   target?: {
     target_bounds: { width_mm: number; height_mm: number }
@@ -84,9 +85,14 @@ type SelectionResponse = {
 }
 
 const placementLabels = {
-  unknown: "Unknown placement",
-  template_base_identity: "Aligned to template base",
-  posegridgen_board_to_base: "Use PoseGridGen board pose",
+  unknown: "Fixed target; estimate grid → PoseTemplateBase",
+  template_base_identity: "Grid aligned to PoseTemplateBase",
+  posegridgen_board_to_base: "Use PoseGridGen grid → PoseTemplateBase pose",
+}
+
+type RunConfigResponse = {
+  config: RunConfig
+  camera_contract?: { mutable: boolean; blockers: string[] }
 }
 
 export function CalibrationTargetsPage() {
@@ -95,6 +101,7 @@ export function CalibrationTargetsPage() {
   const status = useQuery({ queryKey: ["calibration-targets", "status"], queryFn: () => api<GeneratorStatus>("/calibration-targets/status"), staleTime: 30_000 })
   const capabilities = useQuery({ queryKey: ["calibration-targets", "capabilities"], queryFn: () => api<Capabilities>("/calibration-targets/capabilities"), enabled: status.data?.generation_available === true, staleTime: Infinity })
   const library = useQuery({ queryKey: ["calibration-targets", "bundles", selectedRun], queryFn: () => api<LibraryResponse>(query("/calibration-targets/bundles", { run_root: selectedRun })) })
+  const runConfig = useQuery({ queryKey: ["run-config", selectedRun], queryFn: () => api<RunConfigResponse>(query("/run-config", { run_root: selectedRun })), retry: false })
   const [configurationOverride, setConfiguration] = useState<Configuration | null>(null)
   const [displayName, setDisplayName] = useState("")
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -106,6 +113,27 @@ export function CalibrationTargetsPage() {
   const [pendingJob, setPendingJob] = useState<{ id: string; kind: "generate" | "select"; runRoot?: string } | null>(null)
 
   const configuration = configurationOverride ?? capabilities.data?.defaults ?? null
+  const arrangement: CalibrationArrangement = (() => {
+    if (runConfig.isPending) {
+      return {
+        status: "blocked",
+        reason: "no_enabled_cameras",
+        title: "Loading the active run's camera setup",
+        message: "Target selection is disabled until the run-owned camera mounting has been loaded.",
+      }
+    }
+    if (!runConfig.data?.config) {
+      return {
+        status: "blocked",
+        reason: "no_enabled_cameras",
+        title: "Save Workflow step 1 first",
+        message: runConfig.error instanceof ApiError && runConfig.error.status === 404
+          ? "This run has no saved camera setup. Configure its cameras before selecting a target."
+          : `The active run's camera setup could not be loaded${runConfig.error ? `: ${errorMessage(runConfig.error)}` : "."}`,
+      }
+    }
+    return calibrationArrangementForSensors(runConfig.data.config.capture.sensors)
+  })()
 
   const serialized = useMemo(() => configuration ? JSON.stringify(configuration) : "", [configuration])
   useEffect(() => {
@@ -173,7 +201,18 @@ export function CalibrationTargetsPage() {
     onError: (error) => toast.error("Generation was not queued", { description: errorMessage(error) }),
   })
   const select = useMutation({
-    mutationFn: () => api<SelectionResponse>(`/calibration-targets/bundles/${selection!.target_id}/select`, { method: "POST", body: JSON.stringify({ run_root: selectedRun, placement }) }),
+    mutationFn: () => {
+      if (arrangement.status !== "ready") throw new Error(arrangement.message)
+      const selectedPlacement = arrangement.mountingFrame === "robot_flange" ? "unknown" : placement
+      return api<SelectionResponse>(`/calibration-targets/bundles/${selection!.target_id}/select`, {
+        method: "POST",
+        body: JSON.stringify({
+          run_root: selectedRun,
+          placement: selectedPlacement,
+          mounting_frame: arrangement.mountingFrame,
+        }),
+      })
+    },
     onSuccess: (result) => {
       if (result.status === "unchanged") {
         setSelection(null)
@@ -205,27 +244,41 @@ export function CalibrationTargetsPage() {
     onError: (error) => toast.error("Calibration target was not deleted", { description: errorMessage(error) }),
   })
   const active = library.data?.bundles.find((item) => item.selected)
+  const activeMountingFrame = effectiveCalibrationTargetMountingFrame(active?.selected_placement)
   const targetReplacementBlockers = library.data?.replacement_blockers ?? []
   const targetSelectionLocked = Boolean(active && targetReplacementBlockers.length)
   const selectedPlacement = selection?.selected_placement?.mode as keyof typeof placementLabels | undefined
-  const selectionIsCurrent = Boolean(selection?.selected && selectedPlacement === placement)
+  const selectedMountingFrame = effectiveCalibrationTargetMountingFrame(selection?.selected_placement)
+  const requestedPlacement = arrangement.status === "ready" && arrangement.mountingFrame === "robot_flange" ? "unknown" : placement
+  const requestedMountingFrame = arrangement.status === "ready" ? arrangement.mountingFrame : null
+  const selectionIsCurrent = Boolean(
+    selection?.selected
+    && selectedPlacement === requestedPlacement
+    && selectedMountingFrame === requestedMountingFrame,
+  )
   const selectionWouldReplace = Boolean(selection && !selectionIsCurrent && active)
-  const selectionBlocked = targetSelectionLocked && selectionWouldReplace
+  const selectionBlocked = arrangement.status !== "ready" || (targetSelectionLocked && selectionWouldReplace)
+  const targetSetupBlocked = arrangement.status !== "ready"
   const openSelection = (bundle: Bundle) => {
     setSelection(bundle)
-    setPlacement((bundle.selected_placement?.mode as keyof typeof placementLabels) || "unknown")
+    setPlacement(
+      arrangement.status === "ready" && arrangement.mountingFrame === "robot_flange"
+        ? "unknown"
+        : (bundle.selected_placement?.mode as keyof typeof placementLabels) || "unknown",
+    )
   }
 
   if (status.isPending) return <div className="grid min-h-[60vh] place-items-center text-sm text-muted-foreground">Checking PoseGridGen…</div>
   if (!status.data?.generation_available) return <div className="space-y-6">
     <PageHeader eyebrow="Reusable calibration geometry" title="Calibration Targets" description="Browse and select saved targets even while PoseGridGen generation is unavailable." />
     <ProcessHandoff title="The selected target is camera-calibration step 2" description="A saved target remains usable without the generator. Select the bundle that exactly matches the printed board, then return to readiness in the guided calibration workflow." to="/workflow/calibration?step=target" action="Open calibration step 2" />
+    <CalibrationArrangementCard arrangement={arrangement} editHref="/workflow/calibration?step=configure" testId="calibration-target-arrangement" />
     {targetSelectionLocked && active && <TargetReuseNotice bundle={active} blockers={targetReplacementBlockers} />}
     <Card className="border-warning/40"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><ScanLine className="size-5 text-warning" />Target generation is unavailable</CardTitle><CardDescription>{status.data?.generator.reason ?? "The pinned PoseGridGen source checkout could not be initialized."}</CardDescription></CardHeader><CardContent><div className="rounded border bg-muted p-3 font-mono text-xs">git submodule update --init third_party/PoseGridGen<br />bash scripts/install.sh --with-posegridgen</div></CardContent></Card>
     <div><h2 className="text-xl font-semibold">Saved target library</h2><p className="mt-1 text-sm text-muted-foreground">Existing immutable geometry remains fully usable for calibration attempts.</p></div>
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{library.data?.bundles.map((bundle) => <Card key={bundle.target_id} className={bundle.selected ? "border-primary/40" : ""}><CardHeader><CardTitle className="text-base">{bundle.display_name ?? bundle.target_id}</CardTitle><CardDescription className="font-mono text-[10px]">{bundle.target_id}</CardDescription></CardHeader><CardContent className="space-y-3">{bundle.valid ? <><TargetLibraryPreview bundle={bundle} /><div className="text-xs text-muted-foreground">{bundle.target?.grid_size?.join(" × ")} markers · {bundle.target?.target_bounds.width_mm.toFixed(1)} × {bundle.target?.target_bounds.height_mm.toFixed(1)} mm</div><div className="flex flex-wrap gap-2"><DownloadLink bundle={bundle} artifact="source" icon={<FileJson />} /><DownloadLink bundle={bundle} artifact="target" icon={<FileJson />} /><DownloadLink bundle={bundle} artifact="pdf" icon={<FileText />} /></div><Button className="w-full" variant={bundle.selected ? "outline" : "default"} disabled={!bundle.selected && targetSelectionLocked} title={!bundle.selected && targetSelectionLocked ? "This run already has target-dependent evidence. Start a fresh run to reuse a different saved target." : undefined} onClick={() => openSelection(bundle)}>{bundle.selected ? "Review active target" : "Select for run"}</Button>{!bundle.selected && targetSelectionLocked && <p data-testid="calibration-target-disabled-reason" className="text-[11px] leading-relaxed text-warning-foreground">This run already has target-dependent evidence. Start a fresh run to select a different target.</p>}</> : <div className="text-xs text-destructive">Invalid bundle: {bundle.error}</div>}</CardContent></Card>)}</div>
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{library.data?.bundles.map((bundle) => <Card key={bundle.target_id} className={bundle.selected ? "border-primary/40" : ""}><CardHeader><CardTitle className="text-base">{bundle.display_name ?? bundle.target_id}</CardTitle><CardDescription className="font-mono text-[10px]">{bundle.target_id}</CardDescription></CardHeader><CardContent className="space-y-3">{bundle.valid ? <><TargetLibraryPreview bundle={bundle} /><div className="text-xs text-muted-foreground">{bundle.target?.grid_size?.join(" × ")} markers · {bundle.target?.target_bounds.width_mm.toFixed(1)} × {bundle.target?.target_bounds.height_mm.toFixed(1)} mm</div><div className="flex flex-wrap gap-2"><DownloadLink bundle={bundle} artifact="source" icon={<FileJson />} /><DownloadLink bundle={bundle} artifact="target" icon={<FileJson />} /><DownloadLink bundle={bundle} artifact="pdf" icon={<FileText />} /></div><Button className="w-full" variant={bundle.selected ? "outline" : "default"} disabled={!bundle.selected && (targetSelectionLocked || targetSetupBlocked)} title={!bundle.selected && targetSelectionLocked ? "This run already has target-dependent evidence. Start a fresh run to reuse a different saved target." : !bundle.selected && targetSetupBlocked ? "Save one homogeneous camera mounting group in Workflow step 1 first." : undefined} onClick={() => openSelection(bundle)}>{bundle.selected ? "Review active target" : "Select for run"}</Button>{!bundle.selected && targetSelectionLocked && <p data-testid="calibration-target-disabled-reason" className="text-[11px] leading-relaxed text-warning-foreground">This run already has target-dependent evidence. Start a fresh run to select a different target.</p>}{!bundle.selected && targetSetupBlocked && <p data-testid="calibration-target-setup-disabled-reason" className="text-[11px] leading-relaxed text-destructive">Target selection needs one saved camera mounting group in Workflow step 1.</p>}</> : <div className="text-xs text-destructive">Invalid bundle: {bundle.error}</div>}</CardContent></Card>)}</div>
     {library.data?.bundles.length === 0 && <EmptyState icon={Grid3X3} title="No saved targets" description="Generation must be restored before a new target can be created." />}
-    <TargetSelectionDialog selection={selection} placement={placement} placementLocked={Boolean(selection?.selected && targetSelectionLocked)} selectionBlocked={selectionBlocked} selectionIsCurrent={selectionIsCurrent} busy={select.isPending || pendingJob !== null} onPlacementChange={setPlacement} onClose={() => setSelection(null)} onSelect={() => select.mutate()} />
+    <TargetSelectionDialog selection={selection} placement={placement} arrangement={arrangement} placementLocked={Boolean(selection?.selected && targetSelectionLocked)} selectionBlocked={selectionBlocked} selectionIsCurrent={selectionIsCurrent} busy={select.isPending || pendingJob !== null} onPlacementChange={setPlacement} onClose={() => setSelection(null)} onSelect={() => select.mutate()} />
   </div>
   if (!configuration || !capabilities.data) return <div className="grid min-h-[60vh] place-items-center text-sm text-muted-foreground">Loading generator capabilities…</div>
 
@@ -241,8 +294,9 @@ export function CalibrationTargetsPage() {
   return <div className="space-y-6">
     <PageHeader eyebrow="Printable calibration geometry" title="Calibration Targets" description="Preview compensated ArUco geometry, generate immutable JSON/PDF bundles, then explicitly select one for the active run." />
     <ProcessHandoff title="Author here, then continue camera calibration" description="Generating a bundle only adds it to the reusable library. Selecting it binds the exact geometry and placement to the active run; readiness and recording stay in the guided workflow." to="/workflow/calibration?step=target" action="Open calibration step 2" />
+    <CalibrationArrangementCard arrangement={arrangement} editHref="/workflow/calibration?step=configure" testId="calibration-target-arrangement" />
     {pendingJob && <Card className="border-primary/30"><CardContent className="flex items-center justify-between gap-4 py-4"><div><div className="text-xs uppercase tracking-wide text-muted-foreground">{pendingJob.kind === "generate" ? "Reusable-library generation" : "Run selection"} job</div><div className="mt-1 flex items-center gap-2 font-mono text-sm"><LoaderCircle className="size-4 animate-spin" />{pendingJob.id} · {job.data?.job.status ?? "queued"}</div>{pendingJob.runRoot && <p className="mt-1 break-all text-xs text-muted-foreground">Selection is being written for <span className="font-mono">{pendingJob.runRoot}</span>, even if the active folder changes.</p>}</div><Button variant="outline" asChild><Link to="/jobs">Open Jobs</Link></Button></CardContent></Card>}
-    {active && <Card className="border-primary/30"><CardContent className="flex items-center justify-between py-4"><div><div className="flex items-center gap-1 text-xs uppercase tracking-wide text-muted-foreground">Active for this run <HelpTip label="active calibration target">This run owns a snapshot of the selected immutable bundle. Editing generator fields above does not change it.</HelpTip></div><div className="mt-1 font-semibold">{active.display_name}</div><div className="font-mono text-xs text-muted-foreground">{active.target_id} · {placementLabels[(active.selected_placement?.mode as keyof typeof placementLabels) ?? "unknown"] ?? active.selected_placement?.mode}</div></div><Grid3X3 className="size-7 text-primary-strong" /></CardContent></Card>}
+    {active && <Card className="border-primary/30"><CardContent className="flex items-center justify-between py-4"><div><div className="flex items-center gap-1 text-xs uppercase tracking-wide text-muted-foreground">Active for this run <HelpTip label="active calibration target">This run owns a snapshot of the selected immutable bundle and physical mounting frame. Editing generator fields above does not change it.</HelpTip></div><div className="mt-1 font-semibold">{active.display_name}</div><div className="font-mono text-xs text-muted-foreground">{active.target_id} · {!activeMountingFrame ? "legacy mounting not recorded · reselect before recording" : activeMountingFrame === "robot_flange" ? "robot flange · offset estimated" : placementLabels[(active.selected_placement?.mode as keyof typeof placementLabels) ?? "unknown"] ?? active.selected_placement?.mode}</div></div><Grid3X3 className="size-7 text-primary-strong" /></CardContent></Card>}
     {targetSelectionLocked && active && <TargetReuseNotice bundle={active} blockers={targetReplacementBlockers} />}
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(420px,0.9fr)]">
       <Card><CardHeader><CardTitle>ArUco specification</CardTitle><CardDescription>All dimensions are millimetres; X and Y compensation is baked into exact marker corners.</CardDescription></CardHeader><CardContent className="space-y-5">
@@ -250,16 +304,16 @@ export function CalibrationTargetsPage() {
         <div className="grid grid-cols-4 gap-4"><NumberField label="Marker size" value={configuration.board.marker_size_mm} min={0.1} step={0.1} onChange={(marker_size_mm) => setBoard({ marker_size_mm })} /><NumberField label="Separation" value={configuration.board.separation_mm} min={0.1} step={0.1} onChange={(separation_mm) => setBoard({ separation_mm })} /><NumberField label="X print %" help="Printer compensation changes the authored X dimensions so the measured physical print matches the target geometry." value={configuration.print_compensation.x_percent} min={0.1} max={200} step={0.1} onChange={(x_percent) => setCompensation({ x_percent })} /><NumberField label="Y print %" help="Printer compensation changes the authored Y dimensions independently. Measure the print before using a non-100% value." value={configuration.print_compensation.y_percent} min={0.1} max={200} step={0.1} onChange={(y_percent) => setCompensation({ y_percent })} /></div>
         <div className="grid grid-cols-2 gap-4"><Field label="Paper"><Select value={configuration.page.paper_size} onValueChange={(paper_size) => setPage({ paper_size })}><SelectTrigger aria-label="Paper"><SelectValue /></SelectTrigger><SelectContent>{Object.keys(capabilities.data.paper_sizes_mm).map((name) => <SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></Field><Field label="Orientation"><Select value={configuration.page.orientation} onValueChange={(orientation: "portrait" | "landscape") => setPage({ orientation })}><SelectTrigger aria-label="Orientation"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="portrait">Portrait</SelectItem><SelectItem value="landscape">Landscape</SelectItem></SelectContent></Select></Field></div>
         <div className="grid grid-cols-2 gap-2"><Check label="Show ruler" checked={configuration.annotations.show_ruler} onChange={(show_ruler) => setAnnotations({ show_ruler })} /><Check label="Show parameters" checked={configuration.annotations.show_parameters} onChange={(show_parameters) => setAnnotations({ show_parameters })} /><Check label="Show marker IDs" checked={configuration.board.show_ids} onChange={(show_ids) => setBoard({ show_ids })} /><Check label="Show board frame" checked={configuration.annotations.show_frame_legend} onChange={(show_frame_legend) => setAnnotations({ show_frame_legend })} /></div>
-        <div><Check label="Attach optional board-to-base pose" checked={configuration.coordinate_frame.enabled} onChange={(enabled) => setConfiguration({ ...configuration, coordinate_frame: { ...configuration.coordinate_frame, enabled } })} /><p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">Use this only when PoseGridGen’s board frame has a measured transform to template base; otherwise select an unknown placement and solve it during calibration.</p></div>
+        <div><Check label="Attach optional board-to-PoseTemplateBase pose" checked={configuration.coordinate_frame.enabled} onChange={(enabled) => setConfiguration({ ...configuration, coordinate_frame: { ...configuration.coordinate_frame, enabled } })} /><p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">This optional fixed placement is for robot-mounted-camera calibration, where the grid remains stationary in PoseTemplateBase. Static-camera workcell calibration instead mounts the grid on the robot and jointly estimates its attachment; this field is not used for that arrangement.</p></div>
         {configuration.coordinate_frame.enabled && <div className="grid grid-cols-3 gap-3 rounded border p-3"><NumberField label="X m" value={configuration.coordinate_frame.pose.translation_x_m} step={0.001} onChange={(translation_x_m) => setPose({ translation_x_m })} /><NumberField label="Y m" value={configuration.coordinate_frame.pose.translation_y_m} step={0.001} onChange={(translation_y_m) => setPose({ translation_y_m })} /><NumberField label="Z m" value={configuration.coordinate_frame.pose.translation_z_m} step={0.001} onChange={(translation_z_m) => setPose({ translation_z_m })} /><NumberField label="Roll°" value={configuration.coordinate_frame.pose.roll_deg} step={0.1} onChange={(roll_deg) => setPose({ roll_deg })} /><NumberField label="Pitch°" value={configuration.coordinate_frame.pose.pitch_deg} step={0.1} onChange={(pitch_deg) => setPose({ pitch_deg })} /><NumberField label="Yaw°" value={configuration.coordinate_frame.pose.yaw_deg} step={0.1} onChange={(yaw_deg) => setPose({ yaw_deg })} /></div>}
         <div className="flex gap-3"><Button variant="outline" onClick={() => fit.mutate()} disabled={fit.isPending}>{fit.isPending ? <LoaderCircle className="animate-spin" /> : <Sparkles />}Fit to page</Button><Input aria-label="Target display name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Target name" /><Button onClick={() => generate.mutate()} disabled={!displayName.trim() || generate.isPending || pendingJob !== null}>{generate.isPending || pendingJob?.kind === "generate" ? <LoaderCircle className="animate-spin" /> : null}Generate bundle</Button></div>
       </CardContent></Card>
       <Card><CardHeader><CardTitle className="flex items-center gap-2">Preview {previewBusy && <LoaderCircle className="size-4 animate-spin" />}</CardTitle><CardDescription>Debounced PNG from the same pinned renderer used for the persistent PDF.</CardDescription></CardHeader><CardContent>{previewError ? <div className="rounded border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">{previewError}</div> : previewUrl ? <div className="space-y-3"><div className="flex items-center justify-between gap-3 text-xs text-muted-foreground"><span>{configuration.page.paper_size} · <span className="capitalize">{configuration.page.orientation}</span></span><span className="font-mono tabular-nums">{pageWidthMm} × {pageHeightMm} mm</span></div><div data-testid="calibration-preview-canvas" className="surface-grid grid min-h-96 place-items-center overflow-auto rounded-lg border bg-muted p-6 shadow-inner sm:p-8"><div data-testid="calibration-preview-page" className="w-full overflow-hidden bg-white ring-1 ring-black/20 shadow-[0_20px_50px_-20px_rgba(0,0,0,0.75),0_2px_5px_rgba(0,0,0,0.35)]" style={{ aspectRatio: `${pageWidthMm} / ${pageHeightMm}`, maxWidth: `${previewMaxWidthPx}px` }}><img src={previewUrl} alt="Calibration target preview" className="block size-full object-contain" /></div></div></div> : <div className="grid h-96 place-items-center text-sm text-muted-foreground">Rendering preview…</div>}</CardContent></Card>
     </div>
     <div><h2 className="text-xl font-semibold">Immutable target library</h2><p className="mt-1 text-sm text-muted-foreground">Generation never changes the active run. Download, inspect, then select deliberately.</p></div>
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{library.data?.bundles.map((bundle) => <Card key={bundle.target_id} className={bundle.selected ? "border-primary/40" : ""}><CardHeader><CardTitle className="text-base">{bundle.display_name ?? bundle.target_id}</CardTitle><CardDescription className="font-mono text-[10px]">{bundle.target_id}</CardDescription></CardHeader><CardContent className="space-y-3">{bundle.valid ? <><TargetLibraryPreview bundle={bundle} /><div className="text-xs text-muted-foreground">{bundle.target?.grid_size?.join(" × ")} markers · {bundle.target?.target_bounds.width_mm.toFixed(1)} × {bundle.target?.target_bounds.height_mm.toFixed(1)} mm · {bundle.target?.print_compensation.x_percent}% × {bundle.target?.print_compensation.y_percent}%</div><div className="flex flex-wrap gap-2"><DownloadLink bundle={bundle} artifact="source" icon={<FileJson />} /><DownloadLink bundle={bundle} artifact="target" icon={<FileJson />} /><DownloadLink bundle={bundle} artifact="pdf" icon={<FileText />} /></div><div className="flex gap-2"><Button className="flex-1" variant={bundle.selected ? "outline" : "default"} disabled={!bundle.selected && targetSelectionLocked} title={!bundle.selected && targetSelectionLocked ? "This run already has target-dependent evidence. Start a fresh run to reuse a different saved target." : undefined} onClick={() => openSelection(bundle)}>{bundle.selected ? "Review active target" : "Select for run"}</Button><Button variant="outline" size="icon" aria-label={`Delete ${bundle.display_name ?? bundle.target_id}`} title={bundle.selected ? "Cannot delete while this target is selected by the active run." : "Delete target"} disabled={bundle.selected} onClick={() => setDeleteConfirmation(bundle)}><Trash2 /></Button></div>{bundle.selected && <p className="text-[11px] leading-relaxed text-muted-foreground">This library target cannot be deleted while it is selected by the active run.</p>}{!bundle.selected && targetSelectionLocked && <p data-testid="calibration-target-disabled-reason" className="text-[11px] leading-relaxed text-warning-foreground">This run already has target-dependent evidence. Start a fresh run to select a different target.</p>}</> : <div className="text-xs text-destructive">Invalid bundle: {bundle.error}</div>}</CardContent></Card>)}</div>
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{library.data?.bundles.map((bundle) => <Card key={bundle.target_id} className={bundle.selected ? "border-primary/40" : ""}><CardHeader><CardTitle className="text-base">{bundle.display_name ?? bundle.target_id}</CardTitle><CardDescription className="font-mono text-[10px]">{bundle.target_id}</CardDescription></CardHeader><CardContent className="space-y-3">{bundle.valid ? <><TargetLibraryPreview bundle={bundle} /><div className="text-xs text-muted-foreground">{bundle.target?.grid_size?.join(" × ")} markers · {bundle.target?.target_bounds.width_mm.toFixed(1)} × {bundle.target?.target_bounds.height_mm.toFixed(1)} mm · {bundle.target?.print_compensation.x_percent}% × {bundle.target?.print_compensation.y_percent}%</div><div className="flex flex-wrap gap-2"><DownloadLink bundle={bundle} artifact="source" icon={<FileJson />} /><DownloadLink bundle={bundle} artifact="target" icon={<FileJson />} /><DownloadLink bundle={bundle} artifact="pdf" icon={<FileText />} /></div><div className="flex gap-2"><Button className="flex-1" variant={bundle.selected ? "outline" : "default"} disabled={!bundle.selected && (targetSelectionLocked || targetSetupBlocked)} title={!bundle.selected && targetSelectionLocked ? "This run already has target-dependent evidence. Start a fresh run to reuse a different saved target." : !bundle.selected && targetSetupBlocked ? "Save one homogeneous camera mounting group in Workflow step 1 first." : undefined} onClick={() => openSelection(bundle)}>{bundle.selected ? "Review active target" : "Select for run"}</Button><Button variant="outline" size="icon" aria-label={`Delete ${bundle.display_name ?? bundle.target_id}`} title={bundle.selected ? "Cannot delete while this target is selected by the active run." : "Delete target"} disabled={bundle.selected} onClick={() => setDeleteConfirmation(bundle)}><Trash2 /></Button></div>{bundle.selected && <p className="text-[11px] leading-relaxed text-muted-foreground">This library target cannot be deleted while it is selected by the active run.</p>}{!bundle.selected && targetSelectionLocked && <p data-testid="calibration-target-disabled-reason" className="text-[11px] leading-relaxed text-warning-foreground">This run already has target-dependent evidence. Start a fresh run to select a different target.</p>}{!bundle.selected && targetSetupBlocked && <p data-testid="calibration-target-setup-disabled-reason" className="text-[11px] leading-relaxed text-destructive">Target selection needs one saved camera mounting group in Workflow step 1.</p>}</> : <div className="text-xs text-destructive">Invalid bundle: {bundle.error}</div>}</CardContent></Card>)}</div>
     {library.data?.bundles.length === 0 && <EmptyState icon={Grid3X3} title="No generated targets" description="Name and generate a target above; it will appear here without being selected." />}
-    <TargetSelectionDialog selection={selection} placement={placement} placementLocked={Boolean(selection?.selected && targetSelectionLocked)} selectionBlocked={selectionBlocked} selectionIsCurrent={selectionIsCurrent} busy={select.isPending || pendingJob !== null} onPlacementChange={setPlacement} onClose={() => setSelection(null)} onSelect={() => select.mutate()} />
+    <TargetSelectionDialog selection={selection} placement={placement} arrangement={arrangement} placementLocked={Boolean(selection?.selected && targetSelectionLocked)} selectionBlocked={selectionBlocked} selectionIsCurrent={selectionIsCurrent} busy={select.isPending || pendingJob !== null} onPlacementChange={setPlacement} onClose={() => setSelection(null)} onSelect={() => select.mutate()} />
     <Dialog open={deleteConfirmation !== null} onOpenChange={(open) => { if (!open && !removeBundle.isPending) setDeleteConfirmation(null) }}><DialogContent><DialogHeader><DialogTitle>Delete {deleteConfirmation?.display_name ?? "calibration target"}?</DialogTitle><DialogDescription>This permanently removes the source JSON, target specification, and printable PDF from the target library. This action cannot be undone.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteConfirmation(null)} disabled={removeBundle.isPending}>Cancel</Button><Button variant="destructive" onClick={() => deleteConfirmation && removeBundle.mutate(deleteConfirmation)} disabled={removeBundle.isPending}>{removeBundle.isPending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}Confirm delete</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }
@@ -287,6 +341,7 @@ function TargetReuseNotice({ bundle, blockers }: { bundle: Bundle; blockers: str
 function TargetSelectionDialog({
   selection,
   placement,
+  arrangement,
   placementLocked,
   selectionBlocked,
   selectionIsCurrent,
@@ -297,6 +352,7 @@ function TargetSelectionDialog({
 }: {
   selection: Bundle | null
   placement: keyof typeof placementLabels
+  arrangement: CalibrationArrangement
   placementLocked: boolean
   selectionBlocked: boolean
   selectionIsCurrent: boolean
@@ -317,14 +373,17 @@ function TargetSelectionDialog({
             : "This snapshots the complete immutable bundle into the selected run. The global library target remains available for later calibration runs."}
         </DialogDescription>
       </DialogHeader>
-      <Field label="Placement">
+      {arrangement.status === "ready" && arrangement.mountingFrame === "robot_flange" ? <div data-testid="static-target-mounting" className="rounded-lg border border-primary/30 bg-primary/5 p-4 text-xs">
+        <div className="font-semibold">Moving calibration instrument: robot-mounted grid</div>
+        <p className="mt-1 leading-relaxed text-muted-foreground">Attach the grid rigidly to the moving robot flange. Robot poses in <code>{POSE_TEMPLATE_BASE_SUNRISE_PATH}</code> provide many observations of the fixed cameras. PoseTestBot jointly estimates grid → robot_flange as supporting evidence; no measured attachment is required, and the reusable output remains camera → PoseTemplateBase rather than a hand-tracking calibration.</p>
+      </div> : arrangement.status === "ready" ? <Field label="Grid placement relative to PoseTemplateBase">
         <Select disabled={placementLocked} value={placement} onValueChange={(value: keyof typeof placementLabels) => onPlacementChange(value)}>
           <SelectTrigger aria-label="Target placement"><SelectValue /></SelectTrigger>
           <SelectContent>{Object.entries(placementLabels).map(([value, label]) => <SelectItem value={value} key={value}>{label}</SelectItem>)}</SelectContent>
         </Select>
-      </Field>
+      </Field> : <CalibrationArrangementCard arrangement={arrangement} editHref="/workflow/calibration?step=configure" testId="calibration-target-dialog-arrangement" />}
       {placementLocked && <p className="rounded border border-warning/40 bg-warning/5 p-3 text-xs text-muted-foreground">Placement is fixed only for this completed run. Start a fresh run after moving cameras or the board, then select this same saved target with the placement used by the new recording.</p>}
-      {selectionBlocked && <p className="rounded border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">This change would replace target-dependent evidence. Start a fresh run and select the saved target there.</p>}
+      {selectionBlocked && arrangement.status === "ready" && <p className="rounded border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">This change would replace target-dependent evidence. Start a fresh run and select the saved target there.</p>}
       <DialogFooter>
         <Button variant="outline" onClick={onClose}>{selectionIsCurrent ? "Close" : "Cancel"}</Button>
         {!selectionIsCurrent && <Button onClick={onSelect} disabled={busy || selectionBlocked}>{busy ? <LoaderCircle className="animate-spin" /> : null}{selection?.selected ? "Update placement" : "Select target"}</Button>}

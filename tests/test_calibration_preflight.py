@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from posetestbot.calibration import preflight as preflight_module
 from posetestbot.calibration.preflight import (
     build_calibration_preflight,
     write_calibration_preflight_with_manifest,
@@ -72,6 +73,53 @@ def profile(
             mean_reprojection_error_px=mean_error,
         ),
     )
+
+
+def test_calibration_preflight_requires_explicit_target_mounting_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "legacy-target"
+    digest = "0" * 64
+    calibration_target = {
+        "target_id": "legacy-target",
+        "bundle_path": "calibration_targets/legacy-target",
+        "source_sha256": digest,
+        "spec_sha256": digest,
+        "pdf_sha256": digest,
+        "configuration_sha256": digest,
+        "geometry_sha256": digest,
+        "placement": {"mode": "unknown"},
+    }
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            calibration_target=calibration_target,
+        ),
+    )
+    calls = []
+
+    def reject_legacy_selection(_run_root, **kwargs):
+        calls.append(kwargs)
+        raise ValueError("mounting_frame is missing")
+
+    monkeypatch.setattr(
+        preflight_module,
+        "validate_run_target_selection",
+        reject_legacy_selection,
+    )
+
+    report = build_calibration_preflight(run_root)
+
+    target_check = next(
+        item
+        for item in report["checks"]
+        if item["name"] == "calibration_target_selection"
+    )
+    assert calls == [{"require_mounting_frame": True}]
+    assert target_check["status"] == "error"
+    assert "mounting_frame is missing" in target_check["message"]
 
 
 def test_calibration_preflight_matches_profiles_for_run_sensors(tmp_path: Path) -> None:
@@ -141,13 +189,17 @@ def test_calibration_preflight_errors_for_missing_explicit_profile(
         calibration_profiles=profiles_path.as_posix(),
     )
     write_run_config(run_root, config)
-    write_profile_collection([profile(profile_id="rs_123_valid", sensor_id="123")], profiles_path)
+    write_profile_collection(
+        [profile(profile_id="rs_123_valid", sensor_id="123")], profiles_path
+    )
 
     report = build_calibration_preflight(run_root)
 
     assert report["overall_status"] == "error"
     match_check = next(
-        check for check in report["checks"] if check["name"] == "profile_match:realsense_123"
+        check
+        for check in report["checks"]
+        if check["name"] == "profile_match:realsense_123"
     )
     assert "missing_profile" in match_check["message"]
 
@@ -339,7 +391,9 @@ def test_calibration_preflight_cli_writes_manifest_artifact(tmp_path: Path) -> N
         calibration_profiles=profiles_path.as_posix(),
     )
     write_run_config(run_root, config)
-    write_profile_collection([profile(profile_id="rs_123_valid", sensor_id="123")], profiles_path)
+    write_profile_collection(
+        [profile(profile_id="rs_123_valid", sensor_id="123")], profiles_path
+    )
 
     result = subprocess.run(
         [
@@ -361,7 +415,9 @@ def test_calibration_preflight_cli_writes_manifest_artifact(tmp_path: Path) -> N
     assert report["overall_status"] == "ok"
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(
-        stage for stage in manifest["stages"] if stage["name"] == "calibration_preflight"
+        stage
+        for stage in manifest["stages"]
+        if stage["name"] == "calibration_preflight"
     )
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][CALIBRATION_PREFLIGHT_REPORT] == (
@@ -385,6 +441,8 @@ def test_write_calibration_preflight_with_manifest_records_warning_stage(
     assert report["overall_status"] == "warning"
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(
-        stage for stage in manifest["stages"] if stage["name"] == "calibration_preflight"
+        stage
+        for stage in manifest["stages"]
+        if stage["name"] == "calibration_preflight"
     )
     assert stage["status"] == "succeeded"

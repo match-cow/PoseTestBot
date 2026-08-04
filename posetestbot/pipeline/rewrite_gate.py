@@ -38,6 +38,10 @@ from posetestbot.io.artifacts import (
     RUN_PREFLIGHT_REPORT,
     BOP_TARGETS_BOP19,
 )
+from posetestbot.robot.reference_frames import (
+    POSE_TEMPLATE_BASE_SUNRISE_PATH,
+    verified_sunrise_reference_frame_path,
+)
 
 
 SCHEMA_VERSION = "rewrite_gate_report.v1"
@@ -50,6 +54,26 @@ GATE_IDS = (
     CALIBRATION_VALIDATION_GATE_ID,
     BOP_EXPORT_READINESS_GATE_ID,
 )
+
+
+def _static_profile_reference_requirement_met(
+    profile: Mapping[str, Any],
+) -> bool:
+    """Check static frame provenance without requiring a complete profile."""
+
+    if profile.get("mounting_mode") != "static":
+        return True
+    metadata = profile.get("metadata")
+    reference = (
+        metadata.get("robot_pose_reference")
+        if isinstance(metadata, Mapping)
+        else None
+    )
+    try:
+        observed_path = verified_sunrise_reference_frame_path(reference)
+    except ValueError:
+        return False
+    return observed_path == POSE_TEMPLATE_BASE_SUNRISE_PATH
 
 
 def _load_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -2325,6 +2349,9 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
                         "sensor_type": profile.get("sensor_type"),
                         "mounting_mode": profile.get("mounting_mode"),
                         "status": profile.get("status"),
+                        "static_reference_requirement_met": (
+                            _static_profile_reference_requirement_met(profile)
+                        ),
                         "num_inliers": quality.get("num_inliers"),
                         "residual_translation_mm": quality.get(
                             "residual_translation_mm"
@@ -2345,6 +2372,7 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
         ]
         all_profiles_valid = bool(validated_profile_summaries) and all(
             profile["status"] == "valid"
+            and profile["static_reference_requirement_met"]
             and isinstance(profile["num_inliers"], int)
             and profile["num_inliers"] > 0
             and profile["residual_translation_mm"] is not None
@@ -2376,7 +2404,10 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
                 if ok
                 else (
                     "calibration_profiles.json must contain valid profiles "
-                    "with inlier counts and residual quality fields."
+                    "with inlier counts and residual quality fields; static "
+                    "profiles also require verified robot_pose.v1 "
+                    "robot_flange-to-template_base provenance for "
+                    f"{POSE_TEMPLATE_BASE_SUNRISE_PATH}."
                 )
             ),
             details={
@@ -2413,6 +2444,7 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
                 str(profile.get("profile_id"))
                 for profile in raw_profiles
                 if profile.get("status") == "valid"
+                and _static_profile_reference_requirement_met(profile)
                 and str(profile.get("sensor_type") or "") == sensor_type
                 and str(profile.get("sensor_id") or "") == device_id
                 and str(profile.get("mounting_mode") or "") == mounting_mode
@@ -2448,7 +2480,8 @@ def build_calibration_validation_gate_report(run_root: str | Path) -> dict[str, 
                 else (
                     "Every enabled run-config sensor must have exactly one valid "
                     "profile matching sensor type, device ID, mounting mode, and "
-                    "any configured profile ID."
+                    "any configured profile ID; static profiles also require "
+                    "verified PoseTemplateBase robot-pose provenance."
                 )
             ),
             details={

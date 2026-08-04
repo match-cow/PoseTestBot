@@ -38,6 +38,9 @@ def _select_calibration_response():
         common = {
             "sensors": data.get("sensors"),
             "resolution": data.get("resolution"),
+            "robot_pose_sunrise_reference_frame_path": data.get(
+                "robot_pose_sunrise_reference_frame_path"
+            ),
             "operator": data.get("operator"),
             "expected_current_bundle_sha256": data.get(
                 "expected_current_bundle_sha256"

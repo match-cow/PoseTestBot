@@ -15,6 +15,7 @@ from posetestbot.calibration.profiles import (
     CalibrationStatus,
     load_profile_collection,
     profile_from_dict,
+    require_static_profile_pose_template_base,
     write_profile_collection,
 )
 from posetestbot.io.artifacts import (
@@ -135,6 +136,28 @@ def _profile_validation_checks(
             },
         )
     )
+
+    if profile.mounting_mode.value == "static":
+        try:
+            require_static_profile_pose_template_base(profile)
+        except ValueError as exc:
+            checks.append(
+                _check(
+                    f"profile_static_world_provenance:{profile.profile_id}",
+                    "error",
+                    str(exc),
+                    details={"profile_id": profile.profile_id},
+                )
+            )
+        else:
+            checks.append(
+                _check(
+                    f"profile_static_world_provenance:{profile.profile_id}",
+                    "ok",
+                    f"Profile {profile.profile_id} is verified in PoseTemplateBase.",
+                    details={"profile_id": profile.profile_id},
+                )
+            )
 
     checks.append(
         _check(

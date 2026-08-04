@@ -482,9 +482,20 @@ def resolve_calibration_profile_sync_policy(
             "intrinsic_calibration_profiles"
         ),
         expected_bundle_sha256=str(pointer.get("bundle_sha256", "")),
+        verify_run_config=False,
+    )
+    # Preserve the established, sensor-specific drift diagnostics before the
+    # broader run-config binding check also compares robot-pose provenance.
+    current, mapping = _validate_current_setup(config, selection)
+    selection = verify_calibration_profile_selection(
+        root,
+        expected_calibration_profiles=config.get("calibration_profiles"),
+        expected_intrinsic_calibration_profiles=config.get(
+            "intrinsic_calibration_profiles"
+        ),
+        expected_bundle_sha256=str(pointer.get("bundle_sha256", "")),
         verify_run_config=True,
     )
-    current, mapping = _validate_current_setup(config, selection)
     profiles = _load_hash_bound_profiles(root, selection)
     profiles_by_id = {profile.profile_id: profile for profile in profiles}
 

@@ -32,6 +32,9 @@ from posetestbot.io.artifacts import (
     ARUCO_DETECTIONS,
     ARUCO_POSE_ESTIMATION,
     BOP_DIR,
+    CAPTURE_EXECUTION_LOGS_DIR,
+    CAPTURE_EXECUTION_REPORT,
+    CAPTURE_EXECUTION_STATUS,
     CALIBRATION_CANDIDATES,
     CALIBRATION_OBSERVATIONS,
     CALIBRATION_PROFILES,
@@ -43,7 +46,11 @@ from posetestbot.io.artifacts import (
     CALIBRATION_VALIDATION_REPORT,
     CAMERA_RECTIFICATION_REPORT,
     DATASET_MANIFEST,
+    DEPTH_DIR,
+    FRAME_METADATA_JSONL,
     INTRINSIC_CALIBRATION_PROFILES,
+    RAW_ROBOT_EE_POSES,
+    RGB_DIR,
     RUN_CONFIG,
 )
 from posetestbot.io.manifest import (
@@ -69,6 +76,7 @@ PLACEMENT_MODES = {
     "template_base_identity",
     "posegridgen_board_to_base",
 }
+TARGET_MOUNTING_FRAMES = {"robot_flange", "template_base"}
 _FILE_CONTRACT = {
     "source": (POSEGRIDGEN_SOURCE, "application/json"),
     "target": (TARGET_SPEC, "application/json"),
@@ -107,7 +115,9 @@ def default_target_library_root() -> Path:
         app_root = Path(configured).expanduser().resolve()
     else:
         source_root = Path(__file__).resolve().parents[2]
-        app_root = source_root if (source_root / "pyproject.toml").is_file() else Path.cwd()
+        app_root = (
+            source_root if (source_root / "pyproject.toml").is_file() else Path.cwd()
+        )
     return app_root / "working_data" / LIBRARY_DIRECTORY
 
 
@@ -169,13 +179,17 @@ def generate_target_bundle(
     if not name:
         raise ValueError("Calibration target display name must not be empty")
     if len(name) > 120:
-        raise ValueError("Calibration target display name must not exceed 120 characters")
+        raise ValueError(
+            "Calibration target display name must not exceed 120 characters"
+        )
     opaque_id = _validate_target_id(target_id or str(uuid.uuid4()))
     library = Path(library_root or default_target_library_root())
     library.mkdir(parents=True, exist_ok=True)
     destination = library / opaque_id
     if destination.exists():
-        raise CalibrationTargetConflict(f"Calibration target already exists: {opaque_id}")
+        raise CalibrationTargetConflict(
+            f"Calibration target already exists: {opaque_id}"
+        )
     staging = library / f".{opaque_id}.{uuid.uuid4().hex}.tmp"
     staging.mkdir(parents=False, exist_ok=False)
     try:
@@ -240,12 +254,17 @@ def validate_target_bundle(
     _ensure_contained(bundle_dir, library, label="Bundle path")
     _reject_symlinks(bundle_dir, library)
     if not bundle_dir.is_dir():
-        raise FileNotFoundError(f"Calibration-target bundle does not exist: {bundle_dir}")
+        raise FileNotFoundError(
+            f"Calibration-target bundle does not exist: {bundle_dir}"
+        )
     manifest_path = bundle_dir / BUNDLE_MANIFEST
     _reject_symlinks(manifest_path, library)
     with open(manifest_path, "r") as handle:
         bundle = json.load(handle)
-    if not isinstance(bundle, Mapping) or bundle.get("schema_version") != BUNDLE_SCHEMA_VERSION:
+    if (
+        not isinstance(bundle, Mapping)
+        or bundle.get("schema_version") != BUNDLE_SCHEMA_VERSION
+    ):
         raise ValueError(f"Bundle schema must be {BUNDLE_SCHEMA_VERSION!r}")
     target_id = _validate_target_id(str(bundle.get("target_id", "")))
     if not allow_staging and bundle_dir.name != target_id:
@@ -271,7 +290,10 @@ def validate_target_bundle(
         record = records.get(key)
         if not isinstance(record, Mapping):
             raise ValueError(f"Bundle file record is invalid: {key}")
-        if record.get("path") != expected_relative or record.get("media_type") != expected_media:
+        if (
+            record.get("path") != expected_relative
+            or record.get("media_type") != expected_media
+        ):
             raise ValueError(f"Bundle file contract is invalid: {key}")
         path = bundle_dir / expected_relative
         _reject_symlinks(path, library)
@@ -302,7 +324,9 @@ def validate_target_bundle(
     if not isinstance(posegridgen, Mapping):
         raise ValueError("Bundle target is missing PoseGridGen provenance")
     if posegridgen.get("revision") != generator_revision:
-        raise ValueError("Target generator revision does not match the bundle generator")
+        raise ValueError(
+            "Target generator revision does not match the bundle generator"
+        )
     if posegridgen.get("configuration_hash") != bundle.get("configuration_sha256"):
         raise ValueError("Target configuration hash does not match bundle")
     canonical_target = target_from_posegridgen_manifest(
@@ -316,7 +340,9 @@ def validate_target_bundle(
     }
     canonical_target = normalize_calibration_target_spec(canonical_target)
     if target != canonical_target:
-        raise ValueError("Bundle target does not canonically agree with PoseGridGen source")
+        raise ValueError(
+            "Bundle target does not canonically agree with PoseGridGen source"
+        )
     return {**dict(bundle), "bundle_path": bundle_dir.as_posix(), "target": target}
 
 
@@ -339,7 +365,9 @@ def list_target_bundles(
     if not library.is_dir():
         return []
     result = []
-    for child in sorted(library.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True):
+    for child in sorted(
+        library.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True
+    ):
         if not child.is_dir() or child.name.startswith("."):
             continue
         try:
@@ -413,7 +441,7 @@ def delete_target_bundle(
 
 def replacement_blockers(run_root: str | Path) -> list[str]:
     root = Path(run_root)
-    blockers = []
+    blockers = _raw_capture_replacement_blockers(root)
     bop = root / BOP_DIR
     if bop.exists():
         blockers.append(bop.relative_to(root).as_posix())
@@ -429,10 +457,120 @@ def replacement_blockers(run_root: str | Path) -> list[str]:
     return sorted(set(blockers))
 
 
+def _raw_capture_replacement_blockers(root: Path) -> list[str]:
+    """Return acquisition evidence that freezes the target's physical mounting."""
+
+    if not root.is_dir():
+        return []
+    blockers: set[str] = set()
+
+    def add_if_present(path: Path) -> None:
+        if os.path.lexists(path):
+            blockers.add(path.relative_to(root).as_posix())
+
+    for artifact in (
+        RAW_ROBOT_EE_POSES,
+        CAPTURE_EXECUTION_STATUS,
+        CAPTURE_EXECUTION_REPORT,
+        CAPTURE_EXECUTION_LOGS_DIR,
+    ):
+        add_if_present(root / artifact)
+    raw_pose_stem = Path(RAW_ROBOT_EE_POSES).stem
+    for candidate in root.iterdir():
+        if candidate.name.startswith(raw_pose_stem):
+            add_if_present(candidate)
+
+    excluded_directories = {
+        LIBRARY_DIRECTORY,
+        CAPTURE_EXECUTION_LOGS_DIR,
+        "processed",
+    }
+    for candidate in root.iterdir():
+        if candidate.name in excluded_directories:
+            continue
+        if not candidate.is_dir() and not candidate.is_symlink():
+            continue
+        metadata = candidate / FRAME_METADATA_JSONL
+        if metadata.is_file():
+            add_if_present(metadata)
+            continue
+        for directory in (RGB_DIR, DEPTH_DIR):
+            frame_directory = candidate / directory
+            if frame_directory.is_dir() and any(frame_directory.glob("*.png")):
+                blockers.add(frame_directory.relative_to(root).as_posix())
+                break
+    for relative in (FRAME_METADATA_JSONL, RGB_DIR, DEPTH_DIR):
+        candidate = root / relative
+        if candidate.is_file() or (candidate.is_dir() and any(candidate.glob("*.png"))):
+            add_if_present(candidate)
+    return sorted(blockers)
+
+
+def normalize_target_mounting_frame(
+    placement_mode: str,
+    mounting_frame: str | None,
+) -> str | None:
+    """Validate an optional physical target mounting while retaining legacy absence."""
+
+    if placement_mode not in PLACEMENT_MODES:
+        raise ValueError(
+            "placement mode must be one of: " + ", ".join(sorted(PLACEMENT_MODES))
+        )
+    if mounting_frame is None:
+        return None
+    frame = str(mounting_frame).strip()
+    if frame not in TARGET_MOUNTING_FRAMES:
+        raise ValueError(
+            "mounting_frame must be one of: "
+            + ", ".join(sorted(TARGET_MOUNTING_FRAMES))
+        )
+    if placement_mode != "unknown" and frame != "template_base":
+        raise ValueError(
+            f"{placement_mode} is a known template-base placement and requires "
+            "mounting_frame=template_base"
+        )
+    return frame
+
+
+def validate_configured_target_mounting(
+    config: Mapping[str, Any],
+    mounting_frame: str | None,
+) -> None:
+    """Bind a new explicit target mounting to one homogeneous camera group."""
+
+    if mounting_frame is None:
+        return
+    capture = config.get("capture")
+    raw_sensors = capture.get("sensors") if isinstance(capture, Mapping) else None
+    if not isinstance(raw_sensors, list):
+        return
+    modes = {
+        str(sensor.get("mounting_mode", ""))
+        for sensor in raw_sensors
+        if isinstance(sensor, Mapping) and sensor.get("enabled", True) is not False
+    }
+    modes.discard("")
+    if len(modes) > 1:
+        raise ValueError(
+            "Calibration target selection requires one homogeneous enabled camera "
+            "mounting group. Record robot-mounted and static cameras in separate "
+            "calibration runs, then combine their promoted profiles later."
+        )
+    if modes == {"static"} and mounting_frame != "robot_flange":
+        raise ValueError(
+            "Static-camera calibration requires the target mounted on robot_flange"
+        )
+    if modes == {"eye_in_hand"} and mounting_frame != "template_base":
+        raise ValueError(
+            "Eye-in-hand calibration requires the target mounted on template_base"
+        )
+
+
 def validate_run_target_selection(
     run_root: str | Path,
     *,
     require_placement: bool = False,
+    require_mounting_frame: bool = False,
 ) -> dict[str, Any]:
     """Cross-check run config, copied bundle, root target, hashes, and placement."""
 
@@ -459,37 +597,70 @@ def validate_run_target_selection(
     }
     for key, expected in expected_hashes.items():
         if selection.get(key) != expected:
-            raise ValueError(f"Run calibration-target {key} does not match copied bundle")
+            raise ValueError(
+                f"Run calibration-target {key} does not match copied bundle"
+            )
     active = load_calibration_target_spec(root / CALIBRATION_TARGET)
     if active.get("target_id") != target_id:
         raise ValueError("Root calibration target ID does not match run config")
     if active.get("geometry_sha256") != bundle["geometry_sha256"]:
-        raise ValueError("Root calibration target geometry does not match copied bundle")
+        raise ValueError(
+            "Root calibration target geometry does not match copied bundle"
+        )
     placement_selection = selection.get("placement")
     if not isinstance(placement_selection, Mapping):
         raise ValueError("Run calibration-target placement selection is invalid")
     mode = str(placement_selection.get("mode", ""))
+    explicit_mounting_frame = normalize_target_mounting_frame(
+        mode,
+        (
+            str(placement_selection["mounting_frame"])
+            if "mounting_frame" in placement_selection
+            else None
+        ),
+    )
+    if require_mounting_frame and explicit_mounting_frame is None:
+        raise ValueError(
+            "Calibration-target mounting_frame is missing from this legacy run "
+            "selection; explicitly reselect the target arrangement before recording "
+            "or calibration analysis"
+        )
     placement = active.get("placement")
     if mode == "unknown":
         if placement is not None:
-            raise ValueError("Unknown target placement must be omitted from root target")
+            raise ValueError(
+                "Unknown target placement must be omitted from root target"
+            )
         if require_placement:
-            raise ValueError("known_target/compare requires calibration-target placement")
+            raise ValueError(
+                "known_target/compare requires calibration-target placement"
+            )
     else:
         if not isinstance(placement, Mapping):
             raise ValueError(f"{mode} requires placement in the root target")
         if placement_selection.get("transform") != placement:
-            raise ValueError("Run-config placement transform does not match root target")
+            raise ValueError(
+                "Run-config placement transform does not match root target"
+            )
     return {
         "target_id": target_id,
         "geometry_sha256": bundle["geometry_sha256"],
         "configuration_sha256": bundle["configuration_sha256"],
         "placement_mode": mode,
+        "mounting_frame": explicit_mounting_frame,
+        "effective_mounting_frame": (
+            explicit_mounting_frame or ("template_base" if mode != "unknown" else None)
+        ),
+        "placement": dict(placement_selection),
+        "selection": dict(selection),
+        "target": active,
         "bundle_path": expected_relative.as_posix(),
     }
 
 
-def _placement_from_source(source: Mapping[str, Any], mode: str) -> dict[str, Any] | None:
+def _placement_from_source(
+    source: Mapping[str, Any], mode: str
+) -> dict[str, Any] | None:
     if mode == "unknown":
         return None
     if mode == "template_base_identity":
@@ -539,11 +710,13 @@ def _placement_from_source(source: Mapping[str, Any], mode: str) -> dict[str, An
     }
 
 
-def validate_bundle_placement(bundle: Mapping[str, Any], mode: str) -> None:
-    if mode not in PLACEMENT_MODES:
-        raise ValueError(
-            "placement mode must be one of: " + ", ".join(sorted(PLACEMENT_MODES))
-        )
+def validate_bundle_placement(
+    bundle: Mapping[str, Any],
+    mode: str,
+    *,
+    mounting_frame: str | None = None,
+) -> None:
+    normalize_target_mounting_frame(mode, mounting_frame)
     bundle_path = Path(str(bundle.get("bundle_path", "")))
     with open(bundle_path / POSEGRIDGEN_SOURCE, "r") as handle:
         source = json.load(handle)
@@ -596,6 +769,7 @@ def select_target_bundle(
     run_root: str | Path,
     target_id: str,
     placement_mode: str,
+    mounting_frame: str | None = None,
     library_root: str | Path | None = None,
 ) -> dict[str, Any]:
     root = Path(run_root).resolve()
@@ -604,6 +778,7 @@ def select_target_bundle(
             run_root=root,
             target_id=target_id,
             placement_mode=placement_mode,
+            mounting_frame=mounting_frame,
             library_root=library_root,
         )
 
@@ -613,20 +788,27 @@ def _select_target_bundle_locked(
     run_root: str | Path,
     target_id: str,
     placement_mode: str,
+    mounting_frame: str | None = None,
     library_root: str | Path | None = None,
 ) -> dict[str, Any]:
     root = Path(run_root)
     target_uuid = _validate_target_id(target_id)
-    if placement_mode not in PLACEMENT_MODES:
-        raise ValueError(
-            "placement_mode must be one of: " + ", ".join(sorted(PLACEMENT_MODES))
-        )
+    normalized_mounting_frame = normalize_target_mounting_frame(
+        placement_mode, mounting_frame
+    )
     config = load_run_config_for_run_root(root)
+    validate_configured_target_mounting(config, normalized_mounting_frame)
     library = Path(library_root or default_target_library_root())
     bundle = validate_target_bundle(library / target_uuid, library_root=library)
-    validate_bundle_placement(bundle, placement_mode)
+    validate_bundle_placement(
+        bundle,
+        placement_mode,
+        mounting_frame=normalized_mounting_frame,
+    )
     records = bundle["files"]
     selection_placement = {"mode": placement_mode}
+    if normalized_mounting_frame is not None:
+        selection_placement["mounting_frame"] = normalized_mounting_frame
     existing = config.get("calibration_target")
     if isinstance(existing, Mapping):
         existing_mode = (
@@ -634,7 +816,16 @@ def _select_target_bundle_locked(
             if isinstance(existing.get("placement"), Mapping)
             else None
         )
-        if existing.get("target_id") == target_uuid and existing_mode == placement_mode:
+        existing_mounting_frame = (
+            existing.get("placement", {}).get("mounting_frame")
+            if isinstance(existing.get("placement"), Mapping)
+            else None
+        )
+        if (
+            existing.get("target_id") == target_uuid
+            and existing_mode == placement_mode
+            and existing_mounting_frame == normalized_mounting_frame
+        ):
             evidence = validate_run_target_selection(root)
             return {
                 "status": "unchanged",
@@ -643,13 +834,13 @@ def _select_target_bundle_locked(
                 "evidence": evidence,
                 "blockers": [],
             }
-        blockers = replacement_blockers(root)
-        if blockers:
-            raise CalibrationTargetConflict(
-                "The active calibration target cannot be replaced after target-dependent "
-                "artifacts exist; create a new run.",
-                blockers=blockers,
-            )
+    blockers = replacement_blockers(root)
+    if blockers:
+        raise CalibrationTargetConflict(
+            "The calibration target and its mounting must be bound before raw "
+            "acquisition or target-dependent evidence exists; create a new run.",
+            blockers=blockers,
+        )
 
     source = bundle["bundle_path"]
     with open(Path(source) / POSEGRIDGEN_SOURCE, "r") as handle:
@@ -689,7 +880,10 @@ def _select_target_bundle_locked(
             "calibration_target_bundle": root / bundle_relative,
         },
         run_root=root,
-        message=f"Selected immutable calibration target {target_uuid} ({placement_mode}).",
+        message=(
+            f"Selected immutable calibration target {target_uuid} ({placement_mode}, "
+            f"mounting={normalized_mounting_frame or 'legacy_unspecified'})."
+        ),
     )
     manifest["updated_at"] = utc_now_iso()
 

@@ -5,9 +5,12 @@
 `iiwa/PoseTestBot_CalibrationVarianceProposal.java` is an enabled repository
 candidate for the operator-reported running calibration application. The exact
 deployed controller application and revision are not yet captured as evidence.
-Its Workbench contract is reduced to exactly nine persistent 3 × 3 raster
-frames below `/PoseTestBot/TemplateBase`. `CalibrationCenter` is one of those
-nine frames and anchors both phases.
+Its Workbench motion contract is reduced to exactly nine persistent 3 × 3
+raster frames below `/PoseTestBot/TemplateBase`. `CalibrationCenter` is one of
+those nine frames and anchors both phases. That frame tree defines motion only:
+the pose-stream task must query `robot_flange` relative to
+`/PoseTestBot/PoseTemplateBase`, so a static-camera attempt solves each
+`camera -> PoseTemplateBase` transform directly.
 
 The earlier deployed/attested revision remains historical acceptance evidence.
 The repository source now contains a prospective high-rate pose-stream
@@ -65,7 +68,16 @@ physical-base-to-TemplateBase transform.
 
 Validate the existing `/PoseTestBot/TemplateBase`, then create these nine direct
 children with the robot flange selected as the teaching and motion point.
-Values are uncommissioned initial seeds in millimetres and KUKA A/B/C degrees.
+Separately validate the persistent `/PoseTestBot/PoseTemplateBase` used as the
+pose-stream reference and static-calibration result frame. Values are
+uncommissioned initial seeds in millimetres and KUKA A/B/C degrees.
+
+For the static-camera campaign, attach the printed grid rigidly to the flange
+and leave that attachment unchanged. Robot motion supplies multiple grid
+observations. The primary output is `camera -> PoseTemplateBase`; the jointly
+estimated `aruco_grid -> robot_flange` transform is only support evidence for
+closure and cross-camera consistency. The static cameras are not intended to
+track the hand during object capture.
 
 | Child frame | X | Y | Z | A | B | C |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -160,7 +172,10 @@ Captured LIN and LIN_REL motions no longer use a
 separate read-only cyclic task streams sequenced `robot_pose.v1` packets. The
 three post-dwell samples use that same v1 stream at 50 ms spacing. Host receive
 timestamps remain synchronization authority, while the retained sender target,
-delta, query duration, and sequence are cadence diagnostics.
+delta, query duration, and sequence are cadence diagnostics. The task's
+reference must be `/PoseTestBot/PoseTemplateBase`; the waypoint parent
+`/PoseTestBot/TemplateBase` must never be passed as the static-calibration pose
+reference.
 
 The UDP stop message is read only while waiting for another start command. It
 cannot interrupt active motion and is not a safety control. In the current

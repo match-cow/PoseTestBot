@@ -15,6 +15,10 @@ import numpy as np
 
 from posetestbot.calibration.intrinsics import projection_is_opencv_compatible
 from posetestbot.io.atomic import atomic_write_json
+from posetestbot.robot.reference_frames import (
+    POSE_TEMPLATE_BASE_SUNRISE_PATH,
+    verified_sunrise_reference_frame_path,
+)
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 
 SCHEMA_VERSION = "calibration.v2"
@@ -677,13 +681,60 @@ def select_valid_profile_for_sensor(
     sensor_name: str,
     *,
     mounting_mode: MountingMode | None = None,
+    profile_id: str | None = None,
 ) -> CalibrationProfile:
-    return select_profile_for_sensor(
-        profiles,
+    profile_list = list(profiles)
+    if profile_id is not None:
+        exact_matches = [
+            profile for profile in profile_list if profile.profile_id == profile_id
+        ]
+        if not exact_matches:
+            raise KeyError(
+                f"Selected calibration profile {profile_id!r} is unavailable for {sensor_name!r}"
+            )
+        if len(exact_matches) != 1:
+            raise ValueError(f"Duplicate selected calibration profile_id: {profile_id}")
+        profile_list = exact_matches
+    profile = select_profile_for_sensor(
+        profile_list,
         sensor_name,
         mounting_mode=mounting_mode,
         required_statuses={CalibrationStatus.VALID},
     )
+    require_static_profile_pose_template_base(profile)
+    return profile
+
+
+def require_static_profile_pose_template_base(
+    profile: CalibrationProfile,
+) -> None:
+    """Require a reusable static profile to be proven in PoseTemplateBase.
+
+    Legacy/static candidate profiles remain loadable for inspection, but they
+    cannot be selected for dataset preparation or promoted through the legacy
+    validation path without verified robot-pose frame provenance.
+    """
+
+    if profile.mounting_mode != MountingMode.STATIC:
+        return
+    try:
+        observed_path = verified_sunrise_reference_frame_path(
+            profile.metadata.get("robot_pose_reference")
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"Static calibration profile {profile.profile_id} has invalid "
+            f"robot-pose reference provenance: {exc}"
+        ) from exc
+    if observed_path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
+        actual = observed_path if observed_path is not None else "unverified"
+        raise ValueError(
+            f"Static calibration profile {profile.profile_id} cannot be reused: "
+            "camera-to-template_base must be backed by verified robot_pose.v1 "
+            f"poses in {POSE_TEMPLATE_BASE_SUNRISE_PATH!r}; found {actual!r}. "
+            "Use the guided static-camera workflow instead of the legacy "
+            "known-target stages."
+        )
 
 
 def blenderproc_camera_transform_from_profile(
@@ -703,11 +754,37 @@ def blenderproc_camera_transform_from_profile(
 
 
 def blenderproc_camera_transform_map_from_profiles(
-    profiles: Iterable[CalibrationProfile], sensor_names: Iterable[str]
+    profiles: Iterable[CalibrationProfile],
+    sensor_names: Iterable[str],
+    *,
+    profile_ids_by_sensor_name: Mapping[str, str] | None = None,
+    mounting_modes_by_sensor_name: Mapping[str, MountingMode] | None = None,
 ) -> dict[str, dict[str, object]]:
     profile_list = list(profiles)
     transform_map = {}
     for sensor_name in sensor_names:
-        profile = select_valid_profile_for_sensor(profile_list, sensor_name)
+        profile_id = None
+        if profile_ids_by_sensor_name is not None:
+            try:
+                profile_id = profile_ids_by_sensor_name[sensor_name]
+            except KeyError as exc:
+                raise KeyError(
+                    f"Calibration selection has no profile for {sensor_name!r}"
+                ) from exc
+        mounting_mode = None
+        if mounting_modes_by_sensor_name is not None:
+            try:
+                mounting_mode = mounting_modes_by_sensor_name[sensor_name]
+            except KeyError as exc:
+                raise KeyError(
+                    "Run configuration has no mounting mode for "
+                    f"{sensor_name!r}"
+                ) from exc
+        profile = select_valid_profile_for_sensor(
+            profile_list,
+            sensor_name,
+            mounting_mode=mounting_mode,
+            profile_id=profile_id,
+        )
         transform_map[sensor_name] = blenderproc_camera_transform_from_profile(profile)
     return transform_map

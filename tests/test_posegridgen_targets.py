@@ -33,8 +33,12 @@ from posetestbot.calibration.targets import (
     normalize_calibration_target_spec,
     opencv_grid_board,
 )
-from posetestbot.io.artifacts import ARUCO_DETECTIONS, RUN_CONFIG
-from posetestbot.pipeline.run_config import create_run_config, write_run_config_with_manifest
+from posetestbot.io.artifacts import ARUCO_DETECTIONS, RAW_ROBOT_EE_POSES, RUN_CONFIG
+from posetestbot.pipeline.run_config import (
+    create_run_config,
+    sensor_configs_from_values,
+    write_run_config_with_manifest,
+)
 
 
 def aruco_configuration(*, with_pose: bool = False) -> dict:
@@ -97,7 +101,9 @@ def test_loader_reports_missing_wrong_and_dirty_checkouts(
     for name in ("models", "errors", "fit", "scene", "render"):
         (checkout / "backend" / f"{name}.py").write_text("\n")
 
-    monkeypatch.setattr(loader, "_git", lambda _root, *args: "wrong" if args[0] == "rev-parse" else "")
+    monkeypatch.setattr(
+        loader, "_git", lambda _root, *args: "wrong" if args[0] == "rev-parse" else ""
+    )
     wrong = verify_posegridgen_checkout(checkout)
     assert wrong["available"] is False
     assert "revision mismatch" in wrong["reason"]
@@ -105,7 +111,9 @@ def test_loader_reports_missing_wrong_and_dirty_checkouts(
     monkeypatch.setattr(
         loader,
         "_git",
-        lambda _root, *args: POSEGRIDGEN_REVISION if args[0] == "rev-parse" else " M backend/models.py",
+        lambda _root, *args: (
+            POSEGRIDGEN_REVISION if args[0] == "rev-parse" else " M backend/models.py"
+        ),
     )
     dirty = verify_posegridgen_checkout(checkout)
     assert dirty["available"] is False
@@ -147,9 +155,10 @@ def test_din_a5_and_a6_generate_through_the_immutable_bundle_pipeline(
     assert source["request"]["page"] == configuration["page"]
     assert source["page_bounds"]["width_mm"] == pytest.approx(expected_page_mm[0])
     assert source["page_bounds"]["height_mm"] == pytest.approx(expected_page_mm[1])
-    assert bundle["target"]["posegridgen"]["configuration"]["page"] == configuration[
-        "page"
-    ]
+    assert (
+        bundle["target"]["posegridgen"]["configuration"]["page"]
+        == configuration["page"]
+    )
     assert (bundle_path / "calibration_target.pdf").read_bytes().startswith(b"%PDF")
 
 
@@ -235,12 +244,16 @@ def test_anisotropic_geometry_is_authoritative_for_generic_opencv_board(
             dtype=float,
         )
         tvec = np.asarray(
-            [-85.0 + 30.0 * (index % 6), -65.0 + 32.0 * (index % 5), 560.0 + 8.0 * index],
+            [
+                -85.0 + 30.0 * (index % 6),
+                -65.0 + 32.0 * (index % 5),
+                560.0 + 8.0 * index,
+            ],
             dtype=float,
         )
-        projected = cv2.projectPoints(
-            object_points, rvec, tvec, true_k, distortion
-        )[0].reshape(-1, 2)
+        projected = cv2.projectPoints(object_points, rvec, tvec, true_k, distortion)[
+            0
+        ].reshape(-1, 2)
         object_views.append(object_points)
         image_views.append(projected.astype(np.float32))
         view_poses.append((rvec, tvec, projected))
@@ -257,7 +270,10 @@ def test_anisotropic_geometry_is_authoritative_for_generic_opencv_board(
     expected_rvec, expected_tvec, projected = view_poses[0]
     ids = board.getIds().reshape(-1, 1)
     matched_object, matched_image = board.matchImagePoints(
-        [item.reshape(1, 4, 2).astype(np.float32) for item in projected.reshape(-1, 4, 2)],
+        [
+            item.reshape(1, 4, 2).astype(np.float32)
+            for item in projected.reshape(-1, 4, 2)
+        ],
         ids,
     )
     success, recovered_rvec, recovered_tvec = cv2.solvePnP(
@@ -354,6 +370,8 @@ def test_bundle_hashes_tampering_selection_placements_and_replacement_blockers(
     assert selected["status"] == "selected"
     assert "placement" not in json.loads((run / "calibration_target.json").read_text())
     assert validate_run_target_selection(run)["placement_mode"] == "unknown"
+    with pytest.raises(ValueError, match="mounting_frame is missing"):
+        validate_run_target_selection(run, require_mounting_frame=True)
 
     unchanged = select_target_bundle(
         run_root=run,
@@ -370,7 +388,11 @@ def test_bundle_hashes_tampering_selection_placements_and_replacement_blockers(
         placement_mode="template_base_identity",
         library_root=library,
     )
-    assert changed["selection"]["placement"]["transform"]["translation_mm"] == [0.0, 0.0, 0.0]
+    assert changed["selection"]["placement"]["transform"]["translation_mm"] == [
+        0.0,
+        0.0,
+        0.0,
+    ]
     assert replacement_blockers(run) == []
 
     sensor = run / "processed" / "synchronized" / "realsense_1"
@@ -402,6 +424,158 @@ def test_bundle_hashes_tampering_selection_placements_and_replacement_blockers(
     qx, qy, qz, qw = source["board_to_base"]["quaternion_xyzw"]
     assert transform["rotation_quaternion_wxyz"] == pytest.approx([qw, qx, qy, qz])
     assert transform["source_base_frame_interpretation"] == "template_base"
+
+
+def test_explicit_target_mounting_is_bound_to_camera_group_and_raw_capture(
+    tmp_path: Path,
+) -> None:
+    library = tmp_path / "library"
+    bundle = generate_target_bundle(
+        display_name="robot-carried target",
+        configuration=aruco_configuration(),
+        library_root=library,
+    )
+    run = tmp_path / "static-run"
+    sensors = sensor_configs_from_values(
+        [
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": str(index),
+                "display_name": f"Static D435 {index}",
+                "mounting_mode": "static",
+            }
+            for index in range(1, 4)
+        ]
+    )
+    write_run_config_with_manifest(
+        run,
+        create_run_config(run_root=run, sensors=sensors),
+    )
+
+    selected = select_target_bundle(
+        run_root=run,
+        target_id=bundle["target_id"],
+        placement_mode="unknown",
+        mounting_frame="robot_flange",
+        library_root=library,
+    )
+
+    assert selected["selection"]["placement"] == {
+        "mode": "unknown",
+        "mounting_frame": "robot_flange",
+    }
+    evidence = validate_run_target_selection(run)
+    assert evidence["mounting_frame"] == "robot_flange"
+    assert evidence["effective_mounting_frame"] == "robot_flange"
+
+    with pytest.raises(ValueError, match="Static-camera calibration requires"):
+        select_target_bundle(
+            run_root=run,
+            target_id=bundle["target_id"],
+            placement_mode="unknown",
+            mounting_frame="template_base",
+            library_root=library,
+        )
+    with pytest.raises(ValueError, match="known template-base placement"):
+        select_target_bundle(
+            run_root=run,
+            target_id=bundle["target_id"],
+            placement_mode="template_base_identity",
+            mounting_frame="robot_flange",
+            library_root=library,
+        )
+
+    camera_metadata = run / "realsense_1" / "frame_metadata.jsonl"
+    camera_metadata.parent.mkdir()
+    camera_metadata.write_text("{}\n")
+    (run / RAW_ROBOT_EE_POSES).write_text("{}\n")
+    blockers = replacement_blockers(run)
+    assert "realsense_1/frame_metadata.jsonl" in blockers
+    assert RAW_ROBOT_EE_POSES in blockers
+    with pytest.raises(CalibrationTargetConflict) as captured:
+        select_target_bundle(
+            run_root=run,
+            target_id=bundle["target_id"],
+            placement_mode="unknown",
+            library_root=library,
+        )
+    assert RAW_ROBOT_EE_POSES in captured.value.blockers
+
+
+def test_explicit_target_mounting_rejects_mixed_camera_groups(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    bundle = generate_target_bundle(
+        display_name="mixed-run target",
+        configuration=aruco_configuration(),
+        library_root=library,
+    )
+    run = tmp_path / "mixed-run"
+    sensors = sensor_configs_from_values(
+        [
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "static",
+                "display_name": "Static D435",
+                "mounting_mode": "static",
+            },
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist",
+                "display_name": "Wrist D435",
+                "mounting_mode": "eye_in_hand",
+            },
+        ]
+    )
+    write_run_config_with_manifest(
+        run,
+        create_run_config(run_root=run, sensors=sensors),
+    )
+
+    with pytest.raises(ValueError, match="separate calibration runs"):
+        select_target_bundle(
+            run_root=run,
+            target_id=bundle["target_id"],
+            placement_mode="unknown",
+            mounting_frame="robot_flange",
+            library_root=library,
+        )
+
+
+def test_first_target_selection_is_rejected_after_raw_capture(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    bundle = generate_target_bundle(
+        display_name="too-late target",
+        configuration=aruco_configuration(),
+        library_root=library,
+    )
+    run = tmp_path / "captured-run"
+    sensors = sensor_configs_from_values(
+        [
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "1",
+                "display_name": "Static D435",
+                "mounting_mode": "static",
+            }
+        ]
+    )
+    write_run_config_with_manifest(
+        run,
+        create_run_config(run_root=run, sensors=sensors),
+    )
+    (run / RAW_ROBOT_EE_POSES).write_text("{}\n")
+
+    with pytest.raises(CalibrationTargetConflict) as captured:
+        select_target_bundle(
+            run_root=run,
+            target_id=bundle["target_id"],
+            placement_mode="unknown",
+            mounting_frame="robot_flange",
+            library_root=library,
+        )
+
+    assert captured.value.blockers == [RAW_ROBOT_EE_POSES]
+    assert "must be bound before raw acquisition" in str(captured.value)
 
 
 def test_legacy_run_config_loads_calibration_target_as_null(tmp_path: Path) -> None:
@@ -459,7 +633,11 @@ def test_selection_promotion_rolls_back_every_active_artifact(
     ]
     before = {
         path: (
-            sorted((item.relative_to(path).as_posix(), item.read_bytes()) for item in path.rglob("*") if item.is_file())
+            sorted(
+                (item.relative_to(path).as_posix(), item.read_bytes())
+                for item in path.rglob("*")
+                if item.is_file()
+            )
             if path.is_dir()
             else path.read_bytes()
         )
@@ -486,7 +664,11 @@ def test_selection_promotion_rolls_back_every_active_artifact(
 
     after = {
         path: (
-            sorted((item.relative_to(path).as_posix(), item.read_bytes()) for item in path.rglob("*") if item.is_file())
+            sorted(
+                (item.relative_to(path).as_posix(), item.read_bytes())
+                for item in path.rglob("*")
+                if item.is_file()
+            )
             if path.is_dir()
             else path.read_bytes()
         )

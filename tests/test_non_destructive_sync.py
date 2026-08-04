@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from posetestbot.sync import non_destructive as sync_module
 from posetestbot.io.artifacts import (
     CAMERA_DATA_JSON,
     CAMERA_JSON,
@@ -178,7 +179,6 @@ def test_synchronize_sensor_folder_preserves_raw_frames(tmp_path: Path) -> None:
     assert derived_metadata[0]["rgb_path"] == "rgb/000000.png"
     assert derived_metadata[0]["source_frame_id"] == "1000.png"
     assert derived_metadata[0]["sync_timestamp_source"] == "host_received"
-
     matched = json.loads((output_folder / MATCH_ROBOT_EE_POSES).read_text())
     assert list(matched) == ["000000.png", "000001.png"]
     assert matched["000000.png"]["motion"] == "circ_far"
@@ -206,6 +206,73 @@ def test_synchronize_sensor_folder_preserves_raw_frames(tmp_path: Path) -> None:
     assert report["dropped"][0]["frame_id"] == "1500.png"
     assert CAM_K in report["copied_metadata_artifacts"]
     assert FRAME_METADATA_JSONL not in report["copied_metadata_artifacts"]
+
+
+def test_synchronize_sensor_folder_uses_verified_robot_pose_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+    verified_snapshot = json.loads((run_root / RAW_ROBOT_EE_POSES).read_text())
+    verified_snapshot["0"]["pose"]["X"] = 999
+    verified_snapshot["0"]["source_packet"] = {
+        "schema_version": "robot_pose.v1",
+        "from_frame": "robot_flange",
+        "to_frame": "template_base",
+        "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
+    }
+    monkeypatch.setattr(
+        sync_module,
+        "load_robot_poses",
+        lambda *_args: pytest.fail("verified raw robot poses must not be reopened"),
+    )
+
+    result = synchronize_sensor_folder(
+        sensor_folder,
+        run_root=run_root,
+        sync_delta=0,
+        timestamp_source="host_received",
+        raw_robot_poses=verified_snapshot,
+    )
+
+    matched = json.loads(Path(result.matched_poses_path).read_text())
+    assert matched["000000.png"]["robot_ee_pose"]["X"] == 999
+    assert (
+        matched["000000.png"]["source_packet"]
+        == (verified_snapshot["0"]["source_packet"])
+    )
+
+
+def test_synchronize_run_robot_pose_override_requires_exactly_one_sensor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root, sensor_folder = create_sync_fixture(tmp_path)
+    second_folder = run_root / "realsense_456"
+    shutil.copytree(sensor_folder, second_folder)
+    verified_snapshot = json.loads((run_root / RAW_ROBOT_EE_POSES).read_text())
+    monkeypatch.setattr(
+        sync_module,
+        "load_robot_poses",
+        lambda *_args: pytest.fail("run-level override must reach the sensor sync"),
+    )
+
+    results = synchronize_run(
+        run_root,
+        sensor_folders=[sensor_folder],
+        output_root=run_root / "processed" / "verified-override",
+        sync_delta=0,
+        raw_robot_poses=verified_snapshot,
+    )
+
+    assert len(results) == 1
+
+    with pytest.raises(ValueError, match="exactly one selected sensor"):
+        synchronize_run(
+            run_root,
+            sensor_folders=[sensor_folder, second_folder],
+            raw_robot_poses=verified_snapshot,
+        )
 
 
 def test_synchronize_sensor_folder_replaces_stale_derived_frames(

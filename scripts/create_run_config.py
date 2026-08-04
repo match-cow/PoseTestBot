@@ -22,6 +22,7 @@ from posetestbot.pipeline.run_config import (
     write_run_config_with_manifest,
 )
 from posetestbot.pipeline.sequences import PIPELINE_SEQUENCES
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 from posetestbot.sensors.contracts import MountingMode
 
 
@@ -41,6 +42,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Typed fixed frame edge as JSON with from, to, "
             "rotation_quaternion_wxyz, and translation_mm. May be repeated."
+        ),
+    )
+    parser.add_argument(
+        "--robot-pose-sunrise-reference-frame-path",
+        default=POSE_TEMPLATE_BASE_SUNRISE_PATH,
+        help=(
+            "Exact absolute Sunrise Application Data frame path expected in "
+            "robot_pose.v1 packets. New CLI runs default to the canonical "
+            f"dataset world frame {POSE_TEMPLATE_BASE_SUNRISE_PATH}."
         ),
     )
     parser.add_argument("--resolution", default="720p")
@@ -269,6 +279,9 @@ def main() -> None:
         fixed_transforms=tuple(
             fixed_transform_from_mapping(json.loads(value))
             for value in args.fixed_transform_json
+        ),
+        robot_pose_sunrise_reference_frame_path=(
+            args.robot_pose_sunrise_reference_frame_path
         ),
         synchronization=synchronization,
     )

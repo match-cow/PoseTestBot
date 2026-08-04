@@ -392,14 +392,63 @@ least one camera enabled, then regenerate capture-plan and preflight artifacts
 after any enable/disable change.
 
 The **Default operator alias** on **Devices** is a reusable lab default stored
-in the repository `working_data/sensor_aliases.json`; saving visible cameras
-retains records for cameras that are currently disconnected. Workflow step 1
-snapshots that default as the editable, run-owned
+in the repository `working_data/sensor_aliases.json`. Save it with the
+per-camera **Save alias** action; the inline unsaved state remains visible
+until the server returns the saved value. Each field-level save retains records
+for cameras that are currently disconnected. Workflow step 1 snapshots that
+default as the editable, run-owned
 `capture.sensors[].operator_alias` in `run_config.json`, with `display_name`
 retained as the compatibility-facing effective label. A later edit to the
 Devices default does not rename an existing run. Capture planning copies the
 alias into `capture_plan.json` and `dataset_manifest.json` while physical
 identity and folder naming remain bound to sensor type and device ID.
+
+The **Mounting default** and supported **Orientation default** selectors on
+**Devices** write that same lab-default file immediately and report success
+only after the server returns the saved state. A failed immediate write reverts
+the selector. Existing runs keep their run-owned values. Change those
+explicitly with **Mounting for this run** and **Image orientation for this
+run** in Workflow step 1, then save setup. Switching either value also requires
+calibration evidence compatible with the new `static`/`eye_in_hand` and
+normal/inverted interpretation. The **Include in next run** checkbox is only a
+browser-local draft; Workflow step 1 owns durable camera membership.
+
+One camera-calibration recording must contain one mounting group. An all-static
+group uses a grid rigidly attached to `robot_flange`; select unknown placement
+and let the static-camera solver estimate the attachment offset while solving
+each `camera -> template_base` transform. The robot-carried grid supplies
+multi-pose geometric excitation. PoseTestBot does not use the static cameras to
+track the robot hand at runtime. An all eye-in-hand group uses a grid fixed
+relative to `template_base`. Record the two groups in separate fresh runs,
+publish them separately, and assign their exact per-camera sources together
+only when configuring the later object-dataset run. Camera and target mounting
+cannot be changed after raw capture evidence exists.
+
+Static `camera -> template_base` profiles are reference-frame dependent. New
+profiles retain the exact `sunrise_reference_frame_path` observed in
+`robot_pose.v1` packets. Workflow step 1 exposes this as the required
+**Robot-pose Sunrise reference**. Both static-camera calibration and ordinary
+object capture use `/PoseTestBot/PoseTemplateBase`, so a promoted static
+profile directly locates that camera in the frame of the printed pose template
+and its objects. `/PoseTestBot/TemplateBase` remains only the parent of the
+calibration application's taught motion waypoints; it is not the pose-stream
+reference or static-calibration result frame. The same setting is available
+from the CLI:
+
+```bash
+uv run python scripts/create_run_config.py working_data/object_run \
+  --robot-pose-sunrise-reference-frame-path /PoseTestBot/PoseTemplateBase
+```
+
+Selection fails closed when the destination omits this expectation, the static
+profile predates v1 path provenance, or the paths differ. Existing raw pose
+packets are rechecked as well. Preexisting static profiles produced from poses
+expressed in `/PoseTestBot/TemplateBase` are not relabelled as
+`/PoseTestBot/PoseTemplateBase`; recalibrate them against the intended result
+frame. An eye-in-hand `camera -> robot_flange` profile does not depend on this
+world-frame choice. Matching path strings establish software provenance only:
+commissioning must still prove that a persistent Sunrise frame was not retaught
+and is aligned to the intended physical datum.
 
 #### Combined static and robot-mounted D435 triggering
 

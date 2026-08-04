@@ -25,7 +25,7 @@ export const workflowJourneyMetadata: Record<WorkflowJourneyId, WorkflowJourneyM
     title: "Camera calibration",
     steps: [
       { id: "configure", number: 1, title: "Configure the run and cameras" },
-      { id: "target", number: 2, title: "Choose the printed calibration grid" },
+      { id: "target", number: 2, title: "Choose the printed grid and its mounting" },
       { id: "readiness", number: 3, title: "Check readiness" },
       { id: "capture", number: 4, title: "Record calibration images" },
       { id: "calculate", number: 5, title: "Calculate, review, and publish" },

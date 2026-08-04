@@ -19,7 +19,12 @@ def test_ordinary_capture_uses_a_distinct_persistent_pose_template_frame() -> No
     assert "new Frame(" not in java
     assert "/HRC_Hub/Template_Base" not in java
     assert 'TEMPLATE_BASE_PATH = "/PoseTestBot/TemplateBase";' in calibration_java
-    assert "/PoseTestBot/PoseTemplateBase" not in calibration_java
+    assert '"/PoseTestBot/PoseTemplateBase";' in calibration_java
+    assert "robotinfo.setBase(TEMPLATE_BASE_PATH);" in calibration_java
+    assert (
+        "poseTemplateBase = requiredFrame(POSE_TEMPLATE_BASE_PATH);" in calibration_java
+    )
+    assert "command.runId,\n\t\t\t\t\t\tPOSE_TEMPLATE_BASE_PATH);" in (calibration_java)
 
 
 def test_ordinary_capture_is_inert_and_does_not_move_before_start() -> None:

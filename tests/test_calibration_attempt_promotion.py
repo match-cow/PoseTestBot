@@ -33,6 +33,7 @@ from posetestbot.calibration.profiles import (
     write_profile_collection,
 )
 from posetestbot.calibration.target_library import (
+    CalibrationTargetConflict,
     generate_target_bundle,
     select_target_bundle,
 )
@@ -59,6 +60,7 @@ from posetestbot.pipeline.run_config import (
 from posetestbot.pipeline.rewrite_gate import (
     build_calibration_validation_gate_report,
 )
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
 
@@ -409,6 +411,55 @@ def test_promotion_outlier_evidence_rejects_tampered_aggregate() -> None:
             profile,
             candidate_id=candidate_id,
         )
+
+
+def test_preexisting_static_attempt_in_template_base_cannot_be_promoted(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    write_run_config_with_manifest(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=sensor_configs_from_values(
+                [
+                    {
+                        "sensor_type": "realsense_d435",
+                        "device_id": "1",
+                        "display_name": "Static D435",
+                        "mounting_mode": "static",
+                    }
+                ]
+            ),
+            robot_pose_sunrise_reference_frame_path=(POSE_TEMPLATE_BASE_SUNRISE_PATH),
+        ),
+    )
+    attempt_id = "a" * 32
+    attempt_root = attempt_module.calibration_attempt_root(run_root, attempt_id)
+    attempt_root.mkdir(parents=True)
+    request_value = {
+        "schema_version": "calibration_attempt_request.v1",
+        "attempt_id": attempt_id,
+        "run_root": run_root.as_posix(),
+        "mode": "eye_to_hand",
+        "robot_pose_reference": {
+            "schema_version": "robot_pose_reference.v1",
+            "status": "verified",
+            "packet_schema_version": "robot_pose.v1",
+            "from": "robot_flange",
+            "to": "template_base",
+            "sunrise_reference_frame_path": "/PoseTestBot/TemplateBase",
+        },
+    }
+    (attempt_root / "request.json").write_text(json.dumps(request_value))
+    (attempt_root / "progress.json").write_text(
+        json.dumps(attempt_module._initial_progress(attempt_id))
+    )
+
+    with pytest.raises(ValueError, match="PoseTemplateBase"):
+        promote_calibration_attempt(run_root, attempt_id)
+
+    assert not (run_root / CALIBRATION_PROFILES).exists()
 
 
 def _report_backed_fixed_zero_attempt(tmp_path: Path) -> tuple[dict, Path]:
@@ -806,7 +857,16 @@ def test_report_backed_fixed_zero_time_offset_tampering_blocks_promotion(
 
 @pytest.mark.parametrize(
     "tamper_mode",
-    [None, "candidate_profile_transform", "promotion_status_selection"],
+    [
+        None,
+        "candidate_profile_binding",
+        "candidate_profile_transform",
+        "promotion_status_selection",
+        "robot_pose_artifact",
+        "request_robot_pose_reference",
+        "target_selection",
+        "legacy_target_selection",
+    ],
 )
 def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected_camera(
     tmp_path: Path,
@@ -827,12 +887,27 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
                 "device_id": "2",
                 "display_name": "OAK",
                 "mounting_mode": "static",
+                "enabled": False,
             },
         ]
     )
     write_run_config_with_manifest(
         run_root,
         create_run_config(run_root=run_root, sensors=configured),
+    )
+    library = tmp_path / "library"
+    bundle = generate_target_bundle(
+        display_name="Promotion target",
+        configuration=_configuration(),
+        library_root=library,
+    )
+    monkeypatch.setattr(attempt_module, "default_target_library_root", lambda: library)
+    select_target_bundle(
+        run_root=run_root,
+        target_id=bundle["target_id"],
+        placement_mode="template_base_identity",
+        mounting_frame="template_base",
+        library_root=library,
     )
     _write_capture_folder(run_root / "realsense_1")
     _write_capture_folder(run_root / "luxonis_2")
@@ -855,19 +930,6 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
             }
         )
     )
-    library = tmp_path / "library"
-    bundle = generate_target_bundle(
-        display_name="Promotion target",
-        configuration=_configuration(),
-        library_root=library,
-    )
-    monkeypatch.setattr(attempt_module, "default_target_library_root", lambda: library)
-    select_target_bundle(
-        run_root=run_root,
-        target_id=bundle["target_id"],
-        placement_mode="unknown",
-        library_root=library,
-    )
     request_value = create_calibration_attempt(
         run_root,
         {
@@ -878,6 +940,11 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         },
     )
     attempt_id = request_value["attempt_id"]
+    requested_placement = request_value["target_bundle"]["selection"]["placement"]
+    assert requested_placement["mode"] == "template_base_identity"
+    assert requested_placement["mounting_frame"] == "template_base"
+    assert requested_placement["transform"]["to"] == "template_base"
+    assert request_value["target"]["placement"] == requested_placement["transform"]
     attempt_root = run_root / "processed" / "calibration" / attempt_id
     _, time_offset_source = _write_fixed_zero_time_offset_evidence(
         run_root,
@@ -913,6 +980,7 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         metadata={
             **candidate.metadata,
             "synchronization": synchronization,
+            "robot_pose_reference": request_value["robot_pose_reference"],
         },
     )
     candidate_evidence = _motion_balanced_candidate(candidate_id)
@@ -972,6 +1040,27 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         operator="test-operator",
     )
 
+    if tamper_mode == "candidate_profile_binding":
+        write_profile_collection(
+            [
+                replace(
+                    candidate,
+                    metadata={
+                        key: value
+                        for key, value in candidate.metadata.items()
+                        if key != "robot_pose_reference"
+                    },
+                )
+            ],
+            attempt_root / "candidate_profiles.json",
+        )
+        with pytest.raises(ValueError, match="immutable robot-pose artifact binding"):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
     if tamper_mode == "candidate_profile_transform":
         write_profile_collection(
             [
@@ -1000,6 +1089,66 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         }
         promotion_status_path.write_text(json.dumps(promotion_status))
         with pytest.raises(ValueError, match="selections are inconsistent"):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+    if tamper_mode == "robot_pose_artifact":
+        raw_pose_path = run_root / "raw_robot_ee_poses.json"
+        raw_poses = json.loads(raw_pose_path.read_text())
+        raw_poses["0"]["pose"]["X"] = 1.0
+        raw_pose_path.write_text(json.dumps(raw_poses))
+        with pytest.raises(
+            ValueError,
+            match="changed after calibration attempt creation",
+        ):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+    if tamper_mode == "request_robot_pose_reference":
+        request_path = attempt_root / "request.json"
+        tampered_request = json.loads(request_path.read_text())
+        tampered_request["robot_pose_reference"]["reason"] = "forged_reference_identity"
+        request_path.write_text(json.dumps(tampered_request))
+        with pytest.raises(
+            ValueError,
+            match="reference identity or pose counts",
+        ):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+    if tamper_mode == "target_selection":
+        config_path = run_root / "run_config.json"
+        config = json.loads(config_path.read_text())
+        config["calibration_target"]["operator_note"] = "changed after attempt"
+        config_path.write_text(json.dumps(config))
+        with pytest.raises(
+            CalibrationTargetConflict,
+            match="selection changed after this attempt",
+        ):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+    if tamper_mode == "legacy_target_selection":
+        config_path = run_root / "run_config.json"
+        config = json.loads(config_path.read_text())
+        config["calibration_target"]["placement"].pop("mounting_frame")
+        config_path.write_text(json.dumps(config))
+        with pytest.raises(
+            CalibrationTargetConflict,
+            match="evidence changed after this attempt",
+        ):
             promote_calibration_attempt(run_root, attempt_id)
         assert {
             profile.profile_id
@@ -1055,12 +1204,15 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
     )
     assert sensors[("oak_d_pro", "2")]["calibration_profile_id"] is None
     assert config["calibration_target"]["target_id"] == bundle["target_id"]
-    assert config["calibration_target"]["placement"] == {"mode": "unknown"}
+    assert config["calibration_target"]["placement"] == requested_placement
     intrinsic_profiles = load_intrinsic_profile_collection(
         run_root / "intrinsic_calibration_profiles.json"
     )
     assert {item["sensor_id"] for item in intrinsic_profiles} == {"1", "2"}
-    assert (run_root / CALIBRATION_TARGET).is_file()
+    assert (
+        json.loads((run_root / CALIBRATION_TARGET).read_text())["placement"]
+        == (requested_placement["transform"])
+    )
     for filename in (
         CALIBRATION_CANDIDATES,
         CALIBRATION_SOLVER_REPORT,

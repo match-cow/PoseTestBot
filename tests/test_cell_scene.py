@@ -30,6 +30,7 @@ from posetestbot.pipeline.run_config import (
     sensor_config_from_token,
     write_run_config,
 )
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 from posetestbot.web.app import create_app
 
@@ -92,6 +93,22 @@ def profile(
             "promoted_by": "cell-test",
             "outlier_count": 1,
             "outlier_ratio": 0.125,
+            **(
+                {
+                    "robot_pose_reference": {
+                        "schema_version": "robot_pose_reference.v1",
+                        "status": "verified",
+                        "packet_schema_version": "robot_pose.v1",
+                        "from": "robot_flange",
+                        "to": "template_base",
+                        "sunrise_reference_frame_path": (
+                            POSE_TEMPLATE_BASE_SUNRISE_PATH
+                        ),
+                    }
+                }
+                if mounting == MountingMode.STATIC
+                else {}
+            ),
             "companion_transform": {
                 "from": "aruco_grid",
                 "to": (
@@ -161,6 +178,9 @@ def make_scene_run(tmp_path: Path) -> Path:
             ),
             FixedFrameTransform("tcp", "robot_flange", (1, 0, 0, 0), (0, 0, 120)),
         ),
+        robot_pose_sunrise_reference_frame_path=(
+            POSE_TEMPLATE_BASE_SUNRISE_PATH
+        ),
     )
     write_run_config(run_root, config)
     for sensor in ("realsense_111", "realsense_222"):
@@ -171,6 +191,14 @@ def make_scene_run(tmp_path: Path) -> Path:
                 {
                     f"{index:06d}.png": {
                         "motion": "arc",
+                        "source_packet": {
+                            "schema_version": "robot_pose.v1",
+                            "from_frame": "robot_flange",
+                            "to_frame": "template_base",
+                            "sunrise_reference_frame_path": (
+                                POSE_TEMPLATE_BASE_SUNRISE_PATH
+                            ),
+                        },
                         "robot_ee_pose": {
                             "X": index,
                             "Y": 2,

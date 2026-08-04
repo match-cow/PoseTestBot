@@ -37,7 +37,11 @@ import org.json.simple.parser.JSONParser;
 public class PoseTestBot_CalibrationVarianceProposal
 		extends RoboticsAPIApplication {
 
+	/* Motion waypoints stay under the commissioned calibration teaching frame. */
 	private static final String TEMPLATE_BASE_PATH = "/PoseTestBot/TemplateBase";
+	/* Static-camera extrinsics are solved in the ordinary dataset world frame. */
+	private static final String POSE_TEMPLATE_BASE_PATH =
+			"/PoseTestBot/PoseTemplateBase";
 	private static final String CALIBRATION_COVERAGE_UPPER_LEFT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageUpperLeft";
 	private static final String CALIBRATION_COVERAGE_UPPER_CENTER_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageUpperCenter";
 	private static final String CALIBRATION_COVERAGE_UPPER_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageUpperRight";
@@ -77,6 +81,7 @@ public class PoseTestBot_CalibrationVarianceProposal
 	private InfoTemplate robotinfo;
 
 	private ObjectFrame templateBase;
+	private ObjectFrame poseTemplateBase;
 	private ObjectFrame coverageUpperLeft;
 	private ObjectFrame coverageUpperCenter;
 	private ObjectFrame coverageUpperRight;
@@ -93,6 +98,7 @@ public class PoseTestBot_CalibrationVarianceProposal
 		robot = getContext().getDeviceFromType(LBR.class);
 		robotinfo.setBase(TEMPLATE_BASE_PATH);
 		templateBase = requiredFrame(TEMPLATE_BASE_PATH);
+		poseTemplateBase = requiredFrame(POSE_TEMPLATE_BASE_PATH);
 		coverageUpperLeft = requiredFrame(CALIBRATION_COVERAGE_UPPER_LEFT_PATH);
 		coverageUpperCenter = requiredFrame(CALIBRATION_COVERAGE_UPPER_CENTER_PATH);
 		coverageUpperRight = requiredFrame(CALIBRATION_COVERAGE_UPPER_RIGHT_PATH);
@@ -105,6 +111,8 @@ public class PoseTestBot_CalibrationVarianceProposal
 
 		getLogger().info("Resolved TemplateBase and all nine taught grid frames: "
 				+ robotinfo.getBase());
+		getLogger().info("Resolved static-camera calibration output reference: "
+				+ poseTemplateBase);
 	}
 
 	private ObjectFrame requiredFrame(String path) {
@@ -148,7 +156,7 @@ public class PoseTestBot_CalibrationVarianceProposal
 						command.receiverIp,
 						command.receiverPort,
 						command.runId,
-						TEMPLATE_BASE_PATH);
+						POSE_TEMPLATE_BASE_PATH);
 				double cartVelocityMmS = cartVelocityMmS(
 						command.cartesianVelocityMps);
 				getLogger().info("Starting calibration variance capture for run "

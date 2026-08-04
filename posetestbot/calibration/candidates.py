@@ -16,6 +16,7 @@ from pytransform3d.transform_manager import TransformManager
 
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.calibration.observations import SCHEMA_VERSION as OBSERVATION_SCHEMA
+from posetestbot.calibration.legacy_static import require_legacy_static_known_target
 from posetestbot.calibration.profiles import (
     SCHEMA_VERSION as PROFILE_SCHEMA_VERSION,
     CalibrationProfile,
@@ -482,6 +483,12 @@ def build_calibration_candidates(
             "Unsupported calibration observation schema: "
             f"{observations_report.get('schema_version')!r}"
         )
+    require_legacy_static_known_target(
+        root,
+        observations_report,
+        target_to_reference=target_to_reference,
+        stage_label="Legacy calibration candidates",
+    )
     calibration_target = observations_report.get("target")
     calibration_target_evidence = (
         target_identity(calibration_target)

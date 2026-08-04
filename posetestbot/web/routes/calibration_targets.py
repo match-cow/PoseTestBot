@@ -25,7 +25,9 @@ from posetestbot.calibration.target_library import (
     default_target_library_root,
     delete_target_bundle,
     list_target_bundles,
+    normalize_target_mounting_frame,
     replacement_blockers,
+    validate_configured_target_mounting,
     validate_bundle_placement,
     validate_run_target_selection,
     validate_target_bundle,
@@ -43,7 +45,10 @@ MAX_TARGET_REQUEST_BYTES = 256 * 1024
 
 
 def _request_json() -> dict:
-    if request.content_length is not None and request.content_length > MAX_TARGET_REQUEST_BYTES:
+    if (
+        request.content_length is not None
+        and request.content_length > MAX_TARGET_REQUEST_BYTES
+    ):
         raise ValueError("Calibration-target request exceeds 256 KiB")
     value = request.get_json(silent=True)
     if not isinstance(value, dict):
@@ -179,7 +184,9 @@ def calibration_target_generate():
         # Validate Pydantic and page-fit errors before accepting a background job.
         build_posegridgen_scene(configuration)
         request_id = uuid.uuid4().hex
-        request_root = APP_ROOT / "working_data" / "jobs" / "calibration_target_requests"
+        request_root = (
+            APP_ROOT / "working_data" / "jobs" / "calibration_target_requests"
+        )
         request_path = request_root / f"{request_id}.json"
         atomic_write_json(
             request_path,
@@ -213,27 +220,34 @@ def calibration_target_generate():
     return jsonify({"job": job.to_dict(), "job_id": job.id}), 202
 
 
-@calibration_targets_bp.post(
-    "/calibration-targets/bundles/<target_id>/select"
-)
+@calibration_targets_bp.post("/calibration-targets/bundles/<target_id>/select")
 def calibration_target_select(target_id: str):
     try:
         value = _request_json()
         run_root = value.get("run_root")
         placement = str(value.get("placement", ""))
+        raw_mounting_frame = value.get("mounting_frame")
+        mounting_frame = (
+            str(raw_mounting_frame) if raw_mounting_frame is not None else None
+        )
         if not run_root:
             raise ValueError("run_root is required")
         if placement not in PLACEMENT_MODES:
             raise ValueError(
                 "placement must be one of: " + ", ".join(sorted(PLACEMENT_MODES))
             )
+        mounting_frame = normalize_target_mounting_frame(placement, mounting_frame)
         config = load_run_config_for_run_root(run_root)
+        validate_configured_target_mounting(config, mounting_frame)
         existing = config.get("calibration_target")
         if isinstance(existing, dict):
-            current_mode = existing.get("placement", {}).get("mode")
+            existing_placement = existing.get("placement", {})
+            current_mode = existing_placement.get("mode")
+            current_mounting_frame = existing_placement.get("mounting_frame")
             if (
                 existing.get("target_id") == target_id
                 and current_mode == placement
+                and current_mounting_frame == mounting_frame
             ):
                 evidence = validate_run_target_selection(run_root)
                 return (
@@ -253,26 +267,33 @@ def calibration_target_select(target_id: str):
             default_target_library_root() / target_id,
             library_root=default_target_library_root(),
         )
-        validate_bundle_placement(bundle, placement)
-        if isinstance(existing, dict):
-            blockers = replacement_blockers(run_root)
-            if blockers:
-                raise CalibrationTargetConflict(
-                    "The active calibration target cannot be replaced; create a new run.",
-                    blockers=blockers,
-                )
+        validate_bundle_placement(
+            bundle,
+            placement,
+            mounting_frame=mounting_frame,
+        )
+        blockers = replacement_blockers(run_root)
+        if blockers:
+            raise CalibrationTargetConflict(
+                "The calibration target and its mounting must be bound before raw "
+                "acquisition or target-dependent evidence exists; create a new run.",
+                blockers=blockers,
+            )
+        command = [
+            "uv",
+            "run",
+            "python",
+            "scripts/run_calibration_target_select.py",
+            str(run_root),
+            bundle["target_id"],
+            "--placement",
+            placement,
+        ]
+        if mounting_frame is not None:
+            command.extend(["--mounting-frame", mounting_frame])
         job = job_runner.submit(
             name="calibration_target_select",
-            command=[
-                "uv",
-                "run",
-                "python",
-                "scripts/run_calibration_target_select.py",
-                str(run_root),
-                bundle["target_id"],
-                "--placement",
-                placement,
-            ],
+            command=command,
             cwd=APP_ROOT,
             resources=["disk_io"],
             scope_kind="run",
@@ -281,6 +302,7 @@ def calibration_target_select(target_id: str):
                 "run_root": str(run_root),
                 "target_id": bundle["target_id"],
                 "placement": placement,
+                "mounting_frame": mounting_frame,
             },
         )
     except CalibrationTargetConflict as exc:

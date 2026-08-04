@@ -20,9 +20,11 @@ from posetestbot.pipeline.run_config import (
     create_run_config,
     load_run_config_for_run_root,
     sensor_config_from_mapping,
+    sensor_configs_from_values,
     sensor_configs_from_status,
     sensor_config_from_token,
     sequence_plan_from_run_config,
+    validate_run_config,
     write_run_config,
 )
 
@@ -69,6 +71,26 @@ def test_default_run_config_uses_real_robot_and_lab_sensors(tmp_path: Path) -> N
     assert plan.steps[0].command[:3] == ["uv", "run", "python"]
 
 
+def test_run_config_records_and_validates_expected_sunrise_reference_path(
+    tmp_path: Path,
+) -> None:
+    value = create_run_config(
+        run_root=tmp_path / "referenced-run",
+        robot_pose_sunrise_reference_frame_path="/PoseTestBot/PoseTemplateBase",
+    ).to_dict()
+
+    assert value["frames"]["robot_pose"]["sunrise_reference_frame_path"] == (
+        "/PoseTestBot/PoseTemplateBase"
+    )
+    validate_run_config(value)
+
+    value["frames"]["robot_pose"]["sunrise_reference_frame_path"] = (
+        "PoseTestBot/PoseTemplateBase"
+    )
+    with pytest.raises(ValueError, match="sunrise_reference_frame_path is invalid"):
+        validate_run_config(value)
+
+
 @pytest.mark.parametrize("velocity", [0.0, -0.01, float("inf"), float("nan")])
 def test_run_config_rejects_non_positive_or_non_finite_velocity(
     tmp_path: Path,
@@ -106,6 +128,40 @@ def test_sensor_config_normalizes_explicit_run_operator_alias() -> None:
     assert sensor.operator_alias == "Run wrist camera"
     assert sensor.display_name == "Run wrist camera"
     assert sensor.to_dict()["operator_alias"] == "Run wrist camera"
+
+
+def test_sensor_mapping_requires_explicit_mount_or_explicit_default() -> None:
+    value = {
+        "sensor_type": "realsense",
+        "device_id": "123",
+        "display_name": "Intel RealSense 123",
+    }
+
+    with pytest.raises(ValueError, match="mounting_mode is required"):
+        sensor_config_from_mapping(value)
+
+    sensor = sensor_config_from_mapping(value, default_mounting_mode="static")
+    assert sensor.mounting_mode == "static"
+
+
+def test_sensor_token_requires_explicit_mount_or_explicit_default() -> None:
+    with pytest.raises(ValueError, match="mounting_mode is required"):
+        sensor_config_from_token("realsense:123")
+
+    sensor = sensor_config_from_token(
+        "realsense:123",
+        default_mounting_mode="static",
+    )
+    assert sensor.mounting_mode == "static"
+
+
+def test_new_default_sensor_set_requires_explicit_mounting_default() -> None:
+    with pytest.raises(ValueError, match="mounting_mode is required"):
+        sensor_configs_from_values(None)
+
+    sensors = sensor_configs_from_values(None, default_mounting_mode="static")
+    assert sensors
+    assert all(sensor.mounting_mode == "static" for sensor in sensors)
 
 
 def test_sensor_config_accepts_realsense_inverted_orientation() -> None:
@@ -185,6 +241,28 @@ def test_sensor_configs_from_status_uses_alias_defaults() -> None:
     assert sensors[0].mounting_mode == "static"
     assert sensors[0].inverted is True
     assert sensors[0].metadata == {"model": "D435"}
+
+
+def test_sensor_configs_from_status_requires_mount_or_explicit_default() -> None:
+    status = {
+        "families": [
+            {
+                "devices": [
+                    {
+                        "sensor_type": "realsense_d435",
+                        "device_id": "123",
+                        "display_name": "Intel RealSense 123",
+                    }
+                ]
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="mounting_mode is required"):
+        sensor_configs_from_status(status)
+
+    sensors = sensor_configs_from_status(status, default_mounting_mode="static")
+    assert [sensor.mounting_mode for sensor in sensors] == ["static"]
 
 
 def test_sensor_config_rejects_non_realsense_inverted_orientation() -> None:
@@ -541,6 +619,9 @@ def test_create_run_config_cli_writes_config_manifest_and_plan(
     assert f"Wrote {run_root / RUN_CONFIG}" in result.stdout
     assert '"sequence_id": "sync_aruco"' in result.stdout
     config = json.loads((run_root / RUN_CONFIG).read_text())
+    assert config["frames"]["robot_pose"]["sunrise_reference_frame_path"] == (
+        "/PoseTestBot/PoseTemplateBase"
+    )
     assert config["capture"]["sensors"] == [
         {
             "calibration_profile_id": None,

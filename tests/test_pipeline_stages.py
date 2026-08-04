@@ -163,6 +163,17 @@ def test_stage_listing_contains_acquisition_stages_only() -> None:
     assert "synthetic_rgbd_fixture" not in stage_ids
 
 
+def test_legacy_calibration_stages_do_not_claim_the_guided_moving_grid_solve() -> None:
+    candidates = PIPELINE_STAGES["calibration_candidates"]
+    solver = PIPELINE_STAGES["calibration_solver"]
+
+    assert candidates.label == "Legacy Calibration Candidates"
+    assert "not the guided moving-grid static-camera solve" in candidates.description
+    assert solver.label == "Legacy Known-Target Solver"
+    assert "cannot solve the guided static-camera arrangement" in solver.description
+    assert "Workflow step 5" in solver.description
+
+
 def test_capture_execution_stage_rejects_retired_mode_option(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unknown pipeline option"):
         build_pipeline_job(

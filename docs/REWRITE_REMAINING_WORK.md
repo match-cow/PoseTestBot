@@ -76,6 +76,17 @@ outcome.
   miss without treating cadence alone as a calibration-attempt failure. Follow
   [IIWA_POSE_STREAM_CADENCE.md](IIWA_POSE_STREAM_CADENCE.md); never send UDP
   `STOP` between repeated calibration captures.
+- [ ] After the high-rate calibration revision is deployed and target
+  visibility is improved, create a fresh run for the three exact static D435
+  cameras. Bind the printed grid to `robot_flange` with unknown attachment,
+  perform one explicitly authorized supervised capture, and retain the
+  three-camera static-world attempt (internally the eye-to-hand equation).
+  Require every robot pose packet to use
+  `sunrise_reference_frame_path=/PoseTestBot/PoseTemplateBase`, passing
+  `camera -> PoseTemplateBase` profiles, and mutually consistent estimated
+  `aruco_grid -> robot_flange` support evidence before promotion. The latter is
+  a nuisance transform, not a runtime hand-tracking output. Do not reinterpret
+  an older run whose saved camera mounting or pose reference is wrong.
 
 - [ ] Identify and record the exact Sunrise application deployed for ordinary
   capture. `iiwa/PoseTestBot_Test.java` remains a repository candidate, not
@@ -84,9 +95,16 @@ outcome.
   enabling it or reconciling the repository source with the deployed source.
 - [ ] Create, teach, and read back the distinct persistent frames
   `/PoseTestBot/PoseTemplateBase`, `/PoseTestBot/CaptureStart`, and
-  `/PoseTestBot/CaptureEnd`. Record the measured relationship between
-  `/PoseTestBot/PoseTemplateBase` and the calibration application's
-  `/PoseTestBot/TemplateBase`.
+  `/PoseTestBot/CaptureEnd`. Retain `/PoseTestBot/TemplateBase` only as the
+  calibration application's commissioned motion-waypoint parent. Confirm that
+  the calibration pose-stream task queries the flange relative to
+  `/PoseTestBot/PoseTemplateBase`; the static solver does not require a measured
+  transform between the waypoint parent and result frame.
+  The software now retains and compares exact v1
+  `sunrise_reference_frame_path` values and refuses legacy, undeclared, or
+  mismatched static-profile reuse. Equal path strings are not evidence that a
+  persistent frame was never retaught, so this commissioning/read-back item
+  remains required.
 - [ ] Commission the complete PTP/A1/PTP path in the installed cell, including
   joint branch, singularity, clearance, payload, camera-rig, cable, dwell,
   speed, and final-pose checks.

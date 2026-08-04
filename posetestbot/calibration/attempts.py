@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -146,6 +147,13 @@ from posetestbot.pipeline.run_config import (
     load_run_config_for_run_root,
     run_config_lock,
     validate_run_config,
+)
+from posetestbot.robot.reference_frames import (
+    POSE_TEMPLATE_BASE_SUNRISE_PATH,
+    ROBOT_POSE_REFERENCE_SCHEMA_VERSION,
+    configured_sunrise_reference_frame_path,
+    robot_pose_reference_evidence,
+    verified_sunrise_reference_frame_path,
 )
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 from posetestbot.sync.non_destructive import (
@@ -322,13 +330,14 @@ def _is_contained(path: Path, root: Path) -> bool:
 def _calibration_timestamp_preflight(
     run_root: Path,
     sensors: Sequence[Mapping[str, Any]],
+    robot_pose_artifacts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Fail closed unless selected cameras provide one coherent timebase."""
 
     policy = _attempt_timestamp_policy(sensors)
     errors: list[str] = []
     evidence: list[dict[str, Any]] = []
-    robot_paths: set[Path] = set()
+    robot_paths: dict[str, Path] = {}
     for sensor in sensors:
         sensor_policy = _timestamp_policy_for_sensor(policy, sensor)
         required_domain = sensor_policy["required_frame_timestamp_domain"]
@@ -380,15 +389,23 @@ def _calibration_timestamp_preflight(
                 f"{sensor_key}: robot timestamp evidence escapes the run root"
             )
         else:
-            robot_paths.add(robot_path)
+            robot_paths[_relative(robot_path, run_root)] = robot_path
 
     robot_evidence: list[dict[str, Any]] = []
-    for robot_path in sorted(robot_paths):
-        try:
-            poses = _read_json(robot_path)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            errors.append(f"invalid robot timestamp evidence: {exc}")
-            continue
+    for relative, robot_path in sorted(robot_paths.items()):
+        if robot_pose_artifacts is None:
+            try:
+                poses = _read_json(robot_path)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                errors.append(f"invalid robot timestamp evidence: {exc}")
+                continue
+        else:
+            poses = robot_pose_artifacts.get(relative)
+            if not isinstance(poses, Mapping):
+                errors.append(
+                    "verified robot timestamp evidence does not cover " + relative
+                )
+                continue
         missing_host_wall = sum(
             not isinstance(item, Mapping) or item.get("host_wall_timestamp_ns") is None
             for item in poses.values()
@@ -397,12 +414,12 @@ def _calibration_timestamp_preflight(
             errors.append("robot timestamp evidence is empty")
         if missing_host_wall:
             errors.append(
-                f"{_relative(robot_path, run_root)}: {missing_host_wall} robot "
+                f"{relative}: {missing_host_wall} robot "
                 "pose(s) lack host_wall_timestamp_ns"
             )
         robot_evidence.append(
             {
-                "path": _relative(robot_path, run_root),
+                "path": relative,
                 "pose_count": len(poses),
                 "host_wall_timestamp_missing_count": missing_host_wall,
             }
@@ -590,12 +607,321 @@ def _saved_targets(run_root: Path) -> list[dict[str, Any]]:
             "valid": item.get("valid", False),
             "error": item.get("error"),
             "selected": item.get("selected", False),
+            "selected_placement": item.get("selected_placement"),
             "target": item.get("target"),
         }
         for item in list_target_bundles(
             library_root=default_target_library_root(), run_root=run_root
         )
     ]
+
+
+def _robot_pose_reference_from_artifacts(
+    robot_pose_artifacts: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Derive one aggregate frame identity from already loaded raw artifacts."""
+
+    evidence_by_path = {
+        relative: robot_pose_reference_evidence(raw)
+        for relative, raw in sorted(robot_pose_artifacts.items())
+    }
+    if not evidence_by_path:
+        raise ValueError("Calibration attempt has no bound robot-pose artifacts")
+    statuses = {str(item.get("status")) for item in evidence_by_path.values()}
+    if len(statuses) != 1:
+        raise ValueError(
+            "Selected cameras mix verified v1 and legacy robot-pose reference evidence"
+        )
+    status = next(iter(statuses))
+    if status == "verified":
+        identities = {
+            (
+                item.get("packet_schema_version"),
+                item.get("from"),
+                item.get("to"),
+                verified_sunrise_reference_frame_path(item),
+            )
+            for item in evidence_by_path.values()
+        }
+        if len(identities) != 1:
+            raise ValueError(
+                "Selected cameras do not share one Sunrise robot-pose reference frame"
+            )
+        evidence = dict(next(iter(evidence_by_path.values())))
+        evidence.pop("pose_count", None)
+        evidence["artifacts"] = sorted(evidence_by_path)
+        evidence["pose_counts"] = {
+            relative: int(item["pose_count"])
+            for relative, item in sorted(evidence_by_path.items())
+        }
+    else:
+        reasons = {str(item.get("reason") or "") for item in evidence_by_path.values()}
+        if len(reasons) != 1:
+            raise ValueError(
+                "Selected cameras have inconsistent legacy robot-pose provenance"
+            )
+        evidence = {
+            "schema_version": ROBOT_POSE_REFERENCE_SCHEMA_VERSION,
+            "status": "unverified",
+            "reason": next(iter(reasons)),
+            "artifacts": sorted(evidence_by_path),
+        }
+    return evidence
+
+
+def _attempt_robot_pose_reference(
+    run_root: Path,
+    cameras: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Bind an attempt to the exact shared robot-pose reference, when recorded."""
+
+    robot_pose_artifacts: dict[str, dict[str, Any]] = {}
+    artifact_bindings: dict[str, dict[str, Any]] = {}
+    for camera in cameras:
+        relative = str(camera.get("robot_pose_path") or "")
+        if not relative:
+            raise ValueError(
+                f"{camera.get('sensor_key')}: robot-pose artifact path is missing"
+            )
+        if relative not in robot_pose_artifacts:
+            artifact_path = run_root / relative
+            if not _is_contained(artifact_path, run_root):
+                raise ValueError(
+                    f"{camera.get('sensor_key')}: robot-pose artifact escapes "
+                    "the run root"
+                )
+            payload = artifact_path.read_bytes()
+            try:
+                raw = json.loads(payload)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ValueError(
+                    f"Robot-pose artifact must contain valid JSON: {relative}"
+                ) from exc
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    f"Robot-pose artifact must contain a JSON object: {relative}"
+                )
+            robot_pose_artifacts[relative] = raw
+            artifact_bindings[relative] = {
+                "path": relative,
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+
+    evidence = _robot_pose_reference_from_artifacts(robot_pose_artifacts)
+    evidence["artifact_bindings"] = [
+        artifact_bindings[relative] for relative in sorted(artifact_bindings)
+    ]
+
+    config = load_run_config_for_run_root(run_root)
+    expected_path = configured_sunrise_reference_frame_path(config)
+    if expected_path is not None:
+        observed_path = verified_sunrise_reference_frame_path(evidence)
+        if observed_path is None:
+            raise ValueError(
+                "Run config declares an exact Sunrise robot-pose reference frame, "
+                "but the captured robot poses use legacy packets without that "
+                "evidence"
+            )
+        if observed_path != expected_path:
+            raise ValueError(
+                "Captured robot-pose Sunrise reference frame does not match run "
+                f"config: observed {observed_path!r}, expected {expected_path!r}"
+            )
+    return evidence
+
+
+def _validated_robot_pose_artifact_bindings(
+    request_value: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    evidence = request_value.get("robot_pose_reference")
+    if not isinstance(evidence, Mapping):
+        if request_value.get("schema_version") == REQUEST_SCHEMA_VERSION:
+            raise ValueError(
+                "Calibration attempt request lacks robot-pose reference evidence"
+            )
+        return []
+    raw_bindings = evidence.get("artifact_bindings")
+    if not isinstance(raw_bindings, list) or not raw_bindings:
+        raise ValueError(
+            "Calibration attempt robot-pose reference lacks immutable artifact "
+            "bindings; create a new attempt"
+        )
+    bindings: list[dict[str, Any]] = []
+    paths: set[str] = set()
+    for index, raw_binding in enumerate(raw_bindings):
+        if not isinstance(raw_binding, Mapping):
+            raise ValueError(
+                f"Robot-pose artifact binding {index} must be a JSON object"
+            )
+        path = raw_binding.get("path")
+        size_bytes = raw_binding.get("size_bytes")
+        sha256 = raw_binding.get("sha256")
+        if (
+            not isinstance(path, str)
+            or not path
+            or Path(path).is_absolute()
+            or Path(path).as_posix() != path
+            or any(part in {"", ".", ".."} for part in Path(path).parts)
+        ):
+            raise ValueError(
+                f"Robot-pose artifact binding {index} has an invalid run-relative path"
+            )
+        if path in paths:
+            raise ValueError(f"Duplicate robot-pose artifact binding path: {path}")
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
+            raise ValueError(
+                f"Robot-pose artifact binding {path} has an invalid size_bytes"
+            )
+        if size_bytes < 1:
+            raise ValueError(
+                f"Robot-pose artifact binding {path} must have positive size_bytes"
+            )
+        if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise ValueError(
+                f"Robot-pose artifact binding {path} has an invalid sha256"
+            )
+        paths.add(path)
+        bindings.append({"path": path, "size_bytes": size_bytes, "sha256": sha256})
+
+    recorded_artifacts = evidence.get("artifacts")
+    if (
+        not isinstance(recorded_artifacts, list)
+        or not all(isinstance(item, str) for item in recorded_artifacts)
+        or recorded_artifacts != sorted(paths)
+    ):
+        raise ValueError(
+            "Robot-pose artifact bindings do not exactly cover the recorded "
+            "reference artifacts"
+        )
+    expected_paths = {
+        str(sensor.get("robot_pose_path") or RAW_ROBOT_EE_POSES)
+        for sensor in request_value.get("sensors", [])
+        if isinstance(sensor, Mapping)
+    }
+    if expected_paths != paths:
+        raise ValueError(
+            "Robot-pose artifact bindings do not exactly cover every selected "
+            "camera's recorded robot-pose source"
+        )
+    return sorted(bindings, key=lambda item: str(item["path"]))
+
+
+def _verify_robot_pose_artifact_bindings(
+    run_root: Path,
+    request_value: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Load, hash, parse, and semantically verify every bound raw pose artifact.
+
+    Each path is read exactly once.  The returned decoded records are therefore
+    the same bytes whose hashes and frame identity were checked, and callers can
+    use them without reopening a mutable raw path.
+    """
+
+    robot_pose_artifacts: dict[str, dict[str, Any]] = {}
+    for binding in _validated_robot_pose_artifact_bindings(request_value):
+        relative = str(binding["path"])
+        path = run_root / relative
+        if not _is_contained(path, run_root):
+            raise ValueError(
+                f"Bound robot-pose artifact escapes the run root: {relative}"
+            )
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            raise ValueError(
+                "Bound robot-pose artifact is no longer readable: " + relative
+            ) from exc
+        actual_size = len(payload)
+        actual_sha256 = hashlib.sha256(payload).hexdigest()
+        if (
+            actual_size != int(binding["size_bytes"])
+            or actual_sha256 != binding["sha256"]
+        ):
+            raise ValueError(
+                "Raw robot-pose artifact changed after calibration attempt "
+                f"creation: {relative}"
+            )
+        try:
+            raw = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(
+                f"Bound robot-pose artifact must contain valid JSON: {relative}"
+            ) from exc
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"Bound robot-pose artifact must contain a JSON object: {relative}"
+            )
+        robot_pose_artifacts[relative] = raw
+
+    if not robot_pose_artifacts:
+        return {}
+    recorded = request_value.get("robot_pose_reference")
+    if not isinstance(recorded, Mapping):
+        raise ValueError("Calibration attempt lacks robot-pose reference evidence")
+    recorded_semantics = dict(recorded)
+    recorded_semantics.pop("artifact_bindings", None)
+    recomputed = _robot_pose_reference_from_artifacts(robot_pose_artifacts)
+    recorded_json = json.dumps(
+        recorded_semantics,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    recomputed_json = json.dumps(recomputed, sort_keys=True, separators=(",", ":"))
+    if recorded_json != recomputed_json:
+        raise ValueError(
+            "Calibration attempt robot-pose reference identity or pose counts "
+            "do not match the bound raw artifacts"
+        )
+    return robot_pose_artifacts
+
+
+def _robot_poses_for_sensor(
+    run_root: Path,
+    sensor: Mapping[str, Any],
+    robot_pose_artifacts: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Resolve one sensor's already verified raw records, with legacy fallback."""
+
+    relative = str(sensor.get("robot_pose_path") or RAW_ROBOT_EE_POSES)
+    if robot_pose_artifacts:
+        raw = robot_pose_artifacts.get(relative)
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"Verified robot-pose artifacts do not cover {relative}")
+        return raw
+    return load_robot_poses(run_root, run_root / str(sensor["folder"]))
+
+
+def _require_static_pose_template_base_evidence(evidence: Mapping[str, Any]) -> None:
+    """Reject a static solve whose flange poses are not in PoseTemplateBase."""
+
+    observed_path = verified_sunrise_reference_frame_path(evidence)
+    if observed_path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
+        actual = observed_path if observed_path is not None else "unverified"
+        raise ValueError(
+            "Static camera calibration requires verified robot_pose.v1 packets "
+            "expressed in "
+            f"{POSE_TEMPLATE_BASE_SUNRISE_PATH!r}; captured evidence is {actual!r}"
+        )
+
+
+def _require_static_pose_template_base_reference(
+    run_root: Path,
+    evidence: Mapping[str, Any],
+) -> None:
+    """Require static-camera calibration to solve in the dataset world frame."""
+
+    config = load_run_config_for_run_root(run_root)
+    configured_path = configured_sunrise_reference_frame_path(config)
+    if configured_path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
+        actual = configured_path if configured_path is not None else "not configured"
+        raise ValueError(
+            "Static camera calibration must declare "
+            "frames.robot_pose.sunrise_reference_frame_path as "
+            f"{POSE_TEMPLATE_BASE_SUNRISE_PATH!r} so the solved camera extrinsic "
+            f"is expressed in PoseTemplateBase; found {actual!r}"
+        )
+    _require_static_pose_template_base_evidence(evidence)
 
 
 def list_calibration_attempts(run_root: str | Path) -> list[dict[str, Any]]:
@@ -770,22 +1096,6 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
     }
 
 
-def _target_selection(bundle: Mapping[str, Any]) -> dict[str, Any]:
-    files = bundle.get("files")
-    if not isinstance(files, Mapping):
-        raise ValueError("Calibration-target bundle file evidence is invalid")
-    return {
-        "target_id": bundle["target_id"],
-        "bundle_path": f"{LIBRARY_DIRECTORY}/{bundle['target_id']}",
-        "source_sha256": files["source"]["sha256"],
-        "spec_sha256": files["target"]["sha256"],
-        "pdf_sha256": files["pdf"]["sha256"],
-        "configuration_sha256": bundle["configuration_sha256"],
-        "geometry_sha256": bundle["geometry_sha256"],
-        "placement": {"mode": "unknown"},
-    }
-
-
 def validate_attempt_request(
     run_root: str | Path,
     value: Mapping[str, Any],
@@ -826,9 +1136,15 @@ def validate_attempt_request(
             + ", ".join(mounting_mismatches)
         )
     timestamp_policy = _calibration_timestamp_preflight(root, selected_cameras)
+    robot_pose_reference = _attempt_robot_pose_reference(root, selected_cameras)
+    if mode == "eye_to_hand":
+        _require_static_pose_template_base_reference(root, robot_pose_reference)
     target_id = str(value.get("target_id", ""))
     try:
-        selected_target = validate_run_target_selection(root)
+        selected_target = validate_run_target_selection(
+            root,
+            require_mounting_frame=True,
+        )
     except FileNotFoundError as exc:
         raise ValueError(
             "Select the exact printed calibration grid in workflow step 2 before analysis"
@@ -842,12 +1158,33 @@ def validate_attempt_request(
         ]
         if blockers:
             raise CalibrationTargetConflict(
-                "The calibration target conflicts with existing target-dependent artifacts; create a new run.",
+                "The calibration target conflicts with existing raw acquisition or "
+                "target-dependent evidence; create a new run.",
                 blockers=blockers,
             )
         raise CalibrationTargetConflict(
             "The requested grid is not the grid selected in workflow step 2; change the run selection first.",
             blockers=[],
+        )
+    expected_target_mounting_frame = (
+        "template_base" if mode == "eye_in_hand" else "robot_flange"
+    )
+    placement_mode = str(selected_target["placement_mode"])
+    selected_mounting_frame = selected_target.get("effective_mounting_frame")
+    if placement_mode != "unknown" and mode == "eye_to_hand":
+        raise ValueError(
+            "Static eye-to-hand calibration requires an unknown target placement "
+            "mounted on robot_flange; the selected target has a known "
+            "template-base placement"
+        )
+    if (
+        selected_mounting_frame is not None
+        and selected_mounting_frame != expected_target_mounting_frame
+    ):
+        raise ValueError(
+            f"{mode} calibration requires the target mounted on "
+            f"{expected_target_mounting_frame}; the selected target is mounted on "
+            f"{selected_mounting_frame}"
         )
     run_target_library = root / LIBRARY_DIRECTORY
     bundle = validate_target_bundle(
@@ -904,21 +1241,22 @@ def validate_attempt_request(
         "sensors": selected_cameras,
         "timestamp_policy": timestamp_policy,
         "target_id": target_id,
-        "target": normalize_calibration_target_spec(bundle["target"]),
+        "target": normalize_calibration_target_spec(selected_target["target"]),
         "target_bundle": {
             "target_id": bundle["target_id"],
             "display_name": bundle.get("display_name"),
             "configuration_sha256": bundle["configuration_sha256"],
             "geometry_sha256": bundle["geometry_sha256"],
             "files": bundle["files"],
-            "selection": _target_selection(bundle),
+            "selection": dict(selected_target["selection"]),
             "source_path": bundle["bundle_path"],
         },
         "target_mounting": {
             "from": "aruco_grid",
-            "to": "template_base" if mode == "eye_in_hand" else "robot_flange",
+            "to": expected_target_mounting_frame,
             "state": "estimated",
         },
+        "robot_pose_reference": robot_pose_reference,
         "solver_policy": solver_policy,
         "pnp_methods": pnp_methods,
         "extrinsic_methods": extrinsic_methods,
@@ -2185,12 +2523,19 @@ def _prepare_attempt_data(
     run_root: Path,
     attempt_root: Path,
     request_value: Mapping[str, Any],
+    robot_pose_artifacts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Path], dict[str, dict[str, Any]]]:
+    if robot_pose_artifacts is None:
+        robot_pose_artifacts = _verify_robot_pose_artifact_bindings(
+            run_root, request_value
+        )
     max_nearest_pose_delta_ms, warning_nearest_pose_delta_ms = (
         _recorded_nearest_pose_limits_ms(request_value)
     )
     timestamp_policy = _calibration_timestamp_preflight(
-        run_root, request_value["sensors"]
+        run_root,
+        request_value["sensors"],
+        robot_pose_artifacts or None,
     )
     recorded_timestamp_policy = request_value.get("timestamp_policy")
     if isinstance(recorded_timestamp_policy, Mapping):
@@ -2260,6 +2605,9 @@ def _prepare_attempt_data(
         required_robot_sources[sensor_name] = str(
             sensor_policy["robot_timestamp_source"]
         )
+        loaded_robot_poses = _robot_poses_for_sensor(
+            run_root, sensor, robot_pose_artifacts
+        )
         results = synchronize_run(
             run_root,
             sensor_folders=[sensor_path],
@@ -2268,6 +2616,7 @@ def _prepare_attempt_data(
             timestamp_source=sensor_policy["frame_timestamp_source"],
             robot_timestamp_source=sensor_policy["robot_timestamp_source"],
             max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+            raw_robot_poses=loaded_robot_poses,
         )
         for result in results:
             selected_sensor = selected_by_path[Path(result.sensor_folder).resolve()]
@@ -2816,10 +3165,15 @@ def _estimate_and_apply_time_offsets(
     attempt_root: Path,
     request_value: Mapping[str, Any],
     observations: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+    robot_pose_artifacts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[
     dict[str, Any],
     dict[str, dict[str, list[dict[str, Any]]]],
 ]:
+    if robot_pose_artifacts is None:
+        robot_pose_artifacts = _verify_robot_pose_artifact_bindings(
+            run_root, request_value
+        )
     policy = str(
         request_value.get(
             "synchronization_policy",
@@ -2944,9 +3298,11 @@ def _estimate_and_apply_time_offsets(
                     else _attempt_timestamp_policy(request_value["sensors"]),
                     sensor,
                 )
-                sensor_folder = run_root / str(sensor["folder"])
+                loaded_robot_poses = _robot_poses_for_sensor(
+                    run_root, sensor, robot_pose_artifacts
+                )
                 robot_records = indexed_robot_poses(
-                    load_robot_poses(run_root, sensor_folder),
+                    loaded_robot_poses,
                     timestamp_source=str(sensor_policy["robot_timestamp_source"]),
                 )
                 if not reference_observations:
@@ -3122,12 +3478,19 @@ def _materialize_authoritative_synchronization(
     request_value: Mapping[str, Any],
     time_offset_search: Mapping[str, Any],
     observations: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+    robot_pose_artifacts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[
     dict[str, Path],
     dict[str, dict[str, list[dict[str, Any]]]],
 ]:
+    if robot_pose_artifacts is None:
+        robot_pose_artifacts = _verify_robot_pose_artifact_bindings(
+            run_root, request_value
+        )
     timestamp_policy = _calibration_timestamp_preflight(
-        run_root, request_value["sensors"]
+        run_root,
+        request_value["sensors"],
+        robot_pose_artifacts or None,
     )
     result_by_sensor = {
         str(item["sensor_key"]): item
@@ -3183,6 +3546,9 @@ def _materialize_authoritative_synchronization(
             sensor_policy["robot_timestamp_source"]
         )
         expected_by_sensor_name[sensor_name] = selected_sync_delta_ms
+        loaded_robot_poses = _robot_poses_for_sensor(
+            run_root, sensor, robot_pose_artifacts
+        )
         results = synchronize_run(
             run_root,
             sensor_folders=[sensor_path],
@@ -3192,6 +3558,7 @@ def _materialize_authoritative_synchronization(
             robot_timestamp_source=sensor_policy["robot_timestamp_source"],
             copy_files=False,
             max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
+            raw_robot_poses=loaded_robot_poses,
         )
         if len(results) != 1:
             raise ValueError(
@@ -3486,6 +3853,14 @@ def _candidate_profile(
     quaternion = tuple(float(item) for item in transform["rotation_quaternion_wxyz"])
     translation = tuple(float(item) for item in transform["translation_mm"])
     mode = str(request_value["mode"])
+    if mode == "eye_to_hand":
+        reference_evidence = request_value.get("robot_pose_reference")
+        if not isinstance(reference_evidence, Mapping):
+            raise ValueError(
+                "Static candidate materialization requires robot-pose reference "
+                "evidence from the immutable attempt request"
+            )
+        _require_static_pose_template_base_evidence(reference_evidence)
     raw_timestamp_policy = request_value.get("timestamp_policy")
     timestamp_policy = (
         dict(raw_timestamp_policy)
@@ -3565,6 +3940,14 @@ def _candidate_profile(
             "extrinsic_method": candidate["extrinsic_method"],
             "target_id": request_value["target_id"],
             "target_mounting": request_value["target_mounting"],
+            "robot_pose_reference": request_value.get(
+                "robot_pose_reference",
+                {
+                    "schema_version": ROBOT_POSE_REFERENCE_SCHEMA_VERSION,
+                    "status": "unverified",
+                    "reason": "calibration_attempt_predates_reference_provenance",
+                },
+            ),
             "companion_transform": candidate["companion_transform"],
             "held_out_residuals": candidate["held_out_residuals"],
             "outlier_count": candidate["outlier_count"],
@@ -4259,8 +4642,12 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             phase_status="running",
             message="Synchronizing the selected camera subset.",
         )
+        robot_pose_artifacts = _verify_robot_pose_artifact_bindings(root, request_value)
         synchronized, intrinsics = _prepare_attempt_data(
-            root, attempt_root, request_value
+            root,
+            attempt_root,
+            request_value,
+            robot_pose_artifacts,
         )
         _update_progress(
             attempt_root,
@@ -4300,6 +4687,7 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             attempt_root,
             request_value,
             observations,
+            robot_pose_artifacts,
         )
         _authoritative_synchronized, observations = (
             _materialize_authoritative_synchronization(
@@ -4308,6 +4696,7 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
                 request_value,
                 time_offset_search,
                 adjusted_observations,
+                robot_pose_artifacts,
             )
         )
         observation_report = _calibration_observation_report(
@@ -5770,6 +6159,13 @@ def _selected_profiles(
             raise ValueError(
                 f"Candidate profile {candidate_id!r} does not belong to {sensor_key}"
             )
+        if profile.metadata.get("robot_pose_reference") != request_value.get(
+            "robot_pose_reference"
+        ):
+            raise ValueError(
+                f"Candidate profile {candidate_id!r} does not retain the immutable "
+                "robot-pose artifact binding from its attempt request"
+            )
         result = next(
             item
             for item in attempt["results"]["results"]
@@ -6110,6 +6506,15 @@ def _promote_calibration_attempt_locked(
     attempt_root = calibration_attempt_root(root, attempt_id)
     attempt = load_calibration_attempt(root, attempt_id)
     request_value = attempt["request"]
+    if request_value.get("mode") == "eye_to_hand":
+        reference_evidence = request_value.get("robot_pose_reference")
+        if not isinstance(reference_evidence, Mapping):
+            raise ValueError(
+                "Static calibration promotion requires robot-pose reference "
+                "evidence from the immutable attempt request"
+            )
+        _require_static_pose_template_base_reference(root, reference_evidence)
+    _verify_robot_pose_artifact_bindings(root, request_value)
     promotion_request = _read_json(attempt_root / PROMOTION_REQUEST_FILE)
     promotion_path = attempt_root / PROMOTION_FILE
     current = _read_json(promotion_path)
@@ -6125,26 +6530,34 @@ def _promote_calibration_attempt_locked(
     staging.mkdir(parents=False, exist_ok=False)
     try:
         current_config = load_run_config_for_run_root(root)
-        current_target = current_config.get("calibration_target")
-        current_target_id = (
-            current_target.get("target_id")
-            if isinstance(current_target, Mapping)
-            else None
-        )
-        if (
-            current_target_id is not None
-            and current_target_id != request_value["target_id"]
+        requested_target = request_value.get("target_bundle", {}).get("selection")
+        try:
+            current_target = validate_run_target_selection(
+                root,
+                require_mounting_frame=True,
+            )["selection"]
+        except (FileNotFoundError, ValueError) as exc:
+            blockers = [
+                item
+                for item in replacement_blockers(root)
+                if not item.startswith(f"{ATTEMPT_DIRECTORY.as_posix()}/")
+            ]
+            raise CalibrationTargetConflict(
+                "Canonical calibration-target evidence changed after this attempt was created.",
+                blockers=blockers,
+            ) from exc
+        if not isinstance(requested_target, Mapping) or current_target != dict(
+            requested_target
         ):
             blockers = [
                 item
                 for item in replacement_blockers(root)
                 if not item.startswith(f"{ATTEMPT_DIRECTORY.as_posix()}/")
             ]
-            if blockers:
-                raise CalibrationTargetConflict(
-                    "Canonical target-dependent artifacts changed after this attempt was created.",
-                    blockers=blockers,
-                )
+            raise CalibrationTargetConflict(
+                "Canonical calibration-target selection changed after this attempt was created.",
+                blockers=blockers,
+            )
         selected_profiles = _selected_profiles(
             attempt_root, attempt, request_value, promotion_request
         )
@@ -6251,7 +6664,6 @@ def _promote_calibration_attempt_locked(
         for filename, report in reports.items():
             atomic_write_json(staging / filename, report)
         target = dict(request_value["target"])
-        target.pop("placement", None)
         atomic_write_json(staging / CALIBRATION_TARGET, target)
         updated_config = dict(current_config)
         updated_config["calibration_target"] = request_value["target_bundle"][

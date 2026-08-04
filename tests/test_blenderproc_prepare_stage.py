@@ -36,7 +36,11 @@ from posetestbot.pipeline.run_config import (
     create_run_config,
     write_run_config,
 )
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
+from scripts.run_blenderproc_prepare_stage import (
+    camera_transformations_from_calibration_profiles,
+)
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -314,6 +318,23 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
     tmp_path: Path,
 ) -> None:
     run_root, _ = create_blenderproc_prepare_fixture(tmp_path)
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "123",
+                    "Static camera",
+                    mounting_mode="static",
+                ),
+            ),
+            robot_pose_sunrise_reference_frame_path=(
+                POSE_TEMPLATE_BASE_SUNRISE_PATH
+            ),
+        ),
+    )
     sensor_folder = run_root / "processed" / "synchronized" / "realsense_123"
     write_json(
         sensor_folder / MATCH_ROBOT_EE_POSES,
@@ -373,6 +394,18 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
                 ),
                 status=CalibrationStatus.VALID,
                 quality=CalibrationQuality(num_observations=8, num_inliers=8),
+                metadata={
+                    "robot_pose_reference": {
+                        "schema_version": "robot_pose_reference.v1",
+                        "status": "verified",
+                        "packet_schema_version": "robot_pose.v1",
+                        "from": "robot_flange",
+                        "to": "template_base",
+                        "sunrise_reference_frame_path": (
+                            POSE_TEMPLATE_BASE_SUNRISE_PATH
+                        ),
+                    }
+                },
             )
         ],
         calibration_profiles,
@@ -405,6 +438,170 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
     assert camera_poses.shape == (2, 4, 4)
     np.testing.assert_allclose(camera_poses[0, :3, 3], [0.1, 0.2, 0.3])
     np.testing.assert_allclose(camera_poses[1, :3, 3], [0.1, 0.2, 0.3])
+
+
+def test_blenderproc_prepare_rejects_profile_with_wrong_run_mount(
+    tmp_path: Path,
+) -> None:
+    run_root, _ = create_blenderproc_prepare_fixture(tmp_path)
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "123",
+                    "Static camera",
+                    mounting_mode="static",
+                ),
+            ),
+        ),
+    )
+    profiles_path = tmp_path / "eye-only-calibration-profiles.json"
+    write_profile_collection(
+        [
+            CalibrationProfile(
+                schema_version=SCHEMA_VERSION,
+                profile_id="realsense_123_eye_in_hand_wrong_mount",
+                sensor_id="123",
+                sensor_type=SensorType.REALSENSE_D435,
+                mounting_mode=MountingMode.EYE_IN_HAND,
+                rig_position="wrist",
+                intrinsics=CameraIntrinsics(
+                    cam_k=(50.0, 0.0, 40.0, 0.0, 50.0, 40.0, 0.0, 0.0, 1.0),
+                    width=80,
+                    height=80,
+                ),
+                extrinsics=RigidTransform(
+                    from_frame=TransformFrame.CAMERA,
+                    to_frame=TransformFrame.ROBOT_FLANGE,
+                    rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+                    translation_mm=(10.0, 20.0, 30.0),
+                ),
+                status=CalibrationStatus.VALID,
+                quality=CalibrationQuality(num_observations=8, num_inliers=8),
+            )
+        ],
+        profiles_path,
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(
+                Path(__file__).resolve().parents[1]
+                / "scripts"
+                / "run_blenderproc_prepare_stage.py"
+            ),
+            str(run_root),
+            "--calibration-profiles",
+            str(profiles_path),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "No static calibration profile matches" in result.stderr
+    assert not (
+        run_root
+        / "processed"
+        / "calibration"
+        / DERIVED_CAMERA_EE_TRANSFORM
+    ).exists()
+    assert not (
+        run_root
+        / "processed"
+        / "synchronized"
+        / "realsense_123"
+        / "blenderproc"
+    ).exists()
+
+
+def test_blenderproc_prepare_uses_exact_selected_profile_for_ambiguous_sensor(
+    tmp_path: Path,
+) -> None:
+    run_root, _ = create_blenderproc_prepare_fixture(tmp_path)
+    profiles_path = tmp_path / "mixed_mount_calibration_profiles.json"
+    intrinsics = CameraIntrinsics(
+        cam_k=(50.0, 0.0, 40.0, 0.0, 50.0, 40.0, 0.0, 0.0, 1.0),
+        width=80,
+        height=80,
+    )
+    eye_profile_id = "realsense_d435_123_eye_in_hand_selected_test"
+    static_profile_id = "realsense_d435_123_static_selected_test"
+    write_profile_collection(
+        [
+            CalibrationProfile(
+                schema_version=SCHEMA_VERSION,
+                profile_id=eye_profile_id,
+                sensor_id="123",
+                sensor_type=SensorType.REALSENSE_D435,
+                mounting_mode=MountingMode.EYE_IN_HAND,
+                rig_position="wrist",
+                intrinsics=intrinsics,
+                extrinsics=RigidTransform(
+                    from_frame=TransformFrame.CAMERA,
+                    to_frame=TransformFrame.ROBOT_FLANGE,
+                    rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+                    translation_mm=(10.0, 20.0, 30.0),
+                ),
+                status=CalibrationStatus.VALID,
+                quality=CalibrationQuality(num_observations=8, num_inliers=8),
+            ),
+            CalibrationProfile(
+                schema_version=SCHEMA_VERSION,
+                profile_id=static_profile_id,
+                sensor_id="123",
+                sensor_type=SensorType.REALSENSE_D435,
+                mounting_mode=MountingMode.STATIC,
+                rig_position="cell_front",
+                intrinsics=intrinsics,
+                extrinsics=RigidTransform(
+                    from_frame=TransformFrame.CAMERA,
+                    to_frame=TransformFrame.TEMPLATE_BASE,
+                    rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+                    translation_mm=(100.0, 200.0, 300.0),
+                ),
+                status=CalibrationStatus.VALID,
+                quality=CalibrationQuality(num_observations=8, num_inliers=8),
+                metadata={
+                    "robot_pose_reference": {
+                        "schema_version": "robot_pose_reference.v1",
+                        "status": "verified",
+                        "packet_schema_version": "robot_pose.v1",
+                        "from": "robot_flange",
+                        "to": "template_base",
+                        "sunrise_reference_frame_path": (
+                            POSE_TEMPLATE_BASE_SUNRISE_PATH
+                        ),
+                    }
+                },
+            ),
+        ],
+        profiles_path,
+    )
+
+    with pytest.raises(ValueError, match="Ambiguous calibration profiles"):
+        camera_transformations_from_calibration_profiles(
+            input_folder=run_root / "processed" / "synchronized",
+            calibration_profiles_path=profiles_path,
+        )
+
+    transforms = camera_transformations_from_calibration_profiles(
+        input_folder=run_root / "processed" / "synchronized",
+        calibration_profiles_path=profiles_path,
+        profile_ids_by_sensor_name={"realsense_123": static_profile_id},
+        mounting_modes_by_sensor_name={
+            "realsense_123": MountingMode.STATIC,
+        },
+    )
+
+    assert transforms["realsense_123"]["profile_id"] == static_profile_id
+    assert transforms["realsense_123"]["mounting_mode"] == "static"
 
 
 def test_blenderproc_prepare_failure_preserves_all_existing_outputs(

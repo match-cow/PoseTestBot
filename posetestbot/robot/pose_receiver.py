@@ -36,6 +36,9 @@ from posetestbot.io.manifest import (
     write_run_manifest,
 )
 from posetestbot.robot.udp import send_start
+from posetestbot.robot.reference_frames import (
+    configured_sunrise_reference_frame_path,
+)
 
 
 DEFAULT_RECEIVE_START_TIMEOUT_S = 120.0
@@ -555,6 +558,14 @@ def run_pose_receiver(
         raise ValueError(f"Output path is not a directory: {run_root}")
     raw_pose_path = run_root / RAW_ROBOT_EE_POSES
     try:
+        from posetestbot.pipeline.run_config import load_run_config_for_run_root
+
+        run_config = load_run_config_for_run_root(run_root)
+    except FileNotFoundError:
+        expected_reference_path = None
+    else:
+        expected_reference_path = configured_sunrise_reference_frame_path(run_config)
+    try:
         expected_robot_ip = ipaddress.ip_address(profile.robot_ip)
     except ValueError as exc:
         raise ValueError(
@@ -638,6 +649,23 @@ def run_pose_receiver(
                         expected_robot_ip=expected_robot_ip,
                     )
                     motion, pose, source_packet = _decode_packet(data)
+                    if expected_reference_path is not None:
+                        if not source_packet:
+                            raise PoseReceiverPacketError(
+                                "Run config declares an exact Sunrise robot-pose "
+                                "reference frame, so legacy pose packets are not "
+                                "accepted; deploy/use robot_pose.v1."
+                            )
+                        observed_reference_path = source_packet.get(
+                            "sunrise_reference_frame_path"
+                        )
+                        if observed_reference_path != expected_reference_path:
+                            raise PoseReceiverPacketError(
+                                "Robot pose stream Sunrise reference frame does not "
+                                "match run_config.json: observed "
+                                f"{observed_reference_path!r}, expected "
+                                f"{expected_reference_path!r}."
+                            )
                     current_uses_v1 = bool(source_packet)
                     if sender_uses_v1_packets is None:
                         sender_uses_v1_packets = current_uses_v1

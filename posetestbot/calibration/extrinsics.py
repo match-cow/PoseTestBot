@@ -31,6 +31,7 @@ from posetestbot.calibration.intrinsics import (
     select_intrinsic_profile,
     sensor_intrinsic_identity,
 )
+from posetestbot.calibration.legacy_static import observation_mounting_modes
 from posetestbot.calibration.observations import SCHEMA_VERSION as OBSERVATION_SCHEMA
 from posetestbot.calibration.profiles import (
     SCHEMA_VERSION as PROFILE_SCHEMA,
@@ -329,6 +330,14 @@ def build_grid_extrinsic_solver(
     observation_report = _read_json(source_path)
     if observation_report.get("schema_version") != OBSERVATION_SCHEMA:
         raise ValueError("Unsupported calibration observation schema")
+    mounting_modes = observation_mounting_modes(observation_report)
+    if "static" in mounting_modes and mode != "known_target":
+        raise ValueError(
+            "The legacy explicit solver can calibrate a static camera only from "
+            "a fixed known grid-to-PoseTemplateBase placement. A robot-carried "
+            "grid with unknown attachment requires Workflow step 5, which jointly "
+            "solves camera-to-PoseTemplateBase and grid-to-robot_flange."
+        )
     observation_target = observation_report.get("target")
     calibration_target_evidence = target_identity(target)
     if isinstance(observation_target, Mapping):

@@ -29,20 +29,32 @@ from posetestbot.io.artifacts import (
     RGB_DIR,
 )
 from posetestbot.calibration.intrinsics import factory_intrinsic_profile
+from posetestbot.calibration.profiles import (
+    SCHEMA_VERSION as CALIBRATION_SCHEMA_VERSION,
+    CalibrationProfile,
+    CalibrationQuality,
+    CalibrationStatus,
+    RigidTransform,
+    TransformFrame,
+    write_profile_collection,
+)
 from posetestbot.calibration.rectification import rectify_run
 from posetestbot.pipeline.run_config import (
     SensorRunConfig,
     create_run_config,
     write_run_config,
 )
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 from posetestbot.sensors.hardware_sync_qualification import (
     record_hardware_sync_qualification,
     validate_hardware_sync_qualification,
 )
+from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 from posetestbot.sync.hardware import (
     build_hardware_sync_frame_groups,
     write_hardware_sync_frame_groups,
 )
+from scripts.run_bop_export_stage import calibration_profile_for_sensor
 
 
 def create_synchronized_sensor_fixture(tmp_path: Path) -> Path:
@@ -73,6 +85,157 @@ def export_command(run_root: Path) -> list[str]:
         str(repo_root / "scripts" / "run_bop_export_stage.py"),
         str(run_root),
     ]
+
+
+def test_bop_export_uses_exact_selected_profile_for_ambiguous_sensor() -> None:
+    intrinsics = CameraIntrinsics(
+        cam_k=(10.0, 0.0, 3.0, 0.0, 10.0, 2.5, 0.0, 0.0, 1.0),
+        width=6,
+        height=5,
+    )
+    eye_profile = CalibrationProfile(
+        schema_version=CALIBRATION_SCHEMA_VERSION,
+        profile_id="realsense_123_eye_in_hand_bop_test",
+        sensor_id="123",
+        sensor_type=SensorType.REALSENSE_D435,
+        mounting_mode=MountingMode.EYE_IN_HAND,
+        rig_position="wrist",
+        intrinsics=intrinsics,
+        extrinsics=RigidTransform(
+            from_frame=TransformFrame.CAMERA,
+            to_frame=TransformFrame.ROBOT_FLANGE,
+            rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+            translation_mm=(10.0, 20.0, 30.0),
+        ),
+        status=CalibrationStatus.VALID,
+        quality=CalibrationQuality(num_observations=8, num_inliers=8),
+    )
+    static_profile = CalibrationProfile(
+        schema_version=CALIBRATION_SCHEMA_VERSION,
+        profile_id="realsense_123_static_bop_test",
+        sensor_id="123",
+        sensor_type=SensorType.REALSENSE_D435,
+        mounting_mode=MountingMode.STATIC,
+        rig_position="cell_front",
+        intrinsics=intrinsics,
+        extrinsics=RigidTransform(
+            from_frame=TransformFrame.CAMERA,
+            to_frame=TransformFrame.TEMPLATE_BASE,
+            rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+            translation_mm=(100.0, 200.0, 300.0),
+        ),
+        status=CalibrationStatus.VALID,
+        quality=CalibrationQuality(num_observations=8, num_inliers=8),
+        metadata={
+            "robot_pose_reference": {
+                "schema_version": "robot_pose_reference.v1",
+                "status": "verified",
+                "packet_schema_version": "robot_pose.v1",
+                "from": "robot_flange",
+                "to": "template_base",
+                "sunrise_reference_frame_path": POSE_TEMPLATE_BASE_SUNRISE_PATH,
+            }
+        },
+    )
+    profiles = [eye_profile, static_profile]
+
+    with pytest.raises(ValueError, match="Ambiguous calibration profiles"):
+        calibration_profile_for_sensor(profiles, "realsense_123")
+
+    selected = calibration_profile_for_sensor(
+        profiles,
+        "realsense_123",
+        profile_ids_by_sensor_name={
+            "realsense_123": static_profile.profile_id,
+        },
+        mounting_modes_by_sensor_name={
+            "realsense_123": MountingMode.STATIC,
+        },
+    )
+
+    assert selected is static_profile
+
+    with pytest.raises(KeyError, match="No static calibration profile"):
+        calibration_profile_for_sensor(
+            [eye_profile],
+            "realsense_123",
+            mounting_modes_by_sensor_name={
+                "realsense_123": MountingMode.STATIC,
+            },
+        )
+
+    with pytest.raises(KeyError, match="No static calibration profile"):
+        calibration_profile_for_sensor(
+            profiles,
+            "realsense_123",
+            profile_ids_by_sensor_name={
+                "realsense_123": eye_profile.profile_id,
+            },
+            mounting_modes_by_sensor_name={
+                "realsense_123": MountingMode.STATIC,
+            },
+        )
+
+
+def test_bop_export_rejects_profile_with_wrong_run_mount(tmp_path: Path) -> None:
+    run_root = create_synchronized_sensor_fixture(tmp_path)
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            sensors=(
+                SensorRunConfig(
+                    "realsense_d435",
+                    "123",
+                    "Static camera",
+                    mounting_mode="static",
+                ),
+            ),
+        ),
+    )
+    profiles_path = tmp_path / "eye-only-calibration-profiles.json"
+    write_profile_collection(
+        [
+            CalibrationProfile(
+                schema_version=CALIBRATION_SCHEMA_VERSION,
+                profile_id="realsense_123_eye_in_hand_wrong_mount",
+                sensor_id="123",
+                sensor_type=SensorType.REALSENSE_D435,
+                mounting_mode=MountingMode.EYE_IN_HAND,
+                rig_position="wrist",
+                intrinsics=CameraIntrinsics(
+                    cam_k=(10.0, 0.0, 3.0, 0.0, 10.0, 2.5, 0.0, 0.0, 1.0),
+                    width=6,
+                    height=5,
+                ),
+                extrinsics=RigidTransform(
+                    from_frame=TransformFrame.CAMERA,
+                    to_frame=TransformFrame.ROBOT_FLANGE,
+                    rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+                    translation_mm=(10.0, 20.0, 30.0),
+                ),
+                status=CalibrationStatus.VALID,
+                quality=CalibrationQuality(num_observations=8, num_inliers=8),
+            )
+        ],
+        profiles_path,
+    )
+
+    result = subprocess.run(
+        [
+            *export_command(run_root),
+            "--calibration-profiles",
+            str(profiles_path),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "No static calibration profile matches" in result.stderr
+    assert not (run_root / BOP_DIR).exists()
 
 
 def create_hardware_sync_fixture(tmp_path: Path) -> Path:

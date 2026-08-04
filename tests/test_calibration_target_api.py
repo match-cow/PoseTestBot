@@ -14,7 +14,11 @@ from posetestbot.calibration.target_library import (
     select_target_bundle,
 )
 from posetestbot.io.artifacts import ARUCO_DETECTIONS
-from posetestbot.pipeline.run_config import create_run_config, write_run_config_with_manifest
+from posetestbot.pipeline.run_config import (
+    create_run_config,
+    sensor_configs_from_values,
+    write_run_config_with_manifest,
+)
 from posetestbot.web.app import create_app
 from posetestbot.web.routes import calibration_targets as routes
 
@@ -70,7 +74,22 @@ def target_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app_root = tmp_path / "app"
     app_root.mkdir()
     run = tmp_path / "runs" / "run"
-    write_run_config_with_manifest(run, create_run_config(run_root=run))
+    write_run_config_with_manifest(
+        run,
+        create_run_config(
+            run_root=run,
+            sensors=sensor_configs_from_values(
+                [
+                    {
+                        "sensor_type": "realsense_d435",
+                        "device_id": "static-1",
+                        "display_name": "Static D435",
+                        "mounting_mode": "static",
+                    }
+                ]
+            ),
+        ),
+    )
     bundle = generate_target_bundle(
         display_name="API target",
         configuration=configuration(),
@@ -86,7 +105,10 @@ def target_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def test_status_capabilities_preview_fit_and_pydantic_details(target_client) -> None:
     client, _runner, _run, _bundle = target_client
-    assert client.get("/calibration-targets/status").get_json()["generation_available"] is True
+    assert (
+        client.get("/calibration-targets/status").get_json()["generation_available"]
+        is True
+    )
     capabilities = client.get("/calibration-targets/capabilities")
     assert capabilities.status_code == 200
     capability_payload = capabilities.get_json()
@@ -161,7 +183,11 @@ def test_generate_and_select_use_exact_queued_resources(target_client) -> None:
 
     selected = client.post(
         f"/calibration-targets/bundles/{bundle['target_id']}/select",
-        json={"run_root": run.as_posix(), "placement": "unknown"},
+        json={
+            "run_root": run.as_posix(),
+            "placement": "unknown",
+            "mounting_frame": "robot_flange",
+        },
     )
     assert selected.status_code == 202
     assert runner.submissions[1]["name"] == "calibration_target_select"
@@ -177,7 +203,32 @@ def test_generate_and_select_use_exact_queued_resources(target_client) -> None:
         bundle["target_id"],
         "--placement",
         "unknown",
+        "--mounting-frame",
+        "robot_flange",
     ]
+    assert runner.submissions[1]["parameters"]["mounting_frame"] == "robot_flange"
+
+    wrong_mounting = client.post(
+        f"/calibration-targets/bundles/{bundle['target_id']}/select",
+        json={
+            "run_root": run.as_posix(),
+            "placement": "unknown",
+            "mounting_frame": "template_base",
+        },
+    )
+    assert wrong_mounting.status_code == 400
+    assert "Static-camera calibration requires" in wrong_mounting.get_json()["output"]
+
+    known_robot_mounting = client.post(
+        f"/calibration-targets/bundles/{bundle['target_id']}/select",
+        json={
+            "run_root": run.as_posix(),
+            "placement": "template_base_identity",
+            "mounting_frame": "robot_flange",
+        },
+    )
+    assert known_robot_mounting.status_code == 400
+    assert "known template-base placement" in known_robot_mounting.get_json()["output"]
 
     missing_pose = client.post(
         f"/calibration-targets/bundles/{bundle['target_id']}/select",
@@ -207,7 +258,9 @@ def test_bundle_listing_downloads_and_traversal_rejection(target_client) -> None
     assert preview.data.startswith(b"\x89PNG\r\n\x1a\n")
     assert preview.headers["Cache-Control"] == "public, max-age=31536000, immutable"
     assert preview.headers["ETag"] == f'"{bundle["configuration_sha256"]}"'
-    image = cv2.imdecode(np.frombuffer(preview.data, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    image = cv2.imdecode(
+        np.frombuffer(preview.data, dtype=np.uint8), cv2.IMREAD_GRAYSCALE
+    )
     assert image.shape[1] > image.shape[0]
     dark_y, dark_x = np.where(image < 128)
     assert dark_x.min() > 0
@@ -225,15 +278,40 @@ def test_bundle_listing_downloads_and_traversal_rejection(target_client) -> None
         )
         assert response.status_code == 200
         assert response.mimetype == mimetype
-    assert client.get(
-        f"/calibration-targets/bundles/{bundle['target_id']}/download/other"
-    ).status_code == 404
-    assert client.get("/calibration-targets/bundles/../download/pdf").status_code in {400, 404}
+    assert (
+        client.get(
+            f"/calibration-targets/bundles/{bundle['target_id']}/download/other"
+        ).status_code
+        == 404
+    )
+    assert client.get("/calibration-targets/bundles/../download/pdf").status_code in {
+        400,
+        404,
+    }
     assert client.get("/calibration-targets/bundles/../preview.png").status_code in {
         400,
         404,
     }
     assert client.get("/artifacts").status_code == 404
+
+
+def test_first_selection_after_raw_capture_fails_before_queueing(target_client) -> None:
+    client, runner, run, bundle = target_client
+    (run / "raw_robot_ee_poses.json").write_text("{}\n")
+
+    response = client.post(
+        f"/calibration-targets/bundles/{bundle['target_id']}/select",
+        json={
+            "run_root": run.as_posix(),
+            "placement": "unknown",
+            "mounting_frame": "robot_flange",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["blockers"] == ["raw_robot_ee_poses.json"]
+    assert "must be bound before raw acquisition" in response.get_json()["output"]
+    assert runner.submissions == []
 
 
 def test_bundle_delete_requires_confirmation_and_removes_library_target(

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from pathlib import Path
 
 from posetestbot.blenderproc.preparation import (
@@ -15,11 +16,15 @@ from posetestbot.calibration.profiles import (
     blenderproc_camera_transform_map_from_profiles,
     load_profile_collection,
 )
+from posetestbot.calibration.static_reuse import (
+    verify_static_profile_destination_reference,
+)
 from posetestbot.io.artifacts import (
     CALIBRATION_DIR,
     CALIBRATION_PROFILES,
     CALIBRATION_PROFILE_SELECTION,
     DERIVED_CAMERA_EE_TRANSFORM,
+    MATCH_ROBOT_EE_POSES,
     OBJECT_INSTANCES,
     PROCESSED_DIR,
     SYNCHRONIZED_DIR,
@@ -30,8 +35,12 @@ from posetestbot.io.manifest import (
     write_run_manifest,
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
-from posetestbot.pipeline.sensor_selection import enabled_sensor_folder_names
+from posetestbot.pipeline.sensor_selection import (
+    enabled_sensor_folder_names,
+    enabled_sensor_mounting_modes_by_folder,
+)
 from posetestbot.pose_templates.selection import prepare_object_instances
+from posetestbot.sensors.contracts import MountingMode
 
 
 def parse_args() -> argparse.Namespace:
@@ -133,12 +142,38 @@ def camera_transformations_from_calibration_profiles(
     input_folder: Path,
     calibration_profiles_path: Path,
     sensor_names: tuple[str, ...] | None = None,
+    profile_ids_by_sensor_name: dict[str, str] | None = None,
+    mounting_modes_by_sensor_name: Mapping[str, MountingMode] | None = None,
+    destination_run_root: Path | None = None,
+    run_config: Mapping[str, object] | None = None,
 ) -> dict[str, dict[str, object]]:
     profiles = load_profile_collection(calibration_profiles_path)
-    return blenderproc_camera_transform_map_from_profiles(
-        profiles,
-        synchronized_sensor_names(input_folder, sensor_names=sensor_names),
+    resolved_sensor_names = synchronized_sensor_names(
+        input_folder,
+        sensor_names=sensor_names,
     )
+    transform_map = blenderproc_camera_transform_map_from_profiles(
+        profiles,
+        resolved_sensor_names,
+        profile_ids_by_sensor_name=profile_ids_by_sensor_name,
+        mounting_modes_by_sensor_name=mounting_modes_by_sensor_name,
+    )
+    if destination_run_root is not None:
+        profiles_by_id = {profile.profile_id: profile for profile in profiles}
+        selected_profiles = [
+            profiles_by_id[str(transform_map[name]["profile_id"])]
+            for name in resolved_sensor_names
+        ]
+        verify_static_profile_destination_reference(
+            destination_run_root,
+            run_config,
+            selected_profiles,
+            matched_robot_pose_paths_by_sensor_name={
+                name: input_folder / name / MATCH_ROBOT_EE_POSES
+                for name in resolved_sensor_names
+            },
+        )
+    return transform_map
 
 
 def run_prepare(
@@ -188,6 +223,10 @@ def main() -> None:
             run_config = load_run_config_for_run_root(run_root)
         except FileNotFoundError:
             run_config = None
+        mounting_modes_by_sensor_name = enabled_sensor_mounting_modes_by_folder(
+            run_config
+        )
+        calibration_profile_ids_by_sensor_name = None
         if _selected_calibration_configured(run_root, run_config):
             if calibration_profiles is None:
                 raise ValueError(
@@ -195,12 +234,19 @@ def main() -> None:
                     "calibration_profiles snapshot to BlenderProc preparation"
                 )
             from posetestbot.calibration.profile_library import (
+                selected_calibration_profile_ids_by_sensor_folder,
                 verify_calibration_profile_selection,
             )
 
-            verify_calibration_profile_selection(
+            calibration_selection = verify_calibration_profile_selection(
                 run_root,
                 expected_calibration_profiles=calibration_profiles,
+            )
+            calibration_profile_ids_by_sensor_name = (
+                selected_calibration_profile_ids_by_sensor_folder(
+                    run_root,
+                    selection=calibration_selection,
+                )
             )
         if (
             not args.objectless
@@ -214,6 +260,10 @@ def main() -> None:
                 input_folder=input_folder,
                 calibration_profiles_path=calibration_profiles,
                 sensor_names=sensor_names,
+                profile_ids_by_sensor_name=calibration_profile_ids_by_sensor_name,
+                mounting_modes_by_sensor_name=mounting_modes_by_sensor_name,
+                destination_run_root=run_root,
+                run_config=run_config,
             )
             stage_artifacts[CALIBRATION_PROFILES] = calibration_profiles
         else:

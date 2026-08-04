@@ -359,6 +359,16 @@ export interface RunConfig {
       [key: string]: JsonValue
     }>
   }
+  frames?: {
+    robot_pose: {
+      from: "robot_flange"
+      to: "template_base"
+      convention: "kuka_abc_radians"
+      sunrise_reference_frame_path?: string
+    }
+    dataset_reference_frame: "template_base"
+    fixed_transforms: JsonValue[]
+  }
   dataset_mode: "objectless" | "pose_template"
   pose_template?: {
     template_uuid: string
@@ -381,7 +391,11 @@ export interface RunConfig {
     pdf_sha256: string
     configuration_sha256: string
     geometry_sha256: string
-    placement: { mode: "unknown" | "template_base_identity" | "posegridgen_board_to_base" }
+    placement: {
+      mode: "unknown" | "template_base_identity" | "posegridgen_board_to_base"
+      mounting_frame?: "robot_flange" | "template_base"
+      [key: string]: JsonValue | undefined
+    }
   } | null
   pipeline: {
     sequence_id: string

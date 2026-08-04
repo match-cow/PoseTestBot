@@ -5,6 +5,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 from pytransform3d import rotations as pr
 from pytransform3d import transformations as pt
 from pytransform3d.transform_manager import TransformManager
@@ -163,15 +164,12 @@ def test_unknown_target_static_is_explicitly_unobservable(tmp_path: Path) -> Non
         observation["mounting_mode"] = "static"
     (run_root / CALIBRATION_OBSERVATIONS).write_text(json.dumps(value))
 
-    report = build_grid_extrinsic_solver(
-        run_root,
-        target=target(),
-        mode="hand_eye_unknown_target",
-    )
-
-    assert report["overall_status"] == "error"
-    assert report["profile_count"] == 0
-    assert "unobservable" in report["checks"][0]["message"]
+    with pytest.raises(ValueError, match="Workflow step 5"):
+        build_grid_extrinsic_solver(
+            run_root,
+            target=target(),
+            mode="hand_eye_unknown_target",
+        )
 
 
 def test_known_target_solves_static_camera_to_template_base(tmp_path: Path) -> None:
