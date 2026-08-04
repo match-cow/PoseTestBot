@@ -24,11 +24,7 @@ from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 
 
 SCHEMA_VERSION = "sync_quality_report.v2"
-SUPPORTED_SYNC_REPORT_SCHEMAS = {
-    "sync_report.v1",
-    "sync_report.v2",
-    "sync_report.v3",
-}
+SYNC_REPORT_SCHEMA_VERSION = "sync_report.v3"
 
 
 def _check(
@@ -118,8 +114,42 @@ def _sensor_summary(
     matched_frames = int(report.get("matched_frames", 0))
     dropped_frames = int(report.get("dropped_frames", 0))
     report_schema = str(report.get("schema_version") or "")
-    if report_schema not in SUPPORTED_SYNC_REPORT_SCHEMAS:
+    if report_schema != SYNC_REPORT_SCHEMA_VERSION:
         raise ValueError(f"Unsupported sync report schema: {report_schema!r}")
+    required_fields = {
+        "sensor_folder",
+        "output_folder",
+        "requested_timestamp_source",
+        "requested_frame_timestamp_source",
+        "timestamp_source",
+        "frame_timestamp_source",
+        "robot_timestamp_source",
+        "timestamp_pair",
+        "timestamp_pair_provenance_audited",
+        "timestamp_source_counts",
+        "timestamp_fallback_count",
+        "timestamp_missing_count",
+        "incompatible_timestamp_pair_count",
+        "sync_delta_ms",
+        "max_nearest_pose_delta_ms",
+        "total_frames",
+        "matched_frames",
+        "dropped_frames",
+        "outside_motion_interval_frame_count",
+        "eligible_in_motion_frames",
+        "matched_eligible_frames",
+        "in_motion_exclusion_count",
+        "unexplained_in_motion_exclusion_count",
+        "robot_pose_packet_loss_audited",
+        "robot_pose_packet_loss_count",
+        "motion_intervals",
+        "dropped",
+    }
+    missing_fields = sorted(required_fields - set(report))
+    if missing_fields:
+        raise ValueError(
+            "sync_report.v3 is missing required fields: " + ", ".join(missing_fields)
+        )
     dropped_rows = (
         [row for row in report.get("dropped", []) if isinstance(row, Mapping)]
         if isinstance(report.get("dropped"), list)
@@ -198,16 +228,11 @@ def _sensor_summary(
     motion_intervals = report.get("motion_intervals")
     motion_windows = report.get("motion_windows", {})
     timestamp_source_counts = report.get("timestamp_source_counts")
-    provenance_audited = report_schema in {
-        "sync_report.v2",
-        "sync_report.v3",
-    } and isinstance(timestamp_source_counts, Mapping)
+    provenance_audited = isinstance(timestamp_source_counts, Mapping)
     timestamp_pair = report.get("timestamp_pair")
-    pair_audited = (
-        report_schema == "sync_report.v3"
-        and report.get("timestamp_pair_provenance_audited") is True
-        and isinstance(timestamp_pair, Mapping)
-    )
+    pair_audited = report.get(
+        "timestamp_pair_provenance_audited"
+    ) is True and isinstance(timestamp_pair, Mapping)
     return {
         "sync_report_schema_version": report_schema,
         "sensor_name": report_path.parent.name,

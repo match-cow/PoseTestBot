@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import uuid
 from pathlib import Path
 
 from posetestbot.io.manifest import (
@@ -14,11 +12,7 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
-from posetestbot.io.artifacts import MULTIVIEW_FRAME_GROUPS, RUN_CONFIG
-from posetestbot.pipeline.run_config import (
-    capture_synchronization_from_mapping,
-    load_run_config_for_run_root,
-)
+from posetestbot.io.artifacts import RUN_CONFIG
 from posetestbot.sync.calibration_policy import (
     resolve_calibration_profile_sync_policy,
 )
@@ -27,15 +21,6 @@ from posetestbot.sync.non_destructive import (
     synchronize_run,
 )
 from posetestbot.sync.quality import calibration_sync_provenance
-from posetestbot.sync.hardware import (
-    build_hardware_sync_frame_groups,
-    capture_execution_hardware_sync_binding,
-    hardware_sync_frame_groups_path,
-    write_hardware_sync_frame_groups,
-)
-from posetestbot.sensors.hardware_sync_qualification import (
-    validate_hardware_sync_qualification,
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,31 +92,6 @@ def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
     sync_delta = load_sync_delta(args.sync_delta)
-    run_config = (
-        load_run_config_for_run_root(run_root)
-        if (run_root / RUN_CONFIG).is_file()
-        else None
-    )
-    capture = (run_config or {}).get("capture")
-    synchronization = capture_synchronization_from_mapping(
-        capture.get("synchronization") if isinstance(capture, dict) else None
-    ).to_dict()
-    hardware_triggered = synchronization["mode"] == "hardware_trigger"
-    if hardware_triggered and args.sensor_folder is not None:
-        raise ValueError(
-            "hardware_trigger synchronization must process the exact complete "
-            "configured sensor set; remove --sensor-folder"
-        )
-    if hardware_triggered and args.output_root is not None:
-        raise ValueError(
-            "hardware_trigger synchronization writes its authoritative frame "
-            "groups below processed/synchronized; remove --output-root"
-        )
-    if hardware_triggered and args.no_copy:
-        raise ValueError(
-            "hardware_trigger synchronization requires derived RGB-D files for "
-            "every authoritative complete frame group; remove --no-copy"
-        )
     calibration_sync_policy = (
         resolve_calibration_profile_sync_policy(run_root)
         if (run_root / RUN_CONFIG).is_file()
@@ -157,32 +117,10 @@ def main() -> None:
             )
 
     manifest = load_or_create_run_manifest(run_root)
-    invalidated_groups_path = None
-    if hardware_triggered:
-        groups_path = hardware_sync_frame_groups_path(run_root)
-        if groups_path.is_file():
-            invalidated_groups_path = groups_path.with_name(
-                f".{groups_path.name}.{uuid.uuid4().hex}.invalidated"
-            )
-            os.replace(groups_path, invalidated_groups_path)
-        manifest.get("artifacts", {}).pop(MULTIVIEW_FRAME_GROUPS, None)
-        for stage in manifest.get("stages", []):
-            if isinstance(stage, dict) and stage.get("name") == "sync_run":
-                stage.get("artifacts", {}).pop(MULTIVIEW_FRAME_GROUPS, None)
-                if not stage.get("artifacts"):
-                    stage.pop("artifacts", None)
     upsert_stage(manifest, name="sync_run", status="running")
     write_run_manifest(manifest, run_root)
 
-    hardware_groups = None
-    hardware_groups_path = None
-    hardware_sync_qualification = None
     try:
-        if hardware_triggered:
-            hardware_sync_qualification = validate_hardware_sync_qualification(
-                run_root,
-                run_config=run_config,
-            )
         if calibration_sync_policy is None:
             results = synchronize_run(
                 run_root,
@@ -215,36 +153,12 @@ def main() -> None:
                         ),
                     )
                 )
-        if hardware_triggered:
-            hardware_groups = build_hardware_sync_frame_groups(
-                run_root,
-                run_config=run_config,
-            )
-            hardware_groups["hardware_sync_qualification"] = hardware_sync_qualification
-            hardware_groups["hardware_sync_execution_binding"] = (
-                capture_execution_hardware_sync_binding(
-                    run_root,
-                    qualification=hardware_sync_qualification,
-                )
-            )
-            hardware_groups_path = write_hardware_sync_frame_groups(
-                run_root,
-                hardware_groups,
-            )
-            if invalidated_groups_path is not None:
-                invalidated_groups_path.unlink(missing_ok=True)
     except Exception as exc:
-        failure_message = str(exc)
-        if invalidated_groups_path is not None:
-            failure_message += (
-                " Previous hardware-sync groups were invalidated and preserved "
-                f"at {invalidated_groups_path}."
-            )
         upsert_stage(
             manifest,
             name="sync_run",
             status="failed",
-            message=failure_message,
+            message=str(exc),
         )
         write_run_manifest(manifest, run_root)
         raise
@@ -268,11 +182,6 @@ def main() -> None:
         manifest,
         name="sync_run",
         status="succeeded",
-        artifacts=(
-            {MULTIVIEW_FRAME_GROUPS: hardware_groups_path}
-            if hardware_groups_path is not None
-            else None
-        ),
         run_root=run_root,
         message=(
             f"Synchronized {len(results)} sensor(s): wrote "
@@ -282,13 +191,6 @@ def main() -> None:
                 if calibration_sync_policy is not None
                 else ""
             )
-            + (
-                " Published "
-                f"{hardware_groups['summary']['complete_group_count']} "
-                "authoritative complete hardware-sync frame group(s)."
-                if hardware_groups is not None
-                else ""
-            )
         ),
     )
     write_run_manifest(manifest, run_root)
@@ -296,13 +198,6 @@ def main() -> None:
     print(
         f"Synchronized {len(results)} sensor(s): wrote "
         f"{matched_frames} in-motion frame-pose match(es)."
-        + (
-            " Published "
-            f"{hardware_groups['summary']['complete_group_count']} "
-            "authoritative complete hardware-sync frame group(s)."
-            if hardware_groups is not None
-            else ""
-        )
     )
 
 

@@ -21,7 +21,6 @@ from posetestbot.calibration.intrinsics import (
 from posetestbot.calibration.profiles import (
     CalibrationProfile,
     CalibrationStatus,
-    LEGACY_SCHEMA_VERSION as LEGACY_CALIBRATION_SCHEMA_VERSION,
     SCHEMA_VERSION as CALIBRATION_SCHEMA_VERSION,
     profile_from_dict,
     profile_to_dict,
@@ -205,10 +204,8 @@ def _parse_calibration_profiles(
 ) -> tuple[str, tuple[CalibrationProfile, ...]]:
     value = _json_object(payload, label=CALIBRATION_PROFILES)
     schema = str(value.get("schema_version"))
-    if schema not in {CALIBRATION_SCHEMA_VERSION, LEGACY_CALIBRATION_SCHEMA_VERSION}:
-        raise ValueError(
-            "Calibration collection schema must be calibration.v2 or calibration.v1"
-        )
+    if schema != CALIBRATION_SCHEMA_VERSION:
+        raise ValueError("Calibration collection schema must be calibration.v2")
     raw_profiles = value.get("profiles")
     if not isinstance(raw_profiles, list):
         raise ValueError("Calibration collection profiles must be a list")
@@ -750,9 +747,7 @@ def _normalize_setup(
             )
     normalized = {"resolution": resolution, "sensors": normalized_sensors}
     reference_path = (
-        normalize_sunrise_reference_frame_path(
-            robot_pose_sunrise_reference_frame_path
-        )
+        normalize_sunrise_reference_frame_path(robot_pose_sunrise_reference_frame_path)
         if robot_pose_sunrise_reference_frame_path is not None
         else (
             configured_sunrise_reference_frame_path(current)

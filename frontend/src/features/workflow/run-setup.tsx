@@ -39,10 +39,6 @@ const setupSchema = (maximumCaptureSpeedMps: number) => z.object({
       && value.split("/").slice(1).every((component) => component !== "." && component !== ".."), {
       message: "Enter an absolute Sunrise frame path without empty, '.' or '..' components or a trailing slash.",
     }),
-  synchronization_mode: z.enum(["timestamp_aligned", "hardware_trigger"]),
-  hardware_sync_group_id: z.string(),
-  hardware_sync_master_sensor_key: z.string(),
-  max_depth_timestamp_skew_ms: z.number().positive().max(5),
 })
 
 type SetupValues = z.infer<ReturnType<typeof setupSchema>>
@@ -193,39 +189,6 @@ const TIMESTAMP_SYNCHRONIZATION: CaptureSynchronization = {
   schema_version: "capture_synchronization.v1",
   mode: "timestamp_aligned",
 }
-const DEFAULT_HARDWARE_GROUP_ID = "mixed-depth-rig"
-const DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS = 2
-const isExactHardwareSensor = (sensor: RunSensor) => sensor.sensor_type === "realsense_d435"
-  && !["", "auto", "default"].includes(sensor.device_id.trim().toLowerCase())
-
-function hardwareSynchronizationBlockers(
-  sensors: RunSensor[],
-  masterSensorKey: string,
-  groupId: string,
-  maxDepthTimestampSkewMs: number,
-) {
-  const blockers: string[] = []
-  if (sensors.length < 2) blockers.push("Enable at least two cameras.")
-  const unsupported = sensors.filter((sensor) => sensor.sensor_type !== "realsense_d435")
-  if (unsupported.length) blockers.push("OAK-D Pro and ZED 2i cannot join this hardware-trigger group.")
-  const nonExact = sensors.filter((sensor) => !isExactHardwareSensor(sensor))
-  if (nonExact.length) blockers.push("Every enabled RealSense needs an exact device ID; auto/default IDs are not allowed.")
-  const mounts = new Set(sensors.map((sensor) => sensor.mounting_mode))
-  if (!mounts.has("static") || !mounts.has("eye_in_hand")) {
-    blockers.push("Enable both a static and a robot-mounted camera for this research contract.")
-  }
-  const eligibleKeys = new Set(sensors.filter(isExactHardwareSensor).map(sensorKey))
-  if (!masterSensorKey || !eligibleKeys.has(masterSensorKey)) {
-    blockers.push("Choose one enabled exact-ID RealSense as the depth trigger master.")
-  }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(groupId)) {
-    blockers.push("Use a 1-64 character trigger group ID containing only letters, digits, '.', '_', or '-'.")
-  }
-  if (!Number.isFinite(maxDepthTimestampSkewMs) || maxDepthTimestampSkewMs <= 0 || maxDepthTimestampSkewMs > 5) {
-    blockers.push("Enter a finite positive earliest-to-latest depth timestamp span no greater than 5 ms.")
-  }
-  return blockers
-}
 
 const sequenceFor = (intent: WorkflowIntent) => intent === "camera_calibration"
   ? "real_full_capture_validation"
@@ -251,10 +214,6 @@ function defaultSetupValues(): SetupValues {
     fps: 6,
     velocity: DEFAULT_CAPTURE_SPEED_M_S,
     robot_pose_sunrise_reference_frame_path: defaultSunriseReferenceFramePath(),
-    synchronization_mode: "timestamp_aligned",
-    hardware_sync_group_id: DEFAULT_HARDWARE_GROUP_ID,
-    hardware_sync_master_sensor_key: "",
-    max_depth_timestamp_skew_ms: DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS,
   }
 }
 
@@ -262,7 +221,6 @@ function setupValuesFromConfig(
   config: RunConfig,
   maximumCaptureSpeedMps: number,
 ): SetupValues {
-  const synchronization = config.capture.synchronization ?? TIMESTAMP_SYNCHRONIZATION
   return {
     run_name: config.run_name,
     resolution: config.capture.resolution,
@@ -270,16 +228,6 @@ function setupValuesFromConfig(
     velocity: Math.min(config.capture.velocity_m_s, maximumCaptureSpeedMps),
     robot_pose_sunrise_reference_frame_path: config.frames?.robot_pose.sunrise_reference_frame_path
       ?? defaultSunriseReferenceFramePath(),
-    synchronization_mode: synchronization.mode,
-    hardware_sync_group_id: synchronization.mode === "hardware_trigger"
-      ? synchronization.group_id
-      : DEFAULT_HARDWARE_GROUP_ID,
-    hardware_sync_master_sensor_key: synchronization.mode === "hardware_trigger"
-      ? synchronization.master_sensor_key
-      : "",
-    max_depth_timestamp_skew_ms: synchronization.mode === "hardware_trigger"
-      ? synchronization.max_depth_timestamp_skew_ms
-      : DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS,
   }
 }
 
@@ -431,29 +379,6 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const enabledSensors = configuredSensors.filter(isEnabled)
   const missingMountingSensorKeys = enabledSensors.filter((sensor) => !isConfiguredMounting(sensor.mounting_mode)).map(sensorKey)
   const cameraMountingReady = missingMountingSensorKeys.length === 0
-  const hardwareMasterOptions = enabledSensors.filter(isExactHardwareSensor)
-  const [
-    synchronizationMode,
-    hardwareMasterSensorKey,
-    hardwareGroupId,
-    maxDepthTimestampSkewMs,
-  ] = useWatch({
-    control: form.control,
-    name: [
-      "synchronization_mode",
-      "hardware_sync_master_sensor_key",
-      "hardware_sync_group_id",
-      "max_depth_timestamp_skew_ms",
-    ],
-  })
-  const hardwareBlockers = synchronizationMode === "hardware_trigger"
-    ? hardwareSynchronizationBlockers(
-        enabledSensors,
-        hardwareMasterSensorKey,
-        hardwareGroupId,
-        maxDepthTimestampSkewMs,
-      )
-    : []
   const selectedResolution = useWatch({ control: form.control, name: "resolution" })
   const savedEnabledSensorKeys = (existing.data?.config.capture.sensors ?? [])
     .filter((sensor) => sensor.enabled !== false)
@@ -535,27 +460,6 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
         return !detected || detected.connected === false || detected.capture_ready === false
       })
       if (unavailable.length) throw new Error(`Enabled cameras are not ready: ${unavailable.map(sensorKey).join(", ")}`)
-      const synchronization: CaptureSynchronization = values.synchronization_mode === "hardware_trigger"
-        ? {
-            schema_version: "capture_synchronization.v1",
-            mode: "hardware_trigger",
-            implementation: "realsense_inter_cam_sync",
-            scope: "depth_exposure",
-            group_id: values.hardware_sync_group_id,
-            master_sensor_key: values.hardware_sync_master_sensor_key,
-            max_depth_timestamp_skew_ms: values.max_depth_timestamp_skew_ms,
-          }
-        : TIMESTAMP_SYNCHRONIZATION
-      if (synchronization.mode === "hardware_trigger") {
-        const blockers = hardwareSynchronizationBlockers(
-          enabledSensors,
-          synchronization.master_sensor_key,
-          synchronization.group_id,
-          synchronization.max_depth_timestamp_skew_ms,
-        )
-        if (blockers.length) throw new Error(blockers.join(" "))
-      }
-
       let calibrationProfiles = existing.data?.config.calibration_profiles ?? ""
       let intrinsicProfiles = intent === "object_dataset"
         ? existing.data?.config.intrinsic_calibration_profiles ?? String(existing.data?.config.pipeline.options?.camera_rectification && typeof existing.data.config.pipeline.options.camera_rectification === "object"
@@ -652,7 +556,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
           ...(intent === "object_dataset" ? { expected_calibration_bundle_sha256: expectedCalibrationBundleSha256 } : {}),
           dataset_mode: intent === "object_dataset" ? "pose_template" : "objectless",
           plan_only: intent === "camera_calibration",
-          ...(intent === "object_dataset" ? { synchronization } : {}),
+          synchronization: TIMESTAMP_SYNCHRONIZATION,
         }),
       })
     },
@@ -701,31 +605,9 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
           <div className="rounded border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed"><span className="font-semibold">Controller contract:</span> A configured path rejects legacy packets and a different reported path before capture evidence can be treated as valid. Change this value only before acquisition.</div>
         </section>
 
-        {intent === "object_dataset" && <section className="space-y-4 rounded-lg border bg-muted/15 p-4" data-testid="capture-synchronization-setup" aria-labelledby="capture-synchronization-heading">
-          <div><h3 id="capture-synchronization-heading" className="text-sm font-semibold">Cross-camera capture synchronization</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Choose whether this dataset uses the existing timestamp association or the bounded RealSense depth-trigger contract.</p></div>
-          <Field id="capture-synchronization-mode" label="Synchronization mode">
-            <Controller control={form.control} name="synchronization_mode" render={({ field }) => <Select value={field.value} disabled={cameraContractLocked} onValueChange={(value: "timestamp_aligned" | "hardware_trigger") => {
-              field.onChange(value)
-              if (value === "hardware_trigger" && !hardwareMasterOptions.some((sensor) => sensorKey(sensor) === form.getValues("hardware_sync_master_sensor_key"))) {
-                form.setValue("hardware_sync_master_sensor_key", hardwareMasterOptions[0] ? sensorKey(hardwareMasterOptions[0]) : "", { shouldValidate: true })
-              }
-            }}><SelectTrigger id="capture-synchronization-mode" aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue>{field.value === "hardware_trigger" ? "Hardware-triggered RealSense depth exposure" : "Timestamp-aligned RGB-D streams"}</SelectValue></SelectTrigger><SelectContent><SelectItem value="timestamp_aligned">Timestamp-aligned RGB-D streams</SelectItem><SelectItem value="hardware_trigger">Hardware-triggered RealSense depth exposure</SelectItem></SelectContent></Select>} />
-          </Field>
-          {synchronizationMode === "timestamp_aligned" ? <div className="rounded border border-primary/25 bg-primary/5 p-3 text-xs leading-relaxed"><div className="font-semibold">Timestamp association</div><p className="mt-1 text-muted-foreground">Each camera records its own RGB-D stream. Processing later associates frames and robot poses using the selected calibration timing; it does not certify simultaneous exposures.</p></div> : <div className="space-y-4">
-            <div className="rounded border border-warning/40 bg-warning/10 p-3 text-xs leading-relaxed"><div className="font-semibold">Depth-only hardware synchronization boundary</div><p className="mt-1 text-muted-foreground">The supported implementation synchronizes <strong className="text-foreground">RealSense depth exposure</strong> through inter-camera triggering. RGB remains timestamp-associated with each camera’s depth frame and is <strong className="text-foreground">not certified as hardware-synchronous across cameras</strong>.</p></div>
-            <div className="grid gap-4 md:grid-cols-3">
-              <Field id="hardware-sync-group-id" label="Trigger group ID" hint="Stable safe identifier recorded in the run configuration." error={form.formState.errors.hardware_sync_group_id?.message}><Input id="hardware-sync-group-id" disabled={cameraContractLocked} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} {...form.register("hardware_sync_group_id")} /></Field>
-              <Field id="hardware-sync-master" label="Depth trigger master" hint="One enabled exact-ID RealSense drives the group."><Controller control={form.control} name="hardware_sync_master_sensor_key" render={({ field }) => <Select value={field.value} onValueChange={field.onChange} disabled={cameraContractLocked}><SelectTrigger id="hardware-sync-master" aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue placeholder="Choose master" /></SelectTrigger><SelectContent>{hardwareMasterOptions.map((sensor) => <SelectItem value={sensorKey(sensor)} key={sensorKey(sensor)}>{cameraLabel(sensor)}</SelectItem>)}</SelectContent></Select>} /></Field>
-              <Field id="max-depth-timestamp-skew-ms" label="Max group span (ms)" hint="Maximum earliest-to-latest depth timestamp span across every camera in one complete group; default 2.0 ms, maximum 5.0 ms." error={form.formState.errors.max_depth_timestamp_skew_ms?.message}><Input id="max-depth-timestamp-skew-ms" type="number" min="0.001" max="5" step="0.001" disabled={cameraContractLocked} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} {...form.register("max_depth_timestamp_skew_ms", { valueAsNumber: true })} /></Field>
-            </div>
-            <div className="overflow-x-auto rounded border"><table className="w-full min-w-[620px] text-left text-[11px]"><thead className="bg-muted/60 text-muted-foreground"><tr><th className="px-3 py-2">Camera</th><th className="px-3 py-2">Mount</th><th className="px-3 py-2">Depth-trigger eligibility</th><th className="px-3 py-2">Role</th></tr></thead><tbody>{enabledSensors.map((sensor) => {
-              const key = sensorKey(sensor)
-              const eligible = isExactHardwareSensor(sensor)
-              return <tr className="border-t" key={key}><td className="px-3 py-2"><div className="font-medium">{cameraLabel(sensor)}</div><div className="font-mono text-[9px] text-muted-foreground">{key}</div></td><td className="px-3 py-2">{mountingLabel(sensor.mounting_mode)}</td><td className={`px-3 py-2 font-semibold ${eligible ? "text-success" : "text-destructive"}`}>{eligible ? "Exact-ID D435" : "Unsupported"}</td><td className="px-3 py-2">{key === hardwareMasterSensorKey ? "Master" : eligible ? "Follower" : "—"}</td></tr>
-            })}</tbody></table></div>
-            <div className={`rounded border p-3 text-xs ${hardwareBlockers.length ? "border-destructive/35 bg-destructive/5" : "border-success/35 bg-success/5"}`} data-testid="hardware-sync-contract-status"><div className="font-semibold">{hardwareBlockers.length ? "Hardware trigger configuration is blocked" : "Hardware trigger configuration is complete"}</div>{hardwareBlockers.length ? <ul className="mt-2 list-disc space-y-1 pl-4 text-muted-foreground">{hardwareBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul> : <p className="mt-1 text-muted-foreground">The server will validate the exact cameras, mounting mix, master identity, implementation, scope, and skew again before saving. This completes configuration only; it does not yet prove the physical trigger harness.</p>}</div>
-            <div className="flex items-start gap-2 rounded border border-warning/40 bg-warning/10 p-3 text-xs" data-testid="hardware-sync-qualification-requirement"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Current physical qualification required before recording</div><p className="mt-1 text-muted-foreground">Readiness requires a hash-verified <code>hardware_sync_qualification.json</code> bound to this exact resolution, frame rate, trigger policy, camera identity, mount, and role assignment. Record operator-confirmed pulsed-light or equivalent exposure-timing evidence with <code>scripts/record_hardware_sync_qualification.py</code>. Any change to this setup invalidates that qualification.</p></div></div>
-          </div>}
+        {intent === "object_dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="capture-synchronization-setup" aria-labelledby="capture-synchronization-heading">
+          <div><h3 id="capture-synchronization-heading" className="text-sm font-semibold">Cross-camera timing</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">All PoseTestBot acquisitions use timestamp-aligned RGB-D streams.</p></div>
+          <div className="rounded border border-primary/25 bg-primary/5 p-3 text-xs leading-relaxed"><div className="font-semibold">Timestamp association</div><p className="mt-1 text-muted-foreground">Each camera preserves its own RGB-D stream and timestamps. Processing associates frames and robot poses using the promoted calibration timing evidence; it does not claim simultaneous camera exposures.</p></div>
         </section>}
 
         {intent === "object_dataset" && <section className="space-y-3" aria-labelledby="saved-calibration-heading">
@@ -762,7 +644,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
               : !cameraMountingReady
                 ? <p className="text-xs font-medium text-destructive" data-testid="run-mounting-required">Choose Static or Robot-mounted for every enabled camera. PoseTestBot will not assume a mounting.</p>
                 : <p className="text-xs text-muted-foreground">Saving setup never authorizes a camera or robot action.</p>}
-          <Button type="submit" disabled={setupControlsDisabled || save.isPending || sensors.isPending || !calibrationReady || hardwareBlockers.length > 0}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (hasCalibrationDraft ? "Validating and saving…" : "Saving…") : (hasCalibrationDraft ? "Validate and save setup" : "Save setup")}</Button>
+          <Button type="submit" disabled={setupControlsDisabled || save.isPending || sensors.isPending || !calibrationReady}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (hasCalibrationDraft ? "Validating and saving…" : "Saving…") : (hasCalibrationDraft ? "Validate and save setup" : "Save setup")}</Button>
         </div>
       </form></CardContent>
     </Card>

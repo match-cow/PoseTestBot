@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -38,22 +37,10 @@ from posetestbot.robot.reference_frames import (
 from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
-LEGACY_SCHEMA_VERSION = "run_config.v1"
-PREVIOUS_SCHEMA_VERSION = "run_config.v2"
 SCHEMA_VERSION = "run_config.v3"
-SUPPORTED_SCHEMA_VERSIONS = {
-    LEGACY_SCHEMA_VERSION,
-    PREVIOUS_SCHEMA_VERSION,
-    SCHEMA_VERSION,
-}
+SUPPORTED_SCHEMA_VERSIONS = {SCHEMA_VERSION}
 CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION = "capture_synchronization.v1"
-CAPTURE_SYNCHRONIZATION_MODES = {"timestamp_aligned", "hardware_trigger"}
-HARDWARE_TRIGGER_IMPLEMENTATION = "realsense_inter_cam_sync"
-HARDWARE_TRIGGER_SCOPE = "depth_exposure"
-DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS = 2.0
-MAX_DEPTH_TIMESTAMP_SKEW_MS = 5.0
-_SAFE_SYNC_GROUP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-_SAFE_HARDWARE_DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+CAPTURE_SYNCHRONIZATION_MODES = {"timestamp_aligned"}
 DATASET_MODES = {"objectless", "pose_template"}
 CALIBRATION_PROFILE_OPTION_STAGES = ("blenderproc_prepare", "bop_export")
 INTRINSIC_CALIBRATION_PROFILE_OPTION_STAGES = ("camera_rectification",)
@@ -163,28 +150,12 @@ class CaptureSynchronizationConfig:
 
     schema_version: str = CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION
     mode: str = "timestamp_aligned"
-    implementation: str | None = None
-    scope: str | None = None
-    group_id: str | None = None
-    master_sensor_key: str | None = None
-    max_depth_timestamp_skew_ms: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {
+        return {
             "schema_version": self.schema_version,
             "mode": self.mode,
         }
-        if self.mode == "hardware_trigger":
-            result.update(
-                {
-                    "implementation": self.implementation,
-                    "scope": self.scope,
-                    "group_id": self.group_id,
-                    "master_sensor_key": self.master_sensor_key,
-                    "max_depth_timestamp_skew_ms": (self.max_depth_timestamp_skew_ms),
-                }
-            )
-        return result
 
 
 @dataclass(frozen=True)
@@ -300,11 +271,10 @@ class PoseTestBotRunConfig:
             result["calibration_profile_selection"] = dict(
                 self.calibration_profile_selection
             )
-        if self.schema_version in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
-            result["dataset_mode"] = self.dataset_mode
-            result["pose_template"] = (
-                dict(self.pose_template) if self.pose_template is not None else None
-            )
+        result["dataset_mode"] = self.dataset_mode
+        result["pose_template"] = (
+            dict(self.pose_template) if self.pose_template is not None else None
+        )
         return result
 
 
@@ -372,7 +342,7 @@ def capture_synchronization_from_mapping(
     if value is None:
         return CaptureSynchronizationConfig()
     if isinstance(value, CaptureSynchronizationConfig):
-        return value
+        value = value.to_dict()
     if not isinstance(value, Mapping):
         raise ValueError("capture.synchronization must be a JSON object")
     schema_version = str(value.get("schema_version", ""))
@@ -381,91 +351,18 @@ def capture_synchronization_from_mapping(
             "capture.synchronization.schema_version must be "
             f"{CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION}"
         )
-    mode = str(value.get("mode", ""))
-    if mode not in CAPTURE_SYNCHRONIZATION_MODES:
-        raise ValueError(
-            "capture.synchronization.mode must be one of: "
-            + ", ".join(sorted(CAPTURE_SYNCHRONIZATION_MODES))
-        )
     base_keys = {"schema_version", "mode"}
-    if mode == "timestamp_aligned":
-        unexpected = sorted(set(value) - base_keys)
-        if unexpected:
-            raise ValueError(
-                "timestamp_aligned capture synchronization does not accept: "
-                + ", ".join(unexpected)
-            )
-        return CaptureSynchronizationConfig()
-
-    allowed_keys = base_keys | {
-        "implementation",
-        "scope",
-        "group_id",
-        "master_sensor_key",
-        "max_depth_timestamp_skew_ms",
-    }
-    unexpected = sorted(set(value) - allowed_keys)
+    unexpected = sorted(set(value) - base_keys)
     if unexpected:
         raise ValueError(
-            "hardware_trigger capture synchronization contains unknown fields: "
+            "timestamp_aligned capture synchronization does not accept: "
             + ", ".join(unexpected)
         )
-    implementation = str(value.get("implementation", ""))
-    if implementation != HARDWARE_TRIGGER_IMPLEMENTATION:
+    if value.get("mode") != "timestamp_aligned":
         raise ValueError(
-            "hardware_trigger capture synchronization implementation must be "
-            f"{HARDWARE_TRIGGER_IMPLEMENTATION}"
+            "capture.synchronization.mode must be exactly timestamp_aligned"
         )
-    scope = str(value.get("scope", ""))
-    if scope != HARDWARE_TRIGGER_SCOPE:
-        raise ValueError(
-            "hardware_trigger capture synchronization scope must be "
-            f"{HARDWARE_TRIGGER_SCOPE}"
-        )
-    group_id = str(value.get("group_id", ""))
-    if not _SAFE_SYNC_GROUP_ID.fullmatch(group_id):
-        raise ValueError(
-            "hardware_trigger capture synchronization group_id must contain "
-            "1-64 letters, digits, '.', '_', or '-', and start with a letter or digit"
-        )
-    master_sensor_key = str(value.get("master_sensor_key", ""))
-    if not master_sensor_key:
-        raise ValueError(
-            "hardware_trigger capture synchronization master_sensor_key is required"
-        )
-    skew_value = value.get(
-        "max_depth_timestamp_skew_ms",
-        DEFAULT_MAX_DEPTH_TIMESTAMP_SKEW_MS,
-    )
-    if isinstance(skew_value, bool):
-        raise ValueError(
-            "hardware_trigger max_depth_timestamp_skew_ms must be a finite "
-            "positive number"
-        )
-    try:
-        max_skew = float(skew_value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "hardware_trigger max_depth_timestamp_skew_ms must be a finite "
-            "positive number"
-        ) from exc
-    if (
-        not math.isfinite(max_skew)
-        or max_skew <= 0
-        or max_skew > MAX_DEPTH_TIMESTAMP_SKEW_MS
-    ):
-        raise ValueError(
-            "hardware_trigger max_depth_timestamp_skew_ms must be a finite "
-            f"positive number no greater than {MAX_DEPTH_TIMESTAMP_SKEW_MS}"
-        )
-    return CaptureSynchronizationConfig(
-        mode=mode,
-        implementation=implementation,
-        scope=scope,
-        group_id=group_id,
-        master_sensor_key=master_sensor_key,
-        max_depth_timestamp_skew_ms=max_skew,
-    )
+    return CaptureSynchronizationConfig()
 
 
 def validate_capture_synchronization(
@@ -474,68 +371,8 @@ def validate_capture_synchronization(
 ) -> CaptureSynchronizationConfig:
     """Validate synchronization against the exact enabled camera set."""
 
-    policy = capture_synchronization_from_mapping(synchronization)
-    if policy.mode == "timestamp_aligned":
-        return policy
-
-    enabled: dict[str, Mapping[str, Any] | SensorRunConfig] = {}
-    mounting_modes: set[str] = set()
-    for index, raw_sensor in enumerate(sensors):
-        sensor = (
-            raw_sensor.to_dict()
-            if isinstance(raw_sensor, SensorRunConfig)
-            else raw_sensor
-        )
-        if not isinstance(sensor, Mapping):
-            raise ValueError(f"Run config sensor {index} must be an object")
-        if not normalize_sensor_enabled(sensor.get("enabled", True)):
-            continue
-        sensor_type = normalize_sensor_type(str(sensor.get("sensor_type", ""))).value
-        device_id = str(sensor.get("device_id", "")).strip()
-        sensor_key = f"{sensor_type}:{device_id}"
-        if sensor_type != SensorType.REALSENSE_D435.value:
-            raise ValueError(
-                "hardware_trigger capture synchronization supports enabled "
-                "RealSense D435 cameras only; OAK-D Pro and ZED 2i are unsupported"
-            )
-        if device_id.lower() in {"", "auto", "default"}:
-            raise ValueError(
-                "hardware_trigger capture synchronization requires exact "
-                f"RealSense device IDs; got {device_id!r}"
-            )
-        if not _SAFE_HARDWARE_DEVICE_ID.fullmatch(device_id):
-            raise ValueError(
-                "hardware_trigger RealSense device IDs must contain 1-128 "
-                "letters, digits, '.', '_', or '-', and start with a letter "
-                "or digit"
-            )
-        if sensor_key in enabled:
-            raise ValueError(
-                f"hardware_trigger capture synchronization duplicates {sensor_key}"
-            )
-        enabled[sensor_key] = raw_sensor
-        mounting_modes.add(
-            normalize_mounting_mode(str(sensor.get("mounting_mode", ""))).value
-        )
-    if len(enabled) < 2:
-        raise ValueError(
-            "hardware_trigger capture synchronization requires at least two "
-            "enabled exact-ID RealSense D435 cameras"
-        )
-    if mounting_modes != {
-        MountingMode.EYE_IN_HAND.value,
-        MountingMode.STATIC.value,
-    }:
-        raise ValueError(
-            "hardware_trigger research capture requires both static and "
-            "eye_in_hand enabled cameras"
-        )
-    if policy.master_sensor_key not in enabled:
-        raise ValueError(
-            "hardware_trigger master_sensor_key must exactly match one enabled "
-            "RealSense D435 sensor key"
-        )
-    return policy
+    del sensors
+    return capture_synchronization_from_mapping(synchronization)
 
 
 def _validate_sensor_orientation(sensor_type: SensorType | str, inverted: bool) -> None:
@@ -894,36 +731,29 @@ def fixed_transform_from_mapping(value: Mapping[str, Any]) -> FixedFrameTransfor
 
 def validate_run_config(value: Mapping[str, Any]) -> None:
     schema = value.get("schema_version")
-    if schema not in SUPPORTED_SCHEMA_VERSIONS:
+    if schema != SCHEMA_VERSION:
+        raise ValueError(f"Run config schema_version must be {SCHEMA_VERSION}")
+    retired_fields = sorted({"object_folder", "selected_objects"} & value.keys())
+    if retired_fields:
         raise ValueError(
-            "Run config schema_version must be one of: "
-            + ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
+            "Run config contains retired legacy object-registry fields: "
+            + ", ".join(retired_fields)
         )
-    if schema in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
-        retired_fields = sorted({"object_folder", "selected_objects"} & value.keys())
-        if retired_fields:
+    dataset_mode = value.get("dataset_mode")
+    if dataset_mode not in DATASET_MODES:
+        raise ValueError(
+            "Run config dataset_mode must be one of: "
+            + ", ".join(sorted(DATASET_MODES))
+        )
+    pose_template = value.get("pose_template")
+    if pose_template is not None:
+        if not isinstance(pose_template, Mapping):
+            raise ValueError("Run config pose_template must be an object or null")
+        if pose_template.get("selection_artifact") != "pose_template_selection.json":
             raise ValueError(
-                "Run config contains retired legacy object-registry fields: "
-                + ", ".join(retired_fields)
+                "Run config pose_template.selection_artifact must be "
+                "pose_template_selection.json"
             )
-        dataset_mode = value.get("dataset_mode")
-        if dataset_mode not in DATASET_MODES:
-            raise ValueError(
-                "Run config dataset_mode must be one of: "
-                + ", ".join(sorted(DATASET_MODES))
-            )
-        pose_template = value.get("pose_template")
-        if pose_template is not None:
-            if not isinstance(pose_template, Mapping):
-                raise ValueError("Run config pose_template must be an object or null")
-            if (
-                pose_template.get("selection_artifact")
-                != "pose_template_selection.json"
-            ):
-                raise ValueError(
-                    "Run config pose_template.selection_artifact must be "
-                    "pose_template_selection.json"
-                )
 
     robot = value.get("robot_profile")
     if not isinstance(robot, Mapping):
@@ -1057,24 +887,20 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
                 "Run config known calibration-target placement requires "
                 "mounting_frame=template_base"
             )
-    if schema in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
-        if (
-            value["dataset_mode"] == "objectless"
-            and value.get("pose_template") is not None
-        ):
-            raise ValueError("Objectless run config cannot reference a pose template")
-        if (
-            value["dataset_mode"] != "pose_template"
-            and value.get("pose_template") is not None
-        ):
-            raise ValueError(
-                "Only pose_template dataset mode may reference a pose template"
-            )
+    if value["dataset_mode"] == "objectless" and value.get("pose_template") is not None:
+        raise ValueError("Objectless run config cannot reference a pose template")
+    if (
+        value["dataset_mode"] != "pose_template"
+        and value.get("pose_template") is not None
+    ):
+        raise ValueError(
+            "Only pose_template dataset mode may reference a pose template"
+        )
 
     frames = value.get("frames")
+    if not isinstance(frames, Mapping):
+        raise ValueError("Run config frames must be an object")
     if frames is not None:
-        if not isinstance(frames, Mapping):
-            raise ValueError("Run config frames must be an object")
         robot_pose = frames.get("robot_pose")
         if (
             not isinstance(robot_pose, Mapping)
@@ -1157,17 +983,9 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
     if enabled_sensor_count == 0:
         raise ValueError("Run config must enable at least one capture sensor")
     synchronization = capture.get("synchronization")
-    if schema == SCHEMA_VERSION and synchronization is None:
+    if synchronization is None:
         raise ValueError("run_config.v3 requires capture.synchronization")
-    if schema in {LEGACY_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION}:
-        legacy_policy = capture_synchronization_from_mapping(synchronization)
-        if legacy_policy.mode != "timestamp_aligned":
-            raise ValueError(
-                f"{schema} cannot claim hardware_trigger capture synchronization; "
-                f"use {SCHEMA_VERSION}"
-            )
-    else:
-        validate_capture_synchronization(synchronization, sensors)
+    validate_capture_synchronization(synchronization, sensors)
 
     pipeline = value.get("pipeline")
     if not isinstance(pipeline, Mapping):
@@ -1226,63 +1044,19 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
         value = json.load(f)
     if not isinstance(value, dict):
         raise ValueError(f"Run config must be a JSON object: {path}")
-    if "frames" not in value:
-        value["frames"] = RunFramesConfig().to_dict()
-        warnings = value.setdefault("warnings", [])
-        if not isinstance(warnings, list):
-            raise ValueError("Run config warnings must be a list")
-        warnings.append(
-            {
-                "code": "legacy_frames_inferred",
-                "message": (
-                    "Run config omitted frames; inferred robot_flange -> "
-                    "template_base with kuka_abc_radians. Rewrite the config "
-                    "to make frame semantics explicit."
-                ),
-            }
-        )
     capture = value.get("capture")
     if isinstance(capture, Mapping):
         sensors = capture.get("sensors")
         if isinstance(sensors, list):
             for sensor in sensors:
                 if isinstance(sensor, dict):
-                    sensor.setdefault("enabled", True)
                     operator_alias = normalize_operator_alias(
                         sensor.get("operator_alias")
                     )
                     if operator_alias is not None:
                         sensor["operator_alias"] = operator_alias
                         sensor["display_name"] = operator_alias
-        if (
-            value.get("schema_version")
-            in {
-                LEGACY_SCHEMA_VERSION,
-                PREVIOUS_SCHEMA_VERSION,
-            }
-            and "synchronization" not in capture
-        ):
-            if not isinstance(capture, dict):
-                capture = dict(capture)
-                value["capture"] = capture
-            capture["synchronization"] = CaptureSynchronizationConfig().to_dict()
-            warnings = value.setdefault("warnings", [])
-            if not isinstance(warnings, list):
-                raise ValueError("Run config warnings must be a list")
-            warnings.append(
-                {
-                    "code": "legacy_capture_synchronization_inferred",
-                    "message": (
-                        "Legacy run config omitted capture synchronization; "
-                        "inferred timestamp_aligned. It is not hardware-sync evidence."
-                    ),
-                }
-            )
-    value.setdefault("calibration_target", None)
-    if value.get("schema_version") in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
-        value.setdefault("pose_template", None)
     validate_run_config(value)
-    value.setdefault("dataset_mode", "objectless")
     return value
 
 

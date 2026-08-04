@@ -16,15 +16,11 @@ from posetestbot.io.atomic import atomic_write_json
 from posetestbot.jobs.runner import ResourceBusyError
 from posetestbot.pose_templates.adapter import (
     PoseTemplateCreatorUnavailable,
-    load_posetemplatecreator_backend,
     posetemplatecreator_status,
 )
 from posetestbot.pose_templates.catalog import (
-    default_catalog_root,
     default_working_data_root,
     get_catalog_object,
-    load_catalog,
-    set_catalog_object_state,
 )
 from posetestbot.pose_templates.library import (
     BUNDLE_MANIFEST,
@@ -184,121 +180,7 @@ def source_status():
     return jsonify(posetemplatecreator_status())
 
 
-@pose_templates_bp.get("/pose-templates/catalog")
-def catalog_list():
-    try:
-        return jsonify(load_catalog())
-    except (OSError, ValueError) as exc:
-        return _error(exc)
-
-
-@pose_templates_bp.get("/pose-templates/catalog/<catalog_uuid>")
-def catalog_detail(catalog_uuid: str):
-    try:
-        return jsonify(get_catalog_object(catalog_uuid))
-    except (KeyError, OSError, ValueError) as exc:
-        return _error(exc)
-
-
-@pose_templates_bp.post("/pose-templates/catalog/upload")
-def catalog_upload():
-    folder: Path | None = None
-    try:
-        request.max_content_length = MAX_UPLOAD_BATCH_BYTES + 1024 * 1024
-        if (
-            request.content_length is not None
-            and request.content_length > MAX_UPLOAD_BATCH_BYTES + 1024 * 1024
-        ):
-            raise RequestEntityTooLarge()
-        cad = request.files.get("cad")
-        textures = request.files.getlist("texture")
-        if cad is None or not cad.filename:
-            raise ValueError("One CAD file is required")
-        if len(textures) > 1:
-            raise ValueError("At most one PNG texture is supported")
-        backend = load_posetemplatecreator_backend()
-        safe_name = backend.safe_filename(cad.filename)
-        backend.file_format(safe_name)
-        _prune_stale_requests(
-            "catalog_upload", request_root=WORKPIECE_REQUEST_ROOT
-        )
-        request_id = uuid.uuid4().hex
-        folder = WORKPIECE_REQUEST_ROOT / "catalog_upload" / request_id
-        folder.mkdir(parents=True, exist_ok=False)
-        cad_path = folder / safe_name
-        cad.save(cad_path)
-        if cad_path.stat().st_size > int(backend.constants.MAX_UPLOAD_BYTES):
-            raise ValueError("CAD upload exceeds the 50 MiB file limit")
-        texture_path = None
-        if textures and textures[0].filename:
-            texture_name = backend.safe_filename(textures[0].filename)
-            if Path(texture_name).suffix.lower() != ".png":
-                raise ValueError("Texture must be PNG")
-            texture_path = folder / "texture.png"
-            textures[0].save(texture_path)
-        total = cad_path.stat().st_size + (
-            texture_path.stat().st_size if texture_path else 0
-        )
-        if total > MAX_UPLOAD_BATCH_BYTES:
-            raise ValueError("Upload exceeds the 100 MiB batch limit")
-        value = {
-            "name": request.form.get("name") or Path(safe_name).stem,
-            "description": request.form.get("description") or None,
-            "cad_path": cad_path.as_posix(),
-            "texture_path": texture_path.as_posix() if texture_path else None,
-            "catalog_root": default_catalog_root().as_posix(),
-            "cleanup_request_folder": True,
-        }
-        request_path = folder / "request.json"
-        atomic_write_json(request_path, value)
-        return _submit(
-            name="object_catalog_import",
-            script="scripts/run_object_catalog_import.py",
-            request_path=request_path,
-            request_id=request_id,
-            resources=["cpu", "disk_io"],
-        )
-    except Exception as exc:
-        if folder is not None:
-            shutil.rmtree(folder, ignore_errors=True)
-        return _error(exc)
-
-
-@pose_templates_bp.post("/pose-templates/catalog/<catalog_uuid>/<action>")
-def catalog_state(catalog_uuid: str, action: str):
-    try:
-        if action not in {"archive", "restore"}:
-            raise KeyError("Unknown catalog action")
-        return jsonify(
-            set_catalog_object_state(
-                catalog_uuid, state="archived" if action == "archive" else "active"
-            )
-        )
-    except Exception as exc:
-        return _error(exc)
-
-
-@pose_templates_bp.get("/pose-templates/catalog/<catalog_uuid>/assets/<kind>")
-def catalog_asset(catalog_uuid: str, kind: str):
-    try:
-        item = get_catalog_object(catalog_uuid)
-        if kind not in item["assets"]:
-            raise KeyError("Unknown catalog asset")
-        record = item["assets"][kind]
-        path = Path(item["catalog_root"]) / record["path"]
-        return send_file(
-            path,
-            mimetype=record["media_type"],
-            as_attachment=True,
-            download_name=path.name,
-            conditional=True,
-        )
-    except Exception as exc:
-        return _error(exc)
-
-
 @pose_templates_bp.get("/pose-templates/workpieces/<catalog_uuid>/orientations")
-@pose_templates_bp.get("/pose-templates/catalog/<catalog_uuid>/orientations")
 def workpiece_orientations(catalog_uuid: str):
     """Return only a hash-current, revision-current orientation analysis."""
 
@@ -321,7 +203,6 @@ def workpiece_orientations(catalog_uuid: str):
 @pose_templates_bp.get(
     "/pose-templates/workpieces/<catalog_uuid>/orientation-thumbnail"
 )
-@pose_templates_bp.get("/pose-templates/catalog/<catalog_uuid>/orientation-thumbnail")
 def workpiece_orientation_thumbnail(catalog_uuid: str):
     """Serve one bounded default orientation for catalogue/list cards."""
 
@@ -342,7 +223,6 @@ def workpiece_orientation_thumbnail(catalog_uuid: str):
 
 
 @pose_templates_bp.post("/pose-templates/workpieces/<catalog_uuid>/orientations")
-@pose_templates_bp.post("/pose-templates/catalog/<catalog_uuid>/orientations")
 def analyze_workpiece_orientations(catalog_uuid: str):
     """Queue CPU/disk-heavy stable-pose and footprint extraction."""
 
@@ -506,9 +386,7 @@ def library_delete(template_uuid: str):
             result = record_template_cleanup_submission_failure(
                 template_uuid, cleanup_error
             )
-            return jsonify(
-                {**result, "cleanup_job_error": str(cleanup_error)[:2_000]}
-            )
+            return jsonify({**result, "cleanup_job_error": str(cleanup_error)[:2_000]})
         return (
             jsonify(
                 {

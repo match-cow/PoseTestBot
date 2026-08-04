@@ -19,9 +19,7 @@ from posetestbot.pipeline.stages import (
 
 SCHEMA_VERSION = "pipeline_sequence_plan.v1"
 SEQUENCE_EXECUTION_ACK_ENV = "POSETESTBOT_SEQUENCE_EXECUTION_ACKNOWLEDGEMENTS"
-EXECUTION_ACKNOWLEDGEMENT_KEYS = frozenset(
-    {"allow_cameras", "allow_real_robot"}
-)
+EXECUTION_ACKNOWLEDGEMENT_KEYS = frozenset({"allow_cameras", "allow_real_robot"})
 
 
 @dataclass(frozen=True)
@@ -131,7 +129,10 @@ def list_pipeline_sequences(
     registry: Mapping[str, PipelineSequenceSpec] | None = None,
 ) -> list[dict[str, Any]]:
     specs = _sequence_specs(registry)
-    return [sequence.to_dict() for sequence in sorted(specs.values(), key=lambda item: item.id)]
+    return [
+        sequence.to_dict()
+        for sequence in sorted(specs.values(), key=lambda item: item.id)
+    ]
 
 
 def get_pipeline_sequence(
@@ -339,14 +340,10 @@ def _resolve_option_placeholders(value: Any, *, run_root: str) -> Any:
     if isinstance(value, str):
         return value.replace("{run_root}", run_root)
     if isinstance(value, list):
-        return [
-            _resolve_option_placeholders(item, run_root=run_root)
-            for item in value
-        ]
+        return [_resolve_option_placeholders(item, run_root=run_root) for item in value]
     if isinstance(value, tuple):
         return tuple(
-            _resolve_option_placeholders(item, run_root=run_root)
-            for item in value
+            _resolve_option_placeholders(item, run_root=run_root) for item in value
         )
     if isinstance(value, Mapping):
         return {
@@ -609,7 +606,6 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                     "startup_wait_s": 15.0,
                     "receive_start_timeout_s": 120.0,
                     "receive_idle_timeout_s": 60.0,
-                    "camera_metadata_idle_timeout_s": 5.0,
                 },
             ),
             PipelineSequenceStepSpec(
@@ -819,9 +815,7 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
                 stage_id="bop_export",
                 depends_on=("sync_quality", "calibration_preflight"),
                 options={
-                    "calibration_profiles": (
-                        "{run_root}/calibration_profiles.json"
-                    ),
+                    "calibration_profiles": ("{run_root}/calibration_profiles.json"),
                     "annotation_source": "none",
                     "overwrite": True,
                 },
@@ -863,10 +857,6 @@ PIPELINE_SEQUENCES: dict[str, PipelineSequenceSpec] = {
             PipelineSequenceStepSpec(
                 id="calibration_target_import",
                 stage_id="calibration_target_import",
-                options={
-                    "source": "{run_root}/aruco_grid_config.json",
-                    "aligned_to_template_base": True,
-                },
             ),
             PipelineSequenceStepSpec(
                 id="sync_run",

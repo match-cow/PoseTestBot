@@ -19,7 +19,6 @@ const CALIBRATION_CAPTURE_TIMEOUTS = {
   startup_wait_s: 15,
   receive_start_timeout_s: 120,
   receive_idle_timeout_s: 60,
-  camera_metadata_idle_timeout_s: 5,
 } as const
 
 const ACTIVE_CAPTURE_STATUSES = new Set(["queued", "running", "canceling"])
