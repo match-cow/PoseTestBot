@@ -20,6 +20,7 @@ from posetestbot.web.routes.calibration_library import calibration_library_bp
 from posetestbot.web.routes.calibration_targets import calibration_targets_bp
 from posetestbot.web.routes.bop_annotations import bop_annotations_bp
 from posetestbot.web.routes.bop_evaluation import bop_evaluation_bp
+from posetestbot.web.routes.cluster import cluster_bp
 from posetestbot.web.routes.overview import overview_bp
 from posetestbot.web.routes.pages import pages_bp
 from posetestbot.web.routes.pose_templates import pose_templates_bp
@@ -46,10 +47,7 @@ class _PreviewPollLogFilter(logging.Filter):
         message = record.getMessage()
         successful_poll = message.rstrip().endswith('" 200 -')
         noisy_preview_get = any(
-            marker in message
-            for marker in (
-                '"GET /sensors/previews',
-            )
+            marker in message for marker in ('"GET /sensors/previews',)
         )
         return not (successful_poll and noisy_preview_get)
 
@@ -122,6 +120,7 @@ def create_app(
     app.register_blueprint(calibration_targets_bp)
     app.register_blueprint(bop_annotations_bp)
     app.register_blueprint(bop_evaluation_bp)
+    app.register_blueprint(cluster_bp)
     app.register_blueprint(workpieces_bp)
     app.register_blueprint(pose_templates_bp)
     app.register_blueprint(sensors_bp)

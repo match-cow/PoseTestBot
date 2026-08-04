@@ -1,6 +1,7 @@
 import { useDeferredValue, useMemo, useState } from "react"
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Ban, ChevronDown, Clock3, Copy, FileText, LockKeyhole, RefreshCw, Search, Square, Terminal, X } from "lucide-react"
+import { Ban, ChevronDown, Clock3, Copy, Cpu, FileText, LockKeyhole, RefreshCw, Search, Server, Square, Terminal, X } from "lucide-react"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 
 import { EmptyState } from "@/components/empty-state"
@@ -16,13 +17,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, query } from "@/lib/api"
-import type { Job, JobPage } from "@/lib/contracts"
+import type { ClusterJob, Job, JobPage } from "@/lib/contracts"
 import { jobStatusTone } from "@/lib/jobs"
 import { formatDate } from "@/lib/utils"
 import { activeWorkflowHref } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
 
 const ACTIVE = new Set(["queued", "running", "canceling"])
+const CLUSTER_ACTIVE = new Set(["preparing", "transferring", "submitted", "pending", "running", "collecting", "canceling"])
 const PAGE_SIZE = 20
 type StatusFilter = "all" | "active" | "failed" | "finished"
 type ScopeFilter = "all" | "active_run" | "run" | "library" | "global" | "unknown"
@@ -107,6 +109,86 @@ async function copyDebugText(label: string, text: string, source: HTMLElement) {
   }
 }
 
+function clusterTone(status: string) {
+  if (["succeeded", "succeeded-with-warning"].includes(status)) return "success" as const
+  if (status === "failed") return "destructive" as const
+  if (CLUSTER_ACTIVE.has(status)) return "warning" as const
+  return "neutral" as const
+}
+
+function ClusterJobsSection() {
+  const queryClient = useQueryClient()
+  const { selectedRun } = useOperator()
+  const [status, setStatus] = useState("all")
+  const [search, setSearch] = useState("")
+  const [detailId, setDetailId] = useState<string | null>(null)
+  const jobs = useQuery({
+    queryKey: ["cluster-jobs", status],
+    queryFn: () => api<{ jobs: ClusterJob[]; next_cursor: string | null }>(query("/cluster/jobs", { limit: 50, state: status === "all" ? undefined : status })),
+    retry: false,
+    refetchInterval: (state) => state.state.data?.jobs.some((job) => CLUSTER_ACTIVE.has(job.state)) ? 2_000 : 10_000,
+  })
+  const detail = useQuery({
+    queryKey: ["cluster-job", detailId, "log"],
+    queryFn: () => api<{ job: ClusterJob; log: string }>(query(`/cluster/jobs/${detailId}`, { include_log: true })),
+    enabled: Boolean(detailId),
+    refetchInterval: (state) => CLUSTER_ACTIVE.has(state.state.data?.job.state ?? "") ? 1_500 : false,
+  })
+  const cancel = useMutation({
+    mutationFn: (job: ClusterJob) => api<{ job: ClusterJob }>(`/cluster/jobs/${job.job_id}/cancel`, {
+      method: "POST",
+      body: "{}",
+    }),
+    onSuccess: () => {
+      toast.success("Exact cluster job cancellation requested")
+      queryClient.invalidateQueries({ queryKey: ["cluster-jobs"] })
+      if (detailId) queryClient.invalidateQueries({ queryKey: ["cluster-job", detailId] })
+    },
+    onError: (error) => toast.error("Cluster job could not be canceled", { description: errorMessage(error) }),
+  })
+  const normalizedSearch = search.trim().toLowerCase()
+  const filtered = (jobs.data?.jobs ?? []).filter((job) => !normalizedSearch
+    || job.job_id.toLowerCase().includes(normalizedSearch)
+    || String(job.payload.run_root ?? "").toLowerCase().includes(normalizedSearch)
+    || String(job.slurm_job_id ?? "").includes(normalizedSearch))
+  const current = detail.data?.job ?? jobs.data?.jobs.find((job) => job.job_id === detailId)
+
+  return <Card data-testid="cluster-jobs-section" className="border-primary/25">
+    <CardHeader className="pb-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div><CardTitle className="flex items-center gap-2"><Server className="size-5 text-primary-strong" />Cluster provider</CardTitle><CardDescription className="mt-1">Durable FoundationPose and SLURM state from the loopback companion controller. The bounded view loads at most 50 recent jobs.</CardDescription></div>
+        <div className="flex gap-2"><Button asChild variant="outline" size="sm"><Link to="/pose-estimation"><Cpu />Pose Estimation</Link></Button><Button variant="outline" size="sm" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh</Button></div>
+      </div>
+    </CardHeader>
+    <CardContent className="space-y-3">
+      {jobs.isError
+        ? <div className="rounded-lg border border-muted bg-muted/25 p-3 text-xs text-muted-foreground">Cluster provider unavailable: {errorMessage(jobs.error)}. Local job history below remains unaffected.</div>
+        : <>
+          <div className="grid gap-2 lg:grid-cols-[minmax(220px,1fr)_220px_auto]">
+            <div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search cluster jobs" className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Job ID, SLURM ID, run…" /></div>
+            <Select value={status} onValueChange={setStatus}><SelectTrigger aria-label="Filter cluster jobs by state"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All remote states</SelectItem><SelectItem value="running">Running</SelectItem><SelectItem value="pending">Pending</SelectItem><SelectItem value="collecting">Collecting</SelectItem><SelectItem value="succeeded">Succeeded</SelectItem><SelectItem value="succeeded-with-warning">Succeeded with warning</SelectItem><SelectItem value="failed">Failed</SelectItem><SelectItem value="canceled">Canceled</SelectItem></SelectContent></Select>
+            <div className="self-center text-right text-xs text-muted-foreground">{filtered.length} loaded</div>
+          </div>
+          {jobs.isPending
+            ? <Skeleton className="h-24" />
+            : filtered.length === 0
+              ? <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">No matching cluster jobs.</p>
+              : <div className="max-h-[440px] space-y-2 overflow-y-auto pr-1">
+                {filtered.map((job) => <div key={job.job_id} data-testid={`cluster-job-${job.job_id}`} className="grid items-center gap-3 rounded-lg border bg-muted/15 p-3 xl:grid-cols-[minmax(0,1fr)_150px_190px_auto]">
+                  <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">FoundationPose</span><StatusBadge status={job.state} tone={clusterTone(job.state)} /></div><div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={job.job_id}>{job.job_id}</div><div className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={String(job.payload.run_root ?? "")}>{job.payload.run_root === selectedRun ? "Active run · " : "Other run · "}{String(job.payload.run_root ?? "unknown")}</div></div>
+                  <div><div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">SLURM</div><div className="mt-1 font-mono text-xs">{job.slurm_job_id ?? "not assigned"}</div></div>
+                  <div><div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Updated</div><div className="mt-1 text-xs">{formatDate(job.updated_at)}</div>{job.result && <div className="mt-1 text-[10px] text-muted-foreground">{job.result.estimate_count} estimates · {job.result.failure_count} failures</div>}</div>
+                  <div className="flex gap-2 xl:justify-end"><Button variant="outline" size="sm" onClick={() => setDetailId(job.job_id)}><FileText />Log</Button>{CLUSTER_ACTIVE.has(job.state) && <Button variant="destructive" size="sm" onClick={() => cancel.mutate(job)} disabled={cancel.isPending || job.state === "canceling"}><Ban />{job.state === "canceling" ? "Canceling…" : "Cancel"}</Button>}</div>
+                </div>)}
+              </div>}
+        </>}
+    </CardContent>
+    <Sheet open={Boolean(detailId)} onOpenChange={(open) => !open && setDetailId(null)}>
+      <SheetContent><SheetHeader><SheetTitle>Cluster job log</SheetTitle><SheetDescription>{current?.job_id} · SLURM {current?.slurm_job_id ?? "not assigned"}</SheetDescription></SheetHeader><div className="flex items-center justify-between gap-3"><StatusBadge status={current?.state} tone={clusterTone(current?.state ?? "unknown")} /><span className="text-xs text-muted-foreground">Controller state survives UI and PoseTestBot restarts.</span></div><pre className="min-h-0 flex-1 overflow-auto rounded-lg bg-[#11130d] p-4 text-xs leading-relaxed text-[#dce4c4]">{detail.isError ? `Log unavailable: ${errorMessage(detail.error)}` : detail.data?.log || "Waiting for controller log output…"}</pre>{current?.error && <p className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{current.error}</p>}{current && CLUSTER_ACTIVE.has(current.state) && <Button variant="destructive" onClick={() => cancel.mutate(current)} disabled={cancel.isPending || current.state === "canceling"}><Ban />Cancel exact job</Button>}</SheetContent>
+    </Sheet>
+  </Card>
+}
+
 function jobContext(job: Job) {
   const metadata: Partial<Job> = { ...job }
   delete metadata.tail
@@ -185,13 +267,15 @@ export function JobsPage() {
   const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
 
   return <div className="space-y-6">
-    <PageHeader eyebrow="Lab-wide job runner" title="Jobs & resource locks" description="Monitor background work across every run folder, inspect live logs, and stop camera or capture jobs from one place. Each job shows whether it belongs to the active run." actions={<Button variant="outline" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh</Button>} />
+    <PageHeader eyebrow="Local and cluster providers" title="Jobs & resource locks" description="Monitor local background work and durable external FoundationPose jobs, inspect live logs, and cancel only the exact recorded workload. Each job shows whether it belongs to the active run." actions={<Button variant="outline" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh local jobs</Button>} />
     <ProcessHandoff
       title="Jobs continue when you leave their originating page"
       description="Use this page for status, resource ownership, logs, and safe cancellation. Committed storage operations remain non-cancelable so they cannot be interrupted midway. When a job finishes, return to the guided workflow to review its durable evidence and continue."
       to={workflowHref}
       action="Open workflow"
     />
+
+    <ClusterJobsSection />
 
     {firstPage && Object.keys(firstPage.resources).length > 0 && <Card><CardContent className="flex flex-wrap items-center gap-3 py-4"><span className="flex items-center gap-1 text-xs font-semibold"><LockKeyhole className="size-4 text-warning-foreground" />Held resources <HelpTip label="resource locks">A lock prevents two local jobs from opening the same camera, commanding the robot, or mutating the same managed catalogue at once. It is released when the owning job exits.</HelpTip></span>{Object.entries(firstPage.resources).map(([resource, id]) => <StatusBadge key={resource} status="warning" tone="warning">{resource} · {id}</StatusBadge>)}</CardContent></Card>}
 

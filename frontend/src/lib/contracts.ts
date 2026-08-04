@@ -255,6 +255,128 @@ export interface JobPage {
   limit: number
 }
 
+export interface ClusterBlocker {
+  code: string
+  message: string
+}
+
+export interface ClusterProfile {
+  profile_id: string
+  enabled: boolean
+  partition: string
+  gres: string
+  cpus: number
+  memory: string
+  walltime: string
+  max_targets: number | null
+}
+
+export interface ClusterRuntimeIdentity {
+  runtime_id?: string
+  foundationpose_revision?: string
+  bop_toolkit_revision?: string
+  sif_sha256?: string | null
+  weights_sha256?: string | null
+  foundationpose_license?: string
+  foundationpose_license_sha256?: string
+  qualified?: boolean
+  [key: string]: JsonValue | undefined
+}
+
+export interface ClusterStatus {
+  schema_version: string
+  ready: boolean
+  available: boolean
+  mode?: string
+  connection?: Record<string, JsonValue>
+  features?: Record<string, boolean>
+  feature_blockers?: Record<string, string[]>
+  runtime?: ClusterRuntimeIdentity
+  profiles?: ClusterProfile[]
+  blockers: ClusterBlocker[]
+  integration: {
+    enabled: boolean
+    controller_configured: boolean
+  }
+}
+
+export interface ClusterPoseSetup {
+  schema_version: "cluster_pose_estimation_setup.v1"
+  run_root: string
+  ready: boolean
+  dataset: {
+    dataset_alias: string
+    dataset_sha256: string
+    name: string
+    split: string
+    scene_count: number
+    frame_count: number
+    model_count: number
+    target_count: number
+    annotation_count: number
+    annotation_source: string
+    status: string
+    blockers: ClusterBlocker[]
+    warnings: ClusterBlocker[]
+  }
+  annotation_mode: string | null
+  oracle_mask_contract: string
+  score_contract: string
+  execution_contract: string
+  controller: ClusterStatus
+  runtime: ClusterRuntimeIdentity | null
+  profiles: ClusterProfile[]
+  enabled_profiles: ClusterProfile[]
+  blockers: ClusterBlocker[]
+  warnings: ClusterBlocker[]
+}
+
+export interface ClusterJob {
+  schema_version: "posetestbot_cluster_job.v1"
+  job_id: string
+  kind: string
+  state: string
+  status: string
+  created_at: string
+  updated_at: string
+  slurm_job_id: string | null
+  payload: {
+    run_root?: string
+    dataset_alias?: string
+    dataset_sha256?: string
+    profile_id?: string
+    operator?: string
+    [key: string]: JsonValue | undefined
+  }
+  result: {
+    filename: string
+    sha256: string
+    dataset_sha256: string
+    estimate_count: number
+    failure_count: number
+    [key: string]: JsonValue
+  } | null
+  error: string | null
+  log_available: boolean
+  cancel_requested: boolean
+  terminal: boolean
+}
+
+export interface ClusterArchive {
+  schema_version: "posetestbot_cluster_archive.v1"
+  archive_id: string
+  job_id: string
+  state: string
+  status: string
+  source_run_root: string
+  source_identity: RunFolderIdentity
+  created_at: string
+  updated_at: string
+  archive_sha256: string | null
+  operator: string
+  verified: boolean
+}
+
 export interface PreviewJob {
   job: Job
   preview_root: string | null
@@ -323,20 +445,10 @@ export interface PipelineSequence {
   steps: Array<{ id: string; stage_id: string; [key: string]: JsonValue }>
 }
 
-export type CaptureSynchronization =
-  | {
-      schema_version: "capture_synchronization.v1"
-      mode: "timestamp_aligned"
-    }
-  | {
-      schema_version: "capture_synchronization.v1"
-      mode: "hardware_trigger"
-      implementation: "realsense_inter_cam_sync"
-      scope: "depth_exposure"
-      group_id: string
-      master_sensor_key: string
-      max_depth_timestamp_skew_ms: number
-    }
+export interface CaptureSynchronization {
+  schema_version: "capture_synchronization.v1"
+  mode: "timestamp_aligned"
+}
 
 export interface RunConfig {
   schema_version: string

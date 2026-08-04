@@ -21,7 +21,7 @@ from posetestbot.bop.evaluation import (
     list_evaluations,
     list_results,
     public_dataset_descriptor,
-    result_file_path,
+    result_download_path,
     toolkit_status,
 )
 from posetestbot.jobs.runner import ResourceBusyError
@@ -211,7 +211,7 @@ def download_bop_result(result_id: str):
     try:
         run_root = resolve_web_run_root(request.args.get("run_root"))
         result = get_result(run_root, result_id)
-        path = result_file_path(run_root, result_id)
+        path = result_download_path(run_root, result_id)
         return send_file(
             path,
             as_attachment=True,
