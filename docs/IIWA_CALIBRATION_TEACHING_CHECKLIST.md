@@ -1,9 +1,12 @@
 # IIWA Nine-Frame Teaching and Commissioning Checklist
 
 Print this checklist for Sunrise.Workbench teaching and physical commissioning
-of `iiwa/PoseTestBot_CalibrationVarianceProposal.java`. The complete frame and
-relative-motion contract is in
+of `iiwa/PoseTestBotNineFrameCalibrationApplication.java`. The complete frame
+and relative-motion contract is in
 [`iiwa/calibration_teaching_plan.v2.json`](../iiwa/calibration_teaching_plan.v2.json).
+This checklist is only for the nine-frame application. The
+[single-frame static-camera alternative](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md)
+has a separate anchor and relative-motion contract.
 
 > Teaching aid only—not reachability, redundancy, singularity, collision, or
 > cable-clearance validation. Physical work requires the normal lab risk
@@ -52,8 +55,8 @@ relative-motion contract is in
   orientation, and calibration-profile selection are preserved; do not count
   it as capture, calibration, Cell, or rewrite-gate evidence.
 - [ ] Select the robot flange as the teaching and motion point.
-- [ ] Confirm the repository and deployed application agree on
-  `ENABLE_AFTER_OFFLINE_VALIDATION`, and record the exact deployed revision.
+- [ ] Confirm the repository source and deployed application/revision agree,
+  and record that exact deployed revision.
 - [ ] Confirm this revision intentionally has no `CalibrationReady`, depth, or
   orientation-variant Workbench frames.
 - [ ] Review the loss of the separate high-clearance Ready transit and approve
@@ -105,7 +108,7 @@ and LL/LC/LR = lower-left/lower-center/lower-right.
 
 - [ ] Compile the exact controller project's Sunrise.OS API level and confirm
   `Transformation.ofDeg(...)` plus `linRel(offset, calibrationCenter)` resolve.
-- [ ] Add `PoseTestBot_PoseStreamTask` through Workbench's background-task
+- [ ] Add `PoseTestBotPoseStreamTask` through Workbench's background-task
   workflow, configure automatic start, compile its task-function provider, and
   confirm exactly one `PoseTestBotPoseStreamFunction` provider exists.
 - [ ] Confirm the cyclic task requests a 10 ms `BestEffort` period, contains no
@@ -329,7 +332,7 @@ blank operator/reviewer commissioning fields in this document.
 
 | Decision | Selection / notes |
 | --- | --- |
-| Repository/deployed enable-state agreement recorded | ☐ |
+| Repository/deployed source revision agreement recorded | ☐ |
 | Offline commissioning approved | ☐ |
 | T1 commissioning approved | ☐ |
 | Supervised trial accepted | ☐ |

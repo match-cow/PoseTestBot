@@ -2,7 +2,7 @@
 
 ## Outcome
 
-`iiwa/PoseTestBot_CalibrationVarianceProposal.java` is an enabled repository
+`iiwa/PoseTestBotNineFrameCalibrationApplication.java` is the repository
 candidate for the operator-reported running calibration application. The exact
 deployed controller application and revision are not yet captured as evidence.
 Its Workbench motion contract is reduced to exactly nine persistent 3 × 3
@@ -16,7 +16,7 @@ The earlier deployed/attested revision remains historical acceptance evidence.
 The repository source now contains a prospective high-rate pose-stream
 revision that has not been deployed or physically commissioned: blocking
 motions are sampled by the separate automatic-compatible read-only
-`PoseTestBot_PoseStreamTask` at a 10 ms best-effort target. This new revision
+`PoseTestBotPoseStreamTask` at a 10 ms best-effort target. This new revision
 must not be represented as the accepted deployed program until the exact
 Workbench project is compiled and a supervised cadence trial passes. See
 [IIWA pose-stream cadence](IIWA_POSE_STREAM_CADENCE.md).
@@ -57,6 +57,11 @@ The repository owns three related commissioning artifacts:
   and [PNG rendering](images/iiwa_calibration_teaching_plan.png).
 
 [![PoseTestBot iiwa nine-frame calibration teaching plot](images/iiwa_calibration_teaching_plan.png)](images/iiwa_calibration_teaching_plan.svg)
+
+This nine-frame contract remains available alongside the separate
+[single-frame static-camera relative-grid application](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md).
+The single-frame program has its own center path and commissioning contract;
+do not apply this nine-frame manifest or sign-off table to it.
 
 The 420 × 297 mm template and all nine taught flange frames in the metric views
 are drawn relative to `TemplateBase`. The ceiling-mounted robot/camera-rig inset
@@ -221,14 +226,14 @@ and swept-path checks, T1 single-stepping, and the supervised capture trial.
 The checklist now also covers automatic background-task registration and the
 50 Hz / 25 ms p95 / 40 ms maximum end-to-end cadence targets.
 
-The repository source keeps `ENABLE_AFTER_OFFLINE_VALIDATION=false`, so the
-application exits before motion until offline review and supervised
-commissioning are complete. Enabling a deployed copy does not establish that
-the controller is running the reviewed source: record the deployed application
-and revision, and retain the Workbench compile, nine-frame resolution, path
-simulation, and T1 evidence. Future application or cell changes must be
-revalidated before physical capture. Physical T1 validation and capture are
-operator-run work. Repository tests never access the robot or cameras.
+The application has no repository-only enable switch. After launch it resolves
+its required frames and pose-stream provider, then waits without motion for an
+accepted UDP START command. That start contract is not commissioning evidence:
+record the deployed application and revision, and retain the Workbench compile,
+nine-frame resolution, path simulation, and T1 evidence. Future application or
+cell changes must be revalidated before physical capture. Physical T1
+validation and capture are operator-run work. Repository tests never access the
+robot or cameras.
 
 For every required camera, a future supervised trial must demonstrate at least
 15 accepted views, five-view-supported normalized centroid spans of at least

@@ -20,7 +20,7 @@ from posetestbot.calibration.teaching_plan import (
 )
 
 
-JAVA_PATH = Path("iiwa/PoseTestBot_CalibrationVarianceProposal.java")
+JAVA_PATH = Path("iiwa/PoseTestBotNineFrameCalibrationApplication.java")
 CHECKLIST_PATH = Path("docs/IIWA_CALIBRATION_TEACHING_CHECKLIST.md")
 
 
@@ -121,7 +121,6 @@ def test_manifest_frames_and_relative_deltas_match_java() -> None:
     assert "CALIBRATION_ORIENTATION_" not in java
     assert "robotinfo.setBase(TEMPLATE_BASE_PATH);" in java
     assert "templateBase = requiredFrame(TEMPLATE_BASE_PATH);" in java
-    assert "ENABLE_AFTER_OFFLINE_VALIDATION = false" in java
     assert "Transformation.ofDeg(0, 0, 0," in java
     assert "linRel(offset," in java
     assert re.search(

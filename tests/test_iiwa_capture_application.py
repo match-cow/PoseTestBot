@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 
-JAVA_PATH = Path("iiwa/PoseTestBot_Test.java")
+JAVA_PATH = Path("iiwa/PoseTestBotFullCaptureApplication.java")
 DOC_PATH = Path("docs/IIWA_FULL_CAPTURE_APPLICATION.md")
-CALIBRATION_JAVA_PATH = Path("iiwa/PoseTestBot_CalibrationVarianceProposal.java")
-POSE_STREAM_JAVA_PATH = Path("iiwa/PoseTestBot_PoseStreamTask.java")
+CALIBRATION_JAVA_PATH = Path("iiwa/PoseTestBotNineFrameCalibrationApplication.java")
+POSE_STREAM_JAVA_PATH = Path("iiwa/PoseTestBotPoseStreamTask.java")
 
 
 def test_ordinary_capture_uses_a_distinct_persistent_pose_template_frame() -> None:
@@ -27,13 +27,12 @@ def test_ordinary_capture_uses_a_distinct_persistent_pose_template_frame() -> No
     assert "command.runId,\n\t\t\t\t\t\tPOSE_TEMPLATE_BASE_PATH);" in (calibration_java)
 
 
-def test_ordinary_capture_is_inert_and_does_not_move_before_start() -> None:
+def test_ordinary_capture_waits_for_start_and_does_not_move_before_it() -> None:
     java = JAVA_PATH.read_text()
     run_body = java.split("public void run()", 1)[1].split(
         "private void runCapture", 1
     )[0]
 
-    assert "ENABLE_AFTER_OFFLINE_VALIDATION = false" in java
     assert run_body.index("waitForStartCommand()") < run_body.index(
         "runCapture(command)"
     )
@@ -42,6 +41,27 @@ def test_ordinary_capture_is_inert_and_does_not_move_before_start() -> None:
     assert "moveToA1Min();" not in run_body
     assert "No robot motion occurs before an accepted" in java
     assert "UDP STOP is not a safety stop" in java
+
+
+def test_nine_frame_calibration_waits_for_start_before_center_motion() -> None:
+    java = CALIBRATION_JAVA_PATH.read_text()
+    initialize_body = java.split("public void initialize()", 1)[1].split(
+        "private ObjectFrame requiredFrame", 1
+    )[0]
+    run_body = java.split("public void run()", 1)[1].split(
+        "private void runCoverageRaster", 1
+    )[0]
+
+    assert "robot.move(" not in initialize_body
+    assert run_body.index("waitForStartCommand()") < run_body.index(
+        "poseStream.configure("
+    )
+    assert run_body.index("poseStream.configure(") < run_body.index(
+        'moveToCenter("capture start anchor")'
+    )
+    before_start_wait = run_body[: run_body.index("waitForStartCommand()")]
+    assert "moveToCenter(" not in before_start_wait
+    assert "moveFromCenter(" not in before_start_wait
 
 
 def test_capture_uses_commissioned_start_and_end_ptp_frames() -> None:
