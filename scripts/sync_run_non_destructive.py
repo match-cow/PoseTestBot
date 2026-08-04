@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""Synchronize every discovered sensor folder in a run non-destructively."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import uuid
+from pathlib import Path
+
+from posetestbot.io.manifest import (
+    load_or_create_run_manifest,
+    upsert_stage,
+    write_run_manifest,
+)
+from posetestbot.io.artifacts import MULTIVIEW_FRAME_GROUPS, RUN_CONFIG
+from posetestbot.pipeline.run_config import (
+    capture_synchronization_from_mapping,
+    load_run_config_for_run_root,
+)
+from posetestbot.sync.calibration_policy import (
+    resolve_calibration_profile_sync_policy,
+)
+from posetestbot.sync.non_destructive import (
+    sync_result_artifacts,
+    synchronize_run,
+)
+from posetestbot.sync.quality import calibration_sync_provenance
+from posetestbot.sync.hardware import (
+    build_hardware_sync_frame_groups,
+    capture_execution_hardware_sync_binding,
+    hardware_sync_frame_groups_path,
+    write_hardware_sync_frame_groups,
+)
+from posetestbot.sensors.hardware_sync_qualification import (
+    validate_hardware_sync_qualification,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Synchronize every raw sensor folder in a run into "
+            "processed/synchronized without modifying raw frames."
+        )
+    )
+    parser.add_argument("run_root", help="Run root containing sensor folders.")
+    parser.add_argument(
+        "--output-root",
+        default=None,
+        help="Derived sync output root. Defaults to <run-root>/processed/synchronized.",
+    )
+    parser.add_argument(
+        "--sensor-folder",
+        action="append",
+        default=None,
+        help=(
+            "Explicit run-contained raw sensor folder. Repeat to synchronize a "
+            "subset; omit to preserve run-wide discovery."
+        ),
+    )
+    parser.add_argument(
+        "--sync-delta",
+        default=None,
+        help="Sync delta in ms, or a JSON file mapping sensor types to ms.",
+    )
+    parser.add_argument(
+        "--timestamp-source",
+        choices=("host_received", "host_wall", "sensor", "filename"),
+        default=None,
+        help=(
+            "Manual timestamp source. Runs with a selected calibration always "
+            "use its immutable per-camera timestamp policy."
+        ),
+    )
+    parser.add_argument(
+        "--robot-timestamp-source",
+        choices=("host_received", "host_wall", "filename"),
+        default=None,
+        help=(
+            "Robot-pose timestamp source. Required for sensor/filename frame "
+            "timestamps; inferred only for matching host clock sources."
+        ),
+    )
+    parser.add_argument(
+        "--no-copy",
+        action="store_true",
+        help="Write metadata only without copying rgb/depth frames.",
+    )
+    return parser.parse_args()
+
+
+def load_sync_delta(value: str | None):
+    if value is None:
+        return None
+
+    path = Path(value)
+    if path.exists():
+        with open(path, "r") as f:
+            return json.load(f)
+
+    return float(value)
+
+
+def main() -> None:
+    args = parse_args()
+    run_root = Path(args.run_root)
+    sync_delta = load_sync_delta(args.sync_delta)
+    run_config = (
+        load_run_config_for_run_root(run_root)
+        if (run_root / RUN_CONFIG).is_file()
+        else None
+    )
+    capture = (run_config or {}).get("capture")
+    synchronization = capture_synchronization_from_mapping(
+        capture.get("synchronization") if isinstance(capture, dict) else None
+    ).to_dict()
+    hardware_triggered = synchronization["mode"] == "hardware_trigger"
+    if hardware_triggered and args.sensor_folder is not None:
+        raise ValueError(
+            "hardware_trigger synchronization must process the exact complete "
+            "configured sensor set; remove --sensor-folder"
+        )
+    if hardware_triggered and args.output_root is not None:
+        raise ValueError(
+            "hardware_trigger synchronization writes its authoritative frame "
+            "groups below processed/synchronized; remove --output-root"
+        )
+    if hardware_triggered and args.no_copy:
+        raise ValueError(
+            "hardware_trigger synchronization requires derived RGB-D files for "
+            "every authoritative complete frame group; remove --no-copy"
+        )
+    calibration_sync_policy = (
+        resolve_calibration_profile_sync_policy(run_root)
+        if (run_root / RUN_CONFIG).is_file()
+        else None
+    )
+    if calibration_sync_policy is not None:
+        manual_overrides = [
+            flag
+            for flag, value in (
+                ("--sync-delta", args.sync_delta),
+                ("--timestamp-source", args.timestamp_source),
+                ("--robot-timestamp-source", args.robot_timestamp_source),
+                ("--sensor-folder", args.sensor_folder),
+                ("--output-root", args.output_root),
+            )
+            if value is not None
+        ]
+        if manual_overrides:
+            raise ValueError(
+                "Runs with a selected calibration use its hash-bound per-camera "
+                "timing; remove manual synchronization options: "
+                + ", ".join(manual_overrides)
+            )
+
+    manifest = load_or_create_run_manifest(run_root)
+    invalidated_groups_path = None
+    if hardware_triggered:
+        groups_path = hardware_sync_frame_groups_path(run_root)
+        if groups_path.is_file():
+            invalidated_groups_path = groups_path.with_name(
+                f".{groups_path.name}.{uuid.uuid4().hex}.invalidated"
+            )
+            os.replace(groups_path, invalidated_groups_path)
+        manifest.get("artifacts", {}).pop(MULTIVIEW_FRAME_GROUPS, None)
+        for stage in manifest.get("stages", []):
+            if isinstance(stage, dict) and stage.get("name") == "sync_run":
+                stage.get("artifacts", {}).pop(MULTIVIEW_FRAME_GROUPS, None)
+                if not stage.get("artifacts"):
+                    stage.pop("artifacts", None)
+    upsert_stage(manifest, name="sync_run", status="running")
+    write_run_manifest(manifest, run_root)
+
+    hardware_groups = None
+    hardware_groups_path = None
+    hardware_sync_qualification = None
+    try:
+        if hardware_triggered:
+            hardware_sync_qualification = validate_hardware_sync_qualification(
+                run_root,
+                run_config=run_config,
+            )
+        if calibration_sync_policy is None:
+            results = synchronize_run(
+                run_root,
+                sensor_folders=args.sensor_folder,
+                output_root=args.output_root,
+                sync_delta=sync_delta,
+                timestamp_source=args.timestamp_source or "host_received",
+                robot_timestamp_source=args.robot_timestamp_source,
+                copy_files=not args.no_copy,
+            )
+        else:
+            results = []
+            for sensor in calibration_sync_policy["sensors"]:
+                results.extend(
+                    synchronize_run(
+                        run_root,
+                        sensor_folders=[run_root / sensor["sensor_folder"]],
+                        sync_delta=sensor["sync_delta_ms"],
+                        timestamp_source=sensor["frame_timestamp_source"],
+                        robot_timestamp_source=sensor["robot_timestamp_source"],
+                        copy_files=not args.no_copy,
+                        max_nearest_pose_delta_ms=sensor["max_nearest_pose_delta_ms"],
+                        required_frame_timestamp_domain=sensor[
+                            "required_frame_timestamp_domain"
+                        ],
+                        timestamp_fallback_allowed=sensor["timestamp_fallback_allowed"],
+                        calibration_sync=calibration_sync_provenance(
+                            calibration_sync_policy,
+                            sensor,
+                        ),
+                    )
+                )
+        if hardware_triggered:
+            hardware_groups = build_hardware_sync_frame_groups(
+                run_root,
+                run_config=run_config,
+            )
+            hardware_groups["hardware_sync_qualification"] = hardware_sync_qualification
+            hardware_groups["hardware_sync_execution_binding"] = (
+                capture_execution_hardware_sync_binding(
+                    run_root,
+                    qualification=hardware_sync_qualification,
+                )
+            )
+            hardware_groups_path = write_hardware_sync_frame_groups(
+                run_root,
+                hardware_groups,
+            )
+            if invalidated_groups_path is not None:
+                invalidated_groups_path.unlink(missing_ok=True)
+    except Exception as exc:
+        failure_message = str(exc)
+        if invalidated_groups_path is not None:
+            failure_message += (
+                " Previous hardware-sync groups were invalidated and preserved "
+                f"at {invalidated_groups_path}."
+            )
+        upsert_stage(
+            manifest,
+            name="sync_run",
+            status="failed",
+            message=failure_message,
+        )
+        write_run_manifest(manifest, run_root)
+        raise
+
+    for result in results:
+        sensor_name = Path(result.sensor_folder).name
+        upsert_stage(
+            manifest,
+            name=f"sync:{sensor_name}",
+            status="succeeded",
+            artifacts=sync_result_artifacts(result),
+            run_root=run_root,
+            message=(
+                f"Wrote {result.matched_frames} synchronized in-motion "
+                "frame-pose match(es). Raw frames remain preserved."
+            ),
+        )
+
+    matched_frames = sum(result.matched_frames for result in results)
+    upsert_stage(
+        manifest,
+        name="sync_run",
+        status="succeeded",
+        artifacts=(
+            {MULTIVIEW_FRAME_GROUPS: hardware_groups_path}
+            if hardware_groups_path is not None
+            else None
+        ),
+        run_root=run_root,
+        message=(
+            f"Synchronized {len(results)} sensor(s): wrote "
+            f"{matched_frames} in-motion frame-pose match(es)."
+            + (
+                " Applied hash-bound per-camera calibration timing."
+                if calibration_sync_policy is not None
+                else ""
+            )
+            + (
+                " Published "
+                f"{hardware_groups['summary']['complete_group_count']} "
+                "authoritative complete hardware-sync frame group(s)."
+                if hardware_groups is not None
+                else ""
+            )
+        ),
+    )
+    write_run_manifest(manifest, run_root)
+
+    print(
+        f"Synchronized {len(results)} sensor(s): wrote "
+        f"{matched_frames} in-motion frame-pose match(es)."
+        + (
+            " Published "
+            f"{hardware_groups['summary']['complete_group_count']} "
+            "authoritative complete hardware-sync frame group(s)."
+            if hardware_groups is not None
+            else ""
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -9,12 +9,15 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+frontend/node_modules/
 develop-eggs/
 dist/
 downloads/
 eggs/
 .eggs/
 lib/
+!frontend/src/lib/
+!frontend/src/lib/**
 lib64/
 parts/
 sdist/
@@ -170,5 +173,5 @@ output
 nohup.out
 *.log
 
-# ignore all files in the tests folder
-tests/
+# ruff
+.ruff_cache

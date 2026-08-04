@@ -1,142 +1,144 @@
+#!/usr/bin/env python3
+"""Receive one explicitly authorized iiwa UDP pose stream."""
+
+from __future__ import annotations
+
 import argparse
-import json
-import os
-import socket
-import time
+import sys
+from pathlib import Path
+
+from posetestbot.config import (
+    MAX_CAPTURE_COMMAND_VELOCITY_M_S,
+    robot_profile,
+)
+from posetestbot.robot.pose_receiver import (
+    DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
+    DEFAULT_RECEIVE_START_TIMEOUT_S,
+    PoseReceiverCanceled,
+    run_pose_receiver,
+)
 
 
-def main():
-    # Parse command line arguments
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "output_path",
-        help="Path to folder for received data",
-    )
+    parser.add_argument("output_path", help="Path to folder for received data")
     parser.add_argument(
         "--ip",
         type=str,
-        default="172.31.1.151",
-        help="IP address to bind the socket to",
+        default=None,
+        help="IP address to bind the receiver socket to.",
     )
     parser.add_argument(
-        "--port", type=int, default=8080, help="Port to bind the socket to"
+        "--port", type=int, default=None, help="Port to bind the receiver socket to."
     )
     parser.add_argument(
         "--capture_vel",
-        type=int,
-        default=50,
-        help="Capture velocity, default is 50",
+        type=float,
+        default=None,
+        help=(
+            "Requested capture velocity in m/s. Defaults to the selected "
+            "robot profile; the transmitted value is capped at 0.03 by "
+            "default. Canonical object-dataset plans may supply a larger "
+            "versioned command limit."
+        ),
     )
     parser.add_argument(
         "--ip_robot",
         type=str,
-        default="172.31.1.147",
-        help="IP address of the robot.",
+        default=None,
+        help="Override robot IP address from the selected profile.",
     )
     parser.add_argument(
         "--port_robot",
         type=int,
-        default=30300,
-        help="port of the robot.",
+        default=None,
+        help="Override robot UDP command port from the selected profile.",
     )
     parser.add_argument(
-        "--test",
+        "--protocol",
+        choices=("legacy", "v1"),
+        default="legacy",
+        help="Robot command protocol. Use legacy for the current Sunrise app.",
+    )
+    parser.add_argument(
+        "--maximum-command-velocity-m-s",
+        type=float,
+        default=None,
+        help=(
+            "Maximum transmitted capture request in m/s. Values above the "
+            "conservative 0.03 legacy limit require --protocol v1. The "
+            "canonical object-dataset capture plan supplies this explicitly."
+        ),
+    )
+    parser.add_argument(
+        "--allow-real-robot",
         action="store_true",
-        help="Enable test mode, default is False",
+        help="Fresh acknowledgement that this invocation may start robot motion.",
+    )
+    parser.add_argument(
+        "--allow-cameras",
+        action="store_true",
+        help="Fresh acknowledgement that camera acquisition is authorized.",
+    )
+    parser.add_argument(
+        "--receive-start-timeout-s",
+        type=float,
+        default=DEFAULT_RECEIVE_START_TIMEOUT_S,
+        help="Seconds to wait for the first robot pose packet.",
+    )
+    parser.add_argument(
+        "--receive-idle-timeout-s",
+        type=float,
+        default=DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
+        help="Seconds to wait between robot pose packets.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print received frame diagnostics.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    output_path = Path(args.output_path)
+    if args.output_path == "out":
+        output_path = Path(__file__).resolve().parent / "out"
+    profile = robot_profile().with_overrides(
+        robot_ip=args.ip_robot,
+        command_port=args.port_robot,
+        receiver_ip=args.ip,
+        receiver_port=args.port,
+        cartesian_velocity_m_s=args.capture_vel,
     )
 
-    args = parser.parse_args()
-
-    ip_address = args.ip
-    port = args.port
-    output_path = args.output_path
-    capture_vel = args.capture_vel
-    ip_robot = args.ip_robot
-    port_robot = args.port_robot
-    test = args.test
-
-    script_dir = os.path.dirname(os.path.relpath(__file__))
-    if output_path == "out":
-        output_path = os.path.join(script_dir, output_path)
-
-    # Create the output directory if it does not exist
-    os.makedirs(output_path, exist_ok=True)
-
-    # Test if output_path is a directory
-    if not os.path.isdir(output_path):
-        raise ValueError("Output path is not a directory")
-
-    # Send start message with capture vel to to the robot via tcp
-    start_message = {"start": capture_vel}
-    print(f"sending start message: {start_message}")
-
-    # Convert the start_message to JSON
-    start_message_json = json.dumps(start_message)
-
-    # Send the start_message JSON to the robot via UDP
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.sendto(start_message_json.encode(), (ip_robot, port_robot))
-        print(
-            f"Sent start message to {ip_robot}:{port_robot} with capture vel {capture_vel}"
+    try:
+        result = run_pose_receiver(
+            output_path,
+            profile=profile,
+            protocol=args.protocol,
+            verbose=args.verbose,
+            allow_real_robot=args.allow_real_robot,
+            allow_cameras=args.allow_cameras,
+            maximum_command_velocity_m_s=(
+                args.maximum_command_velocity_m_s
+                if args.maximum_command_velocity_m_s is not None
+                else MAX_CAPTURE_COMMAND_VELOCITY_M_S
+            ),
+            receive_start_timeout_s=args.receive_start_timeout_s,
+            receive_idle_timeout_s=args.receive_idle_timeout_s,
         )
+    except PoseReceiverCanceled as exc:
+        print(str(exc), file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
-    # Create a UDP socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    # Bind the socket to a specific IP address and port
-    sock.bind((ip_address, port))
-
-    poses = {}
-
-    received_frames = 0
-    # Receive and display incoming UDP packets
-    while True:
-        data, addr = sock.recvfrom(1024)
-
-        # load dict from json string
-        pose_dict = json.loads(data)
-        motion = pose_dict["motion"]
-
-        if motion == "end":
-            break
-
-        # Convert the received data to a dictionary
-        framename = int(round(time.time() * 1000))
-
-        if received_frames == 0:
-            previous_frame_ts = framename
-            frame_delta = 0
-        else:
-            frame_delta = framename - int(previous_frame_ts)
-            previous_frame_ts = framename
-
-        poses[received_frames] = {
-            "framename": framename,
-            "frame_delta": frame_delta,
-            "motion": motion,
-            "pose": {
-                "X": pose_dict["X"],
-                "Y": pose_dict["Y"],
-                "Z": pose_dict["Z"],
-                "A": pose_dict["A"],
-                "B": pose_dict["B"],
-                "C": pose_dict["C"],
-            },
-        }
-
-        if test:
-            # If test is enabled, print the received data
-            print(f"framename: {framename}, motion: {motion}, pose_dict: {pose_dict}")
-
-        received_frames += 1
-        # Print the number of received frames
-        print(f"Received poses: {received_frames}", end="\r")
-
-    with open(os.path.join(output_path, f"raw_robot_ee_poses.json"), "w") as f:
-        json.dump(poses, f, indent=4)
-
-    return
+    print(f"Wrote {result.raw_pose_path} ({result.pose_count} poses)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

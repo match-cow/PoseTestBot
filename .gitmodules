@@ -1,0 +1,9 @@
+[submodule "third_party/PoseGridGen"]
+	path = third_party/PoseGridGen
+	url = https://github.com/match-cow/PoseGridGen.git
+[submodule "third_party/PoseTemplateCreator"]
+	path = third_party/PoseTemplateCreator
+	url = https://github.com/match-cow/PoseTemplateCreator.git
+[submodule "third_party/bop_toolkit"]
+	path = third_party/bop_toolkit
+	url = https://github.com/thodan/bop_toolkit.git

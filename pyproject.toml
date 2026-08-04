@@ -1,0 +1,78 @@
+[project]
+name = "posetestbot"
+version = "0.1.0"
+description = "Acquisition, calibration, synchronization, and BOP export for multi-camera robot datasets"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "third_party/PoseTemplateCreator/LICENSE"]
+dependencies = [
+    "opencv-python>=4.11.0.86",
+    "pyrealsense2>=2.55.1.6486",
+    "flask>=2.0.0",
+    "depthai>=3,<4",
+    "pytransform3d>=3.14.1",
+    "trimesh>=4.12.2",
+    "aiortc>=1.14.0",
+    "aiohttp>=3.14.1",
+    "av>=16.1.0",
+    "aioice>=0.10.2",
+    "matplotlib>=3.10.3",
+    "pydantic>=2.11,<3",
+    "numpy>=2.0,<3",
+    "scipy>=1.14,<2",
+    "pillow>=11,<13",
+    "reportlab>=4.2,<6",
+    "networkx>=3.6,<4",
+    "fast-simplification==0.1.13",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+posetestbot-web = "posetestbot.web.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"posetestbot.web" = [
+    "static/*",
+    "static/ui/*",
+    "static/ui/assets/*",
+    "static/cell/*",
+]
+
+[tool.setuptools.packages.find]
+exclude = [
+    "build*",
+    "frontend*",
+    "iiwa*",
+    "output*",
+    "scripts*",
+    "tests*",
+    "third_party*",
+]
+
+[dependency-groups]
+dev = [
+    "playwright>=1.61.0",
+    "pytest>=9.1.0",
+    "ruff>=0.15.21",
+]
+
+[tool.ruff]
+extend-exclude = ["third_party"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-m", "not playwright"]
+markers = [
+    "playwright: localhost browser regressions that require an installed Chromium binary",
+]
+
+[tool.uv.workspace]
+exclude = [
+    "tools/bop_toolkit_runtime",
+]
