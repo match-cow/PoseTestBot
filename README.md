@@ -1,3 +1,7 @@
+> [!WARNING]
+> The repository states used for the CMS and HRI publications are preserved in
+> the `CMS` and `HRI` branches, respectively.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="posetestbot/web/static/cow_dark.png">
