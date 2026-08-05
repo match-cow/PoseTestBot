@@ -15,9 +15,7 @@ def atomic_write_text(path: str | Path, text: str) -> Path:
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(
-        f".{destination.name}.{uuid.uuid4().hex}.tmp"
-    )
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     try:
         with open(temporary, "x", encoding="utf-8", newline="") as handle:
             handle.write(text)
@@ -124,7 +122,9 @@ def replace_directories(
     moved_existing: list[int] = []
     promoted: list[int] = []
     try:
-        for index, ((_source, target), backup) in enumerate(zip(pairs, backups)):
+        for index, ((_source, target), backup) in enumerate(
+            zip(pairs, backups, strict=True)
+        ):
             if target.exists():
                 os.replace(target, backup)
                 moved_existing.append(index)

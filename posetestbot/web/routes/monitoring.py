@@ -10,7 +10,6 @@ import time
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Mapping
 
 from flask import Blueprint, jsonify, request
@@ -88,37 +87,21 @@ def _private_monitor_status(job: Any) -> dict[str, Any]:
 def _monitor_health(job: Any, status: Mapping[str, Any]) -> tuple[bool, str | None]:
     if job.status == "queued":
         return True, None
-    health_status = dict(status)
-    # A few v1-era tests and hand-written diagnostics used the current schema
-    # constant without populating heartbeat_at.  File freshness is a safe route-
-    # local compatibility bridge; real v2 workers always write the heartbeat.
-    if not health_status.get("heartbeat_at"):
-        root = job.parameters.get("monitor_root")
-        if root:
-            try:
-                modified = (Path(root) / "monitor_webrtc_status.json").stat().st_mtime
-                health_status["heartbeat_at"] = datetime.fromtimestamp(
-                    modified, tz=UTC
-                ).isoformat()
-            except OSError:
-                pass
-    healthy, reason = monitor_status_health(health_status)
+    healthy, reason = monitor_status_health(status)
     if healthy:
         return True, None
     if status.get("status") in {"starting", "opening"} and not (
         status.get("error_reason") or status.get("error")
     ):
-        started_at = getattr(job, "started_at", None)
-        if started_at is None:
-            return True, None
-        try:
-            started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=UTC)
-            if (datetime.now(UTC) - started).total_seconds() <= 5.0:
-                return True, None
-        except ValueError:
-            pass
+        if job.started_at is not None:
+            try:
+                started = datetime.fromisoformat(job.started_at.replace("Z", "+00:00"))
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=UTC)
+                if (datetime.now(UTC) - started).total_seconds() <= 5.0:
+                    return True, None
+            except ValueError:
+                pass
     return False, reason
 
 
@@ -165,11 +148,8 @@ def _schedule_monitor_replacement(job: Any, reason: str) -> None:
 
     def replace() -> None:
         try:
-            cancel_job = getattr(job_runner, "cancel", None)
-            if not callable(cancel_job):
-                return
             try:
-                cancel_job(job.id)
+                job_runner.cancel(job.id)
             except KeyError:
                 pass
             deadline = time.monotonic() + 10.0
@@ -242,12 +222,13 @@ def _proxy_brightness_autocalibration(port: int) -> dict[str, Any]:
         except (UnicodeDecodeError, json.JSONDecodeError):
             error_payload = {}
         message = (
-            error_payload.get("error")
-            if isinstance(error_payload, dict)
-            else None
+            error_payload.get("error") if isinstance(error_payload, dict) else None
         )
         raise MonitorWorkerRequestError(
-            str(message or f"Monitor worker rejected brightness calibration ({exc.code})."),
+            str(
+                message
+                or f"Monitor worker rejected brightness calibration ({exc.code})."
+            ),
             status_code=exc.code if 400 <= exc.code < 500 else 503,
         ) from exc
     except (OSError, TimeoutError, socket.timeout, urllib.error.URLError) as exc:
@@ -314,9 +295,7 @@ def start_monitor_webcam():
     return jsonify(_monitor_payload(job)), 202
 
 
-@monitoring_bp.post(
-    "/monitoring/webcam/<job_id>/brightness/autocalibrate"
-)
+@monitoring_bp.post("/monitoring/webcam/<job_id>/brightness/autocalibrate")
 def autocalibrate_monitor_brightness(job_id: str):
     try:
         job = job_runner.get(job_id)

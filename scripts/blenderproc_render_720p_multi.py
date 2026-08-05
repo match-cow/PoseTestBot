@@ -211,7 +211,9 @@ def build_analytic_scene_gt(camera_poses, objects_dir, instance_records):
             )
         )
         annotations = []
-        for instance, template_from_object in zip(instance_records, object_poses):
+        for instance, template_from_object in zip(
+            instance_records, object_poses, strict=True
+        ):
             camera_from_object = camera_from_template @ template_from_object
             camera_from_object = _rigid_transform(
                 camera_from_object,

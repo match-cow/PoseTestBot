@@ -31,7 +31,6 @@ def test_bop_export_stage_builds_dataset_export_command(tmp_path: Path) -> None:
         run_root=tmp_path / "run",
         options={
             "input_folder": "processed/synchronized",
-            "write_multiview_targets": True,
             "write_coco_annotations": True,
         },
     )
@@ -39,7 +38,6 @@ def test_bop_export_stage_builds_dataset_export_command(tmp_path: Path) -> None:
     assert job.command[:4] == ["uv", "run", "python", "scripts/run_bop_export_stage.py"]
     assert "--input-folder" in job.command
     assert "processed/synchronized" in job.command
-    assert "--write-multiview-targets" in job.command
     assert "--write-coco-annotations" in job.command
     assert job.parameters["options"]["annotation_source"] == "none"
     assert job.command[job.command.index("--annotation-source") + 1] == "none"
@@ -95,27 +93,7 @@ def test_capture_execution_uses_calibration_receiver_timeouts(
     assert job.command[job.command.index("--receive-start-timeout-s") + 1] == "120.0"
     assert job.command[job.command.index("--receive-idle-timeout-s") + 1] == "60.0"
     assert job.command[job.command.index("--camera-startup-attempts") + 1] == "3"
-    assert (
-        job.command[job.command.index("--camera-startup-retry-delay-s") + 1]
-        == "1.0"
-    )
-
-
-def test_capture_execution_accepts_distinct_camera_metadata_timeout(
-    tmp_path: Path,
-) -> None:
-    job = build_pipeline_job(
-        stage_id="capture_execution",
-        run_root=tmp_path / "capture",
-        options={"camera_metadata_idle_timeout_s": 3.0},
-    )
-
-    assert job.parameters["options"][
-        "camera_metadata_idle_timeout_s"
-    ] == 3.0
-    assert job.command[
-        job.command.index("--camera-metadata-idle-timeout-s") + 1
-    ] == "3.0"
+    assert job.command[job.command.index("--camera-startup-retry-delay-s") + 1] == "1.0"
 
 
 def test_rewrite_gate_choices_are_acquisition_only(tmp_path: Path) -> None:
@@ -132,15 +110,6 @@ def test_rewrite_gate_choices_are_acquisition_only(tmp_path: Path) -> None:
 def test_unknown_downstream_stage_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unknown pipeline stage"):
         build_pipeline_job(stage_id="bop_evaluation", run_root=tmp_path / "run")
-
-
-@pytest.mark.parametrize("stage_id", ["capture_rehearsal", "synthetic_rgbd_fixture"])
-def test_retired_fake_stage_ids_are_rejected(
-    tmp_path: Path,
-    stage_id: str,
-) -> None:
-    with pytest.raises(ValueError, match="Unknown pipeline stage"):
-        build_pipeline_job(stage_id=stage_id, run_root=tmp_path / "run")
 
 
 def test_stage_listing_contains_acquisition_stages_only() -> None:
@@ -161,26 +130,6 @@ def test_stage_listing_contains_acquisition_stages_only() -> None:
     assert "metric_report_export" not in stage_ids
     assert "capture_rehearsal" not in stage_ids
     assert "synthetic_rgbd_fixture" not in stage_ids
-
-
-def test_legacy_calibration_stages_do_not_claim_the_guided_moving_grid_solve() -> None:
-    candidates = PIPELINE_STAGES["calibration_candidates"]
-    solver = PIPELINE_STAGES["calibration_solver"]
-
-    assert candidates.label == "Legacy Calibration Candidates"
-    assert "not the guided moving-grid static-camera solve" in candidates.description
-    assert solver.label == "Legacy Known-Target Solver"
-    assert "cannot solve the guided static-camera arrangement" in solver.description
-    assert "Workflow step 5" in solver.description
-
-
-def test_capture_execution_stage_rejects_retired_mode_option(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="Unknown pipeline option"):
-        build_pipeline_job(
-            stage_id="capture_execution",
-            run_root=tmp_path / "run",
-            options={"mode": "plan_only"},
-        )
 
 
 def test_every_pipeline_path_parameter_declares_web_scope() -> None:

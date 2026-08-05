@@ -22,13 +22,13 @@ from posetestbot.calibration.intrinsics import (
     write_intrinsic_profile_collection,
 )
 from posetestbot.calibration.targets import (
-    DEFAULT_TARGET_SPEC,
     load_calibration_target_spec,
     normalize_calibration_target_spec,
 )
 from posetestbot.io.artifacts import (
     ARUCO_DETECTIONS,
     ARUCO_POSE_ESTIMATION,
+    CALIBRATION_TARGET,
     INTRINSIC_CALIBRATION_PROFILES,
     MATCH_ROBOT_EE_POSES,
     PROCESSED_DIR,
@@ -53,8 +53,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calibration-target",
         help=(
-            "Imported calibration_target.v1 JSON. Required for intrinsic "
-            "calibration; omitted only for the legacy factory-intrinsics wrapper."
+            "Current calibration_target.v2 JSON. Defaults to the run-owned "
+            "calibration_target.json."
         ),
     )
     parser.add_argument(
@@ -166,12 +166,14 @@ def run_aruco_stage(
     write_run_manifest(manifest, run_root)
 
     try:
-        target = normalize_calibration_target_spec(target or DEFAULT_TARGET_SPEC)
+        if target is None:
+            raise ValueError("A current calibration_target.v2 target is required")
+        target = normalize_calibration_target_spec(target)
         detections = detect_sensor_folder(sensor_folder, target)
         if intrinsics_mode == "calibrate":
             if not target.get("generator_source"):
                 raise ValueError(
-                    "--intrinsics-mode calibrate requires an imported ArUcoGridGen calibration target"
+                    "--intrinsics-mode calibrate requires a selected PoseGridGen calibration target"
                 )
             intrinsic_profile = calibrate_intrinsic_profile(
                 sensor_folder,
@@ -250,11 +252,12 @@ def main() -> None:
         Path(args.run_root) if args.run_root else infer_run_root(sensor_folders[0])
     )
     quiet = not args.show
-    target = (
-        load_calibration_target_spec(args.calibration_target)
+    target_path = (
+        Path(args.calibration_target)
         if args.calibration_target
-        else normalize_calibration_target_spec(DEFAULT_TARGET_SPEC)
+        else run_root / CALIBRATION_TARGET
     )
+    target = load_calibration_target_spec(target_path)
 
     outputs = [
         run_aruco_stage(

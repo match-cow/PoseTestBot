@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Link } from "react-router-dom"
+import { Link, useSearchParams } from "react-router-dom"
 import {
   AlertTriangle,
   ArrowRight,
@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Clock3,
   Database,
+  Download,
   FileUp,
   FlaskConical,
   History,
@@ -100,14 +101,14 @@ function Issues({ title, issues }: { title: string; issues: BopEvaluationIssue[]
   </div>
 }
 
-function ResultDetails({ result }: { result: BopResultSubmission }) {
+function ResultDetails({ result, runRoot }: { result: BopResultSubmission; runRoot: string }) {
   return <div data-testid="bop-result-details" className={cn("rounded-lg border p-4", result.compatible ? "border-success/30 bg-success/5" : "border-destructive/35 bg-destructive/5")}>
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{result.display_name}</span><StatusBadge status={result.compatible ? "valid" : "invalid"} tone={result.compatible ? "success" : "destructive"}>{result.compatible ? "compatible" : "incompatible"}</StatusBadge></div>
         <div className="mt-1 text-xs text-muted-foreground">{result.method} · imported {formatDate(result.created_at)}</div>
       </div>
-      <div className="font-mono text-[10px] text-muted-foreground">{shortHash(result.sha256)}</div>
+      <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-[10px] text-muted-foreground">{shortHash(result.sha256)}</span><Button asChild variant="outline" size="sm"><a href={query(`/bop/evaluation/results/${result.result_id}/download`, { run_root: runRoot })}><Download />Download BOP CSV</a></Button></div>
     </div>
     <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <Detail label="BOP CSV" value={result.filename} mono />
@@ -220,6 +221,7 @@ function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
 
 export function BopEvaluationPage() {
   const { selectedRun } = useOperator()
+  const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const terminalRefresh = useRef<string | null>(null)
   const [sourceKind, setSourceKind] = useState<SourceKind>("registered_result")
@@ -251,9 +253,12 @@ export function BopEvaluationPage() {
     () => (setup.data?.results ?? []).filter((result) => result.source_kind !== "gt_simulation"),
     [setup.data?.results],
   )
+  const requestedResultId = searchParams.get("result_id") ?? ""
   const savedResultId = resultSelection?.runRoot === selectedRun ? resultSelection.resultId : ""
-  const selectedResultId = realResults.some((result) => result.result_id === savedResultId)
-    ? savedResultId
+  const selectedResultId = realResults.some((result) => result.result_id === requestedResultId)
+    ? requestedResultId
+    : realResults.some((result) => result.result_id === savedResultId)
+      ? savedResultId
     : realResults.find((result) => result.compatible)?.result_id ?? realResults[0]?.result_id ?? ""
   const selectedResult = realResults.find((result) => result.result_id === selectedResultId) ?? null
 
@@ -457,8 +462,8 @@ export function BopEvaluationPage() {
                     </form>
 
                     {realResults.length > 0 ? <div className="space-y-3">
-                      <div className="space-y-1.5"><Label htmlFor="bop-result-selection">Pose-estimation method and result</Label><Select value={selectedResultId} onValueChange={(resultId) => setResultSelection({ runRoot: selectedRun, resultId })}><SelectTrigger id="bop-result-selection" aria-label="Pose-estimation method and result"><SelectValue /></SelectTrigger><SelectContent>{realResults.map((result) => <SelectItem key={result.result_id} value={result.result_id}>{result.display_name} · {result.method} · {result.compatible ? "compatible" : "incompatible"}</SelectItem>)}</SelectContent></Select></div>
-                      {selectedResult && <ResultDetails result={selectedResult} />}
+                      <div className="space-y-1.5"><Label htmlFor="bop-result-selection">Pose-estimation method and result</Label><Select value={selectedResultId} onValueChange={(resultId) => { setResultSelection({ runRoot: selectedRun, resultId }); setSearchParams({ result_id: resultId }) }}><SelectTrigger id="bop-result-selection" aria-label="Pose-estimation method and result"><SelectValue /></SelectTrigger><SelectContent>{realResults.map((result) => <SelectItem key={result.result_id} value={result.result_id}>{result.display_name} · {result.method} · {result.compatible ? "compatible" : "incompatible"}</SelectItem>)}</SelectContent></Select></div>
+                      {selectedResult && <ResultDetails result={selectedResult} runRoot={selectedRun} />}
                     </div> : <div className="rounded-lg border border-dashed p-6 text-center"><FileUp className="mx-auto size-6 text-muted-foreground" /><div className="mt-2 text-sm font-semibold">No estimator results registered</div><p className="mt-1 text-xs text-muted-foreground">Import a standard BOP result CSV above, or use the test-only GT simulation.</p></div>}
                   </TabsContent>
 

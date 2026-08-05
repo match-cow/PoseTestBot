@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -58,8 +59,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_TEACHING_PLAN_PATH,
         help="Versioned teaching-plan JSON manifest.",
     )
-    parser.add_argument("--svg", type=Path, default=DEFAULT_SVG_PATH, help="SVG output path.")
-    parser.add_argument("--png", type=Path, default=DEFAULT_PNG_PATH, help="PNG output path.")
+    parser.add_argument(
+        "--svg", type=Path, default=DEFAULT_SVG_PATH, help="SVG output path."
+    )
+    parser.add_argument(
+        "--png", type=Path, default=DEFAULT_PNG_PATH, help="PNG output path."
+    )
     return parser.parse_args(argv)
 
 
@@ -156,9 +161,7 @@ def _draw_isometric(ax: Any, plan: Mapping[str, Any]) -> None:
     _draw_triad_3d(ax, np.eye(4), length=55.0)
     ax.text(5, 5, 60, "TemplateBase", fontsize=7, weight="bold")
 
-    transforms = {
-        name: seed_transform_matrix(frame) for name, frame in frames.items()
-    }
+    transforms = {name: seed_transform_matrix(frame) for name, frame in frames.items()}
     for name, transform in transforms.items():
         position = transform[:3, 3]
         size = 28 if name == "CalibrationCenter" else 18
@@ -187,7 +190,9 @@ def _draw_isometric(ax: Any, plan: Mapping[str, Any]) -> None:
     ):
         if result_label == "Center":
             continue
-        result_transform = relative_result_transform_matrix(center, motion["result_offset"])
+        result_transform = relative_result_transform_matrix(
+            center, motion["result_offset"]
+        )
         _draw_triad_3d(ax, result_transform, length=29.0)
     center_position = transforms["CalibrationCenter"][:3, 3]
     ax.text(
@@ -216,7 +221,9 @@ def _draw_raster(ax: Any, plan: Mapping[str, Any]) -> None:
     ordered_names = [coverage[0]["to"]] + [motion["to"] for motion in coverage[1:-1]]
     positions = [seed_transform_matrix(frames[name])[:3, 3] for name in ordered_names]
 
-    for index, (name, position) in enumerate(zip(ordered_names, positions, strict=True), 1):
+    for index, (name, position) in enumerate(
+        zip(ordered_names, positions, strict=True), 1
+    ):
         ax.scatter(position[0], position[2], color=COVERAGE, s=45, zorder=3)
         ax.text(
             position[0],
@@ -229,8 +236,13 @@ def _draw_raster(ax: Any, plan: Mapping[str, Any]) -> None:
             weight="bold",
             zorder=4,
         )
-        ax.text(position[0] + 8, position[2] + 8, name.replace("Calibration", ""), fontsize=6)
-    for start, end in zip(positions, positions[1:]):
+        ax.text(
+            position[0] + 8,
+            position[2] + 8,
+            name.replace("Calibration", ""),
+            fontsize=6,
+        )
+    for start, end in pairwise(positions):
         ax.annotate(
             "",
             xy=(end[0], end[2]),
@@ -285,7 +297,15 @@ def _draw_orientation(ax: Any, plan: Mapping[str, Any]) -> None:
         "C+15°": np.array([1.25, -1.0]),
     }
     ax.scatter([0], [0], color=COVERAGE, s=50, zorder=4)
-    ax.text(0, -0.16, "taught CalibrationCenter", ha="center", va="top", fontsize=7, weight="bold")
+    ax.text(
+        0,
+        -0.16,
+        "taught CalibrationCenter",
+        ha="center",
+        va="top",
+        fontsize=7,
+        weight="bold",
+    )
 
     for motion, result_label in zip(motions, RESULT_LABELS, strict=True):
         if result_label == "Center":
@@ -294,7 +314,9 @@ def _draw_orientation(ax: Any, plan: Mapping[str, Any]) -> None:
         rotation = transform[:3, :3]
         origin = node_positions[result_label]
         for axis_index, color in enumerate(AXIS_COLORS):
-            projected = np.array([rotation[0, axis_index], rotation[2, axis_index]]) * 0.28
+            projected = (
+                np.array([rotation[0, axis_index], rotation[2, axis_index]]) * 0.28
+            )
             ax.annotate(
                 "",
                 xy=origin + projected,
@@ -304,7 +326,14 @@ def _draw_orientation(ax: Any, plan: Mapping[str, Any]) -> None:
         ax.scatter([origin[0]], [origin[1]], color=ORIENTATION, s=30, zorder=4)
         alignment = "right" if origin[0] < 0 else "left"
         label_x = origin[0] - 0.12 if origin[0] < 0 else origin[0] + 0.12
-        ax.text(label_x, origin[1] + 0.1, result_label, ha=alignment, fontsize=7, weight="bold")
+        ax.text(
+            label_x,
+            origin[1] + 0.1,
+            result_label,
+            ha=alignment,
+            fontsize=7,
+            weight="bold",
+        )
         ax.text(
             label_x,
             origin[1] - 0.12,
@@ -316,7 +345,9 @@ def _draw_orientation(ax: Any, plan: Mapping[str, Any]) -> None:
         )
 
     current_label = "Center"
-    for index, (motion, result_label) in enumerate(zip(motions, RESULT_LABELS, strict=True), 1):
+    for index, (motion, result_label) in enumerate(
+        zip(motions, RESULT_LABELS, strict=True), 1
+    ):
         start = node_positions[current_label]
         end = node_positions[result_label]
         ax.annotate(
@@ -381,7 +412,9 @@ def _draw_orientation(ax: Any, plan: Mapping[str, Any]) -> None:
 
 def _draw_relative_contract(ax: Any, plan: Mapping[str, Any]) -> None:
     ax.axis("off")
-    ax.set_title("Program-only relative orientation contract", loc="left", weight="bold")
+    ax.set_title(
+        "Program-only relative orientation contract", loc="left", weight="bold"
+    )
     rows = []
     for index, (motion, result_label) in enumerate(
         zip(plan["phases"][1]["motions"], RESULT_LABELS, strict=True), 1
@@ -426,15 +459,31 @@ def _draw_cell_schematic(ax: Any) -> None:
     ax.set_ylim(0, 10)
     ax.axis("off")
     ax.set_title("Ceiling-mounted cell context", loc="left", weight="bold")
-    ax.text(5, 9.65, "NON-METRIC SCHEMATIC", ha="center", color="#a33b2b", weight="bold", fontsize=8)
-    ax.add_patch(Rectangle((1.0, 8.5), 8.0, 0.55, facecolor="#9aa1aa", edgecolor="#32363d"))
+    ax.text(
+        5,
+        9.65,
+        "NON-METRIC SCHEMATIC",
+        ha="center",
+        color="#a33b2b",
+        weight="bold",
+        fontsize=8,
+    )
+    ax.add_patch(
+        Rectangle((1.0, 8.5), 8.0, 0.55, facecolor="#9aa1aa", edgecolor="#32363d")
+    )
     ax.text(5, 8.77, "ceiling plate", ha="center", va="center", fontsize=7)
     joints = np.array([[5.0, 8.5], [4.5, 7.4], [5.5, 6.5], [4.7, 5.4], [5.2, 4.5]])
-    ax.plot(joints[:, 0], joints[:, 1], color="#6f7680", linewidth=7, solid_capstyle="round")
+    ax.plot(
+        joints[:, 0], joints[:, 1], color="#6f7680", linewidth=7, solid_capstyle="round"
+    )
     for x_value, y_value in joints:
-        ax.add_patch(Circle((x_value, y_value), 0.2, facecolor="#c6cbd1", edgecolor="#32363d"))
+        ax.add_patch(
+            Circle((x_value, y_value), 0.2, facecolor="#c6cbd1", edgecolor="#32363d")
+        )
     ax.text(6.15, 6.7, "hanging iiwa proxy", fontsize=7, rotation=-75)
-    ax.add_patch(Rectangle((4.15, 3.9), 2.1, 0.6, facecolor="#343a43", edgecolor="#111318"))
+    ax.add_patch(
+        Rectangle((4.15, 3.9), 2.1, 0.6, facecolor="#343a43", edgecolor="#111318")
+    )
     ax.text(6.45, 4.2, "flange + camera rig", va="center", fontsize=7)
     ax.add_patch(
         Polygon(
@@ -444,13 +493,24 @@ def _draw_cell_schematic(ax: Any) -> None:
             edgecolor="#32363d",
         )
     )
-    ax.text(5, 1.65, "420 × 297 mm HRI template below", ha="center", va="center", fontsize=7)
-    ax.annotate("", xy=(5, 2.25), xytext=(5, 3.85), arrowprops={"arrowstyle": "-[", "color": TRANSIT, "lw": 1.2})
+    ax.text(
+        5, 1.65, "420 × 297 mm HRI template below", ha="center", va="center", fontsize=7
+    )
+    ax.annotate(
+        "",
+        xy=(5, 2.25),
+        xytext=(5, 3.85),
+        arrowprops={"arrowstyle": "-[", "color": TRANSIT, "lw": 1.2},
+    )
 
 
 def _draw_key(ax: Any, plan: Mapping[str, Any]) -> None:
     ax.axis("off")
-    ax.set_title("Workbench teaching key — exactly 9 persistent frames", loc="left", weight="bold")
+    ax.set_title(
+        "Workbench teaching key — exactly 9 persistent frames",
+        loc="left",
+        weight="bold",
+    )
     for index, frame in enumerate(plan["frames"]):
         column = index // 3
         row = index % 3
@@ -521,9 +581,20 @@ def build_figure(plan: Mapping[str, Any]) -> plt.Figure:
     _draw_key(key, plan)
 
     legend_handles = [
-        Line2D([0], [0], color=COVERAGE, lw=3, label="Taught coverage frames / LIN raster"),
-        Line2D([0], [0], color=ORIENTATION, lw=3, label="Program-only LIN_REL orientation"),
-        Line2D([0], [0], color=TRANSIT, lw=1.2, ls="--", label="PTP — sequence connector only"),
+        Line2D(
+            [0], [0], color=COVERAGE, lw=3, label="Taught coverage frames / LIN raster"
+        ),
+        Line2D(
+            [0], [0], color=ORIENTATION, lw=3, label="Program-only LIN_REL orientation"
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=TRANSIT,
+            lw=1.2,
+            ls="--",
+            label="PTP — sequence connector only",
+        ),
         Line2D([0], [0], color="#d62728", lw=1.5, label="flange X"),
         Line2D([0], [0], color="#2ca02c", lw=1.5, label="flange Y"),
         Line2D([0], [0], color="#1f77b4", lw=1.5, label="flange Z"),
@@ -585,7 +656,9 @@ def render_teaching_plot(
         ),
     }
     figure.savefig(svg_output, format="svg", dpi=160, metadata=metadata)
-    figure.savefig(png_output, format="png", dpi=160, metadata={"Software": "PoseTestBot"})
+    figure.savefig(
+        png_output, format="png", dpi=160, metadata={"Software": "PoseTestBot"}
+    )
     plt.close(figure)
     return svg_output, png_output
 

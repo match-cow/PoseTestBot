@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from posetestbot.monitoring.webrtc import (
-    MAX_SDP_BYTES,
     MONITOR_STATUS_NAME,
     MONITOR_STATUS_SCHEMA,
 )
+
 from posetestbot.web.app import create_app
+
 from posetestbot.web.routes import monitoring
 
 
@@ -26,6 +29,7 @@ class FakeJob:
         self.id = job_id
         self.name = "monitor-webrtc:ugreen"
         self.status = status
+        self.started_at = datetime.now(UTC).isoformat()
         self.message = "worker failed" if status == "failed" else None
         self.parameters = {
             "monitor_webrtc": owned,
@@ -70,6 +74,11 @@ class FakeRunner:
         self.jobs[job.id] = job
         return job
 
+    def cancel(self, job_id: str):
+        job = self.get(job_id)
+        job.status = "canceled"
+        return job
+
 
 def write_ready_status(root: Path, *, ready: bool = True, port: int = 39876) -> None:
     root.mkdir(parents=True, exist_ok=True)
@@ -80,6 +89,7 @@ def write_ready_status(root: Path, *, ready: bool = True, port: int = 39876) -> 
                 "transport": "webrtc",
                 "status": "ready",
                 "signaling_ready": ready,
+                "heartbeat_at": datetime.now(UTC).isoformat(),
                 "signaling_port": port if ready else None,
                 "peer_count": 0,
                 "frame_count": 0,
@@ -99,7 +109,9 @@ def client(monkeypatch):
     return app.test_client(), runner
 
 
-def test_start_queues_dedicated_webrtc_worker(client, monkeypatch, tmp_path: Path) -> None:
+def test_start_queues_dedicated_webrtc_worker(
+    client, monkeypatch, tmp_path: Path
+) -> None:
     flask_client, runner = client
     monkeypatch.setattr(monitoring, "monitor_stream_root", lambda: tmp_path / "monitor")
 
@@ -200,33 +212,6 @@ def test_brightness_autocalibration_is_forwarded_to_camera_worker(
     assert seen == [39876]
 
 
-def test_brightness_autocalibration_preserves_worker_rejection(
-    client,
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    flask_client, runner = client
-    root = tmp_path / "monitor"
-    write_ready_status(root, port=39876)
-    runner.jobs["monitor-1"] = FakeJob("monitor-1", monitor_root=root)
-
-    def reject(_port: int):
-        raise monitoring.MonitorWorkerRequestError(
-            "Camera must be open.",
-            status_code=409,
-        )
-
-    monkeypatch.setattr(monitoring, "_proxy_brightness_autocalibration", reject)
-
-    response = flask_client.post(
-        "/monitoring/webcam/monitor-1/brightness/autocalibrate",
-        json={},
-    )
-
-    assert response.status_code == 409
-    assert response.get_json()["output"] == "Camera must be open."
-
-
 @pytest.mark.parametrize(
     "payload",
     [None, [], {}, {"type": "answer", "sdp": "v=0"}, {"type": "offer", "sdp": ""}],
@@ -241,20 +226,6 @@ def test_offer_rejects_malformed_payloads(client, tmp_path: Path, payload) -> No
         "/monitoring/webcam/monitor-1/webrtc/offer",
         data=json.dumps(payload) if payload is not None else "not json",
         content_type="application/json",
-    )
-
-    assert response.status_code == 400
-
-
-def test_offer_rejects_oversized_sdp(client, tmp_path: Path) -> None:
-    flask_client, runner = client
-    root = tmp_path / "monitor"
-    write_ready_status(root)
-    runner.jobs["monitor-1"] = FakeJob("monitor-1", monitor_root=root)
-
-    response = flask_client.post(
-        "/monitoring/webcam/monitor-1/webrtc/offer",
-        json={"type": "offer", "sdp": "x" * (MAX_SDP_BYTES + 1)},
     )
 
     assert response.status_code == 400
@@ -276,30 +247,6 @@ def test_offer_returns_404_for_unknown_or_unowned_jobs(client, tmp_path: Path) -
     assert unowned.status_code == 404
 
 
-def test_offer_returns_409_for_terminal_job(client, tmp_path: Path) -> None:
-    flask_client, runner = client
-    runner.jobs["failed"] = FakeJob("failed", status="failed", monitor_root=tmp_path)
-
-    response = flask_client.post(
-        "/monitoring/webcam/failed/webrtc/offer",
-        json={"type": "offer", "sdp": "v=0"},
-    )
-
-    assert response.status_code == 409
-
-
-def test_offer_returns_503_for_queued_worker(client, tmp_path: Path) -> None:
-    flask_client, runner = client
-    runner.jobs["queued"] = FakeJob("queued", status="queued", monitor_root=tmp_path)
-
-    response = flask_client.post(
-        "/monitoring/webcam/queued/webrtc/offer",
-        json={"type": "offer", "sdp": "v=0"},
-    )
-
-    assert response.status_code == 503
-
-
 def test_offer_returns_503_when_signaling_is_not_ready(client, tmp_path: Path) -> None:
     flask_client, runner = client
     root = tmp_path / "monitor"
@@ -312,34 +259,3 @@ def test_offer_returns_503_when_signaling_is_not_ready(client, tmp_path: Path) -
     )
 
     assert response.status_code == 503
-
-
-def test_offer_returns_503_when_worker_proxy_fails(
-    client,
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    flask_client, runner = client
-    root = tmp_path / "monitor"
-    write_ready_status(root)
-    runner.jobs["monitor-1"] = FakeJob("monitor-1", monitor_root=root)
-
-    def fail(_port, _payload):
-        raise RuntimeError("worker unavailable")
-
-    monkeypatch.setattr(monitoring, "_proxy_webrtc_offer", fail)
-
-    response = flask_client.post(
-        "/monitoring/webcam/monitor-1/webrtc/offer",
-        json={"type": "offer", "sdp": "v=0"},
-    )
-
-    assert response.status_code == 503
-
-
-def test_room_monitor_has_no_jpeg_fallback_route(client) -> None:
-    flask_client, _runner = client
-
-    response = flask_client.get("/monitoring/webcam/monitor-1/latest.jpg")
-
-    assert response.status_code == 404

@@ -264,10 +264,9 @@ Append `?download=true` to an asset URL to request a download; source CAD is
 always served as an attachment. Asset resolution checks containment, byte size,
 and SHA-256 before serving the file.
 
-The older `/pose-templates/catalog...` list/detail/upload/archive/restore/asset
-endpoints remain available for compatibility. The canonical operator surface
-for catalogue management is `/workpieces`; template preview, generation,
-library, and run selection remain under `/pose-templates`.
+Catalogue management is available only through `/workpieces`; template
+preview, generation, library, and run selection remain under
+`/pose-templates`.
 
 ## Pose-template and run snapshots
 

@@ -229,7 +229,7 @@ def _validated_artifact_status(relative_path: str, value: Mapping[str, Any]) -> 
     if relative_path == CALIBRATION_PROFILES:
         profiles = value.get("profiles")
         if (
-            value.get("schema_version") not in {"calibration.v1", "calibration.v2"}
+            value.get("schema_version") != "calibration.v2"
             or not isinstance(profiles, list)
             or not profiles
             or not all(isinstance(profile, Mapping) for profile in profiles)

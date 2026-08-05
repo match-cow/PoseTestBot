@@ -740,7 +740,9 @@ def _promote_paths(promotions: list[tuple[Path, Path]]) -> None:
     moved_existing: list[int] = []
     promoted: list[int] = []
     try:
-        for index, ((_source, target), backup) in enumerate(zip(promotions, backups)):
+        for index, ((_source, target), backup) in enumerate(
+            zip(promotions, backups, strict=True)
+        ):
             if target.exists():
                 os.replace(target, backup)
                 moved_existing.append(index)

@@ -285,7 +285,7 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
     assert (
         synchronization["search"]["warning_absolute_robot_pose_time_offset_ms"] == 150.0
     )
-    assert synchronization["search"]["time_offset_failure_policy"] == ("warn_keep_zero")
+    assert synchronization["search"]["time_offset_failure_policy"] == "fail_closed"
     assert (
         synchronization["search"]["minimum_motion_count_per_cross_validation_fold"] == 4
     )
@@ -329,7 +329,6 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "max_mean_translation_mm": 10.0,
         "max_mean_rotation_deg": 5.0,
         "max_outlier_ratio": 0.25,
-        "joint_individual_score_equivalence_tolerance": 0.01,
     }
 
 
@@ -376,8 +375,6 @@ def test_setup_and_attempt_submission_exclude_disabled_camera(
             "mode": "eye_in_hand",
             "sensor_keys": ["oak_d_pro:2"],
             "target_id": bundle["target_id"],
-            "solver_policy": "auto_compare",
-            "intrinsics_policy": "compare_factory_opencv",
         },
     )
 
@@ -403,8 +400,6 @@ def test_attempt_submission_scopes_exact_cameras_and_queues_cpu_disk_parent_job(
             "mode": "eye_in_hand",
             "sensor_keys": ["oak_d_pro:2"],
             "target_id": bundle["target_id"],
-            "solver_policy": "auto_compare",
-            "intrinsics_policy": "reuse_compatible_or_factory",
         },
     )
     payload = response.get_json()
@@ -490,7 +485,6 @@ def test_all_static_three_camera_attempt_uses_robot_mounted_unknown_target(
                 "realsense_d435:3",
             ],
             "target_id": bundle["target_id"],
-            "solver_policy": "auto_compare",
         },
     )
 
@@ -815,9 +809,9 @@ def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
     assert invalid_sensor.status_code == 400
     assert "Unknown sensor key" in invalid_sensor.get_json()["output"]
     assert unsuitable_method.status_code == 400
-    assert "Unsupported board-level PnP" in unsuitable_method.get_json()["output"]
+    assert "unsupported fields: pnp_methods" in unsuitable_method.get_json()["output"]
     assert duplicate_method.status_code == 400
-    assert "must not contain duplicates" in duplicate_method.get_json()["output"]
+    assert "unsupported fields: pnp_methods" in duplicate_method.get_json()["output"]
     assert mounting_mismatch.status_code == 400
     assert (
         "requires cameras configured as static"

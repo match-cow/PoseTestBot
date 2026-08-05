@@ -40,7 +40,9 @@ def _residual_threshold(value: str) -> float | None:
     try:
         threshold = float(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("threshold must be a number, none, or off") from exc
+        raise argparse.ArgumentTypeError(
+            "threshold must be a number, none, or off"
+        ) from exc
     if threshold < 0:
         raise argparse.ArgumentTypeError("threshold must be greater than or equal to 0")
     return threshold
@@ -55,7 +57,9 @@ def parse_args() -> argparse.Namespace:
             "transform with residual-threshold filtering."
         )
     )
-    parser.add_argument("run_root", help="Run folder containing calibration observations.")
+    parser.add_argument(
+        "run_root", help="Run folder containing calibration observations."
+    )
     parser.add_argument(
         "--mode",
         choices=MODES,
@@ -66,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--calibration-target",
-        help="calibration_target.v1 path; defaults to <run_root>/calibration_target.json.",
+        help="calibration_target.v2 path; defaults to <run_root>/calibration_target.json.",
     )
     parser.add_argument(
         "--max-outlier-ratio",
@@ -160,7 +164,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_target_to_reference(path: str | None, *, run_root: Path) -> dict[str, Any] | None:
+def _load_target_to_reference(
+    path: str | None, *, run_root: Path
+) -> dict[str, Any] | None:
     if path is None:
         return None
     target_path = Path(path)
@@ -231,8 +237,12 @@ def main() -> None:
         run_config_path = run_root / RUN_CONFIG
         if run_config_path.is_file():
             run_config = json.loads(run_config_path.read_text())
-            frames = run_config.get("frames", {}) if isinstance(run_config, dict) else {}
-            if isinstance(frames, dict) and isinstance(frames.get("fixed_transforms"), list):
+            frames = (
+                run_config.get("frames", {}) if isinstance(run_config, dict) else {}
+            )
+            if isinstance(frames, dict) and isinstance(
+                frames.get("fixed_transforms"), list
+            ):
                 fixed_transforms = frames["fixed_transforms"]
         explicit_args = {
             "target": target,
@@ -252,8 +262,8 @@ def main() -> None:
             report_path = None
             profiles_path = None
         else:
-            report_path, profiles_path, report = write_grid_extrinsic_solver_with_manifest(
-                run_root, **explicit_args
+            report_path, profiles_path, report = (
+                write_grid_extrinsic_solver_with_manifest(run_root, **explicit_args)
             )
     elif args.no_write:
         report = build_calibration_solver(run_root, **report_args)

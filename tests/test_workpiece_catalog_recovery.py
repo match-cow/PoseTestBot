@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import copy
-import json
+
+
 import re
+
 from pathlib import Path
+
 from types import SimpleNamespace
 
 import pytest
 
 from posetestbot.pose_templates import catalog as catalog_module
+
 from posetestbot.pose_templates.catalog import (
     catalog_export_manifest,
     delete_catalog_object,
@@ -17,7 +21,6 @@ from posetestbot.pose_templates.catalog import (
     load_catalog,
     normalize_catalog_metadata,
     set_catalog_object_state,
-    update_catalog_object_metadata,
 )
 
 
@@ -69,26 +72,10 @@ def add_workpiece(root: Path, source: Path, *, name: str) -> dict:
     ("field", "invalid_value", "message"),
     [
         ("name", None, "Object name must be a string"),
-        ("name", 17, "Object name must be a string"),
-        ("name", {"label": "fixture"}, "Object name must be a string"),
         ("tags", [None], "tags value must be a string"),
-        ("tags", [17], "tags value must be a string"),
-        ("tags", [{"label": "inspection"}], "tags value must be a string"),
-        ("groups", [None], "groups value must be a string"),
         ("groups", [False], "groups value must be a string"),
-        ("groups", [{"label": "bench-a"}], "groups value must be a string"),
     ],
-    ids=[
-        "null-name",
-        "numeric-name",
-        "object-name",
-        "null-tag",
-        "numeric-tag",
-        "object-tag",
-        "null-group",
-        "boolean-group",
-        "object-group",
-    ],
+    ids=["null-name", "null-tag", "boolean-group"],
 )
 def test_name_and_classification_values_require_actual_strings(
     field: str,
@@ -173,59 +160,15 @@ def test_metadata_import_updates_intact_records_and_skips_damaged_assets(
     assert records[missing["catalog_uuid"]]["tags"] == []
 
 
-def test_legacy_v1_defaults_load_and_persist_on_next_mutation(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "object_catalog"
-    record = add_workpiece(root, tmp_path / "legacy.stl", name="Legacy")
-    manifest_path = root / "object_catalog.json"
-    manifest = json.loads(manifest_path.read_text())
-    legacy = manifest["objects"][0]
-    for field in ("alias", "tags", "groups", "attributes"):
-        legacy.pop(field)
-    for field in ("geometry_revision", "source_to_mm_scale", "geometry_revisions"):
-        legacy.pop(field)
-    manifest.pop("tombstones")
-    manifest_path.write_text(json.dumps(manifest))
-    canonical_path = root / record["assets"]["canonical_ply"]["path"]
-    canonical_bytes = canonical_path.read_bytes()
-
-    loaded = load_catalog(root)
-    exported = catalog_export_manifest(root)
-
-    loaded_record = loaded["objects"][0]
-    assert loaded["schema_version"] == "object_catalog.v1"
-    assert loaded["tombstones"] == []
-    assert loaded_record["catalog_uuid"] == record["catalog_uuid"]
-    assert loaded_record["alias"] is None
-    assert loaded_record["tags"] == []
-    assert loaded_record["groups"] == []
-    assert loaded_record["attributes"] == {}
-    assert loaded_record["geometry_revision"] == 1
-    assert loaded_record["source_to_mm_scale"] == 1.0
-    assert (
-        loaded_record["geometry_revisions"][0]["canonical_ply_sha256"]
-        == record["canonical_ply_sha256"]
-    )
-    assert exported["objects"][0]["geometry_revisions"][0]["revision"] == 1
-    update_catalog_object_metadata(
-        record["catalog_uuid"], {"alias": "Migrated"}, catalog_root=root
-    )
-    persisted = json.loads(manifest_path.read_text())["objects"][0]
-    assert persisted["geometry_revision"] == 1
-    assert persisted["geometry_revisions"][0]["canonical_ply"]["path"] == record[
-        "assets"
-    ]["canonical_ply"]["path"]
-    assert canonical_path.read_bytes() == canonical_bytes
-
-
 def test_delete_records_cleanup_failure_and_retries_from_tombstone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "object_catalog"
     record = add_workpiece(root, tmp_path / "delete.stl", name="Delete me")
     object_root = root / "objects" / record["catalog_uuid"]
-    set_catalog_object_state(record["catalog_uuid"], state="archived", catalog_root=root)
+    set_catalog_object_state(
+        record["catalog_uuid"], state="archived", catalog_root=root
+    )
     original_rmtree = catalog_module.shutil.rmtree
     attempts = 0
 

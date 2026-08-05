@@ -11,14 +11,11 @@ from posetestbot.calibration import time_offset as time_offset_module
 from posetestbot.calibration.attempt_solver import transform_record
 from posetestbot.calibration.candidates import _robot_ee_to_reference
 from posetestbot.calibration.time_offset import (
-    FAILURE_POLICY_FAIL_CLOSED,
     IMPROVEMENT_EVIDENCE_STRATEGY,
-    LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY,
     apply_sensor_time_offset,
     estimate_sensor_time_offset,
     offset_values,
     sign_convention,
-    warning_fallback_sensor_result,
 )
 
 
@@ -178,7 +175,6 @@ def test_auto_offset_applies_large_supported_offset_with_warning() -> None:
 
     assert result["status"] == "applied"
     assert result["selected_robot_pose_time_offset_ms"] == 200.0
-    assert result["warning_fallback_used"] is False
     magnitude = next(
         item
         for item in result["checks"]
@@ -188,7 +184,7 @@ def test_auto_offset_applies_large_supported_offset_with_warning() -> None:
     assert len(adjusted) == len(observations)
 
 
-def test_auto_offset_boundary_optimum_warns_and_keeps_recorded_timing() -> None:
+def test_auto_offset_boundary_optimum_fails_closed() -> None:
     observations, robot_records = _synthetic_offset_evidence(
         mode="eye_in_hand",
         planted_offset_ms=40,
@@ -204,9 +200,8 @@ def test_auto_offset_boundary_optimum_warns_and_keeps_recorded_timing() -> None:
         max_search_motions=12,
     )
 
-    assert result["status"] == "kept_zero"
-    assert result["warning_fallback_used"] is True
-    assert result["evidence_strength"] == "degraded"
+    assert result["status"] == "failed"
+    assert result["evidence_strength"] == "failed"
     assert result["boundary_hit"] is True
     assert result["selected_robot_pose_time_offset_ms"] == 0.0
     boundary_check = next(
@@ -214,30 +209,8 @@ def test_auto_offset_boundary_optimum_warns_and_keeps_recorded_timing() -> None:
         for item in result["checks"]
         if item["name"] == "search_optimum_not_at_boundary"
     )
-    assert boundary_check["status"] == "warning"
-    assert boundary_check["original_status"] == "error"
+    assert boundary_check["status"] == "error"
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
-
-
-def test_legacy_failure_policy_still_fails_closed_at_search_boundary() -> None:
-    observations, robot_records = _synthetic_offset_evidence(
-        mode="eye_in_hand",
-        planted_offset_ms=40,
-    )
-
-    result, _adjusted = estimate_sensor_time_offset(
-        observations,
-        sensor_key="realsense_d435:test",
-        robot_records=robot_records,
-        mode="eye_in_hand",
-        offsets_ms=[float(value) for value in range(-40, 41, 10)],
-        methods=("shah",),
-        max_search_motions=12,
-        failure_policy=FAILURE_POLICY_FAIL_CLOSED,
-    )
-
-    assert result["status"] == "failed"
-    assert result["warning_fallback_used"] is False
 
 
 def test_auto_offset_requires_three_motion_disjoint_folds() -> None:
@@ -258,7 +231,7 @@ def test_auto_offset_requires_three_motion_disjoint_folds() -> None:
         )
 
 
-def test_auto_offset_flat_curve_warns_and_keeps_recorded_timing() -> None:
+def test_auto_offset_flat_curve_fails_closed() -> None:
     observations, robot_records = _synthetic_offset_evidence(
         mode="eye_in_hand",
         planted_offset_ms=20,
@@ -275,8 +248,7 @@ def test_auto_offset_flat_curve_warns_and_keeps_recorded_timing() -> None:
         max_search_motions=12,
     )
 
-    assert result["status"] == "kept_zero"
-    assert result["warning_fallback_used"] is True
+    assert result["status"] == "failed"
     assert result["selected_robot_pose_time_offset_ms"] == 0.0
     assert (
         next(
@@ -284,12 +256,12 @@ def test_auto_offset_flat_curve_warns_and_keeps_recorded_timing() -> None:
             for item in result["checks"]
             if item["name"] == "zero_offset_identifiability"
         )["status"]
-        == "warning"
+        == "error"
     )
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
 
 
-def test_auto_offset_motion_consistency_warns_and_keeps_recorded_timing(
+def test_auto_offset_motion_consistency_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observations, robot_records = _synthetic_offset_evidence(
@@ -316,8 +288,7 @@ def test_auto_offset_motion_consistency_warns_and_keeps_recorded_timing(
         max_search_motions=12,
     )
 
-    assert result["status"] == "kept_zero"
-    assert result["warning_fallback_used"] is True
+    assert result["status"] == "failed"
     assert result["selected_robot_pose_time_offset_ms"] == 0.0
     assert (
         next(
@@ -325,39 +296,9 @@ def test_auto_offset_motion_consistency_warns_and_keeps_recorded_timing(
             for item in result["checks"]
             if item["name"] == "leave_one_motion_out_timing_consistency"
         )["status"]
-        == "warning"
+        == "error"
     )
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
-
-
-def test_legacy_time_offset_strategy_replays_original_evidence_rule() -> None:
-    observations, robot_records = _synthetic_offset_evidence(
-        mode="eye_in_hand",
-        planted_offset_ms=20,
-        motion_count=9,
-    )
-
-    result, _adjusted = estimate_sensor_time_offset(
-        observations,
-        sensor_key="realsense_d435:test",
-        robot_records=robot_records,
-        mode="eye_in_hand",
-        offsets_ms=[float(value) for value in range(-40, 41, 10)],
-        methods=("shah",),
-        max_search_motions=9,
-        min_motions_per_fold=3,
-        improvement_evidence_strategy=LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY,
-    )
-
-    assert result["status"] == "applied"
-    assert result["motion_consistency"] is None
-    assert result["decision_reason"] == "motion_disjoint_cross_validation_passed"
-    assert {item["name"] for item in result["checks"]}.isdisjoint(
-        {
-            "cross_validation_fold_materiality",
-            "leave_one_motion_out_timing_consistency",
-        }
-    )
 
 
 def test_full_search_correction_requires_16_of_17_positive_motions() -> None:
@@ -366,59 +307,6 @@ def test_full_search_correction_requires_16_of_17_positive_motions() -> None:
 
     assert sixteen_positive * 120 < 0.05
     assert fifteen_positive * 120 > 0.05
-
-
-def test_100_ms_nearest_pose_gap_is_retained_with_a_warning() -> None:
-    robot_records = [
-        {
-            "pose_index": index,
-            "timestamp_ns": timestamp_ns,
-            "motion": "motion_00",
-            "pose": _robot_pose(0, float(index * 200)),
-        }
-        for index, timestamp_ns in enumerate((0, 200_000_000))
-    ]
-    observations = [
-        {
-            "image_timestamp_ns": 100_000_000,
-            "motion": "motion_00",
-        }
-    ]
-
-    adjusted = apply_sensor_time_offset(
-        observations,
-        robot_records=robot_records,
-        robot_pose_time_offset_ms=0.0,
-    )
-    rejected_below_relaxed_limit = apply_sensor_time_offset(
-        observations,
-        robot_records=robot_records,
-        robot_pose_time_offset_ms=0.0,
-        max_nearest_pose_delta_ms=99.0,
-    )
-    result = warning_fallback_sensor_result(
-        sensor_key="realsense_d435:test",
-        observation_count=1,
-        adjusted_observations=adjusted,
-        error=ValueError("weak timing evidence"),
-        warning_nearest_pose_delta_ms=20.0,
-        max_nearest_pose_delta_ms=150.0,
-    )
-
-    assert len(adjusted) == 1
-    assert rejected_below_relaxed_limit == []
-    assert abs(adjusted[0]["timestamp_alignment"]["nearest_robot_delta_ns"]) == (
-        100_000_000
-    )
-    nearest_check = next(
-        item
-        for item in result["checks"]
-        if item["name"] == "nearest_pose_delta_warning"
-    )
-    assert nearest_check["status"] == "warning"
-    assert nearest_check["actual"]["maximum_abs_nearest_pose_delta_ms"] == 100.0
-    assert nearest_check["warning_threshold"] == 20.0
-    assert nearest_check["failure_threshold"] == 150.0
 
 
 def test_time_offset_public_contract_is_explicit_and_deterministic() -> None:

@@ -102,15 +102,12 @@ def _prune_stale_requests(kind: str) -> None:
     """Remove abandoned staging folders while preserving active job inputs."""
 
     root = REQUEST_ROOT / kind
-    try:
-        active_ids = {
-            str(job.parameters.get("request_id"))
-            for job in job_runner.list(include_services=True)
-            if job.status not in {"succeeded", "failed", "canceled"}
-            and job.parameters.get("request_id")
-        }
-    except (AttributeError, OSError, TypeError):
-        active_ids = set()
+    active_ids = {
+        str(job.parameters.get("request_id"))
+        for job in job_runner.list(include_services=True)
+        if job.status not in {"succeeded", "failed", "canceled"}
+        and job.parameters.get("request_id")
+    }
     cutoff = time.time() - REQUEST_RETENTION_SECONDS
     try:
         folders = list(root.iterdir())

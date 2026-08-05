@@ -366,7 +366,7 @@ def validate_render_output(
                 f"scene_gt.json frame {image_id} does not match prepared instances"
             )
         for annotation_index, (annotation, instance) in enumerate(
-            zip(annotations, instances)
+            zip(annotations, instances, strict=True)
         ):
             if not isinstance(annotation, Mapping) or int(
                 annotation.get("obj_id", -1)
@@ -424,7 +424,9 @@ def validate_render_output(
             raise ValueError(
                 f"Rendered instance identity count is invalid at frame {image_id}"
             )
-        for gt_id, (identity, instance) in enumerate(zip(identities, instances)):
+        for gt_id, (identity, instance) in enumerate(
+            zip(identities, instances, strict=True)
+        ):
             if (
                 not isinstance(identity, Mapping)
                 or identity.get("gt_id") != gt_id

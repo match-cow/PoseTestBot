@@ -22,7 +22,6 @@ from posetestbot.robot.reference_frames import (
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
 
 SCHEMA_VERSION = "calibration.v2"
-LEGACY_SCHEMA_VERSION = "calibration.v1"
 QUATERNION_NORM_TOLERANCE = 1e-3
 
 
@@ -47,7 +46,7 @@ class TransformFrame(StrEnum):
     ARUCO_GRID = "aruco_grid"
     TCP = "tcp"
     PHYSICAL_ROBOT_BASE = "physical_robot_base"
-    # Source-compatible aliases. calibration.v1 values are converted by the loader.
+    # Source-compatible enum aliases retained for internal call sites.
     END_EFFECTOR = "robot_flange"
     ROBOT_BASE = "template_base"
     CELL_WORLD = "template_base"
@@ -165,22 +164,15 @@ class CalibrationProfile:
             or self.intrinsics.depth_scale_to_mm <= 0
         ):
             raise ValueError("intrinsics.depth_scale_to_mm must be finite and positive")
-        legacy_unvalidated = (
-            self.status == CalibrationStatus.NEEDS_VALIDATION
-            and self.method == "legacy_camera_ee_transform"
-            and bool(self.metadata.get("legacy_sensor_key"))
-        )
-        if legacy_unvalidated:
-            if self.intrinsics.width < 0 or self.intrinsics.height < 0:
-                raise ValueError("legacy intrinsics dimensions cannot be negative")
-        else:
-            if self.intrinsics.width <= 0 or self.intrinsics.height <= 0:
-                raise ValueError("intrinsics width and height must be positive")
-            if self.intrinsics.cam_k[0] <= 0 or self.intrinsics.cam_k[4] <= 0:
-                raise ValueError("intrinsics focal lengths fx and fy must be positive")
+        if self.intrinsics.width <= 0 or self.intrinsics.height <= 0:
+            raise ValueError("intrinsics width and height must be positive")
+        if self.intrinsics.cam_k[0] <= 0 or self.intrinsics.cam_k[4] <= 0:
+            raise ValueError("intrinsics focal lengths fx and fy must be positive")
         if not all(
             math.isclose(float(value), expected, abs_tol=1e-9)
-            for value, expected in zip(self.intrinsics.cam_k[6:9], (0.0, 0.0, 1.0))
+            for value, expected in zip(
+                self.intrinsics.cam_k[6:9], (0.0, 0.0, 1.0), strict=True
+            )
         ):
             raise ValueError("intrinsics.cam_k bottom row must be [0, 0, 1]")
         if self.rectified_intrinsics is not None:
@@ -318,15 +310,8 @@ def rectified_intrinsics_from_native(
     return rectified_projection_from_native(intrinsics)[0]
 
 
-def _transform_frame(value: Any, *, source_schema: str) -> TransformFrame:
-    name = str(value)
-    if source_schema == LEGACY_SCHEMA_VERSION:
-        name = {
-            "end_effector": TransformFrame.ROBOT_FLANGE.value,
-            "robot_base": TransformFrame.TEMPLATE_BASE.value,
-            "cell_world": TransformFrame.TEMPLATE_BASE.value,
-        }.get(name, name)
-    return TransformFrame(name)
+def _transform_frame(value: Any) -> TransformFrame:
+    return TransformFrame(str(value))
 
 
 def profile_to_dict(profile: CalibrationProfile) -> dict[str, Any]:
@@ -389,19 +374,15 @@ def profile_to_dict(profile: CalibrationProfile) -> dict[str, Any]:
 
 def profile_from_dict(value: Mapping[str, Any]) -> CalibrationProfile:
     source_schema = str(value.get("schema_version"))
-    if source_schema not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}:
+    if source_schema != SCHEMA_VERSION:
         raise ValueError(f"Unsupported calibration schema: {source_schema!r}")
     raw_intrinsics = value["intrinsics"]
     if not isinstance(raw_intrinsics, Mapping):
         raise ValueError("Calibration intrinsics must be an object")
-    if source_schema == LEGACY_SCHEMA_VERSION:
-        intrinsics = raw_intrinsics
-        rectified_intrinsics = None
-    else:
-        intrinsics = raw_intrinsics.get("native")
-        rectified_intrinsics = raw_intrinsics.get("rectified")
-        if not isinstance(intrinsics, Mapping):
-            raise ValueError("calibration.v2 intrinsics.native must be an object")
+    intrinsics = raw_intrinsics.get("native")
+    rectified_intrinsics = raw_intrinsics.get("rectified")
+    if not isinstance(intrinsics, Mapping):
+        raise ValueError("calibration.v2 intrinsics.native must be an object")
     extrinsics = value["extrinsics"]
     quality = value.get("quality", {})
     native_intrinsics = _intrinsics_from_dict(intrinsics)
@@ -428,10 +409,8 @@ def profile_from_dict(value: Mapping[str, Any]) -> CalibrationProfile:
         rectified_intrinsics=normalized_rectified,
         rectified_valid_roi=rectified_roi,
         extrinsics=RigidTransform(
-            from_frame=_transform_frame(
-                extrinsics["from"], source_schema=source_schema
-            ),
-            to_frame=_transform_frame(extrinsics["to"], source_schema=source_schema),
+            from_frame=_transform_frame(extrinsics["from"]),
+            to_frame=_transform_frame(extrinsics["to"]),
             rotation_quaternion_wxyz=tuple(
                 float(item) for item in extrinsics["rotation_quaternion_wxyz"]
             ),
@@ -477,65 +456,6 @@ def write_profile(profile: CalibrationProfile, path: str | Path) -> Path:
     return atomic_write_json(path, profile_to_dict(profile))
 
 
-def legacy_sensor_type(sensor_key: str) -> SensorType:
-    key = sensor_key.lower()
-    if key.startswith("realsense"):
-        return SensorType.REALSENSE_D435
-    if key.startswith("luxonis") or key.startswith("oak"):
-        return SensorType.OAK_D_PRO
-    if key.startswith("zed"):
-        return SensorType.ZED_2I
-    raise ValueError(f"Cannot infer sensor type from legacy key {sensor_key!r}")
-
-
-def migrate_legacy_camera_ee_profiles(
-    camera_ee_transform: Mapping[str, Mapping[str, Any]],
-    *,
-    sync_deltas_ms: Mapping[str, float] | None = None,
-    intrinsics_by_sensor: Mapping[str, CameraIntrinsics] | None = None,
-) -> list[CalibrationProfile]:
-    profiles: list[CalibrationProfile] = []
-    sync_deltas_ms = sync_deltas_ms or {}
-    intrinsics_by_sensor = intrinsics_by_sensor or {}
-    for sensor_key, transform in sorted(camera_ee_transform.items()):
-        sensor_type = legacy_sensor_type(sensor_key)
-        profile_id = f"{sensor_type.value}_{sensor_key}_eye_in_hand_wrist_legacy"
-        intrinsics = intrinsics_by_sensor.get(
-            sensor_key,
-            CameraIntrinsics(
-                cam_k=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
-                width=0,
-                height=0,
-            ),
-        )
-        profile = CalibrationProfile(
-            schema_version=SCHEMA_VERSION,
-            profile_id=profile_id,
-            sensor_id=sensor_key,
-            sensor_type=sensor_type,
-            mounting_mode=MountingMode.EYE_IN_HAND,
-            rig_position="wrist",
-            intrinsics=intrinsics,
-            extrinsics=RigidTransform(
-                from_frame=TransformFrame.CAMERA,
-                to_frame=TransformFrame.END_EFFECTOR,
-                rotation_quaternion_wxyz=tuple(
-                    float(item) for item in transform["quaternion"]
-                ),
-                translation_mm=tuple(float(item) for item in transform["position"]),
-            ),
-            target_type=CalibrationTargetType.ARUCO_GRID,
-            method="legacy_camera_ee_transform",
-            status=CalibrationStatus.NEEDS_VALIDATION,
-            quality=CalibrationQuality(notes="Migrated from camera_ee_transform.json"),
-            sync_delta_ms=sync_deltas_ms.get(sensor_key),
-            metadata={"legacy_sensor_key": sensor_key},
-        )
-        profile.validate()
-        profiles.append(profile)
-    return profiles
-
-
 def write_profile_collection(
     profiles: list[CalibrationProfile], path: str | Path
 ) -> Path:
@@ -555,7 +475,7 @@ def load_profile_collection(path: str | Path) -> list[CalibrationProfile]:
         value = json.load(f)
     if not isinstance(value, Mapping):
         raise ValueError("Calibration profile collection must be a JSON object")
-    if value.get("schema_version") not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}:
+    if value.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"Unsupported calibration collection schema: {value!r}")
     raw_profiles = value.get("profiles", [])
     if not isinstance(raw_profiles, list):
@@ -777,8 +697,7 @@ def blenderproc_camera_transform_map_from_profiles(
                 mounting_mode = mounting_modes_by_sensor_name[sensor_name]
             except KeyError as exc:
                 raise KeyError(
-                    "Run configuration has no mounting mode for "
-                    f"{sensor_name!r}"
+                    f"Run configuration has no mounting mode for {sensor_name!r}"
                 ) from exc
         profile = select_valid_profile_for_sensor(
             profile_list,

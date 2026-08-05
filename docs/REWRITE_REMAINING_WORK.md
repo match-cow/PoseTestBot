@@ -11,8 +11,11 @@ belong in [REWRITE_PROGRESS.md](REWRITE_PROGRESS.md) and Git history.
 
 PoseTestBot ends at a validated BOP dataset. Capture, calibration,
 synchronization, optional BlenderProc GT/mask generation, pose-template
-provenance, and BOP export are in scope. Estimator execution and BOP result CSV
-conversion belong in a consumer repository. The sole evaluation exception is
+provenance, and BOP export are in scope. Estimator execution and standard BOP19
+result generation belong in the separate `match-cow/posetestbot-cluster`
+companion. PoseTestBot contains only its typed loopback client/proxy, storage
+and job presentation, and immutable standard-result import/download. The sole
+evaluation exception is
 the Inspect-only, run-scoped official BOP19 validation path: it consumes a
 completed annotation-bearing export and an already compatible standard result
 CSV, or generates a deterministic test-only slight GT perturbation, and writes
@@ -177,9 +180,7 @@ This depends on milestones 1 and 2 and on an operator-ready robot/camera cell.
   snapshot, raw folders, synchronization reports, and rewrite-gate report as
   acceptance evidence.
 
-This milestone uses the supported timestamp-aligned five-sensor contract. The
-optional D435-only physical-trigger research program is not a rewrite
-acceptance requirement.
+This milestone uses the supported timestamp-aligned five-sensor contract.
 
 ## 4 — RealSense Metric Depth-Scale Recheck
 
@@ -213,21 +214,24 @@ regressions remain supported.
 
 ## Retained Contracts, Not Open Tasks
 
-- Legacy `run_config.v1`/`run_config.v2`, calibration v1, historical BOP/sync
-  readers, `web_interface.py`, and the direct
-  `scripts/sync_non_destructive.py` CLI are retained compatibility surfaces.
-  Their continued presence is deliberate and is not an undecided rewrite
-  task.
+- Current acquisition inputs are intentionally narrow: `run_config.v3`,
+  `calibration.v2`, `calibration_target.v2`, and `sync_report.v3`. Retired
+  config/profile/sync/target migrations and the old standalone entry points are
+  not repository compatibility surfaces. Historical calibration-attempt
+  evidence remains inspectable but cannot be rerun or promoted.
 - `docs/IIWA_CALIBRATION_TEACHING_CHECKLIST.md` remains the operational
   reference for future calibration-program recommissioning. Its blank
   worksheet fields are not evidence gaps for this accepted rewrite.
-- The implemented `run_config.v3` D435 inter-camera depth-exposure trigger,
-  qualification, watchdog, grouping, and BOP binding contracts remain
-  supported. Optional physical-sync research is outside the active backlog.
+- All supported acquisition uses timestamp alignment. PoseTestBot does not
+  configure or qualify hardware triggering, maintain cross-camera exposure
+  groups, or export multiview synchronization claims.
 - The retained real BOP v5 dataset and its 11/11 readiness evidence supersede
   any requirement to regenerate the older v4 derived export.
-- External pose-estimator result acceptance belongs to a consumer repository,
-  apart from the already implemented narrow Inspect-only validation path.
+- External FoundationPose execution, SSH transfer, durable SLURM state, and
+  standard BOP19 result generation belong to `posetestbot-cluster`. The thin
+  controller proxy, pose-job logs/cancellation, archive copy/restore, and
+  immutable standard-result import/download are retained Inspect contracts
+  here, not acquisition-pipeline stages. Remote-source deletion is not exposed.
 - Production-bundle size tuning is optional engineering work, not a rewrite
   gate.
 - Catalogue JSON portability remains intentionally metadata-only. Managed

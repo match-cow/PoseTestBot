@@ -2,37 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
 AUTO_DEVICE_IDS = {"", "auto", "default"}
-REALSENSE_HARDWARE_SYNC_TRANSPORT = "realsense_inter_cam_sync"
-HARDWARE_SYNC_SCOPE_DEPTH_EXPOSURE = "depth_exposure"
-REALSENSE_HARDWARE_SYNC_ROLES = ("master", "subordinate")
-
-
-@dataclass(frozen=True)
-class HardwareSyncCapability:
-    """Static hardware-trigger capability for one sensor adapter."""
-
-    transport: str | None = None
-    supported_scopes: tuple[str, ...] = ()
-    supported_roles: tuple[str, ...] = ()
-
-    @property
-    def supported(self) -> bool:
-        return bool(self.transport and self.supported_scopes and self.supported_roles)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "supported": self.supported,
-            "transport": self.transport,
-            "supported_scopes": list(self.supported_scopes),
-            "supported_roles": list(self.supported_roles),
-        }
 
 
 @dataclass(frozen=True)
@@ -53,9 +29,6 @@ class SensorAdapterSpec:
     )
     aligned_depth_to: str = "rgb"
     timestamp_source: str = "sensor_and_host"
-    hardware_sync: HardwareSyncCapability = field(
-        default_factory=HardwareSyncCapability
-    )
     notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -63,7 +36,6 @@ class SensorAdapterSpec:
         data["sensor_type"] = self.sensor_type.value
         data["supported_resolutions"] = list(self.supported_resolutions)
         data["mounting_modes"] = [mode.value for mode in self.mounting_modes]
-        data["hardware_sync"] = self.hardware_sync.to_dict()
         data["notes"] = list(self.notes)
         return data
 
@@ -77,15 +49,8 @@ SENSOR_ADAPTERS: dict[SensorType, SensorAdapterSpec] = {
         folder_prefix="realsense",
         supported_resolutions=("720p",),
         live_rgb_preview_supported=True,
-        hardware_sync=HardwareSyncCapability(
-            transport=REALSENSE_HARDWARE_SYNC_TRANSPORT,
-            supported_scopes=(HARDWARE_SYNC_SCOPE_DEPTH_EXPOSURE,),
-            supported_roles=REALSENSE_HARDWARE_SYNC_ROLES,
-        ),
         notes=(
             "Depth is aligned to color by the capture script.",
-            "Inter-camera hardware synchronization covers depth exposure only; "
-            "it does not claim synchronized RGB exposure.",
             "Current capture script is 720p-only.",
         ),
     ),
@@ -167,63 +132,6 @@ def capture_script_for_sensor(sensor_type: SensorType | str, resolution: str) ->
     return adapter.capture_script
 
 
-def validate_hardware_sync_request(
-    *,
-    sensor_type: SensorType | str,
-    hardware_sync_role: str | None,
-    hardware_sync_group_id: str | None,
-    hardware_sync_scope: str | None,
-) -> dict[str, str] | None:
-    """Validate one complete, adapter-supported hardware-sync request."""
-
-    values = {
-        "hardware_sync_role": hardware_sync_role,
-        "hardware_sync_group_id": hardware_sync_group_id,
-        "hardware_sync_scope": hardware_sync_scope,
-    }
-    if all(value is None for value in values.values()):
-        return None
-
-    missing = [name for name, value in values.items() if value is None]
-    if missing:
-        raise ValueError(
-            "Hardware synchronization requires role, group ID, and scope together; "
-            "missing: " + ", ".join(missing)
-        )
-    if not all(isinstance(value, str) and value.strip() for value in values.values()):
-        raise ValueError(
-            "Hardware synchronization role, group ID, and scope must be "
-            "non-empty strings"
-        )
-
-    adapter = get_sensor_adapter(sensor_type)
-    capability = adapter.hardware_sync
-    if not capability.supported:
-        raise ValueError(
-            f"{adapter.display_name} does not support hardware synchronization"
-        )
-
-    role = str(hardware_sync_role).strip().lower()
-    scope = str(hardware_sync_scope).strip().lower()
-    group_id = str(hardware_sync_group_id).strip()
-    if role not in capability.supported_roles:
-        raise ValueError(
-            f"{adapter.display_name} hardware_sync_role must be one of: "
-            + ", ".join(capability.supported_roles)
-        )
-    if scope not in capability.supported_scopes:
-        raise ValueError(
-            f"{adapter.display_name} hardware_sync_scope must be one of: "
-            + ", ".join(capability.supported_scopes)
-        )
-    return {
-        "role": role,
-        "group_id": group_id,
-        "scope": scope,
-        "transport": str(capability.transport),
-    }
-
-
 def build_sensor_capture_command(
     *,
     sensor_type: SensorType | str,
@@ -234,9 +142,6 @@ def build_sensor_capture_command(
     max_frames: int | None = None,
     warmup_frames: int | None = None,
     inverted: bool = False,
-    hardware_sync_role: str | None = None,
-    hardware_sync_group_id: str | None = None,
-    hardware_sync_scope: str | None = None,
 ) -> list[str]:
     """Build the current script-backed capture command for one sensor."""
 
@@ -247,13 +152,6 @@ def build_sensor_capture_command(
         raise ValueError("Sensor inverted=true is only supported for RealSense D435")
     if warmup_frames is not None and warmup_frames < 0:
         raise ValueError("warmup_frames must be greater than or equal to 0")
-    hardware_sync = validate_hardware_sync_request(
-        sensor_type=normalized,
-        hardware_sync_role=hardware_sync_role,
-        hardware_sync_group_id=hardware_sync_group_id,
-        hardware_sync_scope=hardware_sync_scope,
-    )
-
     script = capture_script_for_sensor(sensor_type, resolution)
     command = [
         "uv",
@@ -270,17 +168,6 @@ def build_sensor_capture_command(
         command.extend(["--warmup-frames", str(warmup_frames)])
     if not is_auto_device_id(device_id):
         command.extend(["--device", device_id])
-    if hardware_sync is not None:
-        command.extend(
-            [
-                "--hardware-sync-role",
-                hardware_sync["role"],
-                "--hardware-sync-group-id",
-                hardware_sync["group_id"],
-                "--hardware-sync-scope",
-                hardware_sync["scope"],
-            ]
-        )
     if normalized == SensorType.REALSENSE_D435 and inverted:
         command.append("--inverted")
     if normalized == SensorType.ZED_2I:

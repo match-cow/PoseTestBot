@@ -8,6 +8,7 @@ already exported ``bop/`` tree and writes only below
 from __future__ import annotations
 
 import csv
+import fcntl
 import hashlib
 import io
 import json
@@ -15,9 +16,11 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import uuid
 from collections import Counter
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -37,6 +40,15 @@ RESULT_FILENAME_RE = re.compile(
 )
 RESULT_ID_RE = re.compile(r"^result-[0-9a-f]{12}$")
 EVALUATION_ID_RE = re.compile(r"^evaluation-[0-9a-f]{12}$")
+EXTERNAL_POSE_JOB_RE = re.compile(
+    r"^pose-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+PROVENANCE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
+RUNTIME_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+SLURM_JOB_ID_RE = re.compile(r"^[0-9]{1,32}$")
 EVALUATION_ROOT = Path("processed") / "bop_evaluation"
 RESULTS_DIR = "results"
 EVALUATIONS_DIR = "evaluations"
@@ -1074,6 +1086,193 @@ def _relative_to_run(path: Path, run_root: str | Path) -> str:
     return path.relative_to(Path(run_root).resolve()).as_posix()
 
 
+def _required_sha256(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _provenance_hashes(value: Any, *, label: str) -> dict[str, str]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError(f"{label} must be a non-empty hash object")
+    normalized: dict[str, str] = {}
+    for raw_key, raw_digest in value.items():
+        if not isinstance(raw_key, str) or PROVENANCE_KEY_RE.fullmatch(raw_key) is None:
+            raise ValueError(f"{label} contains an invalid key")
+        normalized[raw_key] = _required_sha256(
+            raw_digest,
+            label=f"{label}.{raw_key}",
+        )
+    return dict(sorted(normalized.items()))
+
+
+def _external_result_provenance(
+    value: Mapping[str, Any],
+    *,
+    external_job_id: str,
+    expected_dataset_sha256: str,
+    source_provenance_sha256: str,
+    source_path: Path,
+    validation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate controller evidence and retain only local inspection metadata."""
+
+    if value.get("schema_version") != "posetestbot_cluster_collected_result.v1":
+        raise ValueError("Controller provenance schema is not supported")
+    if value.get("job_id") != external_job_id:
+        raise ValueError("Controller provenance belongs to another job")
+    if value.get("dataset_sha256") != expected_dataset_sha256:
+        raise ValueError("Controller provenance does not match the staged dataset")
+    contracts = {
+        "method": "foundationpose",
+        "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
+        "score_contract": "constant_1.0_no_detection_confidence",
+        "execution_contract": "independent_register_per_target_no_tracking.v1",
+    }
+    for field, expected in contracts.items():
+        if value.get(field) != expected:
+            raise ValueError(f"Controller provenance has invalid {field}")
+    units = {
+        "bop_model": "millimetres",
+        "bop_depth": "millimetres",
+        "foundationpose": "metres",
+        "result_translation": "millimetres",
+    }
+    if value.get("units") != units:
+        raise ValueError("Controller provenance has invalid unit evidence")
+
+    external_job = value.get("external_job")
+    if (
+        not isinstance(external_job, Mapping)
+        or external_job.get("provider") != "posetestbot-cluster"
+        or external_job.get("job_id") != external_job_id
+        or not isinstance(external_job.get("slurm_job_id"), str)
+        or SLURM_JOB_ID_RE.fullmatch(external_job["slurm_job_id"]) is None
+    ):
+        raise ValueError("Controller provenance has invalid external-job evidence")
+
+    runtime = value.get("runtime")
+    if not isinstance(runtime, Mapping):
+        raise ValueError("Controller provenance has invalid runtime evidence")
+    runtime_id = runtime.get("runtime_id")
+    license_name = runtime.get("foundationpose_license")
+    if (
+        not isinstance(runtime_id, str)
+        or RUNTIME_ID_RE.fullmatch(runtime_id) is None
+        or not isinstance(license_name, str)
+        or not 1 <= len(license_name) <= 120
+        or any(character in license_name for character in "/\\\r\n\0")
+        or runtime.get("qualified") is not True
+        or runtime.get("ready") is not True
+    ):
+        raise ValueError("Controller provenance has invalid runtime identity")
+    normalized_runtime = {
+        "runtime_id": runtime_id,
+        "foundationpose_revision": str(runtime.get("foundationpose_revision")),
+        "bop_toolkit_revision": str(runtime.get("bop_toolkit_revision")),
+        "sif_sha256": _required_sha256(
+            runtime.get("sif_sha256"), label="runtime.sif_sha256"
+        ),
+        "weights_sha256": _required_sha256(
+            runtime.get("weights_sha256"), label="runtime.weights_sha256"
+        ),
+        "weights_files_sha256": _required_sha256(
+            runtime.get("weights_files_sha256"),
+            label="runtime.weights_files_sha256",
+        ),
+        "qualification_manifest_sha256": _required_sha256(
+            runtime.get("qualification_manifest_sha256"),
+            label="runtime.qualification_manifest_sha256",
+        ),
+        "foundationpose_license": license_name,
+        "foundationpose_license_sha256": _required_sha256(
+            runtime.get("foundationpose_license_sha256"),
+            label="runtime.foundationpose_license_sha256",
+        ),
+        "qualified": True,
+        "ready": True,
+    }
+    for field in ("foundationpose_revision", "bop_toolkit_revision"):
+        if GIT_REVISION_RE.fullmatch(normalized_runtime[field]) is None:
+            raise ValueError(f"runtime.{field} must be a full Git revision")
+
+    input_hashes = _provenance_hashes(value.get("input_hashes"), label="input_hashes")
+    output_hashes = _provenance_hashes(
+        value.get("output_hashes"), label="output_hashes"
+    )
+    result_provenance = value.get("result")
+    if (
+        not isinstance(result_provenance, Mapping)
+        or result_provenance.get("filename") != source_path.name
+        or result_provenance.get("sha256") != validation["sha256"]
+        or result_provenance.get("size_bytes") != validation["size_bytes"]
+        or output_hashes.get(source_path.name) != validation["sha256"]
+    ):
+        raise ValueError("Controller result bytes do not match its provenance")
+    project_copy = value.get("project_copy")
+    if (
+        not isinstance(project_copy, Mapping)
+        or set(project_copy) != {"state", "artifact_sha256"}
+        or project_copy.get("state") != "verified"
+        or project_copy.get("artifact_sha256") != output_hashes
+    ):
+        raise ValueError("Controller provenance has invalid verified-copy evidence")
+
+    estimate_count = value.get("estimate_count")
+    failure_count = value.get("failure_count")
+    if (
+        type(estimate_count) is not int
+        or estimate_count != validation["estimate_count"]
+        or type(failure_count) is not int
+        or failure_count < 0
+    ):
+        raise ValueError("Controller provenance has invalid result counts")
+    collected_at = value.get("collected_at")
+    if not isinstance(collected_at, str) or len(collected_at) > 64:
+        raise ValueError("Controller provenance has invalid collection time")
+    try:
+        datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("Controller provenance has invalid collection time") from exc
+
+    return {
+        "schema_version": "posetestbot_external_result_provenance.v1",
+        "source_schema_version": value["schema_version"],
+        "source_provenance_sha256": _required_sha256(
+            source_provenance_sha256,
+            label="source_provenance_sha256",
+        ),
+        "external_job": {
+            "provider": "posetestbot-cluster",
+            "job_id": external_job_id,
+            "slurm_job_id": external_job["slurm_job_id"],
+        },
+        "method": contracts["method"],
+        "oracle_mask_contract": contracts["oracle_mask_contract"],
+        "score_contract": contracts["score_contract"],
+        "execution_contract": contracts["execution_contract"],
+        "units": units,
+        "runtime": normalized_runtime,
+        "dataset_sha256": expected_dataset_sha256,
+        "bop_content_sha256": _required_sha256(
+            value.get("bop_content_sha256"), label="bop_content_sha256"
+        ),
+        "input_manifest_sha256": _required_sha256(
+            value.get("input_manifest_sha256"),
+            label="input_manifest_sha256",
+        ),
+        "input_hashes": input_hashes,
+        "estimate_count": estimate_count,
+        "failure_count": failure_count,
+        "result": {
+            "filename": source_path.name,
+            "sha256": validation["sha256"],
+            "size_bytes": validation["size_bytes"],
+        },
+        "collected_at": collected_at,
+    }
+
+
 def _store_result(
     run_root: str | Path,
     *,
@@ -1083,6 +1282,9 @@ def _store_result(
     simulation: Mapping[str, Any] | None,
     dataset: Mapping[str, Any] | None = None,
     validation: Mapping[str, Any] | None = None,
+    record_extensions: Mapping[str, Any] | None = None,
+    provenance: Mapping[str, Any] | None = None,
+    source_kind: str | None = None,
 ) -> dict[str, Any]:
     current_dataset = (
         dict(dataset) if dataset is not None else inspect_dataset(run_root)
@@ -1117,7 +1319,8 @@ def _store_result(
             "path": _relative_to_run(destination, run_root),
             "result_path": _relative_to_run(destination, run_root),
             "created_at": _utc_now(),
-            "source_kind": "gt_simulation" if simulated else "registered_result",
+            "source_kind": source_kind
+            or ("gt_simulation" if simulated else "registered_result"),
             "simulated": simulated,
             "simulation": dict(simulation) if simulation is not None else None,
             "sha256": current_validation["sha256"],
@@ -1134,7 +1337,25 @@ def _store_result(
             "timings_available": current_validation["timings_available"],
             "average_time_per_image": current_validation["average_time_per_image"],
         }
-        atomic_write_json(folder / RESULT_METADATA, record)
+        if record_extensions is not None:
+            protected = set(record) & set(record_extensions)
+            if protected:
+                raise ValueError(
+                    "External result metadata cannot replace immutable fields: "
+                    + ", ".join(sorted(protected))
+                )
+            record.update(dict(record_extensions))
+        if provenance is not None:
+            provenance_path = folder / "controller-provenance.json"
+            atomic_write_json(provenance_path, dict(provenance))
+            provenance_path.chmod(0o444)
+            record["controller_provenance_path"] = _relative_to_run(
+                provenance_path, run_root
+            )
+            record["controller_provenance_sha256"] = _sha256_file(provenance_path)
+        metadata_path = folder / RESULT_METADATA
+        atomic_write_json(metadata_path, record)
+        metadata_path.chmod(0o444)
         return record
     except Exception:
         try:
@@ -1172,6 +1393,118 @@ def import_bop_result(
         dataset=dataset,
         validation=validation,
     )
+
+
+@contextmanager
+def _external_result_import_lock(run_root: str | Path):
+    root = _evaluation_root(run_root)
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / ".external-result-import.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("External result import lock is not a regular file")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _result_for_external_job(
+    run_root: str | Path, external_job_id: str
+) -> dict[str, Any] | None:
+    root = _evaluation_root(run_root) / RESULTS_DIR
+    try:
+        folders = list(root.iterdir())
+    except FileNotFoundError:
+        return None
+    matches = []
+    for folder in folders:
+        if not folder.is_dir() or folder.is_symlink():
+            continue
+        if not _plain_file(folder / RESULT_METADATA, root=Path(run_root).resolve()):
+            continue
+        record = _load_record(folder / RESULT_METADATA)
+        external_job = record.get("external_job") if record is not None else None
+        if (
+            isinstance(external_job, Mapping)
+            and external_job.get("job_id") == external_job_id
+        ):
+            matches.append(record)
+    if len(matches) > 1:
+        raise RuntimeError(
+            "Multiple immutable results claim the same external controller job"
+        )
+    return matches[0] if matches else None
+
+
+def import_external_bop_result(
+    run_root: str | Path,
+    source_path: str | Path,
+    *,
+    external_job_id: str,
+    expected_dataset_sha256: str,
+    source_provenance_sha256: str,
+    controller_provenance: Mapping[str, Any],
+    method_name: str = "FoundationPose (oracle GT masks)",
+) -> tuple[dict[str, Any], bool]:
+    """Idempotently register one controller-owned immutable BOP19 result."""
+
+    if (
+        not isinstance(external_job_id, str)
+        or EXTERNAL_POSE_JOB_RE.fullmatch(external_job_id) is None
+    ):
+        raise ValueError("External controller job ID is invalid")
+    display_name = method_name.strip()
+    if not display_name or len(display_name) > 120:
+        raise ValueError("method_name must contain 1–120 characters")
+    source = Path(source_path)
+    with _external_result_import_lock(run_root):
+        existing = _result_for_external_job(run_root, external_job_id)
+        if existing is not None:
+            return existing, False
+        dataset = inspect_dataset(run_root)
+        if dataset["dataset_sha256"] != expected_dataset_sha256:
+            raise RuntimeError(
+                "The local BOP export changed after this cluster job was staged. "
+                "Restore or select the matching dataset snapshot before importing."
+            )
+        validation = validate_bop_result_csv(source, dataset=dataset)
+        provenance = _external_result_provenance(
+            controller_provenance,
+            external_job_id=external_job_id,
+            expected_dataset_sha256=expected_dataset_sha256,
+            source_provenance_sha256=source_provenance_sha256,
+            source_path=source,
+            validation=validation,
+        )
+        external_job = provenance["external_job"]
+        summary = {
+            "external_job": {
+                "provider": "posetestbot-cluster",
+                "job_id": external_job_id,
+                "slurm_job_id": external_job["slurm_job_id"],
+            },
+        }
+        result = _store_result(
+            run_root,
+            source_path=source,
+            method_name=display_name,
+            simulated=False,
+            simulation=None,
+            dataset=dataset,
+            validation=validation,
+            record_extensions={
+                **summary,
+            },
+            provenance=provenance,
+            source_kind="external_controller",
+        )
+        return result, True
 
 
 def _rotation_from_rotvec(rotvec: np.ndarray) -> np.ndarray:
@@ -1511,6 +1844,26 @@ def result_file_path(
         folder=_result_dir(run_root, result_id),
         record=result,
     )
+
+
+def result_download_path(run_root: str | Path, result_id: str) -> Path:
+    """Resolve an intact historical CSV independent of current dataset drift."""
+
+    result = get_result(run_root, result_id)
+    path = _stored_result_path(
+        run_root,
+        folder=_result_dir(run_root, result_id),
+        record=result,
+    )
+    if not _plain_file(path, root=Path(run_root).resolve()):
+        raise FileNotFoundError("Registered BOP result CSV is missing")
+    metadata = path.stat(follow_symlinks=False)
+    if metadata.st_size != result.get("size_bytes"):
+        raise RuntimeError("Registered BOP result size changed after import")
+    expected = result.get("sha256")
+    if not isinstance(expected, str) or _sha256_file(path) != expected:
+        raise RuntimeError("Registered BOP result integrity check failed")
+    return path
 
 
 def create_evaluation_request(

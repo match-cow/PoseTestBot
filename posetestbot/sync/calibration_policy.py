@@ -20,7 +20,6 @@ from posetestbot.calibration.profile_library import (
     verify_calibration_profile_selection,
 )
 from posetestbot.calibration.profiles import (
-    LEGACY_SCHEMA_VERSION as LEGACY_CALIBRATION_SCHEMA_VERSION,
     SCHEMA_VERSION as CALIBRATION_SCHEMA_VERSION,
     CalibrationProfile,
     CalibrationStatus,
@@ -144,10 +143,7 @@ def _load_hash_bound_profiles(
         raise ValueError("Calibration snapshot profiles contain invalid JSON") from exc
     if not isinstance(value, Mapping):
         raise ValueError("Calibration snapshot profile collection must be an object")
-    if value.get("schema_version") not in {
-        CALIBRATION_SCHEMA_VERSION,
-        LEGACY_CALIBRATION_SCHEMA_VERSION,
-    }:
+    if value.get("schema_version") != CALIBRATION_SCHEMA_VERSION:
         raise ValueError(
             "Calibration snapshot profile collection schema is unsupported"
         )

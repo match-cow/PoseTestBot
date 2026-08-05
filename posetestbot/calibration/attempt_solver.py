@@ -1530,6 +1530,9 @@ def evaluate_extrinsic_candidate(
         }
 
 
+RANKING_NUMERIC_DECIMALS = 6
+
+
 def rank_candidates(candidates: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Rank passing candidates, followed by deterministic failed evidence."""
 
@@ -1546,8 +1549,8 @@ def rank_candidates(candidates: Sequence[Mapping[str, Any]]) -> list[dict[str, A
         )
         return (
             0 if passing else 1,
-            score,
-            reprojection,
+            round(score, RANKING_NUMERIC_DECIMALS),
+            round(reprojection, RANKING_NUMERIC_DECIMALS),
             -int(item.get("inlier_count", 0)),
             pnp_order.get(str(item.get("pnp_method")), len(pnp_order)),
             extrinsic_order.get(

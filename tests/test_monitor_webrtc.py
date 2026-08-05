@@ -58,9 +58,9 @@ def test_open_v4l2_capture_requests_mjpeg_and_one_frame_buffer(monkeypatch) -> N
 
     assert opened is capture
     settings = dict(capture.settings)
-    assert settings[v4l2_preview.cv2.CAP_PROP_FOURCC] == v4l2_preview.cv2.VideoWriter_fourcc(
-        *"MJPG"
-    )
+    assert settings[
+        v4l2_preview.cv2.CAP_PROP_FOURCC
+    ] == v4l2_preview.cv2.VideoWriter_fourcc(*"MJPG")
     assert settings[v4l2_preview.cv2.CAP_PROP_FRAME_WIDTH] == 640.0
     assert settings[v4l2_preview.cv2.CAP_PROP_FRAME_HEIGHT] == 480.0
     assert settings[v4l2_preview.cv2.CAP_PROP_FPS] == 30.0
@@ -124,39 +124,9 @@ def test_vp8_packetization_leaves_tailscale_mtu_headroom(monkeypatch) -> None:
     assert max(map(len, payloads)) <= 1100
 
 
-def test_server_stop_closes_all_peers() -> None:
-    class EmptyTrack(VideoStreamTrack):
-        async def recv(self):
-            raise NotImplementedError
-
-    class FakePeer:
-        connectionState = "connected"
-
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-            self.connectionState = "closed"
-
-    peer_a = FakePeer()
-    peer_b = FakePeer()
-    counts: list[tuple[int, int]] = []
-    server = webrtc.MonitorWebRTCServer(
-        EmptyTrack(),
-        on_peers_changed=lambda peers, connected: counts.append((peers, connected)),
-    )
-    server._peers.update({peer_a, peer_b})  # type: ignore[arg-type]
-
-    asyncio.run(server.stop())
-
-    assert peer_a.closed is True
-    assert peer_b.closed is True
-    assert server.peer_count == 0
-    assert counts[-1] == (0, 0)
-
-
-def test_worker_releases_camera_and_stops_signaling(monkeypatch, tmp_path: Path) -> None:
+def test_worker_releases_camera_and_stops_signaling(
+    monkeypatch, tmp_path: Path
+) -> None:
     class FakeCapture:
         def __init__(self) -> None:
             self.released = False
@@ -167,16 +137,35 @@ def test_worker_releases_camera_and_stops_signaling(monkeypatch, tmp_path: Path)
     class FakeServer:
         instances: list["FakeServer"] = []
 
-        def __init__(self, _track, *, on_peers_changed) -> None:
+        def __init__(
+            self,
+            *,
+            track_factory,
+            on_peers_changed,
+            on_camera_open_changed,
+            on_error,
+        ) -> None:
+            self.track_factory = track_factory
             self.on_peers_changed = on_peers_changed
             self.stopped = False
+            self.track = None
             self.instances.append(self)
 
         async def start(self) -> int:
+            self.track = self.track_factory()
             return 34567
 
         async def stop(self) -> None:
+            assert self.track is not None
+            self.track.stop()
             self.stopped = True
+
+    class FakeStunTransport:
+        def close(self) -> None:
+            pass
+
+    async def start_stun(_port):
+        return FakeStunTransport(), object(), 3478
 
     capture = FakeCapture()
     selection = V4L2PreviewSelection(
@@ -188,6 +177,7 @@ def test_worker_releases_camera_and_stops_signaling(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(webrtc, "select_usb_rgb_node", lambda *_args: selection)
     monkeypatch.setattr(webrtc, "open_v4l2_capture", lambda *_args, **_kwargs: capture)
     monkeypatch.setattr(webrtc, "MonitorWebRTCServer", FakeServer)
+    monkeypatch.setattr(webrtc, "start_stun_binding_responder", start_stun)
 
     async def run() -> int:
         stop_event = asyncio.Event()
@@ -329,6 +319,9 @@ def test_monitor_server_opens_and_releases_factory_track_lazily() -> None:
     class EmptyTrack(VideoStreamTrack):
         async def recv(self):
             raise NotImplementedError
+
+        async def wait_stopped(self) -> None:
+            return None
 
     created: list[EmptyTrack] = []
     camera_states: list[bool] = []

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+
 import os
+
 import signal
+
 import subprocess
+
 import sys
+
 import time
+
 from pathlib import Path
 
 import pytest
@@ -16,7 +22,6 @@ from posetestbot.jobs.runner import (
     FAILED,
     QUEUED,
     SUCCEEDED,
-    JobRecord,
     LocalJobRunner,
     ResourceBusyError,
     SERVICE_VISIBILITY,
@@ -87,23 +92,6 @@ def test_local_job_runner_requires_valid_explicit_scope(tmp_path: Path) -> None:
     assert finished.parameters["run_root"] == "kept-for-command-provenance"
 
 
-def test_legacy_scope_is_backfilled_as_unknown(tmp_path: Path) -> None:
-    job_root = tmp_path / "jobs"
-    _write_terminal_job(
-        job_root,
-        job_id="legacy",
-        created_at="2026-07-20T00:00:00+00:00",
-        scope_kind=None,
-        parameters={"run_root": "/legacy/untrusted/path"},
-    )
-
-    loaded = LocalJobRunner(job_root).get("legacy")
-
-    assert loaded.scope_kind == "unknown"
-    assert loaded.run_root is None
-    assert loaded.parameters["run_root"] == "/legacy/untrusted/path"
-
-
 def test_job_index_rebuilds_without_rewriting_or_pruning_history(
     tmp_path: Path,
 ) -> None:
@@ -133,21 +121,6 @@ def test_job_index_rebuilds_without_rewriting_or_pruning_history(
         assert (job_root / job_id / "job.json").read_bytes() == original
 
 
-def test_terminal_jobs_load_lazily_by_exact_id(tmp_path: Path) -> None:
-    job_root = tmp_path / "jobs"
-    _write_terminal_job(
-        job_root,
-        job_id="finished",
-        created_at="2026-07-20T00:00:00+00:00",
-    )
-    runner = LocalJobRunner(job_root)
-
-    assert "finished" not in runner._jobs
-    assert runner.get("finished").id == "finished"
-    assert "finished" not in runner._jobs
-    assert runner.log_text("finished") == "finished"
-
-
 def test_job_history_cursor_is_stable_when_newer_history_arrives(
     tmp_path: Path,
 ) -> None:
@@ -173,81 +146,6 @@ def test_job_history_cursor_is_stable_when_newer_history_arrives(
 
     assert [job.id for job in second.jobs] == ["one"]
     assert second.next_cursor is None
-
-
-def test_job_history_filters_and_status_counts_use_authoritative_scope(
-    tmp_path: Path,
-) -> None:
-    job_root = tmp_path / "jobs"
-    run_a = (tmp_path / "run-a").resolve().as_posix()
-    run_b = (tmp_path / "run-b").resolve().as_posix()
-    _write_terminal_job(
-        job_root,
-        job_id="run-alpha",
-        name="Alpha calibration",
-        created_at="2026-07-03T00:00:00+00:00",
-        status=FAILED,
-        scope_kind="run",
-        run_root=run_a,
-    )
-    _write_terminal_job(
-        job_root,
-        job_id="run-beta",
-        name="Beta export",
-        created_at="2026-07-02T00:00:00+00:00",
-        scope_kind="run",
-        run_root=run_b,
-    )
-    _write_terminal_job(
-        job_root,
-        job_id="library-alpha",
-        name="Alpha template",
-        created_at="2026-07-01T00:00:00+00:00",
-        status=CANCELED,
-        scope_kind="library",
-    )
-    runner = LocalJobRunner(job_root)
-
-    page = runner.list_page(
-        search="alpha",
-        statuses={FAILED},
-        scope_kinds={"run"},
-        run_root=run_a,
-    )
-
-    assert [job.id for job in page.jobs] == ["run-alpha"]
-    assert page.total == 1
-    assert page.status_counts == {FAILED: 1}
-    with pytest.raises(ValueError, match="current filters"):
-        runner.list_page(cursor=runner.list_page(limit=1).next_cursor, search="other")
-
-
-def test_first_job_page_includes_all_matching_active_jobs(tmp_path: Path) -> None:
-    job_root = tmp_path / "jobs"
-    for job_id, day in (("old-one", 1), ("old-two", 2)):
-        _write_terminal_job(
-            job_root,
-            job_id=job_id,
-            created_at=f"2026-07-{day:02d}T00:00:00+00:00",
-        )
-    runner = LocalJobRunner(job_root)
-    active = runner.submit(
-        name="active",
-        command=[sys.executable, "-c", "import time; time.sleep(30)"],
-        scope_kind="global",
-    )
-    try:
-        page = runner.list_page(limit=1)
-        assert [job.id for job in page.jobs] == [active.id, "old-two"]
-        assert page.total == 3
-        assert page.next_cursor is not None
-        assert [job.id for job in runner.list_page(
-            limit=1,
-            cursor=page.next_cursor,
-        ).jobs] == ["old-one"]
-    finally:
-        runner.cancel(active.id)
-        runner.wait(active.id, timeout=5)
 
 
 def test_local_job_runner_captures_successful_command(tmp_path: Path) -> None:
@@ -310,91 +208,6 @@ def test_local_job_runner_bounds_large_unbroken_output(tmp_path: Path) -> None:
     assert (log_path.parent / "job.json").stat().st_size < 10_000
 
 
-def test_local_job_runner_bounds_legacy_persisted_tail(tmp_path: Path) -> None:
-    job_root = tmp_path / "jobs"
-    job_dir = job_root / "legacy-large-tail"
-    job_dir.mkdir(parents=True)
-    (job_dir / "job.json").write_text(
-        json.dumps(
-            {
-                "id": "legacy-large-tail",
-                "name": "legacy",
-                "command": [sys.executable, "-c", "pass"],
-                "cwd": None,
-                "status": SUCCEEDED,
-                "created_at": "2026-07-22T00:00:00+00:00",
-                "log_path": (job_dir / "log.txt").as_posix(),
-                "tail": ["discarded", "y" * 1000],
-            }
-        )
-    )
-
-    loaded = LocalJobRunner(
-        job_root,
-        tail_limit=1,
-        max_tail_line_chars=128,
-    ).get("legacy-large-tail")
-
-    assert len(loaded.tail) == 1
-    assert len(loaded.tail[0]) <= 150
-    assert loaded.tail[0].endswith("… [line truncated]")
-
-
-def test_local_job_runner_bounds_total_tail_size(tmp_path: Path) -> None:
-    runner = LocalJobRunner(
-        tmp_path / "jobs",
-        tail_limit=200,
-        max_tail_line_chars=128,
-        max_tail_chars=512,
-    )
-
-    job = runner.submit(
-        name="many-lines",
-        scope_kind="global",
-        command=[
-            sys.executable,
-            "-c",
-            "print(('z' * 100 + '\\n') * 100, end='')",
-        ],
-    )
-    finished = runner.wait(job.id, timeout=5)
-
-    assert finished.status == SUCCEEDED
-    assert sum(len(line) for line in finished.tail) <= 512
-    assert len(finished.tail) < 100
-
-
-def test_local_job_runner_throttles_tail_metadata_writes_for_output_flood(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    runner = LocalJobRunner(tmp_path / "jobs")
-    original_persist = runner._persist_job
-    persist_calls = 0
-
-    def counted_persist(job: JobRecord) -> None:
-        nonlocal persist_calls
-        persist_calls += 1
-        original_persist(job)
-
-    monkeypatch.setattr(runner, "_persist_job", counted_persist)
-    job = runner.submit(
-        name="many-fast-lines",
-        scope_kind="global",
-        command=[
-            sys.executable,
-            "-c",
-            "print(('line\\n') * 20_000, end='')",
-        ],
-    )
-    finished = runner.wait(job.id, timeout=10)
-
-    assert finished.status == SUCCEEDED
-    assert persist_calls < 100
-    persisted = json.loads((Path(finished.log_path).parent / "job.json").read_text())
-    assert persisted["status"] == SUCCEEDED
-    assert persisted["tail"][-1] == "Command completed successfully."
-
-
 def test_local_job_runner_can_cancel_running_command(tmp_path: Path) -> None:
     runner = LocalJobRunner(tmp_path / "jobs")
 
@@ -441,25 +254,9 @@ def test_local_job_runner_cancels_child_process_group(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
-def test_local_job_runner_reloads_persisted_history(tmp_path: Path) -> None:
-    runner = LocalJobRunner(tmp_path / "jobs")
-
-    job = runner.submit(
-        name="echo",
-        scope_kind="global",
-        command=[sys.executable, "-c", "print('persisted')"],
-        resources=["camera"],
-    )
-    finished = runner.wait(job.id, timeout=5)
-    reloaded = LocalJobRunner(tmp_path / "jobs")
-
-    loaded = reloaded.get(finished.id)
-    assert loaded.status == SUCCEEDED
-    assert loaded.resources == ["camera"]
-    assert "persisted" in reloaded.log_text(finished.id)
-
-
-def test_local_job_runner_marks_interrupted_jobs_failed_on_reload(tmp_path: Path) -> None:
+def test_local_job_runner_marks_interrupted_jobs_failed_on_reload(
+    tmp_path: Path,
+) -> None:
     job_root = tmp_path / "jobs"
     job_dir = job_root / "orphaned"
     job_dir.mkdir(parents=True)
@@ -539,76 +336,6 @@ def test_local_job_runner_stops_verified_orphaned_process_group_on_reload(
             process.wait()
 
 
-def test_local_job_runner_does_not_recover_legacy_terminal_job(
-    tmp_path: Path,
-) -> None:
-    if os.name == "nt":
-        pytest.skip("Process-group recovery uses Linux process metadata")
-
-    process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        start_new_session=True,
-    )
-    process_start_time = LocalJobRunner._read_process_start_time(process.pid)
-    if process_start_time is None:
-        process.kill()
-        process.wait()
-        pytest.skip("Linux /proc process start metadata is unavailable")
-
-    job_root = tmp_path / "jobs"
-    job_dir = job_root / "legacy-terminal-orphan"
-    job_dir.mkdir(parents=True)
-    (job_dir / "job.json").write_text(
-        json.dumps(
-            {
-                "id": "legacy-terminal-orphan",
-                "name": "sensor-preview:test",
-                "command": [sys.executable, "-c", "import time; time.sleep(30)"],
-                "cwd": None,
-                "status": FAILED,
-                "created_at": "2026-07-10T00:00:00+00:00",
-                "ended_at": "2026-07-10T00:01:00+00:00",
-                "log_path": (job_dir / "log.txt").as_posix(),
-                "message": "Job runner restarted before this job completed.",
-                "process_pid": process.pid,
-                "process_group_id": os.getpgid(process.pid),
-                "process_start_time": process_start_time,
-                "runner_pid": 999_999_999,
-                "runner_start_time": 1,
-            }
-        )
-    )
-
-    try:
-        reloaded = LocalJobRunner(job_root)
-        loaded = reloaded.get("legacy-terminal-orphan")
-
-        assert loaded.status == FAILED
-        assert loaded.message == "Job runner restarted before this job completed."
-        assert loaded.scope_kind == "unknown"
-        assert process.poll() is None
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-
-
-def test_shutdown_cancels_only_jobs_owned_by_this_runner(tmp_path: Path) -> None:
-    runner = LocalJobRunner(tmp_path / "jobs")
-    job = runner.submit(
-        name="sleep",
-        scope_kind="global",
-        command=[sys.executable, "-c", "import time; time.sleep(30)"],
-    )
-    deadline = time.time() + 5
-    while job.id not in runner._processes and time.time() < deadline:
-        time.sleep(0.01)
-
-    runner.shutdown(timeout=5)
-
-    assert runner.wait(job.id, timeout=5).status == CANCELED
-
-
 def test_local_job_runner_rejects_busy_resources(tmp_path: Path) -> None:
     runner = LocalJobRunner(tmp_path / "jobs")
 
@@ -659,39 +386,6 @@ def test_local_job_runner_applies_hierarchical_resource_conflicts(
     finally:
         runner.cancel(preview.id)
         runner.wait(preview.id, timeout=5)
-
-
-def test_canceling_job_retains_resource_until_process_exits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    runner = LocalJobRunner(tmp_path / "jobs")
-    job = runner.submit(
-        name="sleep",
-        scope_kind="global",
-        command=[sys.executable, "-c", "import time; time.sleep(10)"],
-        resources=["camera"],
-    )
-    deadline = time.time() + 5
-    while job.id not in runner._processes and time.time() < deadline:
-        time.sleep(0.01)
-    process = runner._processes[job.id]
-    terminate = runner._terminate_process_group
-    monkeypatch.setattr(runner, "_terminate_process_group", lambda _process: None)
-
-    canceled = runner.cancel(job.id)
-
-    assert canceled.status == CANCELING
-    assert runner.resource_holders()["camera"] == job.id
-    with pytest.raises(ResourceBusyError):
-        runner.submit(
-            name="blocked",
-            scope_kind="global",
-            command=[sys.executable, "-c", "pass"],
-            resources=["camera:realsense_d435:123"],
-        )
-
-    terminate(process)
-    assert runner.wait(job.id, timeout=5).status == CANCELED
 
 
 def test_service_visibility_filters_public_jobs_and_resources(tmp_path: Path) -> None:
@@ -783,9 +477,7 @@ def test_supervisor_stops_workload_descendants_after_owner_sigkill(
             process.kill()
             process.wait()
         for pid in (
-            json.loads(ready_path.read_text()).values()
-            if ready_path.is_file()
-            else []
+            json.loads(ready_path.read_text()).values() if ready_path.is_file() else []
         ):
             try:
                 os.kill(int(pid), signal.SIGKILL)

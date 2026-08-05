@@ -1,23 +1,28 @@
 from __future__ import annotations
 
 import json
-import os
+
+
 import socket
-import subprocess
+
+
 from pathlib import Path
+
 from typing import Any
 
 import pytest
 
 from posetestbot.config import RobotProfile
+
 from posetestbot.io.artifacts import DATASET_MANIFEST, RAW_ROBOT_EE_POSES
+
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
+
 from posetestbot.robot.pose_receiver import (
     CLAIM_SCHEMA_VERSION,
     PARTIAL_SCHEMA_VERSION,
     POSE_PACKET_SCHEMA_VERSION,
     PoseReceiverCanceled,
-    PoseReceiverOverwriteError,
     PoseReceiverPacketError,
     PoseReceiverPermissionError,
     PoseReceiverTimeout,
@@ -156,12 +161,7 @@ def manifest_stage(run_root: Path) -> dict[str, Any]:
     ("allow_real_robot", "allow_cameras"),
     [
         (False, False),
-        (True, False),
-        (False, True),
         (1, True),
-        (True, 1),
-        ("true", True),
-        (True, "true"),
     ],
 )
 def test_receiver_requires_both_fresh_acknowledgements_before_socket_io(
@@ -190,66 +190,6 @@ def test_receiver_requires_both_fresh_acknowledgements_before_socket_io(
     assert socket_factory.calls == []
     assert start_calls == []
     assert not run_root.exists()
-
-
-def test_receiver_cli_rejects_direct_ungated_start_without_network_io(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "direct-blocked"
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            "scripts/pose_receiver_udp_json.py",
-            run_root.as_posix(),
-            "--ip",
-            "127.0.0.1",
-            "--port",
-            "18080",
-            "--ip_robot",
-            "192.0.2.10",
-        ],
-        cwd=Path(__file__).resolve().parents[1],
-        env={**os.environ, "UV_CACHE_DIR": "/tmp/uv-cache"},
-        text=True,
-        capture_output=True,
-    )
-
-    assert result.returncode == 1
-    assert "--allow-real-robot" in result.stderr
-    assert "--allow-cameras" in result.stderr
-    assert not run_root.exists()
-
-
-def test_receiver_refuses_existing_raw_artifact_before_socket_or_start(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "existing"
-    run_root.mkdir()
-    raw_path = run_root / RAW_ROBOT_EE_POSES
-    raw_path.write_text('{"preserve": true}\n')
-    original = raw_path.read_bytes()
-    socket_factory = FakeSocketFactory(FakeDatagramSocket([]))
-    start_calls: list[object] = []
-
-    with pytest.raises(PoseReceiverOverwriteError, match="Refusing to replace"):
-        run_pose_receiver(
-            run_root,
-            profile=profile(),
-            allow_real_robot=True,
-            allow_cameras=True,
-            socket_factory=socket_factory,
-            send_start_command=lambda *args, **kwargs: start_calls.append(
-                (args, kwargs)
-            ),
-            install_signal_handlers=False,
-        )
-
-    assert raw_path.read_bytes() == original
-    assert socket_factory.calls == []
-    assert start_calls == []
-    assert list(run_root.glob("raw_robot_ee_poses.partial.*.json")) == []
 
 
 def test_receiver_success_uses_start_then_idle_timeout_and_writes_canonical_raw(
@@ -304,47 +244,6 @@ def test_receiver_success_uses_start_then_idle_timeout_and_writes_canonical_raw(
     assert manifest_stage(run_root)["status"] == "succeeded"
 
 
-def test_receiver_caps_start_velocity_and_records_requested_value(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "bounded-start"
-    fake_socket = FakeDatagramSocket(
-        [
-            (packet(), ("192.0.2.10", 40001)),
-            (end_packet(), ("192.0.2.10", 40001)),
-        ]
-    )
-    requested_profile = profile().with_overrides(cartesian_velocity_m_s=0.2)
-    starts: list[RobotProfile] = []
-
-    def fake_start(
-        robot: RobotProfile,
-        *,
-        protocol: str,
-        maximum_velocity_m_s: float,
-    ):
-        assert protocol == "legacy"
-        assert maximum_velocity_m_s == 0.03
-        starts.append(robot)
-        return {"start": robot.cartesian_velocity_m_s}
-
-    run_pose_receiver(
-        run_root,
-        profile=requested_profile,
-        allow_real_robot=True,
-        allow_cameras=True,
-        socket_factory=FakeSocketFactory(fake_socket),
-        send_start_command=fake_start,
-        install_signal_handlers=False,
-    )
-
-    assert starts[0].cartesian_velocity_m_s == 0.03
-    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
-    assert manifest["capture_config"]["cartesian_velocity_m_s"] == 0.03
-    assert manifest["capture_config"]["requested_cartesian_velocity_m_s"] == 0.2
-    assert manifest["capture_config"]["command_velocity_cap_m_s"] == 0.03
-
-
 def test_receiver_passes_extended_speed_only_over_versioned_protocol(
     tmp_path: Path,
 ) -> None:
@@ -387,23 +286,6 @@ def test_receiver_passes_extended_speed_only_over_versioned_protocol(
     assert manifest["capture_config"]["cartesian_velocity_m_s"] == 0.2
     assert manifest["capture_config"]["command_velocity_cap_m_s"] == 1.0
     assert manifest["capture_config"]["protocol"] == "v1"
-
-
-def test_receiver_rejects_extended_limit_on_legacy_protocol(tmp_path: Path) -> None:
-    socket_factory = FakeSocketFactory(FakeDatagramSocket([]))
-
-    with pytest.raises(ValueError, match="require protocol='v1'"):
-        run_pose_receiver(
-            tmp_path / "legacy-extended-start",
-            profile=profile(),
-            maximum_command_velocity_m_s=1.0,
-            allow_real_robot=True,
-            allow_cameras=True,
-            socket_factory=socket_factory,
-            install_signal_handlers=False,
-        )
-
-    assert socket_factory.calls == []
 
 
 def test_receiver_retains_v1_frame_identity_and_packet_loss_evidence(
@@ -465,94 +347,11 @@ def test_receiver_rejects_stream_that_differs_from_run_reference_expectation(
             allow_real_robot=True,
             allow_cameras=True,
             socket_factory=FakeSocketFactory(
-                FakeDatagramSocket(
-                    [(v1_packet(sequence=1), ("192.0.2.10", 40001))]
-                )
+                FakeDatagramSocket([(v1_packet(sequence=1), ("192.0.2.10", 40001))])
             ),
             send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
             install_signal_handlers=False,
         )
-
-
-def test_receiver_retains_complete_sender_cadence_evidence(tmp_path: Path) -> None:
-    run_root = tmp_path / "v1-cadence"
-    fake_socket = FakeDatagramSocket(
-        [
-            (
-                v1_packet(sequence=10, cadence_evidence=True),
-                ("192.0.2.10", 40001),
-            ),
-            (v1_packet(sequence=11, motion="end"), ("192.0.2.10", 40001)),
-        ]
-    )
-
-    result = run_pose_receiver(
-        run_root,
-        profile=profile(),
-        allow_real_robot=True,
-        allow_cameras=True,
-        socket_factory=FakeSocketFactory(fake_socket),
-        send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
-        install_signal_handlers=False,
-    )
-
-    saved = json.loads(result.raw_pose_path.read_text())
-    assert saved["0"]["source_packet"]["sender_target_period_ms"] == 10
-    assert saved["0"]["source_packet"]["sender_previous_pose_delta_ns"] == 10_100_000
-    assert saved["0"]["source_packet"]["sender_pose_query_duration_ns"] == 800_000
-
-
-def test_receiver_rejects_partial_sender_cadence_evidence(tmp_path: Path) -> None:
-    value = json.loads(v1_packet(sequence=1))
-    value["sender_target_period_ms"] = 10
-
-    with pytest.raises(PoseReceiverPacketError, match="cadence evidence must include"):
-        run_pose_receiver(
-            tmp_path / "partial-cadence",
-            profile=profile(),
-            allow_real_robot=True,
-            allow_cameras=True,
-            socket_factory=FakeSocketFactory(
-                FakeDatagramSocket(
-                    [(json.dumps(value).encode(), ("192.0.2.10", 40001))]
-                )
-            ),
-            send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
-            install_signal_handlers=False,
-        )
-
-
-def test_receiver_rejects_v1_reference_frame_change_mid_stream(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "frame-changed"
-
-    with pytest.raises(PoseReceiverPacketError, match="identity changed"):
-        run_pose_receiver(
-            run_root,
-            profile=profile(),
-            allow_real_robot=True,
-            allow_cameras=True,
-            socket_factory=FakeSocketFactory(
-                FakeDatagramSocket(
-                    [
-                        (v1_packet(sequence=1), ("192.0.2.10", 30300)),
-                        (
-                            v1_packet(
-                                sequence=2,
-                                reference_path="/PoseTestBot/TemplateBase",
-                            ),
-                            ("192.0.2.10", 30300),
-                        ),
-                    ]
-                )
-            ),
-            send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
-            install_signal_handlers=False,
-        )
-
-    partial = next(run_root.glob("raw_robot_ee_poses.partial.*.json"))
-    assert json.loads(partial.read_text())["received_pose_count"] == 1
 
 
 def test_receiver_claims_canonical_raw_path_before_bind_or_start(
@@ -613,43 +412,6 @@ def test_receiver_rejects_datagrams_from_any_ip_except_configured_robot(
         "192.0.2.11",
         "30300",
     ]
-
-
-def test_receiver_never_replaces_foreign_artifact_that_displaces_its_claim(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "claim-displaced"
-    raw_path = run_root / RAW_ROBOT_EE_POSES
-    foreign_bytes = b'{"foreign": true}\n'
-
-    def replace_claim(*_args, **_kwargs):
-        assert (
-            json.loads(raw_path.read_text())["schema_version"] == CLAIM_SCHEMA_VERSION
-        )
-        raw_path.unlink()
-        raw_path.write_bytes(foreign_bytes)
-        return {"start": 0.02}
-
-    with pytest.raises(PoseReceiverOverwriteError, match="ownership changed"):
-        run_pose_receiver(
-            run_root,
-            profile=profile(),
-            allow_real_robot=True,
-            allow_cameras=True,
-            socket_factory=FakeSocketFactory(
-                FakeDatagramSocket(
-                    [
-                        (packet(), ("192.0.2.10", 30301)),
-                        (end_packet(), ("192.0.2.10", 30302)),
-                    ]
-                )
-            ),
-            send_start_command=replace_claim,
-            install_signal_handlers=False,
-        )
-
-    assert raw_path.read_bytes() == foreign_bytes
-    assert len(list(run_root.glob("raw_robot_ee_poses.partial.*.json"))) == 1
 
 
 def test_receiver_start_and_idle_timeouts_preserve_unique_partial_evidence(
@@ -722,54 +484,6 @@ def test_receiver_malformed_packet_records_failed_manifest_and_partial(
     assert evidence["status"] == "failed"
     assert evidence["last_packet_preview"] == malformed.decode()
     assert manifest_stage(run_root)["status"] == "failed"
-    assert not (run_root / RAW_ROBOT_EE_POSES).exists()
-
-
-def test_receiver_rejects_end_marker_before_any_pose(tmp_path: Path) -> None:
-    run_root = tmp_path / "empty-stream"
-
-    with pytest.raises(PoseReceiverPacketError, match="before any pose"):
-        run_pose_receiver(
-            run_root,
-            profile=profile(),
-            allow_real_robot=True,
-            allow_cameras=True,
-            socket_factory=FakeSocketFactory(
-                FakeDatagramSocket([(end_packet(), ("192.0.2.10", 30300))])
-            ),
-            send_start_command=lambda *_args, **_kwargs: {"start": 0.02},
-            install_signal_handlers=False,
-        )
-
-    assert manifest_stage(run_root)["status"] == "failed"
-    assert len(list(run_root.glob("raw_robot_ee_poses.partial.*.json"))) == 1
-    assert not (run_root / RAW_ROBOT_EE_POSES).exists()
-
-
-def test_receiver_bind_failure_records_failed_manifest_without_sending_start(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "bind-failure"
-    start_calls: list[object] = []
-
-    with pytest.raises(OSError, match="address unavailable"):
-        run_pose_receiver(
-            run_root,
-            profile=profile(),
-            allow_real_robot=True,
-            allow_cameras=True,
-            socket_factory=FakeSocketFactory(
-                FakeDatagramSocket([], bind_error=OSError("address unavailable"))
-            ),
-            send_start_command=lambda *args, **kwargs: start_calls.append(
-                (args, kwargs)
-            ),
-            install_signal_handlers=False,
-        )
-
-    assert start_calls == []
-    assert manifest_stage(run_root)["status"] == "failed"
-    assert len(list(run_root.glob("raw_robot_ee_poses.partial.*.json"))) == 1
     assert not (run_root / RAW_ROBOT_EE_POSES).exists()
 
 

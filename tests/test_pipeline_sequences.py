@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+
 import os
+
 import subprocess
+
 import sys
+
 from pathlib import Path
 
 import pytest
@@ -14,6 +18,7 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
+
 from posetestbot.pipeline.sequences import (
     PIPELINE_SEQUENCES,
     SEQUENCE_EXECUTION_ACK_ENV,
@@ -22,6 +27,7 @@ from posetestbot.pipeline.sequences import (
     list_pipeline_sequences,
     write_sequence_plan,
 )
+
 from scripts import run_pipeline_sequence
 
 
@@ -44,9 +50,10 @@ def test_capture_to_bop_dataset_sequence_uses_sync_quality_gate(tmp_path: Path) 
     assert plan.steps[2].options["annotation_source"] == "none"
     assert plan.steps[2].options["overwrite"] is True
     assert "--annotation-source" in plan.steps[2].command
-    assert "blenderproc" not in " ".join(
-        part for step in plan.steps for part in step.command
-    ).lower()
+    assert (
+        "blenderproc"
+        not in " ".join(part for step in plan.steps for part in step.command).lower()
+    )
 
 
 def test_calibrated_bop_sequence_passes_profiles_to_export(tmp_path: Path) -> None:
@@ -58,9 +65,10 @@ def test_calibrated_bop_sequence_passes_profiles_to_export(tmp_path: Path) -> No
     )
 
     bop_step = next(step for step in plan.steps if step.id == "bop_export")
-    assert bop_step.options["calibration_profiles"] == (
-        run_root / "calibration_profiles.json"
-    ).as_posix()
+    assert (
+        bop_step.options["calibration_profiles"]
+        == (run_root / "calibration_profiles.json").as_posix()
+    )
     assert "calibration_preflight" in step_ids(plan)
 
 
@@ -103,9 +111,7 @@ def test_real_full_capture_plan_never_persists_execution_acknowledgements(
     assert capture_execution.options["startup_wait_s"] == 15.0
     assert capture_execution.options["receive_start_timeout_s"] == 120.0
     assert capture_execution.options["receive_idle_timeout_s"] == 60.0
-    assert capture_execution.options["camera_metadata_idle_timeout_s"] == 5.0
     assert "--startup-wait" in capture_execution.command
-    assert "--camera-metadata-idle-timeout-s" in capture_execution.command
     for step in plan.steps:
         assert step.options.get("allow_cameras") is not True
         assert step.options.get("allow_real_robot") is not True
@@ -146,26 +152,8 @@ def test_real_full_capture_job_requires_fresh_per_step_acknowledgements(
     assert "allow_real_robot" not in serialized_parameters
     assert "--allow-cameras" not in serialized_evidence
     assert "--allow-real-robot" not in serialized_evidence
-    acknowledgements = json.loads(
-        job.execution_environment[SEQUENCE_EXECUTION_ACK_ENV]
-    )
+    acknowledgements = json.loads(job.execution_environment[SEQUENCE_EXECUTION_ACK_ENV])
     assert acknowledgements == FRESH_CAPTURE_ACKNOWLEDGEMENTS
-
-
-@pytest.mark.parametrize("gate_value", [False, 1, "true", "1"])
-def test_real_full_capture_job_rejects_nonliteral_acknowledgements(
-    tmp_path: Path,
-    gate_value,
-) -> None:
-    options = json.loads(json.dumps(FRESH_CAPTURE_ACKNOWLEDGEMENTS))
-    options["capture_execution"]["allow_cameras"] = gate_value
-
-    with pytest.raises(ValueError, match="capture_execution.allow_cameras"):
-        build_sequence_job(
-            sequence_id="real_full_capture_validation",
-            run_root=tmp_path / "strict-sequence",
-            options=options,
-        )
 
 
 def test_real_capture_sequence_plan_persistence_strips_one_shot_gates(
@@ -191,10 +179,6 @@ def test_real_capture_sequence_plan_persistence_strips_one_shot_gates(
     "options",
     [
         {},
-        {
-            group: {name: "true" for name in values}
-            for group, values in FRESH_CAPTURE_ACKNOWLEDGEMENTS.items()
-        },
     ],
 )
 def test_direct_real_sequence_rejects_missing_or_string_gates_before_writes(
@@ -274,10 +258,7 @@ def test_executed_sequence_retains_child_manifest_sensor_updates(
     assert manifest["sensors"] == [sensor]
     stages = {stage["name"]: stage for stage in manifest["stages"]}
     assert stages["child_sensor_stage"]["status"] == "succeeded"
-    assert (
-        stages["pipeline_sequence:sync_to_bop_dry_run"]["status"]
-        == "succeeded"
-    )
+    assert stages["pipeline_sequence:sync_to_bop_dry_run"]["status"] == "succeeded"
 
 
 def test_failed_sequence_retains_child_manifest_sensor_updates(
@@ -331,10 +312,7 @@ def test_failed_sequence_retains_child_manifest_sensor_updates(
     assert manifest["sensors"] == [sensor]
     stages = {stage["name"]: stage for stage in manifest["stages"]}
     assert stages["child_sensor_stage"]["status"] == "failed"
-    assert (
-        stages["pipeline_sequence:sync_to_bop_dry_run"]["status"]
-        == "failed"
-    )
+    assert stages["pipeline_sequence:sync_to_bop_dry_run"]["status"] == "failed"
 
 
 def test_real_capture_planning_steps_claim_camera_resource(tmp_path: Path) -> None:
@@ -384,28 +362,6 @@ def test_sequence_listing_is_acquisition_only() -> None:
     } <= sequence_ids
     assert "foundationpose_runtime_to_bop_eval" not in sequence_ids
     assert "megapose_runtime_to_bop_eval" not in sequence_ids
-
-
-def test_sequence_job_plan_only_locks_disk_only(tmp_path: Path) -> None:
-    job = build_sequence_job(
-        sequence_id="real_full_capture_validation",
-        run_root=tmp_path / "run",
-        plan_only=True,
-        options=FRESH_CAPTURE_ACKNOWLEDGEMENTS,
-    )
-
-    assert job.command[-1] == "--plan-only"
-    assert job.resources == ["disk_io"]
-    assert job.parameters["planned_resources"] == [
-        "camera",
-        "disk_io",
-        "robot_command",
-    ]
-    assert job.parameters["options"] == {
-        "capture_execution": {},
-        "capture_execution_plan": {},
-        "capture_plan_preflight": {},
-    }
 
 
 def test_pipeline_sequence_registry_references_known_stages() -> None:

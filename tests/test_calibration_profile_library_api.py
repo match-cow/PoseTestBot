@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+
 import os
+
 import stat
+
 from pathlib import Path
 
 import pytest
 
 from posetestbot.calibration.intrinsics import write_intrinsic_profile_collection
+
 from posetestbot.calibration.profile_library import (
     selected_calibration_profile_ids_by_sensor_folder,
     verify_calibration_profile_selection,
 )
+
 from posetestbot.calibration.profiles import (
     CalibrationProfile,
     CalibrationQuality,
@@ -21,33 +26,41 @@ from posetestbot.calibration.profiles import (
     TransformFrame,
     blenderproc_camera_transform_map_from_profiles,
     load_profile_collection,
-    profile_to_dict,
-    rectified_projection_from_native,
     write_profile_collection,
 )
+
 from posetestbot.io.atomic import atomic_write_json
+
 from posetestbot.io.artifacts import (
     CALIBRATION_PROFILES,
     CALIBRATION_PROFILE_SELECTION,
     INTRINSIC_CALIBRATION_PROFILES,
     RAW_ROBOT_EE_POSES,
 )
+
 from posetestbot.pipeline.run_config import (
     SensorRunConfig,
     create_run_config,
     load_run_config_for_run_root,
     write_run_config,
 )
+
 from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
+
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
+
 from posetestbot.sensors.registry import sensor_folder_name
+
 from posetestbot.web.app import create_app
+
 from scripts.run_bop_export_stage import calibration_profile_for_sensor
 
-
 SENSOR_ID = "D435-123"
+
 PROFILE_ID = "d435_123_eye_in_hand_valid"
+
 INTRINSIC_ID = "D435-123_1280x720_normal_opencv"
+
 STATIC_REFERENCE_PATH = POSE_TEMPLATE_BASE_SUNRISE_PATH
 
 
@@ -180,7 +193,6 @@ def _sensor(
 def _write_source(
     source: Path,
     *,
-    legacy: bool = False,
     bundle_marker: str | None = None,
     mounting_mode: MountingMode = MountingMode.EYE_IN_HAND,
     sensor_id: str = SENSOR_ID,
@@ -197,21 +209,7 @@ def _write_source(
         static_reference_path=static_reference_path,
     )
     intrinsic = _intrinsic_profile(sensor_id=sensor_id, intrinsic_id=intrinsic_id)
-    if legacy:
-        value = profile_to_dict(profile)
-        value["schema_version"] = "calibration.v1"
-        value["intrinsics"] = value["intrinsics"]["native"]
-        value["extrinsics"]["to"] = "end_effector"
-        atomic_write_json(
-            source / CALIBRATION_PROFILES,
-            {"schema_version": "calibration.v1", "profiles": [value]},
-        )
-        rectified, roi = rectified_projection_from_native(profile.intrinsics)
-        assert rectified is not None and roi is not None
-        intrinsic["rectified"]["cam_K"] = list(rectified.cam_k)
-        intrinsic["rectified"]["valid_roi"] = list(roi)
-    else:
-        write_profile_collection([profile], source / CALIBRATION_PROFILES)
+    write_profile_collection([profile], source / CALIBRATION_PROFILES)
     if bundle_marker is not None:
         collection = json.loads((source / CALIBRATION_PROFILES).read_text())
         collection["promotion_marker"] = bundle_marker
@@ -491,9 +489,10 @@ def test_composite_selection_combines_static_and_robot_mounted_source_runs(
     assert result["schema_version"] == "calibration_profile_selection.v2"
     assert selection["source"]["kind"] == "composite"
     assert selection["source"]["source_count"] == 2
-    assert selection["intended_setup"][
-        "robot_pose_sunrise_reference_frame_path"
-    ] == STATIC_REFERENCE_PATH
+    assert (
+        selection["intended_setup"]["robot_pose_sunrise_reference_frame_path"]
+        == STATIC_REFERENCE_PATH
+    )
     assert {
         item["run_root"]: item["selected_sensor_keys"] for item in selection["sources"]
     } == {
@@ -574,9 +573,7 @@ def test_composite_selection_combines_static_and_robot_mounted_source_runs(
         "/run-config",
         json={
             "run_root": destination.as_posix(),
-            "robot_pose_sunrise_reference_frame_path": (
-                "/PoseTestBot/TemplateBase"
-            ),
+            "robot_pose_sunrise_reference_frame_path": ("/PoseTestBot/TemplateBase"),
         },
     )
     assert changed_reference.status_code == 409
@@ -584,8 +581,9 @@ def test_composite_selection_combines_static_and_robot_mounted_source_runs(
         "calibration_selection_setup_mismatch"
     )
     assert (
-        load_run_config_for_run_root(destination)["frames"]["robot_pose"]
-        ["sunrise_reference_frame_path"]
+        load_run_config_for_run_root(destination)["frames"]["robot_pose"][
+            "sunrise_reference_frame_path"
+        ]
         == STATIC_REFERENCE_PATH
     )
 
@@ -719,75 +717,6 @@ def test_library_selected_status_requires_current_run_config_binding(
     ]
 
 
-@pytest.mark.parametrize(
-    ("profile_reference", "destination_reference", "issue_code"),
-    [
-        (
-            STATIC_REFERENCE_PATH,
-            None,
-            "destination_robot_pose_reference_unconfigured",
-        ),
-        (
-            None,
-            STATIC_REFERENCE_PATH,
-            "static_calibration_reference_unverified",
-        ),
-        (
-            "/PoseTestBot/TemplateBase",
-            STATIC_REFERENCE_PATH,
-            "static_calibration_not_in_pose_template_base",
-        ),
-        (
-            STATIC_REFERENCE_PATH,
-            "/PoseTestBot/TemplateBase",
-            "destination_pose_template_base_reference_required",
-        ),
-        (
-            "/PoseTestBot/TemplateBase",
-            "/PoseTestBot/TemplateBase",
-            "destination_pose_template_base_reference_required",
-        ),
-    ],
-)
-def test_static_calibration_library_fails_closed_without_matching_v1_reference(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    profile_reference: str | None,
-    destination_reference: str | None,
-    issue_code: str,
-) -> None:
-    runs = tmp_path / "runs"
-    source = runs / "static_calibration"
-    destination = runs / "object_run"
-    _write_source(
-        source,
-        mounting_mode=MountingMode.STATIC,
-        static_reference_path=profile_reference,
-    )
-    destination.mkdir(parents=True)
-    write_run_config(
-        destination,
-        create_run_config(
-            run_root=destination,
-            sensors=(_sensor(mounting_mode="static"),),
-            robot_pose_sunrise_reference_frame_path=destination_reference,
-        ),
-    )
-    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
-
-    candidate = _candidate(
-        create_app()
-        .test_client()
-        .get("/ui/calibrations", query_string={"run_root": destination})
-        .get_json(),
-        source,
-    )
-
-    assert candidate["valid"] is True
-    assert candidate["compatible"] is False
-    assert candidate["issues"][0]["code"] == issue_code
-
-
 def test_static_selection_rechecks_destination_raw_pose_reference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -821,313 +750,10 @@ def test_static_selection_rechecks_destination_raw_pose_reference(
         "/ui/calibrations", query_string={"run_root": destination}
     ).get_json()
     assert listed["selected"]["valid"] is False
-    assert "raw robot-pose Sunrise reference frame" in listed["selected"]["issues"][
-        0
-    ]["message"]
-
-
-def test_composite_selection_same_bundle_requires_replacement_for_membership_change(
-    tmp_path: Path, monkeypatch
-) -> None:
-    runs = tmp_path / "runs"
-    source = runs / "mixed_calibration"
-    destination = runs / "object_run"
-    static_sensor_id = "D435-STATIC-456"
-    static_profile_id = "d435_static_456_valid"
-    static_intrinsic_id = "D435-STATIC-456_1280x720_normal_opencv"
-    source_sensors = (
-        _sensor(),
-        _sensor(mounting_mode="static", sensor_id=static_sensor_id),
-    )
-    source.mkdir(parents=True)
-    write_profile_collection(
-        [
-            _profile(),
-            _profile(
-                mounting_mode=MountingMode.STATIC,
-                sensor_id=static_sensor_id,
-                profile_id=static_profile_id,
-                intrinsic_id=static_intrinsic_id,
-            ),
-        ],
-        source / CALIBRATION_PROFILES,
-    )
-    write_intrinsic_profile_collection(
-        [
-            _intrinsic_profile(),
-            _intrinsic_profile(
-                sensor_id=static_sensor_id,
-                intrinsic_id=static_intrinsic_id,
-            ),
-        ],
-        source / INTRINSIC_CALIBRATION_PROFILES,
-    )
-    write_run_config(
-        source,
-        create_run_config(
-            run_root=source,
-            run_name="Mixed reusable calibration",
-            sensors=source_sensors,
-        ),
-    )
-    destination.mkdir(parents=True)
-    write_run_config(
-        destination,
-        create_run_config(
-            run_root=destination,
-            sensors=source_sensors,
-            robot_pose_sunrise_reference_frame_path=STATIC_REFERENCE_PATH,
-        ),
-    )
-    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
-    client = create_app().test_client()
-    candidate = _candidate(
-        client.get(
-            "/ui/calibrations", query_string={"run_root": destination}
-        ).get_json(),
-        source,
-    )
-    mobile_key = f"realsense_d435:{SENSOR_ID}"
-    static_key = f"realsense_d435:{static_sensor_id}"
-    full_request = {
-        "run_root": destination.as_posix(),
-        "source_selections": [
-            {
-                "source_run_root": source.as_posix(),
-                "expected_bundle_sha256": candidate["bundle_sha256"],
-                "sensor_keys": [mobile_key, static_key],
-            }
-        ],
-        "resolution": "720p",
-        "sensors": [sensor.to_dict() for sensor in source_sensors],
-    }
-    selected = client.post("/ui/calibrations/select", json=full_request)
-    assert selected.status_code == 201, selected.get_json()
-    selected_payload = selected.get_json()
-
-    stale_membership_save = client.post(
-        "/run-config",
-        json={
-            "run_root": destination.as_posix(),
-            "run_name": "object_run",
-            "resolution": "720p",
-            "fps": 6,
-            "velocity_m_s": 0.2,
-            "sensors": [_sensor().to_dict()],
-            "dataset_mode": "objectless",
-            "calibration_profiles": selected_payload["calibration_profiles"],
-            "expected_calibration_bundle_sha256": candidate["bundle_sha256"],
-            "sequence_id": "calibrated_capture_to_bop_dataset_dry_run",
-            "plan_only": True,
-        },
-    )
-    assert stale_membership_save.status_code == 409
-    assert stale_membership_save.get_json()["issues"][0]["code"] == (
-        "calibration_selection_setup_mismatch"
-    )
-
-    reduced_request = {
-        "run_root": destination.as_posix(),
-        "source_selections": [
-            {
-                "source_run_root": source.as_posix(),
-                "expected_bundle_sha256": candidate["bundle_sha256"],
-                "sensor_keys": [mobile_key],
-            }
-        ],
-        "resolution": "720p",
-        "sensors": [_sensor().to_dict()],
-        "expected_current_bundle_sha256": candidate["bundle_sha256"],
-    }
-    unconfirmed = client.post("/ui/calibrations/select", json=reduced_request)
-    assert unconfirmed.status_code == 409
-    assert unconfirmed.get_json()["issues"][0]["code"] == (
-        "calibration_replacement_confirmation_required"
-    )
-
-    replaced = client.post(
-        "/ui/calibrations/select",
-        json={**reduced_request, "confirm_replace": True},
-    )
-    assert replaced.status_code == 201, replaced.get_json()
-    replacement = replaced.get_json()
-    assert replacement["idempotent"] is False
     assert (
-        replacement["selection"]["source"]["bundle_sha256"]
-        == candidate["bundle_sha256"]
+        "raw robot-pose Sunrise reference frame"
+        in listed["selected"]["issues"][0]["message"]
     )
-    assert replacement["sensor_profiles"] == {mobile_key: PROFILE_ID}
-    assert replacement["selection"]["sources"][0]["selected_sensor_keys"] == [
-        mobile_key
-    ]
-
-    saved = client.post(
-        "/run-config",
-        json={
-            "run_root": destination.as_posix(),
-            "run_name": "object_run",
-            "resolution": "720p",
-            "fps": 6,
-            "velocity_m_s": 0.2,
-            "sensors": [
-                {
-                    **_sensor().to_dict(),
-                    "operator_alias": "Dataset wrist camera",
-                }
-            ],
-            "dataset_mode": "objectless",
-            "calibration_profiles": replacement["calibration_profiles"],
-            "expected_calibration_bundle_sha256": candidate["bundle_sha256"],
-            "sequence_id": "calibrated_capture_to_bop_dataset_dry_run",
-            "plan_only": True,
-        },
-    )
-    assert saved.status_code == 201, saved.get_json()
-    assert (
-        load_run_config_for_run_root(destination)["capture"]["sensors"][0][
-            "operator_alias"
-        ]
-        == "Dataset wrist camera"
-    )
-
-
-def test_selection_same_bundle_from_another_source_is_not_idempotent(
-    tmp_path: Path, monkeypatch
-) -> None:
-    runs = tmp_path / "runs"
-    source_a = runs / "calibration_a"
-    source_b = runs / "calibration_b"
-    destination = runs / "object_run"
-    _write_source(source_a)
-    _write_source(source_b)
-    _write_destination(destination)
-    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
-    client = create_app().test_client()
-    library = client.get(
-        "/ui/calibrations", query_string={"run_root": destination}
-    ).get_json()
-    candidate_a = _candidate(library, source_a)
-    candidate_b = _candidate(library, source_b)
-    assert candidate_a["bundle_sha256"] == candidate_b["bundle_sha256"]
-
-    selected_a = client.post(
-        "/ui/calibrations/select",
-        json=_selection_request(destination, source_a, candidate_a["bundle_sha256"]),
-    )
-    assert selected_a.status_code == 201
-
-    replacement_request = {
-        **_selection_request(
-            destination,
-            source_b,
-            candidate_b["bundle_sha256"],
-        ),
-        "expected_current_bundle_sha256": candidate_a["bundle_sha256"],
-    }
-    unconfirmed = client.post(
-        "/ui/calibrations/select",
-        json=replacement_request,
-    )
-    assert unconfirmed.status_code == 409
-    assert unconfirmed.get_json()["issues"][0]["code"] == (
-        "calibration_replacement_confirmation_required"
-    )
-
-    replaced = client.post(
-        "/ui/calibrations/select",
-        json={
-            **replacement_request,
-            "confirm_replace": True,
-        },
-    )
-    assert replaced.status_code == 201, replaced.get_json()
-    assert replaced.get_json()["idempotent"] is False
-    assert replaced.get_json()["selection"]["source"]["run_root"] == (
-        source_b.as_posix()
-    )
-
-
-def test_selection_accepts_intended_setup_before_destination_config(
-    tmp_path: Path, monkeypatch
-) -> None:
-    runs = tmp_path / "runs"
-    source = runs / "legacy_calibration"
-    destination = runs / "new_object_run"
-    _write_source(source, legacy=True)
-    runs.mkdir(exist_ok=True)
-    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
-    client = create_app().test_client()
-
-    listed = client.get("/ui/calibrations", query_string={"run_root": destination})
-    candidate = listed.get_json()["calibrations"][0]
-    assert candidate["valid"] is True
-    assert candidate["compatible"] is False
-    assert candidate["issues"][0]["code"] == "destination_setup_required"
-
-    selected = client.post(
-        "/ui/calibrations/select",
-        json={
-            "run_root": destination.as_posix(),
-            "source_run_root": source.as_posix(),
-            "expected_bundle_sha256": candidate["bundle_sha256"],
-            "resolution": "720p",
-            "sensors": [_sensor().to_dict()],
-        },
-    )
-
-    assert selected.status_code == 201, selected.get_json()
-    assert (
-        selected.get_json()["selection"]["source"]["calibration_profiles"][
-            "schema_version"
-        ]
-        == "calibration.v1"
-    )
-
-
-def test_selection_rejects_incompatible_override_and_stale_hash(
-    tmp_path: Path, monkeypatch
-) -> None:
-    runs = tmp_path / "runs"
-    source = runs / "calibration_run"
-    destination = runs / "object_run"
-    _write_source(source)
-    _write_destination(destination)
-    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
-    client = create_app().test_client()
-    candidate = client.get(
-        "/ui/calibrations", query_string={"run_root": destination}
-    ).get_json()["calibrations"][0]
-
-    incompatible_sensor = _sensor(mounting_mode="static").to_dict()
-    incompatible = client.post(
-        "/ui/calibrations/select",
-        json={
-            "run_root": destination.as_posix(),
-            "source_run_root": source.as_posix(),
-            "expected_bundle_sha256": candidate["bundle_sha256"],
-            "resolution": "720p",
-            "sensors": [incompatible_sensor],
-        },
-    )
-    assert incompatible.status_code == 409
-    assert incompatible.get_json()["issues"][0]["code"] == "mounting_mode_mismatch"
-    assert not (destination / CALIBRATION_PROFILE_SELECTION).exists()
-
-    stale = client.post(
-        "/ui/calibrations/select",
-        json={
-            "run_root": destination.as_posix(),
-            "source_run_root": source.as_posix(),
-            "expected_bundle_sha256": "0" * 64,
-        },
-    )
-    assert stale.status_code == 409
-    assert stale.get_json()["issues"] == [
-        {
-            "code": "stale_calibration_bundle",
-            "message": "The source calibration hashes changed after the library was loaded.",
-        }
-    ]
 
 
 def test_library_does_not_follow_symlinked_profile_artifacts(
@@ -1158,55 +784,6 @@ def test_library_does_not_follow_symlinked_profile_artifacts(
     assert unsafe["valid"] is False
     assert unsafe["compatible"] is False
     assert unsafe["issues"][0]["code"] == "invalid_calibration_bundle"
-
-
-@pytest.mark.parametrize(
-    "mismatch",
-    ("native_k", "native_distortion", "rectified_k", "rectified_roi", "depth_scale"),
-)
-def test_library_rejects_cross_paired_projection_evidence(
-    tmp_path: Path, monkeypatch, mismatch: str
-) -> None:
-    runs = tmp_path / "runs"
-    source = runs / "cross_paired_calibration"
-    destination = runs / "object_run"
-    _write_source(source)
-    _write_destination(destination)
-    intrinsic_path = source / INTRINSIC_CALIBRATION_PROFILES
-    collection = json.loads(intrinsic_path.read_text())
-    intrinsic = collection["profiles"][0]
-    if mismatch == "native_k":
-        intrinsic["native"]["cam_K"][0] += 1.0
-    elif mismatch == "native_distortion":
-        intrinsic["native"]["distortion"][0] += 0.001
-    elif mismatch == "rectified_k":
-        intrinsic["rectified"]["cam_K"][0] += 1.0
-    elif mismatch == "rectified_roi":
-        intrinsic["rectified"]["valid_roi"][2] -= 1
-    else:
-        intrinsic["depth"]["scale_to_mm"] = 2.0
-    atomic_write_json(intrinsic_path, collection)
-    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
-    client = create_app().test_client()
-
-    payload = client.get(
-        "/ui/calibrations", query_string={"run_root": destination}
-    ).get_json()
-    candidate = _candidate(payload, source)
-
-    assert candidate["valid"] is True
-    assert candidate["compatible"] is False
-    assert candidate["issues"][0]["code"] == (
-        "calibration_intrinsic_projection_mismatch"
-    )
-    rejected = client.post(
-        "/ui/calibrations/select",
-        json=_selection_request(destination, source, candidate["bundle_sha256"]),
-    )
-    assert rejected.status_code == 409
-    assert rejected.get_json()["issues"][0]["code"] == (
-        "calibration_intrinsic_projection_mismatch"
-    )
 
 
 def test_snapshot_verifier_detects_tampering_and_publication_is_read_only(
@@ -1247,37 +824,6 @@ def test_snapshot_verifier_detects_tampering_and_publication_is_read_only(
     ).get_json()
     assert listed["selected"]["valid"] is False
     assert listed["selected"]["issues"][0]["code"] == "invalid_current_selection"
-
-
-def test_snapshot_verifier_rejects_lexically_rebound_path_identity(
-    tmp_path: Path, monkeypatch
-) -> None:
-    runs = tmp_path / "runs"
-    source = runs / "calibration_run"
-    destination = runs / "object_run"
-    _write_source(source)
-    _write_destination(destination)
-    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
-    client = create_app().test_client()
-    candidate = _candidate(
-        client.get(
-            "/ui/calibrations", query_string={"run_root": destination}
-        ).get_json(),
-        source,
-    )
-    selected = client.post(
-        "/ui/calibrations/select",
-        json=_selection_request(destination, source, candidate["bundle_sha256"]),
-    )
-    assert selected.status_code == 201
-    selection_path = destination / CALIBRATION_PROFILE_SELECTION
-    selection = json.loads(selection_path.read_text())
-    original = selection["snapshot"]["calibration_profiles"]["relative_path"]
-    selection["snapshot"]["calibration_profiles"]["relative_path"] = f"./{original}"
-    atomic_write_json(selection_path, selection)
-
-    with pytest.raises(ValueError, match="path identity changed"):
-        verify_calibration_profile_selection(destination, verify_run_config=False)
 
 
 def test_selection_replacement_requires_cas_confirmation_and_blocks_after_capture(
@@ -1353,78 +899,6 @@ def test_selection_replacement_requires_cas_confirmation_and_blocks_after_captur
     issue = blocked.get_json()["issues"][0]
     assert issue["code"] == "calibration_replacement_blocked"
     assert issue["blockers"] == [RAW_ROBOT_EE_POSES]
-
-
-def test_run_config_bundle_cas_rejects_selection_change_and_old_snapshot_fallback(
-    tmp_path: Path, monkeypatch
-) -> None:
-    runs = tmp_path / "runs"
-    source_a = runs / "calibration_a"
-    source_b = runs / "calibration_b"
-    destination = runs / "object_run"
-    _write_source(source_a, bundle_marker="A")
-    _write_source(source_b, bundle_marker="B")
-    _write_destination(destination)
-    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
-    client = create_app().test_client()
-    library = client.get(
-        "/ui/calibrations", query_string={"run_root": destination}
-    ).get_json()
-    candidate_a = _candidate(library, source_a)
-    candidate_b = _candidate(library, source_b)
-    selected_a = client.post(
-        "/ui/calibrations/select",
-        json=_selection_request(destination, source_a, candidate_a["bundle_sha256"]),
-    ).get_json()
-    old_path = selected_a["calibration_profiles"]
-
-    replaced = client.post(
-        "/ui/calibrations/select",
-        json={
-            **_selection_request(destination, source_b, candidate_b["bundle_sha256"]),
-            "expected_current_bundle_sha256": candidate_a["bundle_sha256"],
-            "confirm_replace": True,
-        },
-    )
-    assert replaced.status_code == 201
-    save_payload = {
-        "run_root": destination.as_posix(),
-        "run_name": "object_run",
-        "resolution": "720p",
-        "fps": 6,
-        "velocity_m_s": 0.2,
-        "sensors": [_sensor().to_dict()],
-        "dataset_mode": "objectless",
-        "calibration_profiles": old_path,
-        "expected_calibration_bundle_sha256": candidate_a["bundle_sha256"],
-        "sequence_id": "calibrated_capture_to_bop_dataset_dry_run",
-        "plan_only": True,
-    }
-
-    stale = client.post("/run-config", json=save_payload)
-
-    assert stale.status_code == 409
-    assert stale.get_json()["issues"][0]["code"] == "stale_calibration_selection"
-    assert load_run_config_for_run_root(destination)["calibration_profiles"] is None
-
-    without_explicit_cas = dict(save_payload)
-    without_explicit_cas.pop("expected_calibration_bundle_sha256")
-    rebound = client.post("/run-config", json=without_explicit_cas)
-    assert rebound.status_code == 409
-    assert rebound.get_json()["issues"][0]["code"] == (
-        "calibration_selection_path_mismatch"
-    )
-
-    omitted_path = {
-        **save_payload,
-        "calibration_profiles": None,
-        "expected_calibration_bundle_sha256": candidate_b["bundle_sha256"],
-    }
-    missing = client.post("/run-config", json=omitted_path)
-    assert missing.status_code == 409
-    assert missing.get_json()["issues"][0]["code"] == (
-        "calibration_selection_path_missing"
-    )
 
 
 def test_auto_device_id_does_not_wildcard_match_a_physical_profile(

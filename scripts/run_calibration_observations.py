@@ -11,11 +11,7 @@ from posetestbot.calibration.observations import (
     build_calibration_observations,
     write_calibration_observations_with_manifest,
 )
-from posetestbot.calibration.targets import (
-    SUPPORTED_TARGET_TYPES,
-    load_calibration_target_spec,
-    normalize_calibration_target_spec,
-)
+from posetestbot.calibration.targets import load_calibration_target_spec
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,42 +58,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target-spec",
+        default="calibration_target.json",
         help=(
-            "Optional JSON calibration target metadata. Relative paths are "
+            "Current calibration_target.v2 JSON. Relative paths are "
             "resolved from the run root when not found from the current directory."
         ),
-    )
-    parser.add_argument(
-        "--target-type",
-        choices=SUPPORTED_TARGET_TYPES,
-        help="Calibration target type to record in the observation report.",
-    )
-    parser.add_argument(
-        "--dictionary",
-        help="ArUco/ChArUco dictionary name, e.g. DICT_5X5_50.",
-    )
-    parser.add_argument(
-        "--grid-size",
-        help="ArUco/ChArUco grid size as COLSxROWS.",
-    )
-    parser.add_argument(
-        "--marker-length-mm",
-        type=float,
-        help="Marker side length in millimeters.",
-    )
-    parser.add_argument(
-        "--marker-separation-mm",
-        type=float,
-        help="ArUco grid marker separation in millimeters.",
-    )
-    parser.add_argument(
-        "--square-length-mm",
-        type=float,
-        help="ChArUco/checkerboard square side length in millimeters.",
-    )
-    parser.add_argument(
-        "--checkerboard-size",
-        help="Checkerboard inner-corner or board size as COLSxROWS.",
     )
     parser.add_argument(
         "--no-write",
@@ -113,22 +78,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def _target_spec_from_args(args: argparse.Namespace) -> dict:
-    base = None
-    if args.target_spec:
-        target_path = Path(args.target_spec)
-        if not target_path.is_absolute() and not target_path.exists():
-            target_path = Path(args.run_root) / target_path
-        base = load_calibration_target_spec(target_path)
-    return normalize_calibration_target_spec(
-        base,
-        target_type=args.target_type,
-        dictionary=args.dictionary,
-        grid_size=args.grid_size,
-        marker_length=args.marker_length_mm,
-        marker_separation=args.marker_separation_mm,
-        square_length=args.square_length_mm,
-        checkerboard_size=args.checkerboard_size,
-    )
+    target_path = Path(args.target_spec)
+    if not target_path.is_absolute() and not target_path.exists():
+        target_path = Path(args.run_root) / target_path
+    return load_calibration_target_spec(target_path)
 
 
 def main() -> None:

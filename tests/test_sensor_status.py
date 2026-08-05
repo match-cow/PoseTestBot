@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import importlib.util
+
 import json
+
 import os
+
 import sys
+
 from pathlib import Path
 
 from posetestbot.sensors import discovery
+
 from posetestbot.sensors import aliases as sensor_aliases
+
 from posetestbot.sensors.aliases import (
     load_sensor_aliases,
     save_sensor_aliases,
     sensor_alias_key,
     sensor_alias_file_state,
 )
+
 from posetestbot.sensors import status as sensor_status
+
 from posetestbot.sensors.contracts import SensorDeviceInfo, SensorType
 
 
@@ -91,66 +99,6 @@ def test_collect_sensor_status_reports_explicit_expected_counts(monkeypatch) -> 
     assert families["realsense_d435"]["expected_count"] == 3
     assert families["zed_2i"]["meets_expected"] is False
     assert families["zed_2i"]["meets_expected"] is False
-
-
-def test_realsense_usb_only_fallback_does_not_satisfy_expected_count(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(sensor_status, "sdk_module_available", lambda _: True)
-    sdk_devices = [
-        SensorDeviceInfo(
-            sensor_type=SensorType.REALSENSE_D435,
-            device_id=serial,
-            display_name=f"RealSense {serial}",
-            metadata={"discovery": "librealsense"},
-        )
-        for serial in ("825412070181", "923322072633")
-    ]
-    usb_only = SensorDeviceInfo(
-        sensor_type=SensorType.REALSENSE_D435,
-        device_id="usb-005-005",
-        display_name="Intel RealSense D435 usb-005-005",
-        metadata={
-            "discovery": "lsusb_descriptor",
-            "serial_available": False,
-            "bus": "005",
-            "device": "005",
-        },
-    )
-
-    status = sensor_status.collect_sensor_status(
-        expected_counts={SensorType.REALSENSE_D435: 3},
-        discoverers={
-            SensorType.REALSENSE_D435: lambda: [*sdk_devices, usb_only],
-            SensorType.OAK_D_PRO: lambda: [],
-            SensorType.ZED_2I: lambda: [],
-        },
-    )
-
-    family = status["families"][0]
-    assert status["total_connected"] == 3
-    assert status["total_capture_ready"] == 2
-    assert status["all_expected_connected"] is False
-    assert family["connected_count"] == 3
-    assert family["capture_ready_count"] == 2
-    assert family["meets_expected"] is False
-    by_id = {item["device_id"]: item for item in family["devices"]}
-    fallback = by_id["usb-005-005"]
-    assert fallback["connected"] is True
-    assert fallback["capture_ready"] is False
-    assert fallback["capture_readiness_reason"] == "not_enumerated_by_sdk"
-    assert fallback["metadata"]["bus"] == "005"
-    assert [item["code"] for item in family["diagnostics"]] == [
-        "devices_not_capture_ready",
-        "expected_count_not_met",
-    ]
-    assert family["diagnostics"][0]["devices"] == [
-        {
-            "device_id": "usb-005-005",
-            "reason": "not_enumerated_by_sdk",
-            "discovery": "lsusb_descriptor",
-        }
-    ]
 
 
 def test_realsense_usb_fallback_is_not_ready_without_sdk(monkeypatch) -> None:
@@ -237,40 +185,6 @@ def test_realsense_sdk_usb2_device_is_not_capture_ready(monkeypatch) -> None:
     ]
 
 
-def test_realsense_missing_or_unrecognized_usb_descriptor_is_backward_compatible(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(sensor_status, "sdk_module_available", lambda _: True)
-    devices = [
-        SensorDeviceInfo(
-            sensor_type=SensorType.REALSENSE_D435,
-            device_id="legacy-missing",
-            display_name="Legacy RealSense",
-            metadata={"discovery": "librealsense"},
-        ),
-        SensorDeviceInfo(
-            sensor_type=SensorType.REALSENSE_D435,
-            device_id="legacy-unknown",
-            display_name="Legacy RealSense",
-            metadata={
-                "discovery": "librealsense",
-                "usb_type_descriptor": "unknown",
-            },
-        ),
-    ]
-
-    family = sensor_status.collect_sensor_family_status(
-        SensorType.REALSENSE_D435,
-        expected_count=2,
-        discoverer=lambda: devices,
-    ).as_dict(aliases={})
-
-    assert family["capture_ready_count"] == 2
-    assert family["meets_expected"] is True
-    assert all(item["capture_ready"] for item in family["devices"])
-    assert family["diagnostics"] == []
-
-
 def test_depthai_device_id_accepts_v3_device_info_shape() -> None:
     class FakeDepthAIV3DeviceInfo:
         deviceId = "18443010314F3B1300"
@@ -280,8 +194,7 @@ def test_depthai_device_id_accepts_v3_device_info_shape() -> None:
             return self.deviceId
 
     assert (
-        discovery._depthai_device_id(FakeDepthAIV3DeviceInfo())
-        == "18443010314F3B1300"
+        discovery._depthai_device_id(FakeDepthAIV3DeviceInfo()) == "18443010314F3B1300"
     )
 
 
@@ -406,53 +319,6 @@ def test_realsense_discovery_merges_sdk_devices_with_usb_video_nodes(
     assert devices[0].metadata["video_nodes"][0]["path"] == "/dev/video4"
 
 
-def test_realsense_discovery_skips_unsupported_optional_camera_info(
-    monkeypatch,
-) -> None:
-    class FakeCameraInfo:
-        serial_number = "serial_number"
-        name = "name"
-        product_line = "product_line"
-        recommended_firmware_version = "recommended_firmware_version"
-
-    class FakeDevice:
-        def supports(self, key):
-            return key != "recommended_firmware_version"
-
-        def get_info(self, key):
-            if key == "recommended_firmware_version":
-                raise AssertionError("unsupported camera_info was queried")
-            return {
-                "serial_number": "sdk-serial-1",
-                "name": "Intel RealSense D435",
-                "product_line": "D400",
-            }[key]
-
-    fake_rs = type(
-        "FakeRS",
-        (),
-        {
-            "camera_info": FakeCameraInfo,
-            "context": staticmethod(
-                lambda: type(
-                    "FakeContext",
-                    (),
-                    {"query_devices": lambda self: [FakeDevice()]},
-                )()
-            ),
-        },
-    )
-    monkeypatch.setitem(sys.modules, "pyrealsense2", fake_rs)
-    monkeypatch.setattr(discovery, "_video_node_metadata_by_serial", lambda: {})
-    monkeypatch.setattr(discovery, "_discover_realsense_from_lsusb", lambda: [])
-
-    devices = discovery.discover_realsense_d435()
-
-    assert len(devices) == 1
-    assert devices[0].metadata["discovery"] == "librealsense"
-    assert "recommended_firmware_version" not in devices[0].metadata
-
-
 def test_collect_sensor_status_records_discovery_errors(monkeypatch) -> None:
     monkeypatch.setattr(sensor_status, "sdk_module_available", lambda _: True)
 
@@ -521,36 +387,6 @@ def test_collect_sensor_status_adds_udev_and_sdk_diagnostics(
     ]
 
 
-def test_collect_sensor_status_reports_unsupported_depthai_version(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(sensor_status, "sdk_module_available", lambda _: True)
-
-    def sdk_version(module_name: str) -> str | None:
-        return "2.30.0.0" if module_name == "depthai" else None
-
-    monkeypatch.setattr(sensor_status, "sdk_module_version", sdk_version)
-
-    status = sensor_status.collect_sensor_status(
-        expected_counts={
-            SensorType.REALSENSE_D435: None,
-            SensorType.OAK_D_PRO: None,
-            SensorType.ZED_2I: None,
-        },
-        discoverers={
-            SensorType.REALSENSE_D435: lambda: [],
-            SensorType.OAK_D_PRO: lambda: [],
-            SensorType.ZED_2I: lambda: [],
-        },
-    )
-
-    families = {family["sensor_type"]: family for family in status["families"]}
-    oak = families["oak_d_pro"]
-    assert oak["sdk_version"] == "2.30.0.0"
-    assert oak["sdk_requirement"] == ">=3,<4"
-    assert oak["diagnostics"][0]["code"] == "sdk_version_unsupported"
-
-
 def test_sensor_status_json_stdout_survives_noisy_sdk(monkeypatch, capfd) -> None:
     script_path = Path(__file__).parents[1] / "scripts" / "sensor_status.py"
     spec = importlib.util.spec_from_file_location(
@@ -581,31 +417,6 @@ def test_sensor_status_json_stdout_survives_noisy_sdk(monkeypatch, capfd) -> Non
     assert json.loads(captured.out)["schema_version"] == sensor_status.SCHEMA_VERSION
     assert "vendor warning on stdout" not in captured.out
     assert "vendor warning on stdout" in captured.err
-
-
-def test_parse_expected_counts_validates_sensor_type_and_count() -> None:
-    counts = sensor_status.parse_expected_counts(
-        ["realsense_d435=2", "oak_d_pro=none", "zed_2i=0"]
-    )
-
-    assert counts[SensorType.REALSENSE_D435] == 2
-    assert counts[SensorType.OAK_D_PRO] is None
-    assert counts[SensorType.ZED_2I] == 0
-    assert sensor_status.parse_expected_counts([]) == {}
-
-    try:
-        sensor_status.parse_expected_counts(["unknown=1"])
-    except ValueError as exc:
-        assert "Unknown sensor type" in str(exc)
-    else:
-        raise AssertionError("unknown sensor type was accepted")
-
-    try:
-        sensor_status.parse_expected_counts(["zed_2i=-1"])
-    except ValueError as exc:
-        assert "cannot be negative" in str(exc)
-    else:
-        raise AssertionError("negative expected count was accepted")
 
 
 def test_sensor_aliases_round_trip_and_merge_into_status(

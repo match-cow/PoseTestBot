@@ -46,7 +46,7 @@ Bun is not required for normal Python installation or runtime because the
 locked production build is committed and packaged in the wheel.
 
 Omit `--with-posegridgen` when this checkout only needs to consume existing
-`calibration_target.v1/v2` files. The Calibration Targets generator is then
+`calibration_target.v2` files. The Calibration Targets generator is then
 reported unavailable, while calibration readers and the bundled UI continue
 to work.
 
@@ -324,6 +324,36 @@ dependencies into the main project environment. Official VSD rendering uses
 Vispy with EGL in headless mode and therefore also needs a working host
 EGL/OpenGL implementation.
 
+### Optional external cluster controller
+
+FoundationPose and cluster storage live in the separate
+`match-cow/posetestbot-cluster` repository; do not install its estimator
+runtime or SSH credentials into PoseTestBot. Deploy that controller as a
+loopback-only workstation service. PoseTestBot exposes only status, pose-job
+submission/logs/cancellation, immutable result import/download, and archive
+copy/restore. It needs one enable switch plus the shared bearer token and URL
+in the web process environment:
+
+```bash
+POSETESTBOT_CLUSTER_URL=http://127.0.0.1:8765
+POSETESTBOT_CLUSTER_API_TOKEN=<32-or-more-random-characters>
+POSETESTBOT_CLUSTER_ENABLED=true
+```
+
+Enable the integration only after the companion reports both LUIS hosts,
+`checkquota`, the pinned SIF/weights/manifest hashes, and an enabled qualified
+GPU profile as ready. FoundationPose's exact upstream license is bundled into the private
+SIF as runtime provenance; PoseTestBot has no license-approval flag. Build the
+SIF on a LUIS login node with Apptainer `--fakeroot`, retain it only below the
+companion's BIGWORK runtime root, and follow the companion repository's LUIS
+SIF runbook. Verify archive copy and restore before operational use. PoseTestBot
+does not request remote-source deletion or expose remote paths. The web server
+forwards the token only to loopback; no `/cluster/*` response includes it. A controller result is
+imported only when the local dataset identity still matches its staged
+snapshot. An intact historical CSV remains downloadable after dataset drift,
+but evaluation remains blocked until the matching snapshot is selected or
+restored.
+
 Imported results must already use the BOP filename convention and the exact
 `scene_id,im_id,obj_id,score,R,t,time` header. Each result is copied and
 hash-bound below `processed/bop_evaluation/results/<result_id>/`. Queued
@@ -454,71 +484,14 @@ world-frame choice. Matching path strings establish software provenance only:
 commissioning must still prove that a persistent Sunrise frame was not retaught
 and is aligned to the intended physical datum.
 
-#### Combined static and robot-mounted D435 triggering
+#### Timestamp-aligned capture
 
-`run_config.v3` supports one explicit mixed-mount hardware mode:
-`capture_synchronization.v1` with `mode=hardware_trigger`,
-`implementation=realsense_inter_cam_sync`, and `scope=depth_exposure`. Every
-enabled camera in such a run must be an exact-ID D435. The group needs at least
-one `static` and one `eye_in_hand` camera, exactly one master, and one or more
-subordinates. The normal `timestamp_aligned` mode remains available for all
-other sensor combinations.
-
-The Python environment and installer need no extra package for this mode, but
-the physical sync harness is an operator-qualified hardware prerequisite.
-Build and inspect it against Intel's D400 multi-camera guidance, including the
-documented sync/ground pins and electrical limits:
-
-https://dev.realsenseai.com/docs/multiple-depth-cameras-configuration/
-
-Before research acquisition, retain evidence that the exact mounted devices
-and harness pass continuity/electrical inspection, master/subordinate SDK
-configuration and read-back, global-time metadata checks, and a shared-view
-pulsed LED visible in the depth/IR stream, or an equivalent exposure-timing
-qualification, at the intended frame rate. Plan-only validation cannot
-establish any of those physical facts.
-Record the passed external evidence without opening hardware:
-
-```bash
-uv run python scripts/record_hardware_sync_qualification.py \
-  working_data/combined_run \
-  --operator OPERATOR_ID \
-  --method pulsed_light \
-  --observed-max-depth-timestamp-skew-ms 0.8 \
-  --evidence path/to/pulse-trace.csv \
-  --confirm-passed
-```
-
-The resulting `hardware_sync_qualification.json` is hash-bound to the exact
-resolution, FPS, synchronization policy, camera IDs, mounts, and roles.
-Preflight and later dataset stages reject missing, tampered, copied-to-another-
-run, or stale evidence. The recorder copies files only and never accesses a
-camera or robot. Publish it before acquisition. After any capture status,
-report, log, raw camera data, or raw robot-pose evidence exists, qualification
-publication and replacement are blocked; use a new run root for another
-qualification or contract. Treat both the configured and observed maximum skew
-as the full earliest-to-latest depth timestamp span across every camera in a
-complete group.
-No physical hardware-sync capture was performed as part of the software
-implementation.
-
-The supported claim is deliberately **depth exposure only**. D435 color uses a
-rolling shutter and is not certified by this contract as the same RGB exposure
-across cameras. PoseTestBot records the associated RGB frame and its limitation
-instead of upgrading the claim. Do not directly connect or add the current USB
-OAK-D Pro or USB ZED 2i to this trigger group: their present lab interfaces
-cannot participate in the supported D435 inter-camera synchronization
-contract.
-
-During supervised capture, camera metadata has a liveness deadline independent
-of the robot UDP first/inter-packet timeouts. Its default is 12 planned frame
-periods clamped to 2–5 seconds; an explicit override cannot exceed five
-seconds. A stalled, truncated, rewritten, or non-monotonic stream aborts local
-capture while preserving all raw evidence. The successful full-capture report
-binds the exact configuration and qualification hashes after immediate
-pre-receiver revalidation. Authoritative complete groups and BOP frame sets
-carry that binding, and `rewrite_bop_export_readiness.v1` rejects disagreement
-with the current qualification or capture report.
+`run_config.v3` supports one synchronization mode: `timestamp_aligned`.
+RealSense, OAK-D Pro, and ZED 2i recordings retain their camera timestamp and
+host-receive evidence; non-destructive synchronization pairs eligible frames
+with the robot pose stream and records the applied calibration offset and pose
+gap. PoseTestBot does not configure trigger roles, qualify a sync harness, or
+claim simultaneous exposure across cameras.
 
 ### OAK-D Pro
 
@@ -536,13 +509,8 @@ uses a non-blocking DepthAI v3 queue with a single latest frame. The Snapshot
 control remains a one-frame aligned 1280×720 RGB-D acquisition, matching the
 RealSense snapshot contract.
 
-The current PoseTestBot contract does not implement or qualify the USB OAK-D
-Pro as a member of the supported D435 group, so it is accepted only in
-`timestamp_aligned` runs. Luxonis documents external frame-sync connectors on
-other hardware, such as the PoE model, but that is a different electrical
-interface and is not interchangeable with the implemented D435 sync contract:
-
-https://docs.luxonis.com/hardware/products/OAK-D%20Pro%20PoE
+The OAK-D Pro participates through the same timestamp-aligned acquisition
+contract as the other supported cameras.
 
 ### ZED 2i
 
@@ -556,11 +524,8 @@ uv run python scripts/runtime_status.py --json
 uv run python scripts/sensor_status.py --expected zed_2i=1 --check-expected
 ```
 
-The current USB ZED 2i is likewise accepted only in `timestamp_aligned` runs.
-Stereolabs documents hardware triggering for ZED X/GMSL through ZED Link, not
-for the lab's USB ZED 2i:
-
-https://docs.stereolabs.com/docs/development/zed-sdk/modules/camera/multi-camera#frame-synchronization
+The current USB ZED 2i participates through the same timestamp-aligned
+acquisition contract.
 
 ### BlenderProc
 

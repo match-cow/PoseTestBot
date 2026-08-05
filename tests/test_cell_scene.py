@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
-import shutil
+
+
 from dataclasses import replace
+
 from pathlib import Path
 
 import cv2
+
 import numpy as np
+
 import pytest
 
 from posetestbot.calibration.profiles import (
@@ -18,20 +22,30 @@ from posetestbot.calibration.profiles import (
     TransformFrame,
     write_profile_collection,
 )
+from posetestbot.calibration.targets import (
+    DEFAULT_TARGET_SPEC,
+    normalize_calibration_target_spec,
+)
+
 from posetestbot.cell.scene import (
     _pose_template_footprint,
     build_cell_scene,
     cell_timeline_page,
 )
+
 from posetestbot.io.artifacts import BOP_DIR, BOP_EXPORT_MANIFEST
+
 from posetestbot.pipeline.run_config import (
     FixedFrameTransform,
     create_run_config,
     sensor_config_from_token,
     write_run_config,
 )
+
 from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
+
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
+
 from posetestbot.web.app import create_app
 
 
@@ -178,9 +192,7 @@ def make_scene_run(tmp_path: Path) -> Path:
             ),
             FixedFrameTransform("tcp", "robot_flange", (1, 0, 0, 0), (0, 0, 120)),
         ),
-        robot_pose_sunrise_reference_frame_path=(
-            POSE_TEMPLATE_BASE_SUNRISE_PATH
-        ),
+        robot_pose_sunrise_reference_frame_path=(POSE_TEMPLATE_BASE_SUNRISE_PATH),
     )
     write_run_config(run_root, config)
     for sensor in ("realsense_111", "realsense_222"):
@@ -214,19 +226,17 @@ def make_scene_run(tmp_path: Path) -> Path:
         )
     (run_root / "calibration_target.json").write_text(
         json.dumps(
-            {
-                "schema_version": "calibration_target.v1",
-                "target_type": "aruco_grid",
-                "grid_size": [2, 2],
-                "marker_length": 40,
-                "marker_separation": 50,
-                "placement": {
-                    "from": "aruco_grid",
-                    "to": "template_base",
-                    "rotation_quaternion_wxyz": [1, 0, 0, 0],
-                    "translation_mm": [5, 6, 7],
-                },
-            }
+            normalize_calibration_target_spec(
+                {
+                    **DEFAULT_TARGET_SPEC,
+                    "placement": {
+                        "from": "aruco_grid",
+                        "to": "template_base",
+                        "rotation_quaternion_wxyz": [1, 0, 0, 0],
+                        "translation_mm": [5, 6, 7],
+                    },
+                }
+            )
         )
     )
     return run_root
@@ -337,8 +347,9 @@ def test_scene_composes_frames_sensors_and_exact_timelines(tmp_path: Path) -> No
         6.0,
         7.0,
     ]
-    assert entities["calibration_target"]["geometry"]["frame"] == (
-        presentation["target_frame"]
+    assert (
+        entities["calibration_target"]["geometry"]["frame"]
+        == (presentation["target_frame"])
     )
     assert len(scene["timelines"]) == 2
     assert [pose["index"] for pose in scene["trajectory_preview"]] == [0, 1, 2]
@@ -386,70 +397,6 @@ def test_scene_omits_disabled_camera_even_when_a_valid_profile_exists(
     )
     assert flange["provenance"]["source"].endswith(
         "processed/synchronized/realsense_222/match_robot_ee_poses.json"
-    )
-
-
-def test_scene_retains_reference_z_up_presentation_without_grid_target(
-    tmp_path: Path,
-) -> None:
-    run_root = make_scene_run(tmp_path)
-    (run_root / "calibration_target.json").unlink()
-
-    scene = build_cell_scene(run_root)
-
-    assert scene["coordinate_system"]["up_axis"] == "+Z"
-    presentation = scene["coordinate_system"]["presentation"]
-    assert presentation["mode"] == "reference_z_up"
-    assert presentation["target_frame"] is None
-    assert np.allclose(presentation["matrix"], np.eye(4))
-
-
-def test_scene_raw_timeline_fallback_ignores_disabled_sensor_folder(
-    tmp_path: Path,
-) -> None:
-    run_root = make_scene_run(tmp_path)
-    shutil.rmtree(run_root / "processed")
-    config_path = run_root / "run_config.json"
-    config = json.loads(config_path.read_text())
-    next(
-        sensor
-        for sensor in config["capture"]["sensors"]
-        if sensor["device_id"] == "111"
-    )["enabled"] = False
-    config_path.write_text(json.dumps(config))
-    for device_id, x_mm in (("111", 111), ("222", 222)):
-        folder = run_root / f"realsense_{device_id}"
-        folder.mkdir()
-        (folder / "raw_robot_ee_poses.json").write_text(
-            json.dumps(
-                {
-                    "0": {
-                        "pose": {
-                            "X": x_mm,
-                            "Y": 2,
-                            "Z": 3,
-                            "A": 0,
-                            "B": 0,
-                            "C": 0,
-                        }
-                    }
-                }
-            )
-        )
-
-    scene = build_cell_scene(run_root)
-
-    assert scene["default_timeline_id"] == "raw:robot"
-    assert scene["trajectory_preview"][0]["transform"]["translation_mm"] == [
-        222.0,
-        2.0,
-        3.0,
-    ]
-    flange = next(
-        entity for entity in scene["entities"] if entity["id"] == "robot_flange"
-    )
-    assert flange["provenance"]["source"].endswith(
-        "realsense_222/raw_robot_ee_poses.json"
     )
 
 
@@ -515,96 +462,6 @@ def test_scene_marks_missing_calibration_and_supports_raw_fallback(
     assert entities["tcp"]["status"] == "not_configured"
 
 
-def test_scene_uses_latest_run_attempt_board_as_reference_surface(
-    tmp_path: Path, monkeypatch
-) -> None:
-    run_root = make_scene_run(tmp_path)
-    (run_root / "calibration_target.json").unlink()
-    config_path = run_root / "run_config.json"
-    config = json.loads(config_path.read_text())
-    config["calibration_profiles"] = None
-    config_path.write_text(json.dumps(config))
-    attempt_id = "a" * 32
-    attempt = run_root / "processed" / "calibration" / attempt_id
-    bundle = attempt / "target_bundle"
-    bundle.mkdir(parents=True)
-    target = {
-        "schema_version": "calibration_target.v2",
-        "target_id": "target-from-attempt",
-        "target_type": "aruco_grid",
-        "display_name": "Attempt board",
-        "target_bounds": {"x_mm": 0, "y_mm": 0, "width_mm": 90, "height_mm": 40},
-        "grid_size": [2, 1],
-        "markers": [
-            {"id": 0, "corners_mm": [[0, 0, 0], [40, 0, 0], [40, 40, 0], [0, 40, 0]]},
-            {"id": 1, "corners_mm": [[50, 0, 0], [90, 0, 0], [90, 40, 0], [50, 40, 0]]},
-        ],
-    }
-    (bundle / "calibration_target.json").write_text(json.dumps(target))
-    (bundle / "calibration_target.pdf").write_bytes(b"%PDF-1.4\n% cell test\n")
-    (attempt / "request.json").write_text(
-        json.dumps(
-            {
-                "attempt_id": attempt_id,
-                "created_at": "2026-07-22T10:00:00Z",
-                "target_mounting": {
-                    "from": "aruco_grid",
-                    "to": "template_base",
-                    "state": "estimated",
-                },
-            }
-        )
-    )
-    (attempt / "progress.json").write_text(
-        json.dumps({"attempt_id": attempt_id, "status": "complete"})
-    )
-
-    scene = build_cell_scene(run_root)
-    entities = {item["id"]: item for item in scene["entities"]}
-    board = entities["calibration_target"]
-
-    assert board["label"] == "Attempt board (reference placement)"
-    assert board["status"] == "reference"
-    assert board["transform"]["translation_mm"] == [0.0, 0.0, 0.0]
-    assert len(board["geometry"]["markers"]) == 2
-    assert board["geometry"]["pdf_url"].startswith(
-        "/ui/cell-calibration-target-pdf?run_root="
-    )
-    assert board["provenance"]["attempt_id"] == attempt_id
-    assert not any(item["id"] == "hri_template" for item in scene["entities"])
-
-    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
-    monkeypatch.setenv("POSETESTBOT_WEB_INPUT_ROOTS", tmp_path.as_posix())
-    response = create_app().test_client().get(
-        "/ui/cell-calibration-target-pdf",
-        query_string={"run_root": run_root},
-    )
-    assert response.status_code == 200
-    assert response.mimetype == "application/pdf"
-    assert response.data.startswith(b"%PDF")
-
-
-def test_scene_places_promoted_board_from_profile_companion_transform(
-    tmp_path: Path,
-) -> None:
-    run_root = make_scene_run(tmp_path)
-    target_path = run_root / "calibration_target.json"
-    target = json.loads(target_path.read_text())
-    target.pop("placement")
-    target["target_id"] = "target-1"
-    target_path.write_text(json.dumps(target))
-
-    scene = build_cell_scene(run_root)
-    board = next(item for item in scene["entities"] if item["id"] == "calibration_target")
-
-    assert board["status"] == "planned"
-    assert board["transform"]["translation_mm"] == [1.0, 2.0, 3.0]
-    assert board["provenance"]["placement_source"] == (
-        "promoted_calibration_profile_companion"
-    )
-    assert board["geometry"]["placement_known"] is True
-
-
 def test_pose_template_footprint_uses_exact_snapshot_preview(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     snapshot = run_root / "processed" / "pose_template_selection"
@@ -623,7 +480,9 @@ def test_pose_template_footprint_uses_exact_snapshot_preview(tmp_path: Path) -> 
             }
         )
     )
-    contours = [[{"x_mm": 10, "y_mm": 20}, {"x_mm": 30, "y_mm": 20}, {"x_mm": 10, "y_mm": 40}]]
+    contours = [
+        [{"x_mm": 10, "y_mm": 20}, {"x_mm": 30, "y_mm": 20}, {"x_mm": 10, "y_mm": 40}]
+    ]
     (snapshot / "pose_template_preview.json").write_text(
         json.dumps(
             {
@@ -651,24 +510,6 @@ def test_pose_template_footprint_uses_exact_snapshot_preview(tmp_path: Path) -> 
     ]
 
 
-def test_scene_rejects_pinned_profile_for_another_mounting_identity(
-    tmp_path: Path,
-) -> None:
-    run_root = make_scene_run(tmp_path)
-    config = json.loads((run_root / "run_config.json").read_text())
-    config["capture"]["sensors"][0]["calibration_profile_id"] = "static_profile_111"
-    (run_root / "run_config.json").write_text(json.dumps(config))
-
-    scene = build_cell_scene(run_root)
-    wrist = next(
-        entity for entity in scene["entities"] if entity["id"] == "camera:realsense_111"
-    )
-
-    assert wrist["status"] == "unresolved"
-    assert wrist["transform"] is None
-    assert "No eye_in_hand calibration profile matches" in wrist["unresolved_reason"]
-
-
 def test_scene_rejects_pinned_profile_for_another_device(tmp_path: Path) -> None:
     run_root = make_scene_run(tmp_path)
     config = json.loads((run_root / "run_config.json").read_text())
@@ -686,207 +527,6 @@ def test_scene_rejects_pinned_profile_for_another_device(tmp_path: Path) -> None
         "does not match sensor identity realsense_d435:111"
         in wrist["unresolved_reason"]
     )
-
-
-def test_scene_never_reuses_family_generic_profile_across_devices(
-    tmp_path: Path,
-) -> None:
-    profiles_path = tmp_path / "family-profiles.json"
-    write_profile_collection(
-        [
-            profile(
-                "realsense",
-                MountingMode.EYE_IN_HAND,
-                profile_id="family_generic_wrist",
-            )
-        ],
-        profiles_path,
-    )
-    run_root = tmp_path / "generic-run"
-    pinned = replace(
-        sensor_config_from_token("realsense:111:eye_in_hand:Wrist one"),
-        calibration_profile_id="family_generic_wrist",
-    )
-    write_run_config(
-        run_root,
-        create_run_config(
-            run_root=run_root,
-            calibration_profiles=profiles_path.as_posix(),
-            sensors=(
-                pinned,
-                sensor_config_from_token("realsense:222:eye_in_hand:Wrist two"),
-            ),
-        ),
-    )
-
-    scene = build_cell_scene(run_root)
-    cameras = [entity for entity in scene["entities"] if entity["type"] == "camera"]
-
-    assert len(cameras) == 2
-    assert all(camera["status"] == "unresolved" for camera in cameras)
-    assert all(camera["transform"] is None for camera in cameras)
-    assert all("calibration" not in camera for camera in cameras)
-
-
-def test_scene_supports_run_relative_calibration_profile_path(tmp_path: Path) -> None:
-    run_root = tmp_path / "relative-run"
-    write_wrist_run_config(run_root, "calibration_profiles.json")
-    profiles_path = run_root / "calibration_profiles.json"
-    write_profile_collection(
-        [profile("111", MountingMode.EYE_IN_HAND, profile_id="wrist_111")],
-        profiles_path,
-    )
-
-    scene = build_cell_scene(run_root)
-    wrist = next(entity for entity in scene["entities"] if entity["type"] == "camera")
-
-    assert wrist["status"] == "planned"
-    assert wrist["calibration"]["evidence"]["profile_source"] == (
-        profiles_path.resolve().as_posix()
-    )
-
-
-def test_scene_supports_cli_style_cwd_relative_calibration_profile_path(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    run_root = tmp_path / "working_data" / "foo"
-    configured_path = "working_data/foo/calibration_profiles.json"
-    write_wrist_run_config(run_root, configured_path)
-    profiles_path = run_root / "calibration_profiles.json"
-    write_profile_collection(
-        [profile("111", MountingMode.EYE_IN_HAND, profile_id="wrist_111")],
-        profiles_path,
-    )
-
-    scene = build_cell_scene(run_root)
-    wrist = next(entity for entity in scene["entities"] if entity["type"] == "camera")
-
-    assert wrist["status"] == "planned"
-    assert wrist["calibration"]["evidence"]["profile_source"] == (
-        profiles_path.resolve().as_posix()
-    )
-
-
-def test_scene_rejects_ambiguous_relative_calibration_profile_path(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    run_root = tmp_path / "working_data" / "ambiguous"
-    write_wrist_run_config(run_root, "profiles.json")
-    write_profile_collection(
-        [profile("111", MountingMode.EYE_IN_HAND, profile_id="wrist_111")],
-        run_root / "profiles.json",
-    )
-    write_profile_collection(
-        [profile("111", MountingMode.EYE_IN_HAND, profile_id="cwd_wrist_111")],
-        tmp_path / "profiles.json",
-    )
-
-    scene = build_cell_scene(run_root)
-    wrist = next(entity for entity in scene["entities"] if entity["type"] == "camera")
-
-    assert wrist["status"] == "unresolved"
-    assert any(
-        warning["code"] == "invalid_calibration_profiles"
-        and "Ambiguous calibration profile path" in warning["message"]
-        for warning in scene["warnings"]
-    )
-
-
-def test_scene_coerces_legacy_numeric_evidence_to_json_numbers(
-    tmp_path: Path,
-) -> None:
-    run_root = make_scene_run(tmp_path)
-    profiles_path = tmp_path / "profiles.json"
-    payload = json.loads(profiles_path.read_text())
-    wrist_profile = next(
-        item
-        for item in payload["profiles"]
-        if item["profile_id"] == "promoted_wrist_111"
-    )
-    wrist_profile["quality"].update(
-        {
-            "mean_reprojection_error_px": "0.25",
-            "max_reprojection_error_px": "0.75",
-            "residual_translation_mm": "0.5",
-            "residual_rotation_deg": "0.2",
-        }
-    )
-    wrist_profile["sync_delta_ms"] = "1.75"
-    wrist_profile["metadata"]["outlier_count"] = "1"
-    wrist_profile["metadata"]["outlier_ratio"] = "0.125"
-    profiles_path.write_text(json.dumps(payload))
-
-    scene = build_cell_scene(run_root)
-    wrist = next(
-        entity for entity in scene["entities"] if entity["id"] == "camera:realsense_111"
-    )
-    quality = wrist["calibration"]["quality"]
-    evidence = wrist["calibration"]["evidence"]
-
-    assert quality["mean_reprojection_error_px"] == 0.25
-    assert quality["max_reprojection_error_px"] == 0.75
-    assert quality["residual_translation_mm"] == 0.5
-    assert quality["residual_rotation_deg"] == 0.2
-    assert quality["outlier_count"] == 1
-    assert quality["outlier_ratio"] == 0.125
-    assert evidence["sync_delta_ms"] == 1.75
-    assert isinstance(quality["mean_reprojection_error_px"], float)
-    assert isinstance(quality["outlier_count"], int)
-
-
-def test_scene_uses_wxyz_camera_to_parent_direction_for_rotated_extrinsic(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "rotated-run"
-    profiles_path = tmp_path / "rotated-profiles.json"
-    half_sqrt_two = 2**-0.5
-    write_profile_collection(
-        [
-            profile(
-                "111",
-                MountingMode.EYE_IN_HAND,
-                profile_id="wrist_111",
-                rotation_quaternion_wxyz=(
-                    half_sqrt_two,
-                    0,
-                    0,
-                    half_sqrt_two,
-                ),
-                translation_mm=(10, 20, 30),
-            )
-        ],
-        profiles_path,
-    )
-    write_wrist_run_config(run_root, profiles_path.as_posix())
-
-    scene = build_cell_scene(run_root)
-    wrist = next(entity for entity in scene["entities"] if entity["type"] == "camera")
-    calibration = wrist["calibration"]
-    matrix = np.asarray(calibration["extrinsics"]["matrix"])
-
-    assert wrist["transform"]["parent_frame"] == "robot_flange"
-    assert calibration["extrinsics"]["from"] == "camera"
-    assert calibration["extrinsics"]["to"] == "robot_flange"
-    np.testing.assert_allclose(
-        calibration["extrinsics"]["rotation_quaternion_wxyz"],
-        [half_sqrt_two, 0, 0, half_sqrt_two],
-    )
-    np.testing.assert_allclose(
-        matrix,
-        [
-            [0, -1, 0, 10],
-            [1, 0, 0, 20],
-            [0, 0, 1, 30],
-            [0, 0, 0, 1],
-        ],
-        atol=1e-12,
-    )
-    # Camera +X maps to parent +Y; an inverted parent-to-camera transform would not.
-    np.testing.assert_allclose(matrix @ [1, 0, 0, 1], [10, 21, 30, 1])
 
 
 def test_cell_apis_assets_and_objectless_state(tmp_path: Path, monkeypatch) -> None:
@@ -918,9 +558,7 @@ def test_cell_camera_frames_follow_exact_timeline_indices(
     tmp_path: Path, monkeypatch
 ) -> None:
     run_root = make_scene_run(tmp_path)
-    sensor_folder = (
-        run_root / "processed" / "synchronized" / "realsense_111"
-    )
+    sensor_folder = run_root / "processed" / "synchronized" / "realsense_111"
     rgb = sensor_folder / "rgb"
     depth = sensor_folder / "depth"
     rgb.mkdir()

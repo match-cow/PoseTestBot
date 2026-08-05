@@ -553,12 +553,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 default=60.0,
             ),
             PipelineParameter(
-                name="camera_metadata_idle_timeout_s",
-                flag="--camera-metadata-idle-timeout-s",
-                kind="float",
-                default=None,
-            ),
-            PipelineParameter(
                 name="no_write_plan_if_missing",
                 flag="--no-write-plan-if-missing",
                 kind="bool",
@@ -689,26 +683,13 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 kind="int",
                 default=6,
             ),
-            PipelineParameter(name="target_spec", flag="--target-spec"),
-            PipelineParameter(name="target_type", flag="--target-type"),
-            PipelineParameter(name="dictionary", flag="--dictionary"),
-            PipelineParameter(name="grid_size", flag="--grid-size"),
             PipelineParameter(
-                name="marker_length_mm",
-                flag="--marker-length-mm",
-                kind="float",
+                name="target_spec",
+                flag="--target-spec",
+                kind="path",
+                path_scope="run",
+                default="calibration_target.json",
             ),
-            PipelineParameter(
-                name="marker_separation_mm",
-                flag="--marker-separation-mm",
-                kind="float",
-            ),
-            PipelineParameter(
-                name="square_length_mm",
-                flag="--square-length-mm",
-                kind="float",
-            ),
-            PipelineParameter(name="checkerboard_size", flag="--checkerboard-size"),
             PipelineParameter(name="json", flag="--json", kind="bool", default=False),
         ),
     ),
@@ -1089,24 +1070,10 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
         label="Resolve Calibration Target",
         script="scripts/run_calibration_target_import.py",
         description=(
-            "Prefer the run-config target selection, otherwise import a legacy "
-            "ArUcoGridGen 1.0 or PoseGridGen 2.0 JSON fallback."
+            "Validate the exact current target selected and snapshotted by run setup."
         ),
         resources=("disk_io",),
-        parameters=(
-            PipelineParameter(
-                name="source",
-                flag="--source",
-                kind="path",
-                path_scope="input",
-            ),
-            PipelineParameter(
-                name="aligned_to_template_base",
-                flag="--aligned-to-template-base",
-                kind="bool",
-                default=False,
-            ),
-        ),
+        parameters=(),
     ),
     "aruco_detection": PipelineStageSpec(
         id="aruco_detection",
@@ -1388,12 +1355,6 @@ PIPELINE_STAGES: dict[str, PipelineStageSpec] = {
                 flag="--calibration-profiles",
                 kind="path",
                 path_scope="input",
-            ),
-            PipelineParameter(
-                name="write_multiview_targets",
-                flag="--write-multiview-targets",
-                kind="bool",
-                default=False,
             ),
             PipelineParameter(
                 name="write_coco_annotations",

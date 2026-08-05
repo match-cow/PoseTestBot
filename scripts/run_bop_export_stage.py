@@ -29,9 +29,7 @@ from posetestbot.bop.writer import (
     write_bop_dataset_info,
     write_bop_export_manifest,
     write_bop_frame_map,
-    write_bop_frame_sets,
     write_bop_instance_map,
-    write_bop_multiview_targets,
     write_bop_pose_template,
     write_bop_targets,
 )
@@ -42,8 +40,6 @@ from posetestbot.calibration.profiles import (
 )
 from posetestbot.calibration.rectification import (
     RECTIFIED_DIR,
-    rgbd_camera_artifact_fingerprint,
-    validate_rectification_provenance,
 )
 from posetestbot.calibration.static_reuse import (
     verify_static_profile_destination_reference,
@@ -54,9 +50,7 @@ from posetestbot.io.artifacts import (
     BOP_COCO_ANNOTATIONS,
     BOP_EXPORT_MANIFEST,
     BOP_FRAME_MAP_JSON,
-    BOP_FRAME_SETS,
     BOP_INSTANCE_MAP,
-    BOP_MULTIVIEW_TARGETS,
     BOP_POSE_TEMPLATE,
     BOP_TARGETS_BOP19,
     CALIBRATION_PROFILES,
@@ -76,10 +70,7 @@ from posetestbot.io.manifest import (
     utc_now_iso,
     write_run_manifest,
 )
-from posetestbot.pipeline.run_config import (
-    capture_synchronization_from_mapping,
-    load_run_config_for_run_root,
-)
+from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.pipeline.sensor_selection import (
     enabled_sensor_mounting_modes_by_folder,
     filter_enabled_sensor_folders,
@@ -88,12 +79,7 @@ from posetestbot.pose_templates.selection import (
     load_pose_template_selection,
     prepare_object_instances,
 )
-from posetestbot.sync.hardware import load_hardware_sync_frame_groups
 from posetestbot.sensors.contracts import MountingMode
-from posetestbot.sensors.registry import sensor_folder_name
-from posetestbot.sensors.hardware_sync_qualification import (
-    validate_hardware_sync_qualification,
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,14 +110,6 @@ def parse_args() -> argparse.Namespace:
         "--no-model-export",
         action="store_true",
         help="Skip copying object models and generating target files.",
-    )
-    parser.add_argument(
-        "--write-multiview-targets",
-        action="store_true",
-        help=(
-            "Also write posetestbot_multiview_targets.json, a per-object "
-            "summary of scenes/sensors/images containing each target."
-        ),
     )
     parser.add_argument(
         "--write-coco-annotations",
@@ -244,148 +222,6 @@ def calibration_profile_for_sensor(
     )
 
 
-def _load_required_hardware_frame_groups(
-    run_root: Path,
-    run_config: dict | None,
-) -> dict | None:
-    capture = (run_config or {}).get("capture")
-    policy = capture_synchronization_from_mapping(
-        capture.get("synchronization") if isinstance(capture, dict) else None
-    ).to_dict()
-    if policy["mode"] != "hardware_trigger":
-        return None
-
-    groups = load_hardware_sync_frame_groups(run_root)
-    qualification = validate_hardware_sync_qualification(
-        run_root,
-        run_config=run_config,
-    )
-    expected = {
-        "group_id": policy["group_id"],
-        "implementation": policy["implementation"],
-        "scope": policy["scope"],
-        "master_sensor_key": policy["master_sensor_key"],
-    }
-    mismatches = [
-        f"{key}={groups.get(key)!r}, expected {value!r}"
-        for key, value in expected.items()
-        if groups.get(key) != value
-    ]
-    expected_skew_ns = int(
-        round(float(policy["max_depth_timestamp_skew_ms"]) * 1_000_000)
-    )
-    if groups.get("max_depth_timestamp_skew_ns") != expected_skew_ns:
-        mismatches.append(
-            "max_depth_timestamp_skew_ns="
-            f"{groups.get('max_depth_timestamp_skew_ns')!r}, expected "
-            f"{expected_skew_ns!r}"
-        )
-    if groups.get("hardware_sync_qualification") != qualification:
-        mismatches.append(
-            "hardware_sync_qualification does not exactly match the current "
-            "validated physical qualification"
-        )
-    expected_inventory = _hardware_sensor_inventory(run_config, policy)
-    if groups.get("sensor_order") != [
-        item["sensor_key"] for item in expected_inventory
-    ]:
-        mismatches.append(
-            "sensor_order does not exactly match the enabled run-config "
-            "hardware sensor order"
-        )
-    raw_inventory = groups.get("sensors")
-    if not isinstance(raw_inventory, list) or len(raw_inventory) != len(
-        expected_inventory
-    ):
-        mismatches.append(
-            "sensor inventory does not contain exactly the enabled run-config "
-            "hardware sensors"
-        )
-    else:
-        inventory_fields = (
-            "sensor_key",
-            "sensor_type",
-            "device_id",
-            "sensor_folder",
-            "mounting_mode",
-            "hardware_sync_role",
-        )
-        for index, (actual, expected_sensor) in enumerate(
-            zip(raw_inventory, expected_inventory, strict=True)
-        ):
-            if not isinstance(actual, Mapping):
-                mismatches.append(f"sensors[{index}] is not an object")
-                continue
-            for field in inventory_fields:
-                if actual.get(field) != expected_sensor[field]:
-                    mismatches.append(
-                        f"sensors[{index}].{field}={actual.get(field)!r}, "
-                        f"expected {expected_sensor[field]!r}"
-                    )
-    if mismatches:
-        raise ValueError(
-            "Hardware-sync frame-group provenance does not match run_config.json: "
-            + "; ".join(mismatches)
-        )
-    return groups
-
-
-def _hardware_sensor_inventory(
-    run_config: Mapping[str, Any] | None,
-    policy: Mapping[str, Any],
-) -> list[dict[str, str]]:
-    capture = (run_config or {}).get("capture")
-    if not isinstance(capture, Mapping):
-        raise ValueError("Hardware-sync BOP export requires run_config.capture")
-    raw_sensors = capture.get("sensors")
-    if not isinstance(raw_sensors, list):
-        raise ValueError("Hardware-sync BOP export requires run_config.capture.sensors")
-    master_sensor_key = str(policy["master_sensor_key"])
-    inventory: list[dict[str, str]] = []
-    for index, raw_sensor in enumerate(raw_sensors):
-        if not isinstance(raw_sensor, Mapping):
-            raise ValueError(f"run_config.capture.sensors[{index}] is not an object")
-        if raw_sensor.get("enabled", True) is not True:
-            continue
-        sensor_type = str(raw_sensor.get("sensor_type") or "")
-        device_id = str(raw_sensor.get("device_id") or "")
-        mounting_mode = str(raw_sensor.get("mounting_mode") or "")
-        sensor_key = f"{sensor_type}:{device_id}"
-        inventory.append(
-            {
-                "sensor_key": sensor_key,
-                "sensor_type": sensor_type,
-                "device_id": device_id,
-                "sensor_folder": (
-                    f"{PROCESSED_DIR}/{SYNCHRONIZED_DIR}/"
-                    f"{sensor_folder_name(sensor_type, device_id)}"
-                ),
-                "mounting_mode": mounting_mode,
-                "hardware_sync_role": (
-                    "master" if sensor_key == master_sensor_key else "subordinate"
-                ),
-            }
-        )
-    masters = [item for item in inventory if item["sensor_key"] == master_sensor_key]
-    if len(masters) != 1:
-        raise ValueError(
-            "Hardware-sync BOP export master_sensor_key must identify exactly "
-            "one enabled run-config sensor"
-        )
-    return masters + [
-        item for item in inventory if item["sensor_key"] != master_sensor_key
-    ]
-
-
-def _run_relative(path: Path, run_root: Path) -> str:
-    try:
-        return path.resolve().relative_to(run_root.resolve()).as_posix()
-    except ValueError as exc:
-        raise ValueError(
-            f"Hardware-sync BOP input escapes the run root: {path}"
-        ) from exc
-
-
 def _portable_run_path(path: Path, run_root: Path) -> str | None:
     """Return a portable run-relative path, never an absolute host path."""
 
@@ -393,132 +229,6 @@ def _portable_run_path(path: Path, run_root: Path) -> str | None:
         return path.resolve().relative_to(run_root.resolve()).as_posix()
     except ValueError:
         return None
-
-
-def _validated_hardware_input_evidence(
-    *,
-    run_root: Path,
-    input_folder: Path,
-    run_config: Mapping[str, Any],
-    hardware_frame_groups: Mapping[str, Any],
-) -> dict[str, dict[str, str]]:
-    """Validate the one canonical native/rectified source tree for BOP."""
-
-    synchronized_root = run_root / PROCESSED_DIR / SYNCHRONIZED_DIR
-    rectified_root = run_root / PROCESSED_DIR / RECTIFIED_DIR
-    if input_folder.is_symlink():
-        raise ValueError("Hardware-sync BOP input root must not be a symbolic link")
-    resolved_input = input_folder.resolve()
-    if resolved_input == synchronized_root.resolve():
-        projection = "native"
-    elif resolved_input == rectified_root.resolve():
-        projection = "rectified"
-    else:
-        raise ValueError(
-            "Hardware-sync BOP input must be the canonical "
-            f"{synchronized_root} or {rectified_root}; arbitrary input roots "
-            "cannot preserve authoritative frame-group provenance"
-        )
-    if not input_folder.is_dir():
-        raise FileNotFoundError(
-            f"Hardware-sync BOP input folder does not exist: {input_folder}"
-        )
-
-    policy = capture_synchronization_from_mapping(
-        run_config["capture"]["synchronization"]
-    ).to_dict()
-    inventory = _hardware_sensor_inventory(run_config, policy)
-    group_sensors = hardware_frame_groups.get("sensors")
-    if not isinstance(group_sensors, list):
-        raise ValueError("Hardware-sync frame groups have no sensor inventory")
-    group_by_key = {
-        str(item.get("sensor_key")): item
-        for item in group_sensors
-        if isinstance(item, Mapping)
-    }
-    evidence: dict[str, dict[str, str]] = {}
-    for expected in inventory:
-        sensor_name = Path(expected["sensor_folder"]).name
-        source_sensor = synchronized_root / sensor_name
-        input_sensor = input_folder / sensor_name
-        if (
-            source_sensor.is_symlink()
-            or input_sensor.is_symlink()
-            or not source_sensor.is_dir()
-            or not input_sensor.is_dir()
-        ):
-            raise ValueError(
-                "Hardware-sync BOP sensor folders must be existing regular "
-                f"directories: source={source_sensor}, input={input_sensor}"
-            )
-        group_sensor = group_by_key.get(expected["sensor_key"])
-        if (
-            not isinstance(group_sensor, Mapping)
-            or group_sensor.get("sensor_folder") != expected["sensor_folder"]
-        ):
-            raise ValueError(
-                "Hardware-sync frame-group sensor folder does not match the "
-                f"current run config for {expected['sensor_key']}"
-            )
-        if projection == "rectified":
-            provenance = validate_rectification_provenance(
-                source_sensor,
-                input_sensor,
-            )
-            input_fingerprint = provenance["output_fingerprint"]
-            source_fingerprint = provenance["source_fingerprint"]
-        else:
-            source_fingerprint = rgbd_camera_artifact_fingerprint(source_sensor)
-            input_fingerprint = source_fingerprint
-        evidence[sensor_name] = {
-            "projection": projection,
-            "input_sensor_folder": _run_relative(input_sensor, run_root),
-            "authoritative_source_sensor_folder": _run_relative(
-                source_sensor,
-                run_root,
-            ),
-            "input_fingerprint_sha256": str(input_fingerprint["digest"]),
-            "authoritative_source_fingerprint_sha256": str(
-                source_fingerprint["digest"]
-            ),
-        }
-    return evidence
-
-
-def _revalidate_hardware_publication_inputs(
-    *,
-    run_root: Path,
-    input_folder: Path,
-    initial_run_config: Mapping[str, Any],
-    initial_hardware_frame_groups: Mapping[str, Any],
-    initial_hardware_input_evidence: Mapping[str, Mapping[str, str]],
-) -> None:
-    """Close the hardware provenance TOCTOU immediately before publication."""
-
-    current_run_config = load_run_config_for_run_root(run_root)
-    if current_run_config != initial_run_config:
-        raise RuntimeError(
-            "Run configuration changed while the hardware-sync BOP export was running"
-        )
-    current_hardware_frame_groups = _load_required_hardware_frame_groups(
-        run_root,
-        current_run_config,
-    )
-    if current_hardware_frame_groups != initial_hardware_frame_groups:
-        raise RuntimeError(
-            "Authoritative hardware-sync frame groups changed while the BOP "
-            "export was running"
-        )
-    current_hardware_input_evidence = _validated_hardware_input_evidence(
-        run_root=run_root,
-        input_folder=input_folder,
-        run_config=current_run_config,
-        hardware_frame_groups=current_hardware_frame_groups,
-    )
-    if current_hardware_input_evidence != initial_hardware_input_evidence:
-        raise RuntimeError(
-            "Hardware-sync BOP input changed while the export was running"
-        )
 
 
 def discover_exportable_sensor_folders(
@@ -618,13 +328,8 @@ def main() -> None:
             args.annotation_source,
             args.annotation_mode,
         )
-        if annotation_mode == "none" and (
-            args.write_multiview_targets or args.write_coco_annotations
-        ):
-            raise ValueError(
-                "Multiview targets and COCO annotations require "
-                "--annotation-source blenderproc"
-            )
+        if annotation_mode == "none" and args.write_coco_annotations:
+            raise ValueError("COCO annotations require --annotation-source blenderproc")
         if args.write_coco_annotations and annotation_mode != "pose_and_masks":
             raise ValueError(
                 "COCO annotations require --annotation-mode pose_and_masks"
@@ -635,20 +340,6 @@ def main() -> None:
             run_config = None
         mounting_modes_by_sensor_name = enabled_sensor_mounting_modes_by_folder(
             run_config
-        )
-        hardware_frame_groups = _load_required_hardware_frame_groups(
-            run_root,
-            run_config,
-        )
-        hardware_input_evidence = (
-            _validated_hardware_input_evidence(
-                run_root=run_root,
-                input_folder=input_folder,
-                run_config=run_config,
-                hardware_frame_groups=hardware_frame_groups,
-            )
-            if hardware_frame_groups is not None and run_config is not None
-            else {}
         )
         calibration_profile_ids_by_sensor_name = None
         if _selected_calibration_configured(run_root, run_config):
@@ -694,11 +385,7 @@ def main() -> None:
             )
         sensor_folders = discover_exportable_sensor_folders(
             input_folder,
-            run_root=(
-                run_root
-                if args.input_folder is None or hardware_frame_groups is not None
-                else None
-            ),
+            run_root=run_root if args.input_folder is None else None,
         )
         calibration_profiles = (
             load_profile_collection(calibration_profiles_path)
@@ -712,9 +399,7 @@ def main() -> None:
                 sensor_folder.name: calibration_profile_for_sensor(
                     calibration_profiles,
                     sensor_folder.name,
-                    profile_ids_by_sensor_name=(
-                        calibration_profile_ids_by_sensor_name
-                    ),
+                    profile_ids_by_sensor_name=(calibration_profile_ids_by_sensor_name),
                     mounting_modes_by_sensor_name=mounting_modes_by_sensor_name,
                 )
                 for sensor_folder in sensor_folders
@@ -776,12 +461,6 @@ def main() -> None:
                 )
         exports = []
         for offset, sensor_folder in enumerate(sensor_folders):
-            input_evidence = hardware_input_evidence.get(sensor_folder.name)
-            if hardware_frame_groups is not None and input_evidence is None:
-                raise ValueError(
-                    "Hardware-sync BOP input does not exactly cover the "
-                    f"authoritative sensor set: {sensor_folder.name}"
-                )
             calibration_profile = calibration_profiles_by_sensor_name.get(
                 sensor_folder.name
             )
@@ -802,46 +481,12 @@ def main() -> None:
                         if object_instances is not None
                         else None
                     ),
-                    source_projection=(
-                        input_evidence["projection"]
-                        if input_evidence is not None
-                        else None
-                    ),
-                    input_sensor_folder=(
-                        input_evidence["input_sensor_folder"]
-                        if input_evidence is not None
-                        else portable_sensor_folder
-                    ),
-                    authoritative_source_sensor_folder=(
-                        input_evidence["authoritative_source_sensor_folder"]
-                        if input_evidence is not None
-                        else portable_sensor_folder
-                    ),
-                    input_fingerprint_sha256=(
-                        input_evidence["input_fingerprint_sha256"]
-                        if input_evidence is not None
-                        else None
-                    ),
-                    authoritative_source_fingerprint_sha256=(
-                        input_evidence["authoritative_source_fingerprint_sha256"]
-                        if input_evidence is not None
-                        else None
-                    ),
+                    input_sensor_folder=portable_sensor_folder,
+                    authoritative_source_sensor_folder=portable_sensor_folder,
                     annotation_source=args.annotation_source,
                     annotation_mode=annotation_mode,
                 )
             )
-        if hardware_frame_groups is not None and run_config is not None:
-            current_input_evidence = _validated_hardware_input_evidence(
-                run_root=run_root,
-                input_folder=input_folder,
-                run_config=run_config,
-                hardware_frame_groups=hardware_frame_groups,
-            )
-            if current_input_evidence != hardware_input_evidence:
-                raise RuntimeError(
-                    "Hardware-sync BOP input changed while the export was running"
-                )
 
         pose_generation_provenance = {
             "source": "blenderproc_analytic_gt",
@@ -882,7 +527,6 @@ def main() -> None:
             }
 
         targets_path = None
-        multiview_targets_path = None
         coco_annotations_path = None
         if (
             args.split == "test"
@@ -890,12 +534,6 @@ def main() -> None:
             and any(export.targets for export in exports)
         ):
             targets_path = write_bop_targets(staging_folder, exports, split=args.split)
-        if args.write_multiview_targets:
-            multiview_targets_path = write_bop_multiview_targets(
-                staging_folder,
-                exports,
-                split=args.split,
-            )
         if args.write_coco_annotations:
             coco_annotations_path = write_bop_coco_annotations(
                 staging_folder,
@@ -905,15 +543,6 @@ def main() -> None:
             )
 
         frame_map_path = write_bop_frame_map(staging_folder, exports)
-        frame_sets_path = (
-            write_bop_frame_sets(
-                staging_folder,
-                exports,
-                hardware_frame_groups,
-            )
-            if hardware_frame_groups is not None
-            else None
-        )
         instance_map_path = (
             write_bop_instance_map(staging_folder, exports)
             if template_mode and args.annotation_source == "blenderproc"
@@ -936,10 +565,6 @@ def main() -> None:
             object_models=object_models,
             targets_path=targets_path,
         )
-        if frame_sets_path is not None:
-            frame_sets = json.loads(frame_sets_path.read_text())
-            validation["frame_set_count"] = int(frame_sets["frame_set_count"])
-            validation["hardware_sync_scope"] = frame_sets["scope"]
         exported_profile_ids = {
             export.calibration_profile_id
             for export in exports
@@ -961,10 +586,8 @@ def main() -> None:
             calibration_profiles=exported_calibration_profiles,
             object_models=object_models,
             targets_path=targets_path,
-            multiview_targets_path=multiview_targets_path,
             coco_annotations_path=coco_annotations_path,
             frame_map_path=frame_map_path,
-            frame_sets_path=frame_sets_path,
             dataset_info_path=dataset_info_path,
             validation=validation,
             stable_id_mapping=(
@@ -992,14 +615,6 @@ def main() -> None:
             annotation_mode=annotation_mode,
             annotation_provenance=annotation_provenance,
         )
-        if hardware_frame_groups is not None and run_config is not None:
-            _revalidate_hardware_publication_inputs(
-                run_root=run_root,
-                input_folder=input_folder,
-                initial_run_config=run_config,
-                initial_hardware_frame_groups=hardware_frame_groups,
-                initial_hardware_input_evidence=hardware_input_evidence,
-            )
         replace_directory(staging_folder, output_folder)
 
         artifacts: dict[str, Path] = {
@@ -1029,12 +644,8 @@ def main() -> None:
                 args.split
             )
             artifacts[BOP_TARGETS_BOP19] = output_folder / BOP_TARGETS_BOP19
-        if multiview_targets_path is not None:
-            artifacts[BOP_MULTIVIEW_TARGETS] = output_folder / BOP_MULTIVIEW_TARGETS
         if coco_annotations_path is not None:
             artifacts[BOP_COCO_ANNOTATIONS] = output_folder / BOP_COCO_ANNOTATIONS
-        if frame_sets_path is not None:
-            artifacts[BOP_FRAME_SETS] = output_folder / BOP_FRAME_SETS
         message = f"Exported {len(exports)} synchronized sensor folder(s) to BOP."
         if validation["capabilities"]["bop19_evaluation"]:
             message += (
@@ -1050,11 +661,6 @@ def main() -> None:
             message += (
                 " RGB-D scenes, models, and populated targets are "
                 "pose-estimation inputs; rendered GT and masks are not present."
-            )
-        if frame_sets_path is not None:
-            message += (
-                f" Published {validation['frame_set_count']} authoritative "
-                "hardware-synchronized frame set(s)."
             )
         upsert_stage(
             manifest,

@@ -30,9 +30,6 @@ from posetestbot.pipeline.run_config import (
     load_run_config_for_run_root,
 )
 from posetestbot.sensors.registry import get_sensor_adapter, sensor_folder_name
-from posetestbot.sensors.hardware_sync_qualification import (
-    validate_hardware_sync_qualification,
-)
 from posetestbot.sensors.status import (
     REALSENSE_MIN_USB_MAJOR,
     collect_sensor_status,
@@ -81,7 +78,9 @@ def _script_path(command: list[str]) -> Path | None:
     return script if script.is_absolute() else _repo_root() / script
 
 
-def _sensor_families(sensor_status: Mapping[str, Any] | None) -> dict[str, Mapping[str, Any]]:
+def _sensor_families(
+    sensor_status: Mapping[str, Any] | None,
+) -> dict[str, Mapping[str, Any]]:
     if not sensor_status:
         return {}
     return {
@@ -168,7 +167,9 @@ def _enabled_config_sensors(config: Mapping[str, Any]) -> list[Mapping[str, Any]
 
 def _validate_adapter_capabilities(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     capture = config.get("capture", {})
-    resolution = str(capture.get("resolution", "") if isinstance(capture, Mapping) else "")
+    resolution = str(
+        capture.get("resolution", "") if isinstance(capture, Mapping) else ""
+    )
     checks: list[dict[str, Any]] = []
     for sensor in _enabled_config_sensors(config):
         sensor_type = str(sensor.get("sensor_type", ""))
@@ -248,7 +249,9 @@ def _validate_output_folders(
                 )
             )
             continue
-        child_count = sum(1 for _ in folder_path.iterdir()) if folder_path.is_dir() else 0
+        child_count = (
+            sum(1 for _ in folder_path.iterdir()) if folder_path.is_dir() else 0
+        )
         checks.append(
             _check(
                 f"sensor_output_folder:{folder_name}",
@@ -400,197 +403,43 @@ def _validate_command_shape(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     return checks
 
 
-def _validate_hardware_sync_plan(
+def _validate_capture_synchronization_plan(
     config: Mapping[str, Any],
     plan: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    """Expose the exact synchronization guarantee accepted by preflight."""
+    """Require the one supported timestamp-aligned capture contract."""
 
     capture = config.get("capture")
     policy = capture_synchronization_from_mapping(
-        capture.get("synchronization")
-        if isinstance(capture, Mapping)
-        else None
+        capture.get("synchronization") if isinstance(capture, Mapping) else None
     ).to_dict()
-    if policy["mode"] == "timestamp_aligned":
-        return [
-            _check(
-                "capture_synchronization",
-                "ok",
-                "Capture uses timestamp alignment; no hardware exposure "
-                "synchronization is claimed.",
-                details={
-                    "mode": "timestamp_aligned",
-                    "depth_exposure_synchronized": False,
-                    "rgb_exposure_synchronized": False,
-                },
-            )
-        ]
-
-    sensor_commands = [
-        command
-        for command in plan.get("commands", [])
-        if isinstance(command, Mapping)
-        and command.get("role") == "sensor_capture"
-    ]
-    assignments: dict[str, Mapping[str, Any]] = {}
-    errors: list[str] = []
-    for command in sensor_commands:
-        assignment = command.get("hardware_sync")
-        if not isinstance(assignment, Mapping):
-            errors.append(f"{command.get('name')} has no hardware_sync assignment")
-            continue
-        sensor_key = str(assignment.get("sensor_key") or "")
-        if not sensor_key:
-            errors.append(f"{command.get('name')} has no hardware-sync sensor key")
-            continue
-        if sensor_key in assignments:
-            errors.append(f"duplicate hardware-sync assignment for {sensor_key}")
-        assignments[sensor_key] = assignment
-        expected_role = (
-            "master"
-            if sensor_key == policy["master_sensor_key"]
-            else "subordinate"
-        )
-        expected_mode = 1 if expected_role == "master" else 2
-        expected = {
-            "implementation": policy["implementation"],
-            "group_id": policy["group_id"],
-            "scope": policy["scope"],
-            "role": expected_role,
-            "inter_cam_sync_mode_expected": expected_mode,
-            "depth_exposure_synchronized": True,
-            "rgb_exposure_synchronized": False,
-        }
-        for field_name, expected_value in expected.items():
-            if assignment.get(field_name) != expected_value:
-                errors.append(
-                    f"{sensor_key} {field_name}={assignment.get(field_name)!r}; "
-                    f"expected {expected_value!r}"
-                )
-        command_array = command.get("command")
-        expected_flags = (
-            ("--hardware-sync-role", expected_role),
-            ("--hardware-sync-group-id", str(policy["group_id"])),
-            ("--hardware-sync-scope", str(policy["scope"])),
-        )
-        if isinstance(command_array, list):
-            for flag, value in expected_flags:
-                try:
-                    flag_index = command_array.index(flag)
-                except ValueError:
-                    errors.append(f"{sensor_key} command is missing {flag}")
-                    continue
-                if (
-                    flag_index + 1 >= len(command_array)
-                    or command_array[flag_index + 1] != value
-                ):
-                    errors.append(
-                        f"{sensor_key} command has an invalid value for {flag}"
-                    )
-
-    expected_sensor_keys = {
-        f"{sensor['sensor_type']}:{sensor['device_id']}"
-        for sensor in _enabled_config_sensors(config)
-    }
-    if set(assignments) != expected_sensor_keys:
-        errors.append(
-            "hardware-sync assignments do not exactly cover enabled sensors"
-        )
-    ordered_commands = sorted(
-        enumerate(sensor_commands),
-        key=lambda item: (
-            int(item[1].get("startup_order") or 0),
-            item[0],
-        ),
+    plan_capture = plan.get("capture")
+    plan_policy = (
+        plan_capture.get("synchronization")
+        if isinstance(plan_capture, Mapping)
+        else None
     )
-    if (
-        not ordered_commands
-        or (
-            ordered_commands[0][1].get("hardware_sync") or {}
-        ).get("role")
-        != "master"
-    ):
-        errors.append("hardware-sync master is not the first camera to start")
-
+    matches = (
+        plan_policy
+        == policy
+        == {
+            "schema_version": "capture_synchronization.v1",
+            "mode": "timestamp_aligned",
+        }
+    )
     return [
         _check(
             "capture_synchronization",
-            "error" if errors else "ok",
+            "ok" if matches else "error",
             (
-                "Hardware-sync capture plan is inconsistent: "
-                + "; ".join(errors)
-                if errors
-                else (
-                    "RealSense inter-camera depth exposures are planned with "
-                    "one explicit master and complete subordinate assignments; "
-                    "D435 RGB exposure is not certified as synchronized."
-                )
+                "Capture uses the exact timestamp-aligned contract; no simultaneous "
+                "camera exposure is claimed."
+                if matches
+                else "Capture plan synchronization does not match run_config.v3."
             ),
             details={
                 **policy,
-                "sensor_keys": sorted(assignments),
-                "depth_exposure_synchronized": not errors,
-                "rgb_exposure_synchronized": False,
-                "limitations": [
-                    "D435 RGB rolling-shutter exposure is timestamp-associated only.",
-                    "USB OAK-D Pro and USB ZED 2i cannot join this trigger group.",
-                ],
-                "errors": errors,
-            },
-        )
-    ]
-
-
-def _validate_hardware_sync_qualification(
-    config: Mapping[str, Any],
-    *,
-    run_root: Path,
-) -> list[dict[str, Any]]:
-    """Require physical, config-bound evidence before hardware-sync capture."""
-
-    capture = config.get("capture")
-    policy = capture_synchronization_from_mapping(
-        capture.get("synchronization")
-        if isinstance(capture, Mapping)
-        else None
-    )
-    if policy.mode != "hardware_trigger":
-        return []
-    try:
-        provenance = validate_hardware_sync_qualification(
-            run_root,
-            run_config=config,
-        )
-    except (FileNotFoundError, OSError, ValueError) as exc:
-        return [
-            _check(
-                "hardware_sync_qualification",
-                "error",
-                (
-                    "Hardware-trigger capture requires a current physical "
-                    f"depth-sync qualification: {exc}"
-                ),
-                details={
-                    "valid": False,
-                    "error": str(exc),
-                    "depth_exposure_hardware_synchronized": False,
-                    "rgb_exposure_hardware_synchronized": False,
-                },
-            )
-        ]
-    return [
-        _check(
-            "hardware_sync_qualification",
-            "ok",
-            (
-                "Physical RealSense depth-exposure synchronization "
-                "qualification is present, hash-verified, and bound to the "
-                "current capture configuration."
-            ),
-            details={
-                **provenance,
-                "valid": True,
+                "simultaneous_exposure_claimed": False,
             },
         )
     ]
@@ -633,9 +482,7 @@ def _validate_sensor_readiness(
     families = _sensor_families(sensor_status)
     checks = []
     sensors = [
-        sensor
-        for sensor in plan.get("sensors", [])
-        if isinstance(sensor, Mapping)
+        sensor for sensor in plan.get("sensors", []) if isinstance(sensor, Mapping)
     ]
     sensor_commands = [
         command
@@ -780,10 +627,6 @@ def build_capture_plan_preflight(
     pre_plan_checks.extend(_validate_adapter_capabilities(config))
     pre_plan_checks.extend(_validate_output_folders(config, run_root=run_root_path))
     pre_plan_checks.extend(_validate_raw_pose_output(run_root_path))
-    qualification_checks = _validate_hardware_sync_qualification(
-        config,
-        run_root=run_root_path,
-    )
     pre_plan_has_errors = any(check["status"] == "error" for check in pre_plan_checks)
     sensor_status = collect_sensors() if include_sensor_status else None
 
@@ -822,14 +665,11 @@ def build_capture_plan_preflight(
         plan = canonical_plan_object.to_dict()
 
     plan_matches_current_config = (
-        plan is not None
-        and canonical_plan is not None
-        and plan == canonical_plan
+        plan is not None and canonical_plan is not None and plan == canonical_plan
     )
 
     checks = [
         *pre_plan_checks,
-        *qualification_checks,
         _check(
             "capture_plan_build",
             "ok" if plan is not None else "error",
@@ -860,18 +700,24 @@ def build_capture_plan_preflight(
         _check(
             "capture_plan_schema",
             "ok"
-            if isinstance(plan, Mapping) and plan.get("schema_version") == "capture_plan.v1"
+            if isinstance(plan, Mapping)
+            and plan.get("schema_version") == "capture_plan.v1"
             else "error",
             (
                 "Capture plan schema is capture_plan.v1."
-                if isinstance(plan, Mapping) and plan.get("schema_version") == "capture_plan.v1"
+                if isinstance(plan, Mapping)
+                and plan.get("schema_version") == "capture_plan.v1"
                 else (
                     "Capture plan schema is unavailable."
                     if plan is None
                     else f"Unsupported capture plan schema: {plan.get('schema_version')!r}."
                 )
             ),
-            details={"schema_version": plan.get("schema_version") if isinstance(plan, Mapping) else None},
+            details={
+                "schema_version": plan.get("schema_version")
+                if isinstance(plan, Mapping)
+                else None
+            },
         ),
         _check(
             "capture_plan_path",
@@ -886,7 +732,7 @@ def build_capture_plan_preflight(
     ]
     if isinstance(plan, Mapping):
         checks.extend(_validate_command_shape(plan))
-        checks.extend(_validate_hardware_sync_plan(config, plan))
+        checks.extend(_validate_capture_synchronization_plan(config, plan))
         checks.extend(
             _validate_robot_safety(
                 allow_real_robot=allow_real_robot,

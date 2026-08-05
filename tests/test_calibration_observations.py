@@ -10,12 +10,14 @@ from posetestbot.calibration.observations import (
     discover_aruco_outputs,
     write_calibration_observations_with_manifest,
 )
-from posetestbot.calibration.targets import normalize_calibration_target_spec
+from posetestbot.calibration.targets import (
+    DEFAULT_TARGET_SPEC,
+    normalize_calibration_target_spec,
+)
 from posetestbot.io.artifacts import (
     ARUCO_POSE_ESTIMATION,
+    CALIBRATION_TARGET,
     CALIBRATION_OBSERVATIONS,
-    CHARUCO_POSE_ESTIMATION,
-    CHECKERBOARD_POSE_ESTIMATION,
     DATASET_MANIFEST,
 )
 from posetestbot.pipeline.run_config import (
@@ -33,6 +35,7 @@ def write_aruco_fixture(run_root: Path) -> Path:
         sequence_id="sync_aruco_calibration_observations",
     )
     write_run_config(run_root, config)
+    (run_root / CALIBRATION_TARGET).write_text(json.dumps(DEFAULT_TARGET_SPEC) + "\n")
     aruco_path = (
         run_root
         / "processed"
@@ -158,13 +161,7 @@ def test_build_calibration_observations_records_target_metadata(
 ) -> None:
     run_root = tmp_path / "run"
     write_aruco_fixture(run_root)
-    target = normalize_calibration_target_spec(
-        target_type="charuco",
-        grid_size="5x7",
-        dictionary="DICT_4X4_50",
-        marker_length=32.0,
-        square_length=40.0,
-    )
+    target = normalize_calibration_target_spec(DEFAULT_TARGET_SPEC)
 
     report = build_calibration_observations(
         run_root,
@@ -172,129 +169,11 @@ def test_build_calibration_observations_records_target_metadata(
         target=target,
     )
 
-    assert report["target"]["target_type"] == "charuco"
-    assert report["target"]["grid_size"] == [5, 7]
-    assert report["target"]["square_length"] == 40.0
-    assert report["observations"][0]["target_type"] == "charuco"
+    assert report["target"]["schema_version"] == "calibration_target.v2"
+    assert report["target"]["target_type"] == "aruco_grid"
+    assert report["target"]["grid_size"] == [4, 3]
+    assert report["observations"][0]["target_type"] == "aruco_grid"
     assert report["observations"][0]["target_to_camera"]["unit"] == "mm"
-
-
-def test_build_calibration_observations_reads_charuco_pose_outputs(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "run"
-    charuco_path = (
-        run_root
-        / "processed"
-        / "synchronized"
-        / "realsense_123"
-        / CHARUCO_POSE_ESTIMATION
-    )
-    charuco_path.parent.mkdir(parents=True, exist_ok=True)
-    charuco_path.write_text(
-        json.dumps(
-            {
-                "000000.png": {
-                    "motion": "calibration_sweep",
-                    "robot_ee_pose": {"X": 1, "Y": 2, "Z": 3},
-                    "charuco_pose_estimation": {
-                        "rvec": [0.1, 0.2, 0.3],
-                        "tvec": [11, 22, 33],
-                        "corner_count": 12,
-                    },
-                }
-            }
-        )
-        + "\n"
-    )
-    target = normalize_calibration_target_spec(
-        target_type="charuco",
-        dictionary="DICT_4X4_50",
-        grid_size="5x7",
-        marker_length=32.0,
-        square_length=40.0,
-    )
-
-    report = build_calibration_observations(
-        run_root,
-        min_marker_count=8,
-        min_observations=1,
-        target=target,
-    )
-
-    assert discover_calibration_pose_outputs(run_root, target_type="charuco") == [
-        charuco_path
-    ]
-    assert report["overall_status"] == "ok"
-    assert report["checks"][0]["name"] == "calibration_pose_outputs_present"
-    assert report["sensors"][0]["calibration_pose_file"] == (
-        "processed/synchronized/realsense_123/charuco_pose_estimation.json"
-    )
-    observation = report["observations"][0]
-    assert observation["target_type"] == "charuco"
-    assert observation["target_pose_source"] == "charuco_pose_estimation"
-    assert observation["feature_count"] == 12
-    assert observation["target_to_camera"]["translation"] == [11.0, 22.0, 33.0]
-
-
-def test_build_calibration_observations_reads_checkerboard_generic_pose_outputs(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "run"
-    checkerboard_path = (
-        run_root
-        / "processed"
-        / "synchronized"
-        / "zed_2i_auto"
-        / CHECKERBOARD_POSE_ESTIMATION
-    )
-    checkerboard_path.parent.mkdir(parents=True, exist_ok=True)
-    checkerboard_path.write_text(
-        json.dumps(
-            {
-                "000000.png": {
-                    "robot_ee_pose": {"X": 1, "Y": 2, "Z": 3},
-                    "target_pose_estimation": {
-                        "rvec": [0.0, 0.1, 0.2],
-                        "tvec": [100, 200, 300],
-                        "feature_count": 20,
-                    },
-                },
-                "000001.png": {
-                    "robot_ee_pose": {"X": 1, "Y": 2, "Z": 3},
-                    "target_pose_estimation": {
-                        "rvec": [0.0, 0.1, 0.2],
-                        "tvec": [100, 200, 300],
-                        "feature_count": 3,
-                    },
-                },
-            }
-        )
-        + "\n"
-    )
-    target = normalize_calibration_target_spec(
-        target_type="checkerboard",
-        checkerboard_size="6x9",
-        square_length=25.0,
-    )
-
-    report = build_calibration_observations(
-        run_root,
-        min_marker_count=10,
-        min_observations=1,
-        target=target,
-    )
-
-    assert discover_calibration_pose_outputs(run_root, target_type="checkerboard") == [
-        checkerboard_path
-    ]
-    assert report["overall_status"] == "ok"
-    assert report["target"]["target_type"] == "checkerboard"
-    assert report["observation_count"] == 1
-    assert report["observations"][0]["target_pose_source"] == "target_pose_estimation"
-    assert report["observations"][0]["feature_count"] == 20
-    assert report["rejected"][0]["reason"] == "insufficient_target_features"
-    assert report["rejected"][0]["feature_count"] == 3
 
 
 def test_build_calibration_observations_errors_without_usable_frames(
@@ -393,16 +272,6 @@ def test_calibration_observations_cli_writes_report(tmp_path: Path) -> None:
             str(run_root),
             "--min-observations",
             "1",
-            "--target-type",
-            "charuco",
-            "--grid-size",
-            "5x7",
-            "--dictionary",
-            "DICT_4X4_50",
-            "--marker-length-mm",
-            "32",
-            "--square-length-mm",
-            "40",
         ],
         cwd=repo_root,
         check=True,
@@ -415,5 +284,5 @@ def test_calibration_observations_cli_writes_report(tmp_path: Path) -> None:
     )
     assert (run_root / CALIBRATION_OBSERVATIONS).is_file()
     data = json.loads((run_root / CALIBRATION_OBSERVATIONS).read_text())
-    assert data["target"]["target_type"] == "charuco"
-    assert data["target"]["grid_size"] == [5, 7]
+    assert data["target"]["target_type"] == "aruco_grid"
+    assert data["target"]["grid_size"] == [4, 3]

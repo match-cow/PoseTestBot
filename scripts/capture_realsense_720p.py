@@ -60,26 +60,6 @@ def parse_args() -> argparse.Namespace:
         help="Rotate captured RGB/depth frames 180 degrees for inverted mounts.",
     )
     parser.add_argument(
-        "--hardware-sync-role",
-        choices=("master", "subordinate"),
-        default=None,
-        help=(
-            "Configure D435 inter-camera synchronization as master or subordinate. "
-            "This synchronizes depth exposure only."
-        ),
-    )
-    parser.add_argument(
-        "--hardware-sync-group-id",
-        default=None,
-        help="Stable capture-group identity for hardware-sync provenance.",
-    )
-    parser.add_argument(
-        "--hardware-sync-scope",
-        choices=("depth_exposure",),
-        default=None,
-        help="Hardware synchronization scope; D435 supports depth_exposure only.",
-    )
-    parser.add_argument(
         "--print-json",
         action="store_true",
         help="Print the capture summary JSON after completion.",
@@ -113,9 +93,6 @@ def main() -> int:
                 preview=args.preview,
                 record=not args.test,
                 inverted=args.inverted,
-                hardware_sync_role=args.hardware_sync_role,
-                hardware_sync_group_id=args.hardware_sync_group_id,
-                hardware_sync_scope=args.hardware_sync_scope,
                 stop_requested=stop_requested.is_set,
             )
         except (RealSenseCaptureError, ValueError) as exc:

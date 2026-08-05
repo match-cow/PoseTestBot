@@ -95,12 +95,8 @@ from posetestbot.calibration.time_offset import (
     DEFAULT_REFERENCE_PNP_METHOD,
     DEFAULT_WARNING_NEAREST_POSE_DELTA_MS,
     FAILURE_POLICY_FAIL_CLOSED,
-    FAILURE_POLICY_WARN_KEEP_ZERO,
     IMPROVEMENT_EVIDENCE_STRATEGY,
     IMPLEMENTATION_REVISION as TIME_OFFSET_IMPLEMENTATION_REVISION,
-    LEGACY_IMPLEMENTATION_REVISION as TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION,
-    LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY,
-    LOMO_IMPLEMENTATION_REVISION as TIME_OFFSET_LOMO_IMPLEMENTATION_REVISION,
     LOMO_CONSISTENCY_STRATEGY,
     POLICIES as SYNCHRONIZATION_POLICIES,
     SCHEMA_VERSION as TIME_OFFSET_SEARCH_SCHEMA_VERSION,
@@ -112,7 +108,6 @@ from posetestbot.calibration.time_offset import (
     offset_values as time_offset_values,
     search_configuration as time_offset_search_configuration,
     sign_convention as time_offset_sign_convention,
-    warning_fallback_sensor_result,
 )
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import (
@@ -166,7 +161,11 @@ from posetestbot.sync.quality import build_sync_quality_report
 
 
 ATTEMPT_SCHEMA_VERSION = "calibration_attempt.v1"
-REQUEST_SCHEMA_VERSION = "calibration_attempt_request.v1"
+HISTORICAL_REQUEST_SCHEMA_VERSION = "calibration_attempt_request.v1"
+REQUEST_SCHEMA_VERSION = "calibration_attempt_request.v2"
+READABLE_REQUEST_SCHEMA_VERSIONS = frozenset(
+    {HISTORICAL_REQUEST_SCHEMA_VERSION, REQUEST_SCHEMA_VERSION}
+)
 PROGRESS_SCHEMA_VERSION = "calibration_attempt_progress.v1"
 PROMOTION_SCHEMA_VERSION = "calibration_attempt_promotion.v1"
 PROMOTION_REQUEST_SCHEMA_VERSION = "calibration_promotion_request.v1"
@@ -206,16 +205,7 @@ ATTEMPT_INTRINSIC_MIN_RELATIVE_IMPROVEMENT = 0.05
 ATTEMPT_INTRINSIC_MAX_FOCAL_DELTA_RATIO = 0.10
 ATTEMPT_INTRINSIC_MAX_PRINCIPAL_DELTA_RATIO = 0.05
 ATTEMPT_INTRINSIC_MAX_ASPECT_DELTA_RATIO = 0.05
-# Candidate score is normalized by the 10 mm / 5 degree residual gates. This
-# band is one percent of that combined acceptance budget (0.1 mm if translation
-# alone changes, or 0.05 degree if rotation alone changes).
-JOINT_INDIVIDUAL_SCORE_EQUIVALENCE_TOLERANCE = 0.01
-# Six decimals in normalized closure space correspond to 0.00001 mm for a
-# translation-only difference or 0.000005 degree for a rotation-only
-# difference. Both are far below physical calibration significance, so smaller
-# solver differences intentionally fall through to canonical method ordering.
 JOINT_RANKING_NUMERIC_DECIMALS = 6
-JOINT_CLOSURE_SCORE_EQUIVALENCE_TOLERANCE = 10 ** (-JOINT_RANKING_NUMERIC_DECIMALS)
 PROMOTION_TRANSFORM_TOLERANCE_MM = 1e-6
 # Reconstructing a JSON quaternion into a matrix can introduce roughly
 # 2e-6 degrees of acos round-off even when both records describe one transform.
@@ -881,7 +871,7 @@ def _robot_poses_for_sensor(
     sensor: Mapping[str, Any],
     robot_pose_artifacts: Mapping[str, Mapping[str, Any]],
 ) -> Mapping[str, Any]:
-    """Resolve one sensor's already verified raw records, with legacy fallback."""
+    """Resolve one sensor's already verified raw robot-pose records."""
 
     relative = str(sensor.get("robot_pose_path") or RAW_ROBOT_EE_POSES)
     if robot_pose_artifacts:
@@ -957,6 +947,9 @@ def list_calibration_attempts(run_root: str | Path) -> list[dict[str, Any]]:
                 "sensor_keys": request_value.get("sensor_keys", []),
                 "target_id": request_value.get("target_id"),
                 "status": progress.get("status"),
+                "read_only": (
+                    request_value.get("schema_version") != REQUEST_SCHEMA_VERSION
+                ),
                 "recommended_camera_count": (
                     int(ranking.get("recommended_camera_count", 0)) if ranking else 0
                 ),
@@ -1087,9 +1080,6 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                 "max_mean_translation_mm": 10.0,
                 "max_mean_rotation_deg": 5.0,
                 "max_outlier_ratio": 0.25,
-                "joint_individual_score_equivalence_tolerance": (
-                    JOINT_INDIVIDUAL_SCORE_EQUIVALENCE_TOLERANCE
-                ),
             },
         },
         "latest_attempt": attempts[0] if attempts else None,
@@ -1103,6 +1093,19 @@ def validate_attempt_request(
     root = Path(run_root)
     if not root.is_dir():
         raise FileNotFoundError(f"Run root not found: {root}")
+    allowed_fields = {
+        "run_root",
+        "mode",
+        "sensor_keys",
+        "target_id",
+        "synchronization_policy",
+    }
+    unknown_fields = sorted(set(value) - allowed_fields)
+    if unknown_fields:
+        raise ValueError(
+            "Calibration attempt POST contains unsupported fields: "
+            + ", ".join(unknown_fields)
+        )
     mode = str(value.get("mode", ""))
     if mode not in {"eye_in_hand", "eye_to_hand"}:
         raise ValueError("mode must be eye_in_hand or eye_to_hand")
@@ -1191,50 +1194,14 @@ def validate_attempt_request(
         run_target_library / target_id,
         library_root=run_target_library,
     )
-    solver_policy = str(value.get("solver_policy", "auto_compare"))
-    if solver_policy != "auto_compare":
-        raise ValueError("solver_policy must be auto_compare")
-    intrinsics_policy = str(value.get("intrinsics_policy", DEFAULT_INTRINSICS_POLICY))
-    if intrinsics_policy not in INTRINSICS_POLICIES:
-        raise ValueError(
-            "intrinsics_policy must be one of: " + ", ".join(INTRINSICS_POLICIES)
-        )
     synchronization_policy = str(value.get("synchronization_policy", "auto_offset"))
     if synchronization_policy not in SYNCHRONIZATION_POLICIES:
         raise ValueError(
             "synchronization_policy must be one of: "
             + ", ".join(SYNCHRONIZATION_POLICIES)
         )
-    pnp_methods = value.get("pnp_methods", list(PNP_METHOD_ORDER))
-    extrinsic_methods = value.get("extrinsic_methods", list(EXTRINSIC_METHOD_ORDER))
-    if not isinstance(pnp_methods, list) or not pnp_methods:
-        raise ValueError("pnp_methods must be a non-empty list")
-    if not isinstance(extrinsic_methods, list) or not extrinsic_methods:
-        raise ValueError("extrinsic_methods must be a non-empty list")
-    pnp_methods = [str(item).upper() for item in pnp_methods]
-    extrinsic_methods = [str(item).lower() for item in extrinsic_methods]
-    if len(pnp_methods) != len(set(pnp_methods)):
-        raise ValueError("pnp_methods must not contain duplicates")
-    if len(extrinsic_methods) != len(set(extrinsic_methods)):
-        raise ValueError("extrinsic_methods must not contain duplicates")
-    unsupported_pnp = sorted(set(pnp_methods) - set(PNP_METHOD_ORDER))
-    unsupported_extrinsic = sorted(set(extrinsic_methods) - set(EXTRINSIC_METHOD_ORDER))
-    if unsupported_pnp:
-        raise ValueError(
-            "Unsupported board-level PnP method(s): " + ", ".join(unsupported_pnp)
-        )
-    if unsupported_extrinsic:
-        raise ValueError(
-            "Unsupported extrinsic method(s): " + ", ".join(unsupported_extrinsic)
-        )
-    if (
-        synchronization_policy == "auto_offset"
-        and DEFAULT_REFERENCE_PNP_METHOD not in pnp_methods
-    ):
-        raise ValueError(
-            "auto_offset synchronization requires the fixed reference PnP "
-            f"method {DEFAULT_REFERENCE_PNP_METHOD}"
-        )
+    pnp_methods = list(PNP_METHOD_ORDER)
+    extrinsic_methods = list(EXTRINSIC_METHOD_ORDER)
     return {
         "mode": mode,
         "sensor_keys": sensor_keys,
@@ -1257,10 +1224,10 @@ def validate_attempt_request(
             "state": "estimated",
         },
         "robot_pose_reference": robot_pose_reference,
-        "solver_policy": solver_policy,
+        "solver_policy": "auto_compare",
         "pnp_methods": pnp_methods,
         "extrinsic_methods": extrinsic_methods,
-        "intrinsics_policy": intrinsics_policy,
+        "intrinsics_policy": DEFAULT_INTRINSICS_POLICY,
         "synchronization_policy": synchronization_policy,
         "synchronization_search": time_offset_search_configuration(),
         "synchronization_implementation_revision": (
@@ -1291,7 +1258,7 @@ def _validate_attempt_identity(
     request_value: Mapping[str, Any],
     progress: Mapping[str, Any],
 ) -> None:
-    if request_value.get("schema_version") != REQUEST_SCHEMA_VERSION:
+    if request_value.get("schema_version") not in READABLE_REQUEST_SCHEMA_VERSIONS:
         raise ValueError("Unsupported calibration attempt request schema")
     if progress.get("schema_version") != PROGRESS_SCHEMA_VERSION:
         raise ValueError("Unsupported calibration attempt progress schema")
@@ -1303,6 +1270,14 @@ def _validate_attempt_identity(
     recorded_root = Path(str(request_value.get("run_root", ""))).resolve()
     if recorded_root != run_root.resolve():
         raise ValueError("Calibration attempt belongs to a different run root")
+
+
+def _require_current_attempt_request(request_value: Mapping[str, Any]) -> None:
+    if request_value.get("schema_version") != REQUEST_SCHEMA_VERSION:
+        raise ValueError(
+            "Historical calibration attempts are read-only; create a new attempt "
+            "to calculate or promote with the current timing contract"
+        )
 
 
 def create_calibration_attempt(
@@ -3198,28 +3173,12 @@ def _estimate_and_apply_time_offsets(
             "Unsupported calibration time-offset implementation revision: "
             f"{implementation_revision}"
         )
-    improvement_evidence_strategy = (
-        IMPROVEMENT_EVIDENCE_STRATEGY
-        if implementation_revision
-        in {
-            TIME_OFFSET_LOMO_IMPLEMENTATION_REVISION,
-            TIME_OFFSET_IMPLEMENTATION_REVISION,
-        }
-        else LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY
-    )
-    tolerant_warning_fallback = (
-        implementation_revision == TIME_OFFSET_IMPLEMENTATION_REVISION
-    )
-    failure_policy = (
-        FAILURE_POLICY_WARN_KEEP_ZERO
-        if tolerant_warning_fallback
-        else FAILURE_POLICY_FAIL_CLOSED
-    )
+    improvement_evidence_strategy = IMPROVEMENT_EVIDENCE_STRATEGY
+    failure_policy = FAILURE_POLICY_FAIL_CLOSED
     recorded_failure_policy = search_configuration.get("time_offset_failure_policy")
-    if tolerant_warning_fallback and recorded_failure_policy != failure_policy:
+    if recorded_failure_policy != failure_policy:
         raise ValueError(
-            "Current calibration time-offset attempts must record the warning "
-            "fallback policy"
+            "Current calibration time-offset attempts must record fail-closed timing"
         )
     max_lomo_search_adjusted_sign_p_value = float(
         search_configuration.get(
@@ -3378,35 +3337,12 @@ def _estimate_and_apply_time_offsets(
                     for method, items in by_method.items()
                 }
             except Exception as exc:
-                if tolerant_warning_fallback:
-                    if not robot_records:
-                        raise
-                    adjusted[sensor_key] = {
-                        method: apply_sensor_time_offset(
-                            items,
-                            robot_records=robot_records,
-                            robot_pose_time_offset_ms=0.0,
-                            max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
-                        )
-                        for method, items in by_method.items()
-                    }
-                    sensor_result = warning_fallback_sensor_result(
-                        sensor_key=sensor_key,
-                        observation_count=len(reference_observations),
-                        adjusted_observations=adjusted[sensor_key].get(
-                            DEFAULT_REFERENCE_PNP_METHOD, []
-                        ),
-                        error=exc,
-                        warning_nearest_pose_delta_ms=(warning_nearest_pose_delta_ms),
-                        max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
-                    )
-                else:
-                    sensor_result = failed_sensor_result(
-                        sensor_key=sensor_key,
-                        observation_count=len(reference_observations),
-                        error=exc,
-                    )
-                    adjusted[sensor_key] = {}
+                sensor_result = failed_sensor_result(
+                    sensor_key=sensor_key,
+                    observation_count=len(reference_observations),
+                    error=exc,
+                )
+                adjusted[sensor_key] = {}
             if sensor_result["status"] == "failed":
                 failed.append(sensor_key)
         sensor_result["display_name"] = sensor.get("display_name")
@@ -3449,25 +3385,10 @@ def _estimate_and_apply_time_offsets(
                 for check in item.get("checks", [])
                 if isinstance(check, Mapping) and check.get("status") == "error"
             ]
-            if (
-                not error_checks
-                and implementation_revision
-                == TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
-            ):
-                error_checks.append(
-                    "recorded legacy every-fold materiality/safety rule"
-                )
             failed_details.append(
                 sensor_key + (f" ({', '.join(error_checks)})" if error_checks else "")
             )
         message = "Auto-sync evidence failed closed for: " + ", ".join(failed_details)
-        if implementation_revision != TIME_OFFSET_IMPLEMENTATION_REVISION:
-            message += (
-                ". This immutable attempt records legacy timing revision "
-                f"{implementation_revision}; it is not upgraded in place. Restart "
-                "the PoseTestBot backend and create a new attempt to use "
-                f"{TIME_OFFSET_IMPLEMENTATION_REVISION}"
-            )
         raise ValueError(message)
     return report, adjusted
 
@@ -3602,11 +3523,6 @@ def _materialize_authoritative_synchronization(
         ),
         "timing_warning_sensor_keys": list(
             time_offset_search.get("warning_sensor_keys", [])
-        ),
-        "warning_fallback_sensor_keys": sorted(
-            sensor_key
-            for sensor_key, value in result_by_sensor.items()
-            if value.get("warning_fallback_used") is True
         ),
     }
     checks = sync_quality.get("checks")
@@ -3970,9 +3886,6 @@ def _candidate_profile(
                 "timestamp_fallback_allowed": False,
                 "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
                 "warning_nearest_pose_delta_ms": (warning_nearest_pose_delta_ms),
-                "warning_fallback_used": bool(
-                    synchronization.get("warning_fallback_used")
-                ),
                 "historical_per_sensor_offsets_allowed": False,
                 "auto_estimated_per_sensor_offset": (
                     synchronization.get("policy") == "auto_offset"
@@ -4293,38 +4206,10 @@ def _joint_consistency_ranking(
     best_individual_score = min(passing_mean_scores, default=None)
     for bundle in bundles:
         mean_score = bundle.get("mean_score")
-        score_delta = (
+        bundle["individual_score_delta_from_best"] = (
             float(mean_score) - best_individual_score
             if mean_score is not None and best_individual_score is not None
             else None
-        )
-        quality_equivalent = bool(
-            bundle.get("status") == "passing"
-            and score_delta is not None
-            and score_delta <= JOINT_INDIVIDUAL_SCORE_EQUIVALENCE_TOLERANCE + 1e-12
-        )
-        bundle["individual_score_delta_from_best"] = score_delta
-        bundle["individual_score_equivalent_to_best"] = quality_equivalent
-    equivalent_closure_scores = [
-        float(bundle["normalized_companion_closure_score"])
-        for bundle in bundles
-        if bundle["individual_score_equivalent_to_best"]
-        and bundle.get("normalized_companion_closure_score") is not None
-    ]
-    best_equivalent_closure_score = min(equivalent_closure_scores, default=None)
-    for bundle in bundles:
-        closure_score = bundle.get("normalized_companion_closure_score")
-        closure_delta = (
-            float(closure_score) - best_equivalent_closure_score
-            if bundle["individual_score_equivalent_to_best"]
-            and closure_score is not None
-            and best_equivalent_closure_score is not None
-            else None
-        )
-        bundle["closure_score_delta_from_best_equivalent"] = closure_delta
-        bundle["closure_score_equivalent_to_best"] = bool(
-            closure_delta is not None
-            and closure_delta <= JOINT_CLOSURE_SCORE_EQUIVALENCE_TOLERANCE + 1e-12
         )
 
     def ranking_number(value: Any) -> float:
@@ -4340,35 +4225,16 @@ def _joint_consistency_ranking(
         closure_score = bundle.get("normalized_companion_closure_score")
         reprojection = bundle.get("mean_reprojection_error_px")
         passing = bundle.get("status") == "passing"
-        quality_equivalent = bool(bundle.get("individual_score_equivalent_to_best"))
-        closure_equivalent = bool(bundle.get("closure_score_equivalent_to_best"))
         algorithm_key = _algorithm_pair_sort_key(
             (str(bundle["pnp_method"]), str(bundle["extrinsic_method"]))
         )
-        quality_key = (
+        return (
+            0 if passing else 1,
             ranking_number(mean_score),
+            ranking_number(closure_score),
             ranking_number(aggregate_score),
             ranking_number(reprojection),
             -int(bundle.get("total_inlier_count", 0)),
-        )
-        if passing and quality_equivalent and closure_equivalent:
-            return (0, 0, 0, *algorithm_key, *quality_key, str(bundle["bundle_id"]))
-        if passing and quality_equivalent:
-            return (
-                0,
-                0,
-                1,
-                ranking_number(closure_score),
-                *quality_key,
-                *algorithm_key,
-                str(bundle["bundle_id"]),
-            )
-        return (
-            0 if passing else 1,
-            1,
-            0,
-            *quality_key,
-            ranking_number(closure_score),
             *algorithm_key,
             str(bundle["bundle_id"]),
         )
@@ -4387,32 +4253,24 @@ def _joint_consistency_ranking(
         "thresholds": {
             "max_pairwise_companion_translation_mm": (DEFAULT_MAX_MEAN_TRANSLATION_MM),
             "max_pairwise_companion_rotation_deg": DEFAULT_MAX_MEAN_ROTATION_DEG,
-            "individual_score_equivalence_tolerance": (
-                JOINT_INDIVIDUAL_SCORE_EQUIVALENCE_TOLERANCE
-            ),
-            "closure_score_equivalence_tolerance": (
-                JOINT_CLOSURE_SCORE_EQUIVALENCE_TOLERANCE
-            ),
         },
         "ranking_policy": {
-            "individual_quality_metric": "mean_score",
             "best_individual_score": best_individual_score,
-            "individual_score_equivalence_tolerance": (
-                JOINT_INDIVIDUAL_SCORE_EQUIVALENCE_TOLERANCE
-            ),
-            "equivalent_quality_ordering_metric": (
-                "normalized_companion_closure_score"
-            ),
             "normalized_companion_closure_score_definition": (
                 "max_pairwise_translation_mm/max_translation_mm + "
                 "max_pairwise_rotation_deg/max_rotation_deg"
             ),
             "numeric_round_decimals": JOINT_RANKING_NUMERIC_DECIMALS,
-            "closure_score_equivalence_tolerance": (
-                JOINT_CLOSURE_SCORE_EQUIVALENCE_TOLERANCE
-            ),
-            "closure_equivalent_ordering": "canonical_algorithm_order",
-            "outside_equivalence_band_ordering_metric": "mean_score",
+            "ordering": [
+                "status",
+                "rounded_mean_score",
+                "rounded_normalized_companion_closure_score",
+                "rounded_aggregate_score",
+                "rounded_mean_reprojection_error_px",
+                "descending_total_inlier_count",
+                "canonical_algorithm_order",
+                "bundle_id",
+            ],
         },
         "bundle_count": len(bundles),
         "passing_bundle_count": sum(
@@ -4630,6 +4488,7 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
     request_value = _read_json(attempt_root / REQUEST_FILE)
     initial_progress = _read_json(attempt_root / PROGRESS_FILE)
     _validate_attempt_identity(root, attempt_id, request_value, initial_progress)
+    _require_current_attempt_request(request_value)
     if initial_progress.get("status") != "queued":
         raise ValueError(
             "Calibration attempts are immutable and may only be calculated once"
@@ -4715,8 +4574,7 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             phase_status="complete",
             message=(
                 "Authoritative camera/robot time alignment is ready with "
-                f"warnings for {timing_warning_count} camera(s); recorded timing "
-                "was retained where auto-offset evidence was weak."
+                f"advisory evidence for {timing_warning_count} camera(s)."
                 if timing_warning_count
                 else "Authoritative camera/robot time alignment is ready."
             ),
@@ -4811,6 +4669,7 @@ def load_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str,
         "attempt_id": attempt_id,
         "run_root": root.as_posix(),
         "request": request_value,
+        "read_only": request_value.get("schema_version") != REQUEST_SCHEMA_VERSION,
         "progress": progress,
         "results": ranking,
         "intrinsic_comparison": intrinsic_comparison,
@@ -4895,14 +4754,6 @@ def _revalidate_joint_promotion(
         or not _optional_floats_match(
             thresholds.get("max_pairwise_companion_rotation_deg"),
             DEFAULT_MAX_MEAN_ROTATION_DEG,
-        )
-        or not _optional_floats_match(
-            thresholds.get("individual_score_equivalence_tolerance"),
-            JOINT_INDIVIDUAL_SCORE_EQUIVALENCE_TOLERANCE,
-        )
-        or not _optional_floats_match(
-            thresholds.get("closure_score_equivalence_tolerance"),
-            JOINT_CLOSURE_SCORE_EQUIVALENCE_TOLERANCE,
         )
     ):
         raise ValueError("Multi-camera consistency thresholds are invalid")
@@ -5458,13 +5309,12 @@ def _promotion_time_offset_evidence(
         "cross_validated_rotation_guard",
         "zero_offset_identifiability",
     }
-    if recorded_revision != TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION:
-        required_auto_checks.update(
-            {
-                "cross_validation_fold_materiality",
-                "leave_one_motion_out_timing_consistency",
-            }
-        )
+    required_auto_checks.update(
+        {
+            "cross_validation_fold_materiality",
+            "leave_one_motion_out_timing_consistency",
+        }
+    )
     for sensor_key, item in sensors.items():
         status = str(item.get("status") or "")
         valid_statuses = (
@@ -5507,71 +5357,28 @@ def _promotion_time_offset_evidence(
             if isinstance(check, Mapping)
         }
         if policy == "auto_offset":
-            degraded_warning_fallback = bool(
-                recorded_revision == TIME_OFFSET_IMPLEMENTATION_REVISION
-                and item.get("warning_fallback_used") is True
-            )
             if (
-                recorded_revision != TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION
-                and item.get("improvement_evidence_strategy")
+                item.get("improvement_evidence_strategy")
                 != IMPROVEMENT_EVIDENCE_STRATEGY
             ):
                 raise ValueError(
                     "Auto-sync improvement evidence strategy is invalid for "
                     f"{sensor_key}"
                 )
-            if degraded_warning_fallback:
-                warning_checks = [
-                    check
-                    for check in check_by_name.values()
-                    if check.get("status") == "warning"
-                ]
-                candidate_on_grid = any(
-                    math.isclose(
-                        candidate_offset,
-                        value,
-                        rel_tol=0.0,
-                        abs_tol=1e-9,
-                    )
-                    for value in search_grid
-                )
-                if (
-                    status != "kept_zero"
-                    or item.get("decision") != "recorded_timing_kept"
-                    or item.get("evidence_strength") != "degraded"
-                    or not math.isclose(
-                        operator_offset,
-                        0.0,
-                        rel_tol=0.0,
-                        abs_tol=1e-9,
-                    )
-                    or not candidate_on_grid
-                    or not warning_checks
-                    or any(
-                        check.get("status") == "error"
-                        for check in check_by_name.values()
-                    )
-                ):
-                    raise ValueError(
-                        "Degraded auto-sync warning fallback is invalid for "
-                        f"{sensor_key}"
-                    )
-                continue
             if not required_auto_checks.issubset(check_by_name) or any(
                 check.get("status") == "error" for check in check_by_name.values()
             ):
                 raise ValueError(
                     f"Auto-sync checks are not promotable for {sensor_key}"
                 )
-            if recorded_revision != TIME_OFFSET_LEGACY_IMPLEMENTATION_REVISION:
-                _validate_promotion_motion_consistency(
-                    item,
-                    sensor_key=sensor_key,
-                    candidate_offset=candidate_offset,
-                    recorded_search=recorded_search,
-                    search_grid=search_grid,
-                    check_by_name=check_by_name,
-                )
+            _validate_promotion_motion_consistency(
+                item,
+                sensor_key=sensor_key,
+                candidate_offset=candidate_offset,
+                recorded_search=recorded_search,
+                search_grid=search_grid,
+                check_by_name=check_by_name,
+            )
             if status == "applied":
                 if (
                     math.isclose(operator_offset, 0.0, rel_tol=0.0, abs_tol=1e-9)
@@ -5762,6 +5569,7 @@ def create_promotion_request(
 ) -> dict[str, Any]:
     root = Path(run_root)
     attempt = load_calibration_attempt(root, attempt_id)
+    _require_current_attempt_request(attempt["request"])
     if attempt["progress"].get("status") != "complete":
         raise ValueError("Calibration attempt is not complete")
     prior_promotion = attempt.get("promotion")
@@ -6506,6 +6314,7 @@ def _promote_calibration_attempt_locked(
     attempt_root = calibration_attempt_root(root, attempt_id)
     attempt = load_calibration_attempt(root, attempt_id)
     request_value = attempt["request"]
+    _require_current_attempt_request(request_value)
     if request_value.get("mode") == "eye_to_hand":
         reference_evidence = request_value.get("robot_pose_reference")
         if not isinstance(reference_evidence, Mapping):

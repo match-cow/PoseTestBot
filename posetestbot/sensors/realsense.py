@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -11,16 +10,11 @@ from typing import Any
 import numpy as np
 
 from posetestbot.sensors.contracts import CameraIntrinsics, SensorType
-from posetestbot.sensors.discovery import is_realsense_d435_identity
 from posetestbot.sensors.frame_writer import (
     ensure_legacy_rgbd_folders,
     sync_frame_metadata,
     write_legacy_camera_sidecars,
     write_legacy_rgbd_frame,
-)
-from posetestbot.sensors.registry import (
-    REALSENSE_HARDWARE_SYNC_TRANSPORT,
-    validate_hardware_sync_request,
 )
 
 
@@ -268,166 +262,6 @@ def _realsense_timestamp_metadata(
     return metadata
 
 
-def _sensor_supports_option(sensor: Any, option: Any) -> bool:
-    supports = getattr(sensor, "supports", None)
-    if callable(supports):
-        try:
-            return bool(supports(option))
-        except Exception:
-            return False
-    return callable(getattr(sensor, "set_option", None)) and callable(
-        getattr(sensor, "get_option", None)
-    )
-
-
-def _sensor_name(sensor: Any, rs: Any, *, fallback: str) -> str:
-    try:
-        return str(sensor.get_info(rs.camera_info.name))
-    except Exception:
-        return fallback
-
-
-def _set_integer_option_and_verify(
-    sensor: Any,
-    option: Any,
-    configured: int,
-    *,
-    option_name: str,
-    sensor_name: str,
-) -> int:
-    try:
-        sensor.set_option(option, float(configured))
-        raw_readback = float(sensor.get_option(option))
-    except Exception as exc:
-        raise RealSenseCaptureError(
-            f"Unable to configure RealSense {option_name}={configured} on "
-            f"{sensor_name}: {type(exc).__name__}: {exc}"
-        ) from exc
-    if not math.isfinite(raw_readback) or not math.isclose(
-        raw_readback, float(configured), abs_tol=1e-6
-    ):
-        raise RealSenseCaptureError(
-            f"RealSense {option_name} readback mismatch on {sensor_name}: "
-            f"configured {configured}, read back {raw_readback}."
-        )
-    return int(round(raw_readback))
-
-
-def _configure_global_time(
-    device: Any,
-    depth_sensor: Any,
-    rs: Any,
-) -> list[dict[str, Any]]:
-    """Enable global timestamps and require verified depth-sensor readback."""
-
-    option_namespace = getattr(rs, "option", None)
-    option = getattr(option_namespace, "global_time_enabled", None)
-    if option is None:
-        raise RealSenseCaptureError(
-            "RealSense SDK does not expose global_time_enabled; "
-            "refusing hardware-synchronized capture."
-        )
-
-    sensors = list(getattr(device, "sensors", ()) or ())
-    depth_sensor_index = next(
-        (
-            index
-            for index, sensor in enumerate(sensors)
-            if sensor is depth_sensor
-        ),
-        None,
-    )
-    if depth_sensor_index is None:
-        sensors.append(depth_sensor)
-        depth_sensor_index = len(sensors) - 1
-
-    if not _sensor_supports_option(depth_sensor, option):
-        raise RealSenseCaptureError(
-            "RealSense depth sensor does not expose global_time_enabled; "
-            "evidence from another sensor is insufficient for "
-            "hardware-synchronized depth capture."
-        )
-
-    evidence: list[dict[str, Any]] = []
-    ordered_sensors = [
-        (depth_sensor_index, depth_sensor, True),
-        *[
-            (index, sensor, False)
-            for index, sensor in enumerate(sensors)
-            if index != depth_sensor_index
-        ],
-    ]
-    for index, sensor, is_depth_sensor in ordered_sensors:
-        if not _sensor_supports_option(sensor, option):
-            continue
-        name = _sensor_name(sensor, rs, fallback=f"sensor_{index}")
-        readback = _set_integer_option_and_verify(
-            sensor,
-            option,
-            1,
-            option_name="global_time_enabled",
-            sensor_name=name,
-        )
-        evidence.append(
-            {
-                "sensor_index": index,
-                "sensor_name": name,
-                "configured": 1,
-                "readback": readback,
-                "is_depth_sensor": is_depth_sensor,
-            }
-        )
-    return evidence
-
-
-def _configure_inter_cam_sync(
-    depth_sensor: Any,
-    rs: Any,
-    *,
-    hardware_sync_role: str,
-) -> tuple[int, int]:
-    option_namespace = getattr(rs, "option", None)
-    option = getattr(option_namespace, "inter_cam_sync_mode", None)
-    if option is None or not _sensor_supports_option(depth_sensor, option):
-        raise RealSenseCaptureError(
-            "RealSense depth sensor does not support inter_cam_sync_mode; "
-            "refusing hardware-synchronized capture."
-        )
-
-    configured = 1 if hardware_sync_role == "master" else 2
-    sensor_name = _sensor_name(depth_sensor, rs, fallback="depth sensor")
-    readback = _set_integer_option_and_verify(
-        depth_sensor,
-        option,
-        configured,
-        option_name="inter_cam_sync_mode",
-        sensor_name=sensor_name,
-    )
-    return configured, readback
-
-
-def _reset_inter_cam_sync(depth_sensor: Any, rs: Any) -> dict[str, Any] | None:
-    """Clear a master/slave mode that may persist across capture processes."""
-
-    option_namespace = getattr(rs, "option", None)
-    option = getattr(option_namespace, "inter_cam_sync_mode", None)
-    if option is None or not _sensor_supports_option(depth_sensor, option):
-        return None
-    sensor_name = _sensor_name(depth_sensor, rs, fallback="depth sensor")
-    readback = _set_integer_option_and_verify(
-        depth_sensor,
-        option,
-        0,
-        option_name="inter_cam_sync_mode",
-        sensor_name=sensor_name,
-    )
-    return {
-        "sensor_name": sensor_name,
-        "configured": 0,
-        "readback": readback,
-    }
-
-
 def capture_realsense_rgbd(
     output_path: str | Path | None,
     *,
@@ -438,9 +272,6 @@ def capture_realsense_rgbd(
     preview: bool = False,
     record: bool = True,
     inverted: bool = False,
-    hardware_sync_role: str | None = None,
-    hardware_sync_group_id: str | None = None,
-    hardware_sync_scope: str | None = None,
     stop_requested: Callable[[], bool] | None = None,
     rs_module: Any | None = None,
     cv2_module: Any | None = None,
@@ -455,13 +286,6 @@ def capture_realsense_rgbd(
         raise ValueError("warmup_frames must be greater than or equal to 0")
     if record and output_path is None:
         raise ValueError("output_path is required when record=True")
-    hardware_sync = validate_hardware_sync_request(
-        sensor_type=SensorType.REALSENSE_D435,
-        hardware_sync_role=hardware_sync_role,
-        hardware_sync_group_id=hardware_sync_group_id,
-        hardware_sync_scope=hardware_sync_scope,
-    )
-
     output = Path(output_path) if output_path is not None else None
     rs = rs_module or _import_realsense()
     cv2_preview = _cv2_for_preview(cv2_module) if preview else None
@@ -482,50 +306,9 @@ def capture_realsense_rgbd(
     resolved_serial = _device_info(device, rs, "serial_number", device_id or "default")
     device_name = _device_info(device, rs, "name", "RealSense")
     product_id = _device_info(device, rs, "product_id", "")
-    if hardware_sync is not None and not is_realsense_d435_identity(
-        name=device_name,
-        product_id=product_id or None,
-    ):
-        raise RealSenseCaptureError(
-            "Hardware-synchronized capture is restricted to verified "
-            f"RealSense D435/D435i devices; resolved {device_name!r} "
-            f"(product_id={product_id or 'unavailable'!r})."
-        )
     if not _has_rgb_sensor(device, rs):
         raise RealSenseCaptureError(
             f"RealSense device {resolved_serial} does not expose an RGB Camera sensor."
-        )
-
-    try:
-        prestart_depth_sensor = device.first_depth_sensor()
-    except Exception as exc:
-        raise RealSenseCaptureError(
-            f"Unable to access RealSense depth sensor for {resolved_serial}: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-
-    global_time_enabled_evidence: list[dict[str, Any]] = []
-    inter_cam_sync_reset_evidence: dict[str, Any] | None = None
-    inter_cam_sync_mode_configured: int | None = None
-    inter_cam_sync_mode_readback: int | None = None
-    if hardware_sync is not None:
-        global_time_enabled_evidence = _configure_global_time(
-            device,
-            prestart_depth_sensor,
-            rs,
-        )
-        (
-            inter_cam_sync_mode_configured,
-            inter_cam_sync_mode_readback,
-        ) = _configure_inter_cam_sync(
-            prestart_depth_sensor,
-            rs,
-            hardware_sync_role=hardware_sync["role"],
-        )
-    else:
-        inter_cam_sync_reset_evidence = _reset_inter_cam_sync(
-            prestart_depth_sensor,
-            rs,
         )
 
     _enable_streams(config, rs, fps=fps, product_line=product_line)
@@ -659,28 +442,6 @@ def capture_realsense_rgbd(
                         "product_line": product_line,
                         "product_id": product_id or None,
                         **timestamp_metadata,
-                        **(
-                            {
-                                "capture_group_id": hardware_sync["group_id"],
-                                "hardware_sync_role": hardware_sync["role"],
-                                "hardware_sync_scope": hardware_sync["scope"],
-                                "hardware_sync_transport": (
-                                    REALSENSE_HARDWARE_SYNC_TRANSPORT
-                                ),
-                                "inter_cam_sync_mode_configured": (
-                                    inter_cam_sync_mode_configured
-                                ),
-                                "inter_cam_sync_mode_readback": (
-                                    inter_cam_sync_mode_readback
-                                ),
-                            }
-                            if hardware_sync is not None
-                            else {}
-                        ),
-                        "global_time_enabled_evidence": (global_time_enabled_evidence),
-                        "inter_cam_sync_reset_evidence": (
-                            inter_cam_sync_reset_evidence
-                        ),
                     },
                 )
                 metadata_records.append(metadata)
@@ -717,24 +478,6 @@ def capture_realsense_rgbd(
         "inverted": bool(inverted),
         "image_rotation_degrees": image_rotation_degrees,
         "orientation": orientation,
-        "hardware_sync_enabled": hardware_sync is not None,
-        "hardware_sync_transport": (
-            REALSENSE_HARDWARE_SYNC_TRANSPORT if hardware_sync is not None else None
-        ),
-        "capture_group_id": (
-            hardware_sync["group_id"] if hardware_sync is not None else None
-        ),
-        "hardware_sync_role": (
-            hardware_sync["role"] if hardware_sync is not None else None
-        ),
-        "hardware_sync_scope": (
-            hardware_sync["scope"] if hardware_sync is not None else None
-        ),
-        "hardware_sync_rgb_exposure_claimed": False,
-        "inter_cam_sync_mode_configured": inter_cam_sync_mode_configured,
-        "inter_cam_sync_mode_readback": inter_cam_sync_mode_readback,
-        "inter_cam_sync_reset_evidence": inter_cam_sync_reset_evidence,
-        "global_time_enabled_evidence": global_time_enabled_evidence,
         "fps": fps,
         "max_frames": max_frames,
         "warmup_frames": warmup_frames,

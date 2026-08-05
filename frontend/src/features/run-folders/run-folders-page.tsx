@@ -3,8 +3,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
 import {
   AlertTriangle,
+  Archive,
   Boxes,
   Camera,
+  CloudDownload,
+  CloudUpload,
   Clock3,
   FileWarning,
   FolderOpen,
@@ -13,6 +16,7 @@ import {
   LoaderCircle,
   MoveRight,
   RefreshCw,
+  ShieldCheck,
   Trash2,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -27,10 +31,11 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage } from "@/lib/api"
-import type { Job, RunFolder, RunFolderInventory, RunFolderInventory as Inventory } from "@/lib/contracts"
+import type { ClusterArchive, ClusterJob, Job, RunFolder, RunFolderInventory, RunFolderInventory as Inventory } from "@/lib/contracts"
 import { cn, formatDate, titleCase } from "@/lib/utils"
 import { activeWorkflowHref } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
@@ -242,6 +247,111 @@ function EvidenceSummary({ run }: { run: RunFolder }) {
   </div>
 }
 
+function archiveTone(state: string) {
+  if (state === "succeeded") return "success" as const
+  if (["failed", "canceled"].includes(state)) return "destructive" as const
+  return "warning" as const
+}
+
+function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory }) {
+  const queryClient = useQueryClient()
+  const { selectedRun } = useOperator()
+  const [sourcePath, setSourcePath] = useState("")
+  const [operator, setOperator] = useState(() => localStorage.getItem("posetestbot.clusterOperator") ?? "")
+  const [restoreArchive, setRestoreArchive] = useState<ClusterArchive | null>(null)
+  const [destinationRoot, setDestinationRoot] = useState("")
+  const [destinationName, setDestinationName] = useState("")
+  const [remoteJobId, setRemoteJobId] = useState<string | null>(null)
+  const notifiedRemoteJobs = useRef(new Set<string>())
+  const runs = inventory.runs
+  const effectiveSourcePath = runs.some((run) => run.path === sourcePath)
+    ? sourcePath
+    : runs.find((run) => isSelectedRunFolder(run, selectedRun))?.path ?? runs[0]?.path ?? ""
+
+  const archives = useQuery({
+    queryKey: ["cluster-archives"],
+    queryFn: () => api<{ archives: ClusterArchive[]; integration: { enabled: boolean } }>("/cluster/archives"),
+    retry: false,
+    refetchInterval: (state) => state.state.data?.archives.some((archive) => !["succeeded", "failed", "canceled"].includes(archive.state)) ? 2_000 : 15_000,
+  })
+  const remoteJob = useQuery({
+    queryKey: ["cluster-job", remoteJobId],
+    queryFn: () => api<{ job: ClusterJob }>(`/cluster/jobs/${remoteJobId}`),
+    enabled: Boolean(remoteJobId),
+    refetchInterval: (state) => state.state.data?.job.terminal ? false : 1_500,
+  })
+  useEffect(() => {
+    const job = remoteJob.data?.job
+    if (!job?.terminal || notifiedRemoteJobs.current.has(job.job_id)) return
+    notifiedRemoteJobs.current.add(job.job_id)
+    void queryClient.invalidateQueries({ queryKey: ["runs"] })
+    void queryClient.invalidateQueries({ queryKey: ["run-folders"] })
+    if (job.state === "succeeded") toast.success("Cluster archive restore completed and verified")
+    else toast.error("Cluster archive restore did not complete", { description: job.error ?? job.state })
+  }, [queryClient, remoteJob.data])
+
+  const createArchive = useMutation({
+    mutationFn: (run: RunFolder) => api<{ archive: ClusterArchive }>("/cluster/archives", {
+      method: "POST",
+      body: JSON.stringify({ run_root: run.path, expected_identity: run.identity, operator: operator.trim() }),
+    }),
+    onSuccess: ({ archive }) => {
+      localStorage.setItem("posetestbot.clusterOperator", operator.trim())
+      toast.success("Archive copy queued", { description: `${archive.archive_id} continues after navigation.` })
+      queryClient.invalidateQueries({ queryKey: ["cluster-archives"] })
+    },
+    onError: (error) => toast.error("Archive request was refused", { description: errorMessage(error) }),
+  })
+  const restore = useMutation({
+    mutationFn: (archive: ClusterArchive) => api<{ job: ClusterJob }>(`/cluster/archives/${archive.archive_id}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ destination_root: destinationRoot, destination_name: destinationName.trim() || undefined, operator: operator.trim() }),
+    }),
+    onSuccess: ({ job }) => {
+      setRemoteJobId(job.job_id)
+      setRestoreArchive(null)
+      toast.success("Verified restore queued", { description: "The controller downloads, validates, safely extracts, and atomically publishes the run." })
+    },
+    onError: (error) => toast.error("Restore was not queued", { description: errorMessage(error) }),
+  })
+  const source = runs.find((run) => run.path === effectiveSourcePath) ?? null
+  const integration = archives.data?.integration
+  const mutationReady = Boolean(integration?.enabled && operator.trim().length >= 2)
+  const remoteOnlyCount = (archives.data?.archives ?? []).filter((archive) => !runs.some((run) => run.path === archive.source_run_root)).length
+  const remoteOperationActive = Boolean(remoteJobId && !remoteJob.data?.job.terminal)
+
+  return <Card data-testid="cluster-storage-section" className="border-primary/25">
+    <CardHeader>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div><CardTitle className="flex items-center gap-2"><Archive className="size-5 text-primary-strong" />Cluster storage</CardTitle><CardDescription className="mt-1">Copy complete runs to durable PROJECT storage or restore a verified archive. Archive creation never deletes the local run; use the separate confirmed local delete control when appropriate.</CardDescription></div>
+        <Button variant="outline" size="sm" onClick={() => archives.refetch()} disabled={archives.isFetching}><RefreshCw className={archives.isFetching ? "animate-spin" : undefined} />Refresh remote inventory</Button>
+      </div>
+    </CardHeader>
+    <CardContent className="space-y-4">
+      {archives.isError
+        ? <div className="rounded-lg border bg-muted/25 p-3 text-xs text-muted-foreground">Cluster storage is unavailable: {errorMessage(archives.error)}. Local run-folder controls remain available.</div>
+        : <>
+          <div className="grid gap-3 xl:grid-cols-[minmax(260px,1fr)_minmax(220px,0.65fr)_auto]">
+            <div className="space-y-1.5"><Label>Local archive source</Label><Select value={effectiveSourcePath} onValueChange={setSourcePath}><SelectTrigger aria-label="Local archive source"><SelectValue placeholder="Choose a local run" /></SelectTrigger><SelectContent>{runs.map((run) => <SelectItem value={run.path} key={run.path}>{run.name} · {formatBytes(run.size_bytes)}</SelectItem>)}</SelectContent></Select></div>
+            <div className="space-y-1.5"><Label htmlFor="archive-operator">Operator</Label><Input id="archive-operator" value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="Name or lab account" maxLength={120} /></div>
+            <div className="flex items-end"><Button variant="outline" disabled={!source || !mutationReady || createArchive.isPending} onClick={() => source && createArchive.mutate(source)}><CloudUpload />Archive copy</Button></div>
+          </div>
+          <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground"><span>{(archives.data?.archives.length ?? 0)} remote archives</span><span>·</span><span>{remoteOnlyCount} remote-only</span><span>·</span><span>PROJECT is durable project storage, not a backup tier</span></div>
+          {remoteOperationActive && <div className="flex items-center justify-between gap-3 rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs"><span className="flex items-center gap-2"><LoaderCircle className="size-4 animate-spin text-warning-foreground" />Verified restore is running in the controller.</span><Button asChild variant="outline" size="sm"><Link to="/jobs">Open Jobs</Link></Button></div>}
+          <div className="max-h-[400px] overflow-auto rounded-lg border">
+            <table className="w-full min-w-[980px] text-left text-xs"><thead className="sticky top-0 border-b bg-muted text-[9px] font-bold uppercase tracking-wider text-muted-foreground"><tr><th className="px-3 py-2">Archive</th><th className="px-3 py-2">Source identity</th><th className="px-3 py-2">Verification</th><th className="px-3 py-2">Created</th><th className="px-3 py-2 text-right">Actions</th></tr></thead><tbody className="divide-y">{(archives.data?.archives ?? []).map((archive) => {
+              const local = runs.find((run) => run.path === archive.source_run_root && run.identity.device === archive.source_identity.device && run.identity.inode === archive.source_identity.inode)
+              return <tr key={archive.archive_id}><td className="px-3 py-3"><div className="font-mono font-semibold">{archive.archive_id}</div><div className="mt-1 max-w-[360px] truncate font-mono text-[10px] text-muted-foreground" title={archive.source_run_root}>{archive.source_run_root}</div></td><td className="px-3 py-3"><div>{local ? "Exact local source present" : "Remote-only or local identity changed"}</div><div className="mt-1 font-mono text-[10px] text-muted-foreground">dev {archive.source_identity.device} · ino {archive.source_identity.inode}</div></td><td className="px-3 py-3"><StatusBadge status={archive.state} tone={archiveTone(archive.state)} />{archive.verified && <div className="mt-1 flex items-center gap-1 text-[10px] text-success"><ShieldCheck className="size-3" />Receipt and hashes verified</div>}</td><td className="px-3 py-3">{formatDate(archive.created_at)}</td><td className="px-3 py-3 text-right"><Button variant="outline" size="sm" disabled={!archive.verified || !mutationReady} onClick={() => { setRestoreArchive(archive); setDestinationRoot(inventory.roots.find((root) => root.exists)?.path ?? ""); setDestinationName(archive.source_run_root.split("/").at(-1) ?? "") }}><CloudDownload />Restore</Button></td></tr>
+            })}{!archives.isPending && !(archives.data?.archives.length) && <tr><td className="px-3 py-6 text-center text-muted-foreground" colSpan={5}>No remote archives yet.</td></tr>}</tbody></table>
+          </div>
+          <p className="text-[10px] text-muted-foreground">Archive and restore jobs continue after navigation. Monitor their controller-owned status from Jobs.</p>
+        </>}
+    </CardContent>
+
+    <Dialog open={Boolean(restoreArchive)} onOpenChange={(open) => !open && !restore.isPending && setRestoreArchive(null)}><DialogContent><DialogHeader><DialogTitle>Restore verified archive</DialogTitle><DialogDescription>The controller downloads into temporary storage, verifies the archive and every regular file, then atomically publishes the run below an approved root.</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label>Destination root</Label><Select value={destinationRoot} onValueChange={setDestinationRoot}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{inventory.roots.filter((root) => root.exists).map((root) => <SelectItem value={root.path} key={root.path}>{root.path} · {formatBytes(root.storage.free_bytes)} free</SelectItem>)}</SelectContent></Select></div><div className="space-y-1.5"><Label htmlFor="restore-name">Run folder name</Label><Input id="restore-name" value={destinationName} onChange={(event) => setDestinationName(event.target.value)} /></div></div><DialogFooter><Button variant="outline" onClick={() => setRestoreArchive(null)} disabled={restore.isPending}>Cancel</Button><Button onClick={() => restoreArchive && restore.mutate(restoreArchive)} disabled={!restoreArchive || !destinationRoot || !destinationName.trim() || restore.isPending}>{restore.isPending ? <LoaderCircle className="animate-spin" /> : <CloudDownload />}Queue verified restore</Button></DialogFooter></DialogContent></Dialog>
+  </Card>
+}
+
 function RunDetails({ run }: { run: RunFolder }) {
   const breakdown = Object.entries(run.breakdown).sort(([, left], [, right]) => right.size_bytes - left.size_bytes)
   return <details className="group">
@@ -446,6 +556,8 @@ export function RunFoldersPage() {
       to={workflowHref}
       action="Open workflow"
     />
+
+    {inventory.data && <ClusterStorageSection inventory={inventory.data} />}
 
     {inventory.data?.maintenance && (inventory.data.maintenance.recovered_count > 0 || inventory.data.maintenance.unresolved_count > 0) && <Card data-testid="run-folder-maintenance" className={inventory.data.maintenance.unresolved_count > 0 ? "border-destructive/45 bg-destructive/5" : "border-primary/35 bg-primary/5"}>
       <CardHeader>

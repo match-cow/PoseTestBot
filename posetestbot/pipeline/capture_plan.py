@@ -54,14 +54,11 @@ class CaptureCommandPlan:
     output_folder: str | None = None
     sensor_type: str | None = None
     device_id: str | None = None
-    hardware_sync: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["resources"] = list(self.resources)
         data["command_text"] = shlex.join(self.command)
-        if self.hardware_sync is None:
-            data.pop("hardware_sync")
         return data
 
 
@@ -107,7 +104,9 @@ def _robot_float(robot: Mapping[str, Any], key: str, default: float) -> float:
     return float(value)
 
 
-def _run_config_relative_path(run_root: Path, run_config_path: str | Path | None) -> str:
+def _run_config_relative_path(
+    run_root: Path, run_config_path: str | Path | None
+) -> str:
     if run_config_path is None:
         return "run_config.json"
     path = Path(run_config_path)
@@ -159,7 +158,6 @@ def build_capture_plan(
     synchronization = capture_synchronization_from_mapping(
         capture.get("synchronization")
     ).to_dict()
-    hardware_triggered = synchronization["mode"] == "hardware_trigger"
     resolution = str(capture["resolution"])
     fps = int(capture["fps"])
     requested_velocity = float(
@@ -191,16 +189,8 @@ def build_capture_plan(
         raise ValueError("max_frames must be greater than or equal to 0")
     if warmup_frames is not None and warmup_frames < 0:
         raise ValueError("warmup_frames must be greater than or equal to 0")
-    if hardware_triggered and max_frames is not None:
-        raise ValueError(
-            "hardware_trigger capture must be long-running; max_frames could "
-            "exhaust the master before every subordinate and the robot receiver "
-            "are ready"
-        )
     resolved_robot_ip = str(robot_ip or robot.get("robot_ip"))
-    resolved_receiver_ip = str(
-        receiver_ip or robot.get("receiver_ip")
-    )
+    resolved_receiver_ip = str(receiver_ip or robot.get("receiver_ip"))
     command_port = int(
         robot_port
         if robot_port is not None
@@ -243,58 +233,12 @@ def build_capture_plan(
         for sensor in capture.get("sensors", [])
         if sensor.get("enabled", True) is True
     ]
-    if hardware_triggered:
-        master_sensor_key = str(synchronization["master_sensor_key"])
-        enabled_sensors.sort(
-            key=lambda sensor: (
-                0
-                if (
-                    f"{sensor['sensor_type']}:{sensor['device_id']}"
-                    == master_sensor_key
-                )
-                else 1
-            )
-        )
-        notes.extend(
-            [
-                "The RealSense hardware-sync master starts before every "
-                "subordinate; early raw master frames are preserved and later "
-                "excluded from complete multiview sets.",
-                "Hardware synchronization certifies depth exposure only. D435 "
-                "RGB exposure remains timestamp-associated, not hardware-synchronized.",
-            ]
-        )
     for index, sensor in enumerate(enabled_sensors):
         sensor_type = str(sensor["sensor_type"])
         device_id = str(sensor["device_id"])
-        sensor_key = f"{sensor_type}:{device_id}"
         inverted = normalize_inverted(sensor.get("inverted", False))
         folder_name = _sensor_folder_name(sensor_type, device_id)
         output_folder = run_root / folder_name
-        hardware_sync = None
-        if hardware_triggered:
-            hardware_sync = {
-                "schema_version": "capture_hardware_sync_assignment.v1",
-                "implementation": synchronization["implementation"],
-                "group_id": synchronization["group_id"],
-                "scope": synchronization["scope"],
-                "max_depth_timestamp_skew_ms": synchronization[
-                    "max_depth_timestamp_skew_ms"
-                ],
-                "role": (
-                    "master"
-                    if sensor_key == synchronization["master_sensor_key"]
-                    else "subordinate"
-                ),
-                "sensor_key": sensor_key,
-                "inter_cam_sync_mode_expected": (
-                    1
-                    if sensor_key == synchronization["master_sensor_key"]
-                    else 2
-                ),
-                "depth_exposure_synchronized": True,
-                "rgb_exposure_synchronized": False,
-            }
         command = build_sensor_capture_command(
             sensor_type=sensor_type,
             device_id=device_id,
@@ -304,22 +248,9 @@ def build_capture_plan(
             max_frames=max_frames,
             warmup_frames=warmup_frames,
             inverted=inverted,
-            hardware_sync_role=(
-                str(hardware_sync["role"]) if hardware_sync is not None else None
-            ),
-            hardware_sync_group_id=(
-                str(hardware_sync["group_id"])
-                if hardware_sync is not None
-                else None
-            ),
-            hardware_sync_scope=(
-                str(hardware_sync["scope"]) if hardware_sync is not None else None
-            ),
         )
 
         configured_metadata = dict(sensor.get("metadata") or {})
-        if hardware_sync is not None:
-            configured_metadata["hardware_sync"] = dict(hardware_sync)
         sensor_records.append(
             make_sensor_record(
                 sensor_type=sensor_type,
@@ -340,9 +271,6 @@ def build_capture_plan(
                     "inverted": inverted,
                     "image_rotation_degrees": 180 if inverted else 0,
                     "configured_metadata": configured_metadata,
-                    "hardware_sync": (
-                        dict(hardware_sync) if hardware_sync is not None else None
-                    ),
                 },
             )
         )
@@ -350,33 +278,15 @@ def build_capture_plan(
             CaptureCommandPlan(
                 role="sensor_capture",
                 name=folder_name,
-                startup_order=(
-                    20
-                    if hardware_sync is not None
-                    and hardware_sync["role"] == "master"
-                    else 21 if hardware_sync is not None else 20
-                ),
+                startup_order=20,
                 command=command,
                 description=(
-                    "Start the hardware-sync master before subordinates and the "
-                    "pose receiver."
-                    if hardware_sync is not None
-                    and hardware_sync["role"] == "master"
-                    else (
-                        "Start after the hardware-sync master and before the "
-                        "pose receiver."
-                        if hardware_sync is not None
-                        else (
-                            "Start before the pose receiver to avoid missing "
-                            "early robot motion."
-                        )
-                    )
+                    "Start before the pose receiver to avoid missing early robot motion."
                 ),
                 resources=("camera", "disk_io"),
                 output_folder=output_folder.as_posix(),
                 sensor_type=sensor_type,
                 device_id=device_id,
-                hardware_sync=hardware_sync,
             )
         )
 
